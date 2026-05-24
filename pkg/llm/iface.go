@@ -1,7 +1,7 @@
 // Package llm 是 LLM 客户端的 core 侧抽象。
 //
 // 具体实现(目前是 Anthropic Messages API 客户端)归 cloud:
-// openlinker-cloud/internal/llm/anthropic.go。core 自身只定义接口,
+// openlinker-cloud/pkg/llm/anthropic.go。core 自身只定义接口,
 // 让 task / skill.Benchmark 等模块在依赖方向上不引入云服务的商业凭据
 // (ANTHROPIC_API_KEY)。
 //

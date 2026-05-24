@@ -1,0 +1,370 @@
+package agent
+
+import (
+	"net/http"
+
+	"github.com/go-playground/validator/v10"
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+
+	"github.com/kinzhi/openlinker-core/pkg/config"
+	"github.com/kinzhi/openlinker-core/pkg/httpx"
+)
+
+// Handler Agent 注册 / 公开状态 HTTP 入口。
+type Handler struct {
+	svc       *Service
+	validator *validator.Validate
+	cfg       *config.Config
+}
+
+// NewHandler 构造 Handler。cfg 可选（测试可省略）。
+func NewHandler(svc *Service, cfg ...*config.Config) *Handler {
+	h := &Handler{
+		svc:       svc,
+		validator: validator.New(validator.WithRequiredStructEnabled()),
+	}
+	if len(cfg) > 0 {
+		h.cfg = cfg[0]
+	}
+	return h
+}
+
+// Register 公开端点（无需 JWT）。
+//
+//	GET /agents/check-slug?slug=xxx   实时校验
+func (h *Handler) Register(api *echo.Group) {
+	api.GET("/agents/check-slug", h.CheckSlug)
+}
+
+// RegisterProtected 创作者侧端点（需 JWT）。
+//
+//	POST   /me/become-creator
+//	POST   /creator/agents
+//	GET    /creator/agents
+//	GET    /creator/agents/:id
+//	PATCH  /creator/agents/:id
+//	DELETE /creator/agents/:id
+//	GET    /creator/agents/:id/onboarding
+//	PUT    /creator/agents/:id/capabilities
+//	POST   /creator/agents/:id/examples
+//	DELETE /creator/agents/:id/examples/:exampleID
+func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
+	me := api.Group("/me", jwtMiddleware)
+	me.POST("/become-creator", h.BecomeCreator)
+
+	creator := api.Group("/creator", jwtMiddleware)
+	creator.POST("/agents", h.CreateAgent)
+	creator.GET("/agents", h.ListMyAgents)
+	creator.GET("/agents/:id", h.GetMyAgent)
+	creator.PATCH("/agents/:id", h.UpdateAgent)
+	creator.DELETE("/agents/:id", h.DisableAgent)
+
+	creator.GET("/agents/:id/onboarding", h.GetAgentOnboarding)
+	creator.PUT("/agents/:id/capabilities", h.UpsertCapability)
+	creator.POST("/agents/:id/examples", h.CreateExample)
+	creator.DELETE("/agents/:id/examples/:exampleID", h.DeleteExample)
+	creator.POST("/agents/:id/dry-run", h.RunDryRun)
+}
+
+// RegisterAdmin 管理员/运营人工处理端点（需 JWT + admin 双重中间件）。
+//
+//	GET  /admin/agents/pending
+//	POST /admin/agents/:id/approve
+//	POST /admin/agents/:id/reject
+func (h *Handler) RegisterAdmin(api *echo.Group, jwtMiddleware, adminMiddleware echo.MiddlewareFunc) {
+	g := api.Group("/admin", jwtMiddleware, adminMiddleware)
+	g.GET("/agents/pending", h.ListPendingAgents)
+	g.POST("/agents/:id/approve", h.ApproveAgent)
+	g.POST("/agents/:id/reject", h.RejectAgent)
+}
+
+// CheckSlug 实时校验 slug 可用性（公开）。
+func (h *Handler) CheckSlug(c echo.Context) error {
+	slug := c.QueryParam("slug")
+	if slug == "" {
+		return httpx.BadRequest("slug 参数不能为空")
+	}
+	resp, err := h.svc.CheckSlug(c.Request().Context(), slug)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// BecomeCreator 当前用户成为创作者（一键）。
+func (h *Handler) BecomeCreator(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	if err := h.svc.BecomeCreator(c.Request().Context(), uid); err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]any{"is_creator": true})
+}
+
+// CreateAgent 创作者新建 Agent。
+func (h *Handler) CreateAgent(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	var req CreateAgentRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.CreateAgent(c.Request().Context(), uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusCreated, resp)
+}
+
+// ListMyAgents 创作者中心列表。
+func (h *Handler) ListMyAgents(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	items, err := h.svc.ListMyAgents(c.Request().Context(), uid)
+	if err != nil {
+		return err
+	}
+	if items == nil {
+		items = []AgentResponse{}
+	}
+	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
+// GetMyAgent 创作者按 id 查自己的 Agent。
+func (h *Handler) GetMyAgent(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.GetMyAgent(c.Request().Context(), id, uid)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// UpdateAgent 创作者编辑 Agent 基础信息。
+func (h *Handler) UpdateAgent(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	var req UpdateAgentRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.UpdateAgent(c.Request().Context(), id, uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// DisableAgent 创作者主动下架。
+func (h *Handler) DisableAgent(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	if err := h.svc.DisableAgent(c.Request().Context(), id, uid); err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]string{"status": "disabled"})
+}
+
+// GetAgentOnboarding 查询创作者侧接入状态。
+func (h *Handler) GetAgentOnboarding(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.GetAgentOnboarding(c.Request().Context(), id, uid)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// UpsertCapability 保存 Agent 能力声明。
+func (h *Handler) UpsertCapability(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	var req UpsertCapabilityRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.UpsertCapability(c.Request().Context(), id, uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// CreateExample 新增 Agent 示例。
+func (h *Handler) CreateExample(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	var req CreateExampleRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.CreateExample(c.Request().Context(), id, uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusCreated, resp)
+}
+
+// DeleteExample 删除 Agent 示例。
+func (h *Handler) DeleteExample(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	exampleID, err := pathUUID(c, "exampleID")
+	if err != nil {
+		return err
+	}
+	if err := h.svc.DeleteExample(c.Request().Context(), id, exampleID, uid); err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// RunDryRun 用首条 example 调一次 endpoint 验证接入。
+func (h *Handler) RunDryRun(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.RunDryRun(c.Request().Context(), id, uid)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// ListPendingAgents admin/运营人工处理队列。
+func (h *Handler) ListPendingAgents(c echo.Context) error {
+	items, err := h.svc.ListPendingForAdmin(c.Request().Context())
+	if err != nil {
+		return err
+	}
+	if items == nil {
+		items = []AgentResponse{}
+	}
+	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
+// ApproveAgent admin/运营手动放行。
+func (h *Handler) ApproveAgent(c echo.Context) error {
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	if err := h.svc.ApproveAgent(c.Request().Context(), id); err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]string{"status": "approved"})
+}
+
+// RejectAgent admin/运营手动拒绝。
+func (h *Handler) RejectAgent(c echo.Context) error {
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	var req RejectRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	if err := h.svc.RejectAgent(c.Request().Context(), id, req.Reason); err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]string{"status": "rejected"})
+}
+
+// userIDFromCtx 从 echo.Context 取出当前登录用户 uuid。
+func userIDFromCtx(c echo.Context) (uuid.UUID, error) {
+	idStr := httpx.UserIDFrom(c)
+	if idStr == "" {
+		return uuid.Nil, httpx.Unauthorized("")
+	}
+	uid, err := uuid.Parse(idStr)
+	if err != nil {
+		return uuid.Nil, httpx.Unauthorized("token 无效")
+	}
+	return uid, nil
+}
+
+// pathID 解析 :id 路径参数。
+func pathID(c echo.Context) (uuid.UUID, error) {
+	return pathUUID(c, "id")
+}
+
+func pathUUID(c echo.Context, name string) (uuid.UUID, error) {
+	raw := c.Param(name)
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return uuid.Nil, httpx.BadRequest(name + " 不是合法 uuid")
+	}
+	return id, nil
+}
