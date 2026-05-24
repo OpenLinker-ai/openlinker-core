@@ -1,0 +1,157 @@
+-- runs.sql
+--
+-- 模块 4（调用执行）+ 模块 6（双面板）共用的 runs 表查询。
+-- 文件分工约定：
+--   模块 4（runtime，写）由 subagent-4a 维护：
+--     CreateRun / MarkRunSuccess / MarkRunFailed / GetRunByID
+--   模块 6（dashboard，读）由 subagent-6a 维护：
+--     ListRunsByUser / CountRunsByUserThisMonth
+--     SumSpentByUserThisMonth / SumEarningsByCreatorThisMonth
+--     ListRecentRunsForCreator / GetUserUsageStats / GetCreatorStats
+
+-- ## 模块 4（调用执行 + 计费）
+-- subagent-4a 在此区块下追加 query
+
+-- name: CreateRun :one
+-- 创建 run 记录（事务内，状态 running）
+INSERT INTO runs (
+    user_id, agent_id, input, status,
+    cost_cents, platform_fee_cents, creator_revenue_cents, source
+) VALUES (
+    $1, $2, $3, 'running', $4, $5, $6, $7
+)
+RETURNING id, user_id, agent_id, input, output, status, error_code, error_message,
+          cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
+          started_at, finished_at, source;
+
+-- name: MarkRunSuccess :exec
+-- 调用成功：写 output, status=success, duration_ms, finished_at
+UPDATE runs
+SET status = 'success',
+    output = $2,
+    duration_ms = $3,
+    finished_at = NOW()
+WHERE id = $1 AND status = 'running';
+
+-- name: MarkRunFailed :exec
+-- 调用失败：写 status, error_code, error_message, duration_ms
+UPDATE runs
+SET status = $2,
+    error_code = $3,
+    error_message = $4,
+    duration_ms = $5,
+    finished_at = NOW()
+WHERE id = $1 AND status = 'running';
+
+-- name: GetRunByID :one
+SELECT id, user_id, agent_id, input, output, status, error_code, error_message,
+       cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
+       started_at, finished_at, source
+FROM runs
+WHERE id = $1;
+
+-- name: CreateRunEvent :one
+-- 追加 run event；锁 run 行来保证同一个 run 内 sequence 单调递增。
+WITH locked_run AS (
+    SELECT id FROM runs WHERE id = $1 FOR UPDATE
+),
+next_sequence AS (
+    SELECT COALESCE(MAX(e.sequence), 0)::int + 1 AS sequence
+    FROM run_events e
+    JOIN locked_run r ON r.id = e.run_id
+)
+INSERT INTO run_events (
+    run_id, parent_run_id, sequence, event_type, payload
+)
+SELECT
+    locked_run.id, $2, next_sequence.sequence, $3, $4
+FROM locked_run, next_sequence
+RETURNING id, run_id, parent_run_id, sequence, event_type, payload, created_at;
+
+-- name: ListRunEventsByRun :many
+SELECT id, run_id, parent_run_id, sequence, event_type, payload, created_at
+FROM run_events
+WHERE run_id = $1 AND sequence > $2
+ORDER BY sequence ASC
+LIMIT $3;
+
+-- ## 模块 6（双面板数据查询）
+-- subagent-6a 在此区块下追加 query
+
+-- name: ListRunsByUser :many
+SELECT id, user_id, agent_id, input, output, status, error_code, error_message,
+       cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
+       started_at, finished_at, source
+FROM runs
+WHERE user_id = $1
+ORDER BY started_at DESC
+LIMIT $2 OFFSET $3;
+
+-- name: ListRunsByUserWithAgent :many
+-- 列表里要展示 agent name，join 上去
+SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
+       r.error_code, r.error_message, r.cost_cents, r.platform_fee_cents,
+       r.creator_revenue_cents, r.duration_ms, r.started_at, r.finished_at,
+       r.source,
+       a.slug AS agent_slug, a.name AS agent_name
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+WHERE r.user_id = $1
+ORDER BY r.started_at DESC
+LIMIT $2 OFFSET $3;
+
+-- name: CountRunsByUser :one
+SELECT COUNT(*)::int AS total FROM runs WHERE user_id = $1;
+
+-- name: CountRunsByUserThisMonth :one
+SELECT COUNT(*)::int AS total
+FROM runs
+WHERE user_id = $1 AND started_at >= date_trunc('month', NOW());
+
+-- name: SumSpentByUserThisMonth :one
+SELECT COALESCE(SUM(cost_cents), 0)::bigint AS total_spent
+FROM runs
+WHERE user_id = $1 AND status = 'success' AND started_at >= date_trunc('month', NOW());
+
+-- name: SumEarningsByCreatorThisMonth :one
+-- 通过 agent.creator_id 关联
+SELECT COALESCE(SUM(r.creator_revenue_cents), 0)::bigint AS total_earned
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+WHERE a.creator_id = $1 AND r.status = 'success' AND r.started_at >= date_trunc('month', NOW());
+
+-- name: CountRunsForCreatorThisMonth :one
+SELECT COUNT(*)::int AS total
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+WHERE a.creator_id = $1 AND r.status = 'success' AND r.started_at >= date_trunc('month', NOW());
+
+-- name: ListAgentStatsForCreator :many
+-- 创作者每个 Agent 的本月调用 + 收入（用于 creator dashboard）
+SELECT a.id, a.slug, a.name, a.status, a.price_per_call_cents,
+       a.total_calls AS lifetime_calls, a.total_revenue_cents AS lifetime_revenue,
+       COALESCE(monthly.calls_this_month, 0) AS calls_this_month,
+       COALESCE(monthly.revenue_this_month, 0) AS revenue_this_month
+FROM agents a
+LEFT JOIN (
+    SELECT agent_id,
+           COUNT(*) AS calls_this_month,
+           SUM(creator_revenue_cents) AS revenue_this_month
+    FROM runs
+    WHERE status = 'success' AND started_at >= date_trunc('month', NOW())
+    GROUP BY agent_id
+) monthly ON monthly.agent_id = a.id
+WHERE a.creator_id = $1
+ORDER BY a.created_at DESC;
+
+-- name: CountAgentsByCreator :one
+-- 创作者总 Agent 数
+SELECT COUNT(*)::int AS total FROM agents WHERE creator_id = $1;
+
+-- name: CountPendingAgentsByCreator :one
+-- 创作者人工处理队列 Agent 数
+SELECT COUNT(*)::int AS total FROM agents WHERE creator_id = $1 AND status = 'pending';
+
+-- ## 共用 - 占位
+-- name: RunsCount :one
+SELECT COUNT(*)::int AS total FROM runs;
