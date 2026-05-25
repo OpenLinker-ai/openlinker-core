@@ -1,4 +1,4 @@
--- 002_api_keys_and_webhooks.down.sql
+-- 002_webhooks.down.sql
 
 BEGIN;
 
@@ -9,7 +9,5 @@ ALTER TABLE agents DROP CONSTRAINT IF EXISTS agents_webhook_https;
 ALTER TABLE agents
     DROP COLUMN IF EXISTS webhook_secret,
     DROP COLUMN IF EXISTS webhook_url;
-
-DROP TABLE IF EXISTS api_keys;
 
 COMMIT;

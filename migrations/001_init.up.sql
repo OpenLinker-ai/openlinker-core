@@ -1,10 +1,10 @@
 -- 001_init.up.sql
--- OpenLinker Phase 1 数据库初始化
--- 关联 docs/10-phase1-architecture.md 章三
+-- openlinker-core 基线: users + agents + runs + updated_at 触发器
+-- 钱包/充值/提现/api_keys 等商业化表归 openlinker-cloud/migrations/001_cloud_init.up.sql
+-- 关联 docs/10-phase1-architecture.md 章三, docs/26 §7
 
 BEGIN;
 
--- 启用扩展
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- ──────────────────────────────────────────────────────
@@ -95,62 +95,8 @@ CREATE INDEX idx_runs_agent_time ON runs (agent_id, started_at DESC);
 CREATE INDEX idx_runs_status ON runs (status, started_at DESC);
 
 -- ──────────────────────────────────────────────────────
--- 4. 钱包
--- ──────────────────────────────────────────────────────
-CREATE TABLE wallets (
-    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-    balance_cents BIGINT NOT NULL DEFAULT 0,
-    earnings_cents BIGINT NOT NULL DEFAULT 0,
-    total_charged_cents BIGINT NOT NULL DEFAULT 0,
-    total_spent_cents BIGINT NOT NULL DEFAULT 0,
-    total_earned_cents BIGINT NOT NULL DEFAULT 0,
-    total_withdrawn_cents BIGINT NOT NULL DEFAULT 0,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT wallets_balance_nonneg CHECK (balance_cents >= 0),
-    CONSTRAINT wallets_earnings_nonneg CHECK (earnings_cents >= 0)
-);
-
--- ──────────────────────────────────────────────────────
--- 5. 充值记录
--- ──────────────────────────────────────────────────────
-CREATE TABLE charges (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    amount_cents INTEGER NOT NULL,
-    currency TEXT NOT NULL DEFAULT 'usd',
-    stripe_payment_intent_id TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    failure_message TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    succeeded_at TIMESTAMPTZ,
-    CONSTRAINT charges_amount_positive CHECK (amount_cents > 0),
-    CONSTRAINT charges_status_valid CHECK (status IN ('pending', 'succeeded', 'failed', 'cancelled')),
-    CONSTRAINT charges_pi_unique UNIQUE (stripe_payment_intent_id)
-);
-
-CREATE INDEX idx_charges_user_time ON charges (user_id, created_at DESC);
-
--- ──────────────────────────────────────────────────────
--- 6. 提现记录
--- ──────────────────────────────────────────────────────
-CREATE TABLE withdrawals (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    creator_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    amount_cents INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    notes TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    paid_at TIMESTAMPTZ,
-    CONSTRAINT withdrawals_amount_positive CHECK (amount_cents > 0),
-    CONSTRAINT withdrawals_min_amount CHECK (amount_cents >= 5000),
-    CONSTRAINT withdrawals_status_valid CHECK (status IN ('pending', 'paid', 'rejected'))
-);
-
-CREATE INDEX idx_withdrawals_creator ON withdrawals (creator_id, created_at DESC);
-CREATE INDEX idx_withdrawals_status ON withdrawals (status, created_at);
-
--- ──────────────────────────────────────────────────────
 -- updated_at 自动维护
+-- cloud 的 wallets 触发器复用这个函数(cloud migrations 在 core 之后跑)
 -- ──────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION trigger_set_updated_at()
 RETURNS TRIGGER AS $$
@@ -163,8 +109,6 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER users_set_updated_at BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 CREATE TRIGGER agents_set_updated_at BEFORE UPDATE ON agents
-    FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
-CREATE TRIGGER wallets_set_updated_at BEFORE UPDATE ON wallets
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 COMMIT;
