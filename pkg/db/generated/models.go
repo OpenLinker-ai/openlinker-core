@@ -128,6 +128,23 @@ type RunEvent struct {
 	CreatedAt   time.Time  `db:"created_at" json:"created_at"`
 }
 
+// AgentRegistrationToken 是创作者侧短期 Bootstrap Token，供 Agent 自注册流程使用。
+// max_agents 控制同一枚 token 可换取多少个 Agent，used_count 原子递增。
+// 明文 token 仅创建时返回，数据库只保存 hash 与显示用 prefix。
+type AgentRegistrationToken struct {
+	ID            uuid.UUID  `db:"id" json:"id"`
+	CreatorUserID uuid.UUID  `db:"creator_user_id" json:"creator_user_id"`
+	Label         string     `db:"label" json:"label"`
+	Prefix        string     `db:"prefix" json:"prefix"`
+	TokenHash     string     `db:"token_hash" json:"-"`
+	MaxAgents     int32      `db:"max_agents" json:"max_agents"`
+	UsedCount     int32      `db:"used_count" json:"used_count"`
+	ExpiresAt     time.Time  `db:"expires_at" json:"expires_at"`
+	RevokedAt     *time.Time `db:"revoked_at" json:"revoked_at"`
+	LastUsedAt    *time.Time `db:"last_used_at" json:"last_used_at"`
+	CreatedAt     time.Time  `db:"created_at" json:"created_at"`
+}
+
 // AgentRuntimeToken 是绑定单个 Agent 的自动化调用凭证。
 // 明文 token 仅创建时返回，数据库只保存 hash 与显示用 prefix。
 type AgentRuntimeToken struct {
