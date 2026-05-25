@@ -75,12 +75,21 @@ type Service struct {
 }
 
 type runInvocation struct {
-	runID   uuid.UUID
-	userID  uuid.UUID
-	agent   db.Agent
-	cost    int32
-	revenue int32
-	req     *RunRequest
+	runID      uuid.UUID
+	userID     uuid.UUID
+	agent      db.Agent
+	cost       int32
+	revenue    int32
+	req        *RunRequest
+	settle     bool
+	delegation *Delegation
+}
+
+// Delegation describes an Agent-mediated child run executed within an active parent run.
+type Delegation struct {
+	ParentRunID   uuid.UUID
+	CallerAgentID uuid.UUID
+	Reason        string
 }
 
 // SetWebhookEnqueuer 注入 webhook 触发器（main.go 启动时调用）。
@@ -127,7 +136,7 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 // source 标记调用来源：'web' / 'mcp' / 'api'，写入 runs.source 以便 /usage 分类显示。
 // 传空字符串时默认 'web'，便于旧调用方零修改。
 func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
-	invocation, _, err := s.createRunningRun(ctx, userID, req, source)
+	invocation, _, err := s.createRunningRun(ctx, userID, req, source, nil, true)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +145,7 @@ func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, so
 
 // StartRun 创建 running run 并在后台执行；调用方可用 GetRun/ListRunEvents/SSE 查询进度。
 func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
-	invocation, resp, err := s.createRunningRun(ctx, userID, req, source)
+	invocation, resp, err := s.createRunningRun(ctx, userID, req, source, nil, true)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +153,24 @@ func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunReques
 	return resp, nil
 }
 
-func (s *Service) createRunningRun(ctx context.Context, userID uuid.UUID, req *RunRequest, source string) (*runInvocation, *RunResponse, error) {
+// RunDelegated lets an authenticated Agent call another Agent through the platform.
+// Delegated runs are free until explicit user-approved billing exists.
+func (s *Service) RunDelegated(ctx context.Context, userID uuid.UUID, delegation Delegation, req *RunRequest) (*RunResponse, error) {
+	invocation, _, err := s.createRunningRun(ctx, userID, req, "api", &delegation, false)
+	if err != nil {
+		return nil, err
+	}
+	return s.executeRun(ctx, invocation), nil
+}
+
+func (s *Service) createRunningRun(
+	ctx context.Context,
+	userID uuid.UUID,
+	req *RunRequest,
+	source string,
+	delegation *Delegation,
+	settle bool,
+) (*runInvocation, *RunResponse, error) {
 	if source == "" {
 		source = "web"
 	}
@@ -182,6 +208,11 @@ func (s *Service) createRunningRun(ctx context.Context, userID uuid.UUID, req *R
 		fee = cost
 	}
 	revenue := cost - fee
+	if !settle {
+		cost = 0
+		fee = 0
+		revenue = 0
+	}
 
 	// 3. 序列化 input 为 JSONB
 	inputJSON, err := json.Marshal(req.Input)
@@ -194,7 +225,7 @@ func (s *Service) createRunningRun(ctx context.Context, userID uuid.UUID, req *R
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
-		if s.walletCharger != nil {
+		if settle && s.walletCharger != nil {
 			ok, chargeErr := s.walletCharger.Charge(ctx, tx, userID, int64(cost))
 			if chargeErr != nil {
 				return chargeErr
@@ -217,15 +248,41 @@ func (s *Service) createRunningRun(ctx context.Context, userID uuid.UUID, req *R
 			return createErr
 		}
 		runID = run.ID
-		if eventErr := createRunEvent(ctx, q, runID, "run.created", map[string]interface{}{
+		var parentRunID *uuid.UUID
+		if delegation != nil {
+			parentRunID = &delegation.ParentRunID
+			if _, createErr = q.CreateRunDelegation(ctx, db.CreateRunDelegationParams{
+				ChildRunID:    runID,
+				ParentRunID:   delegation.ParentRunID,
+				CallerAgentID: delegation.CallerAgentID,
+				Reason:        delegation.Reason,
+			}); createErr != nil {
+				return createErr
+			}
+			if eventErr := createRunEvent(ctx, q, delegation.ParentRunID, nil, "run.child.created", map[string]interface{}{
+				"child_run_id":    runID.String(),
+				"caller_agent_id": delegation.CallerAgentID.String(),
+				"target_agent_id": agentID.String(),
+				"reason":          delegation.Reason,
+				"billing_mode":    "free_delegation",
+			}); eventErr != nil {
+				return eventErr
+			}
+		}
+		payload := map[string]interface{}{
 			"agent_id":   agentID.String(),
 			"user_id":    userID.String(),
 			"status":     "running",
 			"cost_cents": cost,
-		}); eventErr != nil {
+		}
+		if delegation != nil {
+			payload["caller_agent_id"] = delegation.CallerAgentID.String()
+			payload["billing_mode"] = "free_delegation"
+		}
+		if eventErr := createRunEvent(ctx, q, runID, parentRunID, "run.created", payload); eventErr != nil {
 			return eventErr
 		}
-		if eventErr := createRunEvent(ctx, q, runID, "run.started", map[string]interface{}{
+		if eventErr := createRunEvent(ctx, q, runID, parentRunID, "run.started", map[string]interface{}{
 			"agent_id": agentID.String(),
 			"user_id":  userID.String(),
 			"status":   "running",
@@ -244,18 +301,25 @@ func (s *Service) createRunningRun(ctx context.Context, userID uuid.UUID, req *R
 	}
 
 	invocation := &runInvocation{
-		runID:   runID,
-		userID:  userID,
-		agent:   agent,
-		cost:    cost,
-		revenue: revenue,
-		req:     req,
+		runID:      runID,
+		userID:     userID,
+		agent:      agent,
+		cost:       cost,
+		revenue:    revenue,
+		req:        req,
+		settle:     settle,
+		delegation: delegation,
 	}
 	resp := &RunResponse{
 		RunID:     runID.String(),
 		Status:    "running",
 		CostCents: cost,
 		Source:    source,
+	}
+	if delegation != nil {
+		resp.ParentRunID = delegation.ParentRunID.String()
+		resp.CallerAgentID = delegation.CallerAgentID.String()
+		resp.BillingMode = "free_delegation"
 	}
 	return invocation, resp, nil
 }
@@ -285,24 +349,40 @@ func (s *Service) executeRun(ctx context.Context, invocation *runInvocation) *Ru
 		invocation.runID,
 		invocation.userID,
 		invocation.req,
+		invocation.delegation,
 	)
 	duration := int32(time.Since(started).Milliseconds())
 
 	// 处理结果
+	var resp *RunResponse
 	if callErr != nil || agentErr != nil {
-		return s.handleFailure(ctx, invocation.runID, invocation.userID, invocation.cost, duration, callErr, agentErr)
+		resp = s.handleFailure(ctx, invocation.runID, invocation.userID, invocation.cost, duration, callErr, agentErr, invocation.settle)
+	} else {
+		resp = s.handleSuccess(
+			ctx,
+			invocation.runID,
+			invocation.agent.ID,
+			invocation.agent.CreatorID,
+			invocation.cost,
+			invocation.revenue,
+			output,
+			agentEvents,
+			duration,
+			invocation.settle,
+		)
 	}
-	return s.handleSuccess(
-		ctx,
-		invocation.runID,
-		invocation.agent.ID,
-		invocation.agent.CreatorID,
-		invocation.cost,
-		invocation.revenue,
-		output,
-		agentEvents,
-		duration,
-	)
+	if invocation.delegation != nil {
+		resp.ParentRunID = invocation.delegation.ParentRunID.String()
+		resp.CallerAgentID = invocation.delegation.CallerAgentID.String()
+		resp.BillingMode = "free_delegation"
+		s.recordRunEventBestEffort(ctx, invocation.delegation.ParentRunID, "run.child.completed", map[string]interface{}{
+			"child_run_id":    invocation.runID.String(),
+			"caller_agent_id": invocation.delegation.CallerAgentID.String(),
+			"target_agent_id": invocation.agent.ID.String(),
+			"status":          resp.Status,
+		})
+	}
+	return resp
 }
 
 // GetRun 查单条调用详情；仅 owner 可看。
@@ -319,7 +399,19 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 		// 不暴露存在性，统一 404
 		return nil, httpx.NotFound("调用记录不存在")
 	}
-	return runToResponse(&r), nil
+	resp := runToResponse(&r)
+	delegation, err := s.queries.GetRunDelegationByChild(ctx, runID)
+	if err == nil {
+		resp.ParentRunID = delegation.ParentRunID.String()
+		resp.CallerAgentID = delegation.CallerAgentID.String()
+		resp.BillingMode = "free_delegation"
+		return resp, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.GetRun: GetRunDelegationByChild")
+		return nil, httpx.Internal("查询调用关系失败")
+	}
+	return resp, nil
 }
 
 // ListRunEvents 查询单个 run 的事件流；仅 owner 可看。
@@ -433,13 +525,18 @@ func (s *Service) ReportRunEvent(ctx context.Context, runID uuid.UUID, token str
 //
 // 任意一个非空都视为本次调用失败。
 func (s *Service) callAgentEndpoint(
-	ctx context.Context, agent *db.Agent, runID, userID uuid.UUID, req *RunRequest,
+	ctx context.Context, agent *db.Agent, runID, userID uuid.UUID, req *RunRequest, delegation *Delegation,
 ) (map[string]interface{}, []AgentEvent, *AgentError, error) {
-	payload, err := json.Marshal(AgentRequest{
+	request := AgentRequest{
 		Input:    req.Input,
 		Metadata: req.Metadata,
 		RunID:    runID.String(),
-	})
+	}
+	if delegation != nil {
+		request.ParentRunID = delegation.ParentRunID.String()
+		request.CallerAgentID = delegation.CallerAgentID.String()
+	}
+	payload, err := json.Marshal(request)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("marshal request: %w", err)
 	}
@@ -452,7 +549,9 @@ func (s *Service) callAgentEndpoint(
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("User-Agent", "OpenLinker/1.0")
 	httpReq.Header.Set("X-OpenLinker-Run-Id", runID.String())
-	httpReq.Header.Set("X-OpenLinker-User-Id", userID.String())
+	if delegation == nil {
+		httpReq.Header.Set("X-OpenLinker-User-Id", userID.String())
+	}
 	httpReq.Header.Set("X-OpenLinker-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
 	if agent.EndpointAuthHeader != nil && *agent.EndpointAuthHeader != "" {
 		// 创作者注册时填的预共享 token，平台→endpoint 携带；前端永不返回。
@@ -510,7 +609,7 @@ func (s *Service) DryRun(
 	userID := uuid.New()
 	output, _, agentErr, callErr := s.callAgentEndpoint(ctx, agent, runID, userID, &RunRequest{
 		Input: input,
-	})
+	}, nil)
 	if callErr != nil {
 		return nil, "endpoint 调用失败: " + truncate(callErr.Error(), errMsgMaxLen)
 	}
@@ -530,6 +629,7 @@ func (s *Service) handleSuccess(
 	output map[string]interface{},
 	agentEvents []AgentEvent,
 	duration int32,
+	settle bool,
 ) *RunResponse {
 	outputJSON, err := json.Marshal(output)
 	if err != nil {
@@ -547,11 +647,13 @@ func (s *Service) handleSuccess(
 		}); e != nil {
 			return e
 		}
-		if e := q.AddCreatorEarnings(ctx, db.AddCreatorEarningsParams{
-			UserID:        creatorID,
-			EarningsCents: int64(revenue),
-		}); e != nil {
-			return e
+		if settle {
+			if e := q.AddCreatorEarnings(ctx, db.AddCreatorEarningsParams{
+				UserID:        creatorID,
+				EarningsCents: int64(revenue),
+			}); e != nil {
+				return e
+			}
 		}
 		return q.IncrementAgentStats(ctx, db.IncrementAgentStatsParams{
 			ID:           agentID,
@@ -572,10 +674,11 @@ func (s *Service) handleSuccess(
 		})
 	}
 
-	// 异步触发 webhook（不阻塞响应；EnqueueDelivery 内会 INSERT delivery 并 goroutine 投递）
-	s.triggerWebhook(runID, agentID, output)
-	// 用户侧默认投递目标（独立于 webhook，无默认时静默跳过）
-	s.triggerDelivery(runID)
+	if settle {
+		// 委派子 run 不自动外发中间产物；最终交付由父 run 决定。
+		s.triggerWebhook(runID, agentID, output)
+		s.triggerDelivery(runID)
+	}
 
 	return &RunResponse{
 		RunID:      runID.String(),
@@ -598,6 +701,7 @@ func (s *Service) handleFailure(
 	cost, duration int32,
 	callErr error,
 	agentErr *AgentError,
+	settle bool,
 ) *RunResponse {
 	errCode := "INTERNAL_ERROR"
 	errMsg := "调用失败"
@@ -629,7 +733,7 @@ func (s *Service) handleFailure(
 		}); e != nil {
 			return e
 		}
-		if s.walletCharger == nil {
+		if !settle || s.walletCharger == nil {
 			return nil
 		}
 		return s.walletCharger.Refund(ctx, tx, userID, int64(cost))
@@ -648,10 +752,11 @@ func (s *Service) handleFailure(
 		})
 	}
 
-	// 失败也触发 webhook（status='failed' / 'timeout'），让创作者侧能感知失败
-	// 注：此处 agentID 不在 handleFailure 入参中，故由 triggerWebhook 内部从 run 重读
-	s.triggerWebhookByRun(runID)
-	s.triggerDelivery(runID)
+	if settle {
+		// 失败也触发 webhook（status='failed' / 'timeout'），让创作者侧能感知失败。
+		s.triggerWebhookByRun(runID)
+		s.triggerDelivery(runID)
+	}
 
 	return &RunResponse{
 		RunID:      runID.String(),
@@ -783,21 +888,22 @@ func runToResponse(r *db.Run) *RunResponse {
 	return resp
 }
 
-func createRunEvent(ctx context.Context, q *db.Queries, runID uuid.UUID, eventType string, payload map[string]interface{}) error {
+func createRunEvent(ctx context.Context, q *db.Queries, runID uuid.UUID, parentRunID *uuid.UUID, eventType string, payload map[string]interface{}) error {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 	_, err = q.CreateRunEvent(ctx, db.CreateRunEventParams{
-		RunID:     runID,
-		EventType: eventType,
-		Payload:   payloadJSON,
+		RunID:       runID,
+		ParentRunID: parentRunID,
+		EventType:   eventType,
+		Payload:     payloadJSON,
 	})
 	return err
 }
 
 func (s *Service) recordRunEventBestEffort(ctx context.Context, runID uuid.UUID, eventType string, payload map[string]interface{}) {
-	if err := createRunEvent(ctx, s.queries, runID, eventType, payload); err != nil {
+	if err := createRunEvent(ctx, s.queries, runID, nil, eventType, payload); err != nil {
 		log.Error().Err(err).Str("run_id", runID.String()).Str("event_type", eventType).
 			Msg("runtime.recordRunEventBestEffort")
 	}

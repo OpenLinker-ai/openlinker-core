@@ -128,6 +128,37 @@ type RunEvent struct {
 	CreatedAt   time.Time  `db:"created_at" json:"created_at"`
 }
 
+// AgentRuntimeToken 是绑定单个 Agent 的自动化调用凭证。
+// 明文 token 仅创建时返回，数据库只保存 hash 与显示用 prefix。
+type AgentRuntimeToken struct {
+	ID              uuid.UUID  `db:"id" json:"id"`
+	AgentID         uuid.UUID  `db:"agent_id" json:"agent_id"`
+	CreatedByUserID uuid.UUID  `db:"created_by_user_id" json:"created_by_user_id"`
+	Name            string     `db:"name" json:"name"`
+	Prefix          string     `db:"prefix" json:"prefix"`
+	TokenHash       string     `db:"token_hash" json:"-"`
+	Scopes          []string   `db:"scopes" json:"scopes"`
+	LastUsedAt      *time.Time `db:"last_used_at" json:"last_used_at"`
+	RevokedAt       *time.Time `db:"revoked_at" json:"revoked_at"`
+	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
+}
+
+// AgentCallPolicy 控制目标 Agent 是否接受来自其他 Agent 的平台代理调用。
+type AgentCallPolicy struct {
+	AgentID    uuid.UUID `db:"agent_id" json:"agent_id"`
+	CallableBy string    `db:"callable_by" json:"callable_by"`
+	UpdatedAt  time.Time `db:"updated_at" json:"updated_at"`
+}
+
+// RunDelegation 将被调用的 child run 关联到发起委派的 parent run。
+type RunDelegation struct {
+	ChildRunID    uuid.UUID `db:"child_run_id" json:"child_run_id"`
+	ParentRunID   uuid.UUID `db:"parent_run_id" json:"parent_run_id"`
+	CallerAgentID uuid.UUID `db:"caller_agent_id" json:"caller_agent_id"`
+	Reason        string    `db:"reason" json:"reason"`
+	CreatedAt     time.Time `db:"created_at" json:"created_at"`
+}
+
 // ApiKey 对应 api_keys 表。
 //
 // 子轮 2.1（Phase 2）引入，给开发者用 cURL 调 API 用。

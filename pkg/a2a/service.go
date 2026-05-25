@@ -1,0 +1,277 @@
+package a2a
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog/log"
+	"golang.org/x/crypto/bcrypt"
+
+	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
+	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/kinzhi/openlinker-core/pkg/runtime"
+)
+
+const (
+	runtimeTokenPrefix     = "rt_live_"
+	runtimeTokenPrefixLen  = 12
+	runtimeTokenRandomSize = 32
+	maxRuntimeTokens       = 10
+)
+
+type Service struct {
+	queries *db.Queries
+	runtime *runtime.Service
+}
+
+func NewService(pool *pgxpool.Pool, runtimeSvc *runtime.Service) *Service {
+	return &Service{queries: db.New(pool), runtime: runtimeSvc}
+}
+
+func (s *Service) CreateRuntimeToken(ctx context.Context, userID, agentID uuid.UUID, req *CreateRuntimeTokenRequest) (*RuntimeTokenResponse, error) {
+	if _, err := s.ownerAgent(ctx, userID, agentID); err != nil {
+		return nil, err
+	}
+	count, err := s.queries.CountActiveAgentRuntimeTokens(ctx, agentID)
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("a2a.CreateRuntimeToken: count")
+		return nil, httpx.Internal("查询 Runtime Token 失败")
+	}
+	if count >= maxRuntimeTokens {
+		return nil, httpx.BadRequest("Runtime Token 数量已达上限（10 个），请先撤销旧 token")
+	}
+
+	plaintext, prefix, err := generateRuntimeToken()
+	if err != nil {
+		return nil, httpx.Internal("生成 Runtime Token 失败")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, httpx.Internal("加密 Runtime Token 失败")
+	}
+	token, err := s.queries.CreateAgentRuntimeToken(ctx, db.CreateAgentRuntimeTokenParams{
+		AgentID:         agentID,
+		CreatedByUserID: userID,
+		Name:            strings.TrimSpace(req.Name),
+		Prefix:          prefix,
+		TokenHash:       string(hash),
+		Scopes:          []string{"agent:call"},
+	})
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("a2a.CreateRuntimeToken: insert")
+		return nil, httpx.Internal("创建 Runtime Token 失败")
+	}
+	resp := tokenResponse(token)
+	resp.PlaintextToken = plaintext
+	return &resp, nil
+}
+
+func (s *Service) ListRuntimeTokens(ctx context.Context, userID, agentID uuid.UUID) ([]RuntimeTokenResponse, error) {
+	if _, err := s.ownerAgent(ctx, userID, agentID); err != nil {
+		return nil, err
+	}
+	tokens, err := s.queries.ListAgentRuntimeTokensForOwner(ctx, db.ListAgentRuntimeTokensForOwnerParams{
+		AgentID: agentID,
+		UserID:  userID,
+	})
+	if err != nil {
+		return nil, httpx.Internal("查询 Runtime Token 失败")
+	}
+	items := make([]RuntimeTokenResponse, 0, len(tokens))
+	for _, token := range tokens {
+		items = append(items, tokenResponse(token))
+	}
+	return items, nil
+}
+
+func (s *Service) RevokeRuntimeToken(ctx context.Context, userID, tokenID uuid.UUID) error {
+	affected, err := s.queries.RevokeAgentRuntimeTokenForOwner(ctx, db.RevokeAgentRuntimeTokenForOwnerParams{
+		ID: tokenID, UserID: userID,
+	})
+	if err != nil {
+		return httpx.Internal("撤销 Runtime Token 失败")
+	}
+	if affected == 0 {
+		return httpx.NotFound("Runtime Token 不存在或已撤销")
+	}
+	return nil
+}
+
+func (s *Service) GetCallPolicy(ctx context.Context, userID, agentID uuid.UUID) (*CallPolicyResponse, error) {
+	if _, err := s.ownerAgent(ctx, userID, agentID); err != nil {
+		return nil, err
+	}
+	policy, err := s.queries.GetAgentCallPolicy(ctx, agentID)
+	if err != nil {
+		return nil, httpx.Internal("查询 A2A 策略失败")
+	}
+	return &CallPolicyResponse{AgentID: agentID.String(), CallableBy: policy}, nil
+}
+
+func (s *Service) UpdateCallPolicy(ctx context.Context, userID, agentID uuid.UUID, req *UpdateCallPolicyRequest) (*CallPolicyResponse, error) {
+	policy, err := s.queries.UpsertAgentCallPolicyForOwner(ctx, db.UpsertAgentCallPolicyForOwnerParams{
+		AgentID: agentID, UserID: userID, CallableBy: req.CallableBy,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("Agent 不存在")
+	}
+	if err != nil {
+		return nil, httpx.Internal("更新 A2A 策略失败")
+	}
+	return &CallPolicyResponse{
+		AgentID:    policy.AgentID.String(),
+		CallableBy: policy.CallableBy,
+		UpdatedAt:  policy.UpdatedAt.UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *CallAgentRequest) (*runtime.RunResponse, error) {
+	callerToken, err := s.verifyRuntimeToken(ctx, plaintextToken)
+	if err != nil {
+		return nil, err
+	}
+	parentRunID, _ := uuid.Parse(req.ParentRunID)
+	targetAgentID, _ := uuid.Parse(req.TargetAgentID)
+	if targetAgentID == callerToken.AgentID {
+		return nil, httpx.Unprocessable("Agent 不能通过 A2A 调用自己")
+	}
+
+	parent, err := s.queries.GetRunByID(ctx, parentRunID)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && parent.AgentID != callerToken.AgentID) {
+		return nil, httpx.NotFound("父运行不存在或不属于调用 Agent")
+	}
+	if err != nil {
+		return nil, httpx.Internal("查询父运行失败")
+	}
+	if parent.Status != "running" {
+		return nil, httpx.Conflict("父运行已结束，不能发起新的 Agent 委派")
+	}
+
+	caller, err := s.queries.GetAgentByID(ctx, callerToken.AgentID)
+	if err != nil {
+		return nil, httpx.NotFound("调用 Agent 不存在")
+	}
+	target, err := s.queries.GetAgentByID(ctx, targetAgentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("目标 Agent 不存在")
+	}
+	if err != nil {
+		return nil, httpx.Internal("查询目标 Agent 失败")
+	}
+	policy, err := s.queries.GetAgentCallPolicy(ctx, targetAgentID)
+	if err != nil {
+		return nil, httpx.Internal("查询目标 Agent 调用策略失败")
+	}
+	if policy == "private" || (policy == "same_creator" && caller.CreatorID != target.CreatorID) {
+		return nil, httpx.Forbidden("目标 Agent 不接受当前 Agent 的调用")
+	}
+
+	_ = s.queries.TouchAgentRuntimeToken(ctx, callerToken.ID)
+	return s.runtime.RunDelegated(ctx, parent.UserID, runtime.Delegation{
+		ParentRunID:   parentRunID,
+		CallerAgentID: callerToken.AgentID,
+		Reason:        strings.TrimSpace(req.Reason),
+	}, &runtime.RunRequest{
+		AgentID:  targetAgentID.String(),
+		Input:    req.Input,
+		Metadata: req.Metadata,
+	})
+}
+
+func (s *Service) ListChildren(ctx context.Context, userID, parentRunID uuid.UUID) ([]ChildRunResponse, error) {
+	rows, err := s.queries.ListChildRunsByParentAndUser(ctx, db.ListChildRunsByParentAndUserParams{
+		ParentRunID: parentRunID, UserID: userID,
+	})
+	if err != nil {
+		return nil, httpx.Internal("查询 Agent 协作运行失败")
+	}
+	items := make([]ChildRunResponse, 0, len(rows))
+	for _, row := range rows {
+		item := ChildRunResponse{
+			ChildRunID: row.ChildRunID.String(), ParentRunID: row.ParentRunID.String(),
+			CallerAgentID: row.CallerAgentID.String(), TargetAgentID: row.TargetAgentID.String(),
+			TargetAgentSlug: row.TargetAgentSlug, TargetAgentName: row.TargetAgentName,
+			Reason: row.Reason, Status: row.Status, CostCents: row.CostCents,
+			DurationMs: row.DurationMs, StartedAt: row.StartedAt.UTC().Format(time.RFC3339),
+			Source: row.Source, BillingMode: "free_delegation",
+		}
+		if row.FinishedAt != nil {
+			formatted := row.FinishedAt.UTC().Format(time.RFC3339)
+			item.FinishedAt = &formatted
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (s *Service) ownerAgent(ctx context.Context, userID, agentID uuid.UUID) (db.Agent, error) {
+	agent, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{ID: agentID, CreatorID: userID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return db.Agent{}, httpx.NotFound("Agent 不存在")
+	}
+	if err != nil {
+		return db.Agent{}, httpx.Internal("查询 Agent 失败")
+	}
+	return agent, nil
+}
+
+func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext string) (db.AgentRuntimeToken, error) {
+	plaintext = strings.TrimSpace(plaintext)
+	if !strings.HasPrefix(plaintext, runtimeTokenPrefix) ||
+		len(plaintext) != len(runtimeTokenPrefix)+runtimeTokenRandomSize*2 {
+		return db.AgentRuntimeToken{}, httpx.Unauthorized("Runtime Token 无效或已撤销")
+	}
+	tokens, err := s.queries.ListActiveAgentRuntimeTokensByPrefix(ctx, plaintext[:runtimeTokenPrefixLen])
+	if err != nil {
+		return db.AgentRuntimeToken{}, httpx.Unauthorized("Runtime Token 无效或已撤销")
+	}
+	for _, token := range tokens {
+		if bcrypt.CompareHashAndPassword([]byte(token.TokenHash), []byte(plaintext)) == nil &&
+			hasScope(token.Scopes, "agent:call") {
+			return token, nil
+		}
+	}
+	return db.AgentRuntimeToken{}, httpx.Unauthorized("Runtime Token 无效或已撤销")
+}
+
+func generateRuntimeToken() (string, string, error) {
+	raw := make([]byte, runtimeTokenRandomSize)
+	if _, err := rand.Read(raw); err != nil {
+		return "", "", err
+	}
+	plaintext := runtimeTokenPrefix + hex.EncodeToString(raw)
+	return plaintext, plaintext[:runtimeTokenPrefixLen], nil
+}
+
+func hasScope(scopes []string, expected string) bool {
+	for _, scope := range scopes {
+		if scope == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func tokenResponse(token db.AgentRuntimeToken) RuntimeTokenResponse {
+	resp := RuntimeTokenResponse{
+		ID: token.ID.String(), AgentID: token.AgentID.String(), Name: token.Name,
+		Prefix: token.Prefix, Scopes: token.Scopes,
+		CreatedAt: token.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if token.LastUsedAt != nil {
+		value := token.LastUsedAt.UTC().Format(time.RFC3339)
+		resp.LastUsedAt = &value
+	}
+	if token.RevokedAt != nil {
+		value := token.RevokedAt.UTC().Format(time.RFC3339)
+		resp.RevokedAt = &value
+	}
+	return resp
+}

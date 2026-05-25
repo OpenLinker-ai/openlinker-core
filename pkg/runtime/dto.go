@@ -19,14 +19,17 @@ type RunRequest struct {
 // 失败 / 超时 时 Output 为空、ErrorCode + ErrorMsg 必填，CostCents=0（已退款）。
 // Source: 'web' / 'mcp' / 'api'，由 handler 从鉴权方式推导。
 type RunResponse struct {
-	RunID      string                 `json:"run_id"`
-	Status     string                 `json:"status"`
-	Output     map[string]interface{} `json:"output,omitempty"`
-	ErrorCode  string                 `json:"error_code,omitempty"`
-	ErrorMsg   string                 `json:"error_message,omitempty"`
-	CostCents  int32                  `json:"cost_cents"`
-	DurationMs int32                  `json:"duration_ms"`
-	Source     string                 `json:"source,omitempty"`
+	RunID         string                 `json:"run_id"`
+	Status        string                 `json:"status"`
+	Output        map[string]interface{} `json:"output,omitempty"`
+	ErrorCode     string                 `json:"error_code,omitempty"`
+	ErrorMsg      string                 `json:"error_message,omitempty"`
+	CostCents     int32                  `json:"cost_cents"`
+	DurationMs    int32                  `json:"duration_ms"`
+	Source        string                 `json:"source,omitempty"`
+	ParentRunID   string                 `json:"parent_run_id,omitempty"`
+	CallerAgentID string                 `json:"caller_agent_id,omitempty"`
+	BillingMode   string                 `json:"billing_mode,omitempty"`
 }
 
 // RunEventResponse GET /api/v1/runs/:id/events 响应项。
@@ -46,9 +49,11 @@ type RunEventResponse struct {
 //
 // RunID 让创作者侧可对账 / 排查；Metadata 原样转发。
 type AgentRequest struct {
-	Input    map[string]interface{} `json:"input"`
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
-	RunID    string                 `json:"run_id"`
+	Input         map[string]interface{} `json:"input"`
+	Metadata      map[string]interface{} `json:"metadata,omitempty"`
+	RunID         string                 `json:"run_id"`
+	ParentRunID   string                 `json:"parent_run_id,omitempty"`
+	CallerAgentID string                 `json:"caller_agent_id,omitempty"`
 }
 
 // AgentResponse 创作者 endpoint → 平台的响应体。

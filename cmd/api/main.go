@@ -29,6 +29,7 @@ import (
 	gothgoogle "github.com/markbates/goth/providers/google"
 	"github.com/rs/zerolog/log"
 
+	"github.com/kinzhi/openlinker-core/pkg/a2a"
 	"github.com/kinzhi/openlinker-core/pkg/agent"
 	"github.com/kinzhi/openlinker-core/pkg/auth"
 	"github.com/kinzhi/openlinker-core/pkg/config"
@@ -133,6 +134,10 @@ func main() {
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
 	agentSvc.SetDryRunner(runtimeSvc)
+
+	a2aSvc := a2a.NewService(pool, runtimeSvc)
+	a2aHandler := a2a.NewHandler(a2aSvc)
+	a2aHandler.Register(api, jwtMiddleware, hybridMw)
 
 	webhookSvc := webhook.NewService(pool)
 	webhookHandler := webhook.NewHandler(webhookSvc, cfg)
