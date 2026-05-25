@@ -131,22 +131,23 @@ func (q *Queries) ListTaskQueriesByUser(ctx context.Context, arg ListTaskQueries
 
 const getAgentsByIDs = `-- name: GetAgentsByIDs :many
 SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
-       a.endpoint_auth_header, a.price_per_call_cents, a.tags, a.status,
-       a.rejection_reason, a.approved_at, a.total_calls, a.total_revenue_cents,
-       a.created_at, a.updated_at, u.display_name AS creator_name
+       a.endpoint_auth_header, a.price_per_call_cents, a.tags,
+       a.lifecycle_status, a.visibility, a.certification_status,
+       a.rejection_reason, a.certified_at, a.total_calls, a.total_revenue_cents,
+       a.webhook_url, a.created_at, a.updated_at, u.display_name AS creator_name
 FROM agents a
 JOIN users u ON u.id = a.creator_id
 WHERE a.id = ANY($1::uuid[])
-  AND a.status = 'approved'`
+  AND a.visibility = 'public'
+  AND a.lifecycle_status = 'active'`
 
-// GetAgentsByIDsRow Agent 全字段 + creator 显示名（与 ListApprovedAgentsRow 同结构）。
+// GetAgentsByIDsRow Agent 全字段 + creator 显示名。
 type GetAgentsByIDsRow struct {
 	Agent
 	CreatorName string `db:"creator_name" json:"creator_name"`
 }
 
-// GetAgentsByIDs 批量按 id 取当前 approved Agent 详情（任务推荐回填用）。
-//
+// GetAgentsByIDs 批量按 id 取当前公开运行的 Agent 详情（任务推荐回填用）。
 // 返回顺序由 Postgres 决定（无序），调用方需按入参顺序自行重排。
 func (q *Queries) GetAgentsByIDs(ctx context.Context, ids []uuid.UUID) ([]GetAgentsByIDsRow, error) {
 	rows, err := q.db.Query(ctx, getAgentsByIDs, ids)
@@ -167,11 +168,14 @@ func (q *Queries) GetAgentsByIDs(ctx context.Context, ids []uuid.UUID) ([]GetAge
 			&r.EndpointAuthHeader,
 			&r.PricePerCallCents,
 			&r.Tags,
-			&r.Status,
+			&r.LifecycleStatus,
+			&r.Visibility,
+			&r.CertificationStatus,
 			&r.RejectionReason,
-			&r.ApprovedAt,
+			&r.CertifiedAt,
 			&r.TotalCalls,
 			&r.TotalRevenueCents,
+			&r.WebhookURL,
 			&r.CreatedAt,
 			&r.UpdatedAt,
 			&r.CreatorName,

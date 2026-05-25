@@ -46,21 +46,26 @@ type MarketListResponse struct {
 
 // AgentDetailResponse GET /agents/:slug 响应。
 //
-// 详情页比列表多 endpoint_url / created_at / approved_at 等字段，
+// 详情页比列表多 endpoint_url / created_at / certified_at 等字段，
 // 但 endpoint_auth_header 始终不暴露（仅 runtime 调用时服务端使用）。
 type AgentDetailResponse struct {
-	ID                string              `json:"id"`
-	Slug              string              `json:"slug"`
-	Name              string              `json:"name"`
-	Description       string              `json:"description"`
-	EndpointURL       string              `json:"endpoint_url"`
-	PricePerCallCents int32               `json:"price_per_call_cents"`
-	Tags              []string            `json:"tags"`
-	TotalCalls        int32               `json:"total_calls"`
-	Creator           CreatorMini         `json:"creator"`
-	CreatedAt         string              `json:"created_at"`
-	ApprovedAt        *string             `json:"approved_at,omitempty"`
-	Skills            []SkillMini         `json:"skills"`
-	Capability        *CapabilityResponse `json:"capability,omitempty"`
-	Examples          []ExampleResponse   `json:"examples"`
+	ID                  string              `json:"id"`
+	Slug                string              `json:"slug"`
+	Name                string              `json:"name"`
+	Description         string              `json:"description"`
+	EndpointURL         string              `json:"endpoint_url"`
+	PricePerCallCents   int32               `json:"price_per_call_cents"`
+	Tags                []string            `json:"tags"`
+	TotalCalls          int32               `json:"total_calls"`
+	Creator             CreatorMini         `json:"creator"`
+	CreatedAt           string              `json:"created_at"`
+	CertifiedAt         *string             `json:"certified_at,omitempty"`
+	LifecycleStatus     string              `json:"lifecycle_status"`
+	Visibility          string              `json:"visibility"`
+	CertificationStatus string              `json:"certification_status"`
+	VerifiedSkillCount  int32               `json:"verified_skill_count"`
+	LatestBenchmarkID   *string             `json:"latest_benchmark_batch_id,omitempty"`
+	Skills              []SkillMini         `json:"skills"`
+	Capability          *CapabilityResponse `json:"capability,omitempty"`
+	Examples            []ExampleResponse   `json:"examples"`
 }

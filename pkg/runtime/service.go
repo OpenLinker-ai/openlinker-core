@@ -194,7 +194,7 @@ func (s *Service) createRunningRun(
 		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("runtime.Run: GetAgentByID")
 		return nil, nil, httpx.Internal("查询 Agent 失败")
 	}
-	if agent.Status != "approved" {
+	if agent.LifecycleStatus != "active" || agent.Visibility == "private" {
 		return nil, nil, httpx.Forbidden("Agent 未公开或已下架")
 	}
 

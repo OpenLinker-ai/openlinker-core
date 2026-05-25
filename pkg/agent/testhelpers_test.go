@@ -21,7 +21,9 @@ import (
 )
 
 // truncateAll 测试间数据隔离：从依赖最多的表先删，CASCADE 兜底。
-const truncateAll = "TRUNCATE wallets, runs, charges, withdrawals, agents, users RESTART IDENTITY CASCADE"
+// users CASCADE 会带走 cloud 侧 wallets/charges/withdrawals/api_keys（若已应用 cloud migrations）；
+// 这里只列 core 自带的表，避免运行 core 测试时强制依赖 cloud schema。
+const truncateAll = "TRUNCATE runs, agents, users RESTART IDENTITY CASCADE"
 
 // skipIfNoDB 检查 TEST_DATABASE_URL 环境变量；未设置则 skip 当前 test。
 // 返回 dsn 字符串，调用方可以用它再连一次（少见）。
@@ -84,11 +86,9 @@ func insertCreatorUser(t *testing.T, pool *pgxpool.Pool, displayName string) uui
 func setupTestData(t *testing.T, pool *pgxpool.Pool) (uuid.UUID, func()) {
 	t.Helper()
 	creatorID := insertCreatorUser(t, pool, "Test Creator")
-	// wallet 是测试 query 顺利运行的必要前置（虽然市场查询不直接用 wallets，
-	// 但 phase 1 一些 service 路径会读 wallet——为了通用性，统一建好）。
+	// wallets 在 cloud migrations 里，core 测试 DB 不一定有；best-effort 插入。
 	ctx := context.Background()
-	_, err := pool.Exec(ctx, `INSERT INTO wallets (user_id) VALUES ($1)`, creatorID)
-	require.NoError(t, err, "insert wallet")
+	_, _ = pool.Exec(ctx, `INSERT INTO wallets (user_id) VALUES ($1)`, creatorID)
 
 	cleanup := func() {
 		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -179,22 +179,41 @@ func createApprovedAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, 
 	ctx := context.Background()
 	id := uuid.New()
 
-	// approved_at 仅在 status='approved' 或 'disabled' 时设置。
-	var approvedAt *time.Time
-	if args.status == "approved" || args.status == "disabled" {
+	// 把旧 status 文案翻译成新三维字段，保持已有测试不必改写。
+	lifecycle := "active"
+	cert := "unreviewed"
+	var certifiedAt *time.Time
+	var rejectionReason *string
+	switch args.status {
+	case "approved":
+		// 新建 Agent 即公开但未认证；certified_at 留 NULL
+	case "pending":
+		cert = "pending"
+	case "rejected":
+		cert = "rejected"
+		r := "forced rejection"
+		rejectionReason = &r
+	case "disabled":
+		lifecycle = "disabled"
+	case "certified":
+		cert = "certified"
 		now := time.Now()
-		approvedAt = &now
+		certifiedAt = &now
+	default:
+		require.Failf(t, "createApprovedAgent unknown legacy status", "%q", args.status)
 	}
 
 	_, err := pool.Exec(ctx,
 		`INSERT INTO agents (
 			id, creator_id, slug, name, description, endpoint_url, endpoint_auth_header,
-			price_per_call_cents, tags, status, approved_at
+			price_per_call_cents, tags, lifecycle_status, visibility,
+			certification_status, certified_at, rejection_reason
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'public', $11, $12, $13
 		)`,
 		id, creatorID, slug, args.name, args.description, args.endpointURL,
-		args.endpointAuthHdr, args.pricePerCallCents, args.tags, args.status, approvedAt,
+		args.endpointAuthHdr, args.pricePerCallCents, args.tags,
+		lifecycle, cert, certifiedAt, rejectionReason,
 	)
 	require.NoError(t, err, "insert agent slug=%s status=%s", slug, args.status)
 	return id

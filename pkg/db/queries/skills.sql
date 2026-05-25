@@ -27,6 +27,6 @@ SELECT a.id AS agent_id,
 FROM agent_skills ag
 JOIN agents a ON a.id = ag.agent_id
 WHERE ag.skill_id = ANY($1::text[])
-  AND a.status = 'approved'
+  AND a.visibility = 'public' AND a.lifecycle_status = 'active'
 GROUP BY a.id, a.total_calls
 ORDER BY match_count DESC, a.total_calls DESC, a.id;

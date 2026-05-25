@@ -55,17 +55,26 @@ func insertSkillCreator(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 func insertSkillAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, slug, status string, totalCalls int32) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
-	var approvedAt *time.Time
-	if status == "approved" || status == "disabled" {
-		now := time.Now()
-		approvedAt = &now
+	lifecycle := "active"
+	cert := "unreviewed"
+	switch status {
+	case "approved":
+		// defaults
+	case "disabled":
+		lifecycle = "disabled"
+	case "pending":
+		cert = "pending"
+	case "rejected":
+		cert = "rejected"
+	default:
+		require.Failf(t, "insertSkillAgent unknown legacy status", "%q", status)
 	}
 	_, err := pool.Exec(context.Background(),
 		`INSERT INTO agents (
 			id, creator_id, slug, name, description, endpoint_url, price_per_call_cents,
-			tags, status, approved_at, total_calls
-		) VALUES ($1, $2, $3, $4, 'Skill test agent', $5, 100, '{data}', $6, $7, $8)`,
-		id, creatorID, slug, "Skill Agent "+slug, "https://example.com/agent/"+slug, status, approvedAt, totalCalls)
+			tags, lifecycle_status, visibility, certification_status, total_calls
+		) VALUES ($1, $2, $3, $4, 'Skill test agent', $5, 100, '{data}', $6, 'public', $7, $8)`,
+		id, creatorID, slug, "Skill Agent "+slug, "https://example.com/agent/"+slug, lifecycle, cert, totalCalls)
 	require.NoError(t, err)
 	return id
 }
@@ -84,7 +93,9 @@ func TestSetListAndRecommendAgentSkills(t *testing.T) {
 	creatorID := insertSkillCreator(t, pool)
 	best := insertSkillAgent(t, pool, creatorID, "skill-best-"+uuid.NewString()[:8], "approved", 5)
 	second := insertSkillAgent(t, pool, creatorID, "skill-second-"+uuid.NewString()[:8], "approved", 20)
-	pending := insertSkillAgent(t, pool, creatorID, "skill-pending-"+uuid.NewString()[:8], "pending", 100)
+	// docs/29 缺口 2 后语义：certification_status='pending' 仍进推荐池；
+	// 只有 disabled 会被过滤。换成 disabled 才能保留这个负面用例。
+	pending := insertSkillAgent(t, pool, creatorID, "skill-disabled-"+uuid.NewString()[:8], "disabled", 100)
 	ctx := context.Background()
 
 	require.NoError(t, svc.SetAgentSkills(ctx, best, []string{

@@ -80,6 +80,30 @@ WHERE r.agent_id = $1
 ORDER BY r.batch_id, r.skill_id, r.started_at DESC
 LIMIT $2;
 
+-- name: ListBenchmarkBatchSummariesByAgent :many
+-- 公开 GET /agents/:id/benchmarks：每个 batch 一行，含 skill_id、成功/总数、平均分（仅 success）、起止时间。
+SELECT b.batch_id, b.skill_id,
+       MIN(b.started_at) AS started_at,
+       MAX(b.finished_at) AS finished_at,
+       COUNT(*)::int AS total_count,
+       COUNT(*) FILTER (WHERE b.status = 'success')::int AS success_count,
+       (AVG(b.score) FILTER (WHERE b.status = 'success'))::int AS average_score
+FROM agent_skill_benchmark_runs b
+WHERE b.agent_id = $1
+GROUP BY b.batch_id, b.skill_id
+ORDER BY MIN(b.started_at) DESC
+LIMIT $2;
+
+-- name: GetAgentVerifiedSkillStats :one
+-- 公开市场详情页用：某 Agent 的 verified skill 数 + 最近一次 batch_id。
+SELECT
+    COUNT(*) FILTER (WHERE status = 'verified')::int AS verified_count,
+    (SELECT last_batch_id FROM agent_skill_scores
+     WHERE agent_id = $1 AND last_batch_id IS NOT NULL
+     ORDER BY updated_at DESC LIMIT 1) AS latest_batch_id
+FROM agent_skill_scores
+WHERE agent_id = $1;
+
 -- ──────────────────────────────────────────────────────
 -- agent_skill_scores
 -- ──────────────────────────────────────────────────────
@@ -124,7 +148,9 @@ SELECT s.agent_id, s.skill_id, s.status, s.average_score,
        s.pass_count, s.total_count, s.last_batch_id, s.verified_at, s.updated_at
 FROM agent_skill_scores s
 JOIN agents a ON a.id = s.agent_id
-WHERE a.slug = $1 AND a.status = 'approved'
+WHERE a.slug = $1
+  AND a.visibility IN ('public', 'unlisted')
+  AND a.lifecycle_status = 'active'
 ORDER BY s.status DESC, s.average_score DESC NULLS LAST, s.skill_id;
 
 -- name: ListTopAgentsBySkill :many
@@ -135,7 +161,7 @@ FROM agent_skill_scores s
 JOIN agents a ON a.id = s.agent_id
 WHERE s.skill_id = $1
   AND s.status = 'verified'
-  AND a.status = 'approved'
+  AND a.visibility = 'public' AND a.lifecycle_status = 'active'
 ORDER BY s.average_score DESC NULLS LAST, a.total_calls DESC, a.id
 LIMIT $2;
 
@@ -154,6 +180,6 @@ LEFT JOIN agent_skill_scores s
       AND s.skill_id = ag.skill_id
       AND s.skill_id = ANY($1::text[])
 WHERE ag.skill_id = ANY($1::text[])
-  AND a.status = 'approved'
+  AND a.visibility = 'public' AND a.lifecycle_status = 'active'
 GROUP BY a.id, a.total_calls
 ORDER BY match_count DESC, verified_count DESC, a.total_calls DESC, a.id;

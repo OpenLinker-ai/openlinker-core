@@ -124,6 +124,15 @@ func main() {
 	registrationHandler.RegisterProtected(api, jwtMiddleware)
 	registrationHandler.RegisterPublic(api)
 
+	approvalSvc := agent.NewApprovalService(pool, cfg)
+	approvalHandler := agent.NewApprovalHandler(approvalSvc)
+	approvalHandler.RegisterProtected(api, jwtMiddleware)
+
+	metricSvc := agent.NewMetricService(pool)
+	metricHandler := agent.NewMetricHandler(metricSvc)
+	metricHandler.Register(api)
+	agent.StartMetricWorker(rootCtx, metricSvc, approvalSvc)
+
 	e.GET("/skill/publish-agent", servePublishAgentSkill)
 
 	skillSvc := skill.NewService(pool)

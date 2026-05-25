@@ -57,8 +57,9 @@ func insertAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, endpoint
 	id := uuid.New()
 	_, err := pool.Exec(context.Background(),
 		`INSERT INTO agents (
-		  id, creator_id, slug, name, description, endpoint_url, price_per_call_cents, tags, status, approved_at
-		) VALUES ($1, $2, $3, 'A2A Agent', 'test', $4, 25, '{}', 'approved', NOW())`,
+		  id, creator_id, slug, name, description, endpoint_url, price_per_call_cents, tags,
+		  lifecycle_status, visibility, certification_status
+		) VALUES ($1, $2, $3, 'A2A Agent', 'test', $4, 25, '{}', 'active', 'public', 'unreviewed')`,
 		id, creatorID, "a2a-"+id.String()[:8], endpoint)
 	require.NoError(t, err)
 	return id

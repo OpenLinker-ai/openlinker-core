@@ -296,7 +296,7 @@ SELECT s.agent_id, s.skill_id, s.status, s.average_score,
        s.pass_count, s.total_count, s.last_batch_id, s.verified_at, s.updated_at
 FROM agent_skill_scores s
 JOIN agents a ON a.id = s.agent_id
-WHERE a.slug = $1 AND a.status = 'approved'
+WHERE a.slug = $1 AND a.visibility IN ('public', 'unlisted') AND a.lifecycle_status = 'active'
 ORDER BY s.status DESC, s.average_score DESC NULLS LAST, s.skill_id`
 
 func (q *Queries) ListAgentSkillScoresBySlug(ctx context.Context, slug string) ([]AgentSkillScore, error) {
@@ -323,7 +323,7 @@ FROM agent_skill_scores s
 JOIN agents a ON a.id = s.agent_id
 WHERE s.skill_id = $1
   AND s.status = 'verified'
-  AND a.status = 'approved'
+  AND a.visibility = 'public' AND a.lifecycle_status = 'active'
 ORDER BY s.average_score DESC NULLS LAST, a.total_calls DESC, a.id
 LIMIT $2`
 
@@ -378,7 +378,7 @@ LEFT JOIN agent_skill_scores s
       AND s.skill_id = ag.skill_id
       AND s.skill_id = ANY($1::text[])
 WHERE ag.skill_id = ANY($1::text[])
-  AND a.status = 'approved'
+  AND a.visibility = 'public' AND a.lifecycle_status = 'active'
 GROUP BY a.id, a.total_calls
 ORDER BY match_count DESC, verified_count DESC, a.total_calls DESC, a.id`
 
@@ -405,4 +405,71 @@ func (q *Queries) ListAgentsBySkillsWithVerified(ctx context.Context, skillIDs [
 		items = append(items, m)
 	}
 	return items, rows.Err()
+}
+
+const listBenchmarkBatchSummariesByAgent = `-- name: ListBenchmarkBatchSummariesByAgent :many
+SELECT b.batch_id, b.skill_id,
+       MIN(b.started_at) AS started_at,
+       MAX(b.finished_at) AS finished_at,
+       COUNT(*)::int AS total_count,
+       COUNT(*) FILTER (WHERE b.status = 'success')::int AS success_count,
+       (AVG(b.score) FILTER (WHERE b.status = 'success'))::int AS average_score
+FROM agent_skill_benchmark_runs b
+WHERE b.agent_id = $1
+GROUP BY b.batch_id, b.skill_id
+ORDER BY MIN(b.started_at) DESC
+LIMIT $2`
+
+type ListBenchmarkBatchSummariesByAgentParams struct {
+	AgentID uuid.UUID `db:"agent_id" json:"agent_id"`
+	Limit   int32     `db:"limit" json:"limit"`
+}
+
+type ListBenchmarkBatchSummariesByAgentRow struct {
+	BatchID      uuid.UUID  `db:"batch_id" json:"batch_id"`
+	SkillID      string     `db:"skill_id" json:"skill_id"`
+	StartedAt    time.Time  `db:"started_at" json:"started_at"`
+	FinishedAt   *time.Time `db:"finished_at" json:"finished_at"`
+	TotalCount   int32      `db:"total_count" json:"total_count"`
+	SuccessCount int32      `db:"success_count" json:"success_count"`
+	AverageScore *int32     `db:"average_score" json:"average_score"`
+}
+
+func (q *Queries) ListBenchmarkBatchSummariesByAgent(ctx context.Context, arg ListBenchmarkBatchSummariesByAgentParams) ([]ListBenchmarkBatchSummariesByAgentRow, error) {
+	rows, err := q.db.Query(ctx, listBenchmarkBatchSummariesByAgent, arg.AgentID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListBenchmarkBatchSummariesByAgentRow
+	for rows.Next() {
+		var r ListBenchmarkBatchSummariesByAgentRow
+		if err := rows.Scan(&r.BatchID, &r.SkillID, &r.StartedAt, &r.FinishedAt,
+			&r.TotalCount, &r.SuccessCount, &r.AverageScore); err != nil {
+			return nil, err
+		}
+		items = append(items, r)
+	}
+	return items, rows.Err()
+}
+
+const getAgentVerifiedSkillStats = `-- name: GetAgentVerifiedSkillStats :one
+SELECT
+    COUNT(*) FILTER (WHERE status = 'verified')::int AS verified_count,
+    (SELECT last_batch_id FROM agent_skill_scores
+     WHERE agent_id = $1 AND last_batch_id IS NOT NULL
+     ORDER BY updated_at DESC LIMIT 1) AS latest_batch_id
+FROM agent_skill_scores
+WHERE agent_id = $1`
+
+type GetAgentVerifiedSkillStatsRow struct {
+	VerifiedCount int32      `db:"verified_count" json:"verified_count"`
+	LatestBatchID *uuid.UUID `db:"latest_batch_id" json:"latest_batch_id"`
+}
+
+func (q *Queries) GetAgentVerifiedSkillStats(ctx context.Context, agentID uuid.UUID) (GetAgentVerifiedSkillStatsRow, error) {
+	row := q.db.QueryRow(ctx, getAgentVerifiedSkillStats, agentID)
+	var r GetAgentVerifiedSkillStatsRow
+	err := row.Scan(&r.VerifiedCount, &r.LatestBatchID)
+	return r, err
 }

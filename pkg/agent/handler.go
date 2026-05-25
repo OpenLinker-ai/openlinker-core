@@ -65,18 +65,19 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	creator.POST("/agents/:id/examples", h.CreateExample)
 	creator.DELETE("/agents/:id/examples/:exampleID", h.DeleteExample)
 	creator.POST("/agents/:id/dry-run", h.RunDryRun)
+	creator.POST("/agents/:id/request-certification", h.RequestCertification)
 }
 
 // RegisterAdmin 管理员/运营人工处理端点（需 JWT + admin 双重中间件）。
 //
-//	GET  /admin/agents/pending
-//	POST /admin/agents/:id/approve
-//	POST /admin/agents/:id/reject
+//	GET  /admin/agents/pending          # 待审认证申请队列
+//	POST /admin/agents/:id/certify
+//	POST /admin/agents/:id/reject-certification
 func (h *Handler) RegisterAdmin(api *echo.Group, jwtMiddleware, adminMiddleware echo.MiddlewareFunc) {
 	g := api.Group("/admin", jwtMiddleware, adminMiddleware)
 	g.GET("/agents/pending", h.ListPendingAgents)
-	g.POST("/agents/:id/approve", h.ApproveAgent)
-	g.POST("/agents/:id/reject", h.RejectAgent)
+	g.POST("/agents/:id/certify", h.CertifyAgent)
+	g.POST("/agents/:id/reject-certification", h.RejectCertification)
 }
 
 // CheckSlug 实时校验 slug 可用性（公开）。
@@ -311,20 +312,36 @@ func (h *Handler) ListPendingAgents(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"items": items})
 }
 
-// ApproveAgent admin/运营手动放行。
-func (h *Handler) ApproveAgent(c echo.Context) error {
+// RequestCertification 创作者发起认证申请。
+func (h *Handler) RequestCertification(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
 	id, err := pathID(c)
 	if err != nil {
 		return err
 	}
-	if err := h.svc.ApproveAgent(c.Request().Context(), id); err != nil {
+	if err := h.svc.RequestCertification(c.Request().Context(), id, uid); err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, map[string]string{"status": "approved"})
+	return c.JSON(http.StatusOK, map[string]string{"certification_status": "pending"})
 }
 
-// RejectAgent admin/运营手动拒绝。
-func (h *Handler) RejectAgent(c echo.Context) error {
+// CertifyAgent admin/运营授予认证。pending → certified。
+func (h *Handler) CertifyAgent(c echo.Context) error {
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	if err := h.svc.CertifyAgent(c.Request().Context(), id); err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]string{"certification_status": "certified"})
+}
+
+// RejectCertification admin/运营拒绝认证。pending → rejected。
+func (h *Handler) RejectCertification(c echo.Context) error {
 	id, err := pathID(c)
 	if err != nil {
 		return err
@@ -336,10 +353,10 @@ func (h *Handler) RejectAgent(c echo.Context) error {
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
 	}
-	if err := h.svc.RejectAgent(c.Request().Context(), id, req.Reason); err != nil {
+	if err := h.svc.RejectCertification(c.Request().Context(), id, req.Reason); err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, map[string]string{"status": "rejected"})
+	return c.JSON(http.StatusOK, map[string]string{"certification_status": "rejected"})
 }
 
 // userIDFromCtx 从 echo.Context 取出当前登录用户 uuid。

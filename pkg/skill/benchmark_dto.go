@@ -71,6 +71,17 @@ type BenchmarkBatchDetail struct {
 	Items        []BenchmarkRunItem `json:"items"`
 }
 
+// BenchmarkBatchSummary 公开 GET /agents/:id/benchmarks 单批汇总（不带 case 明细）。
+type BenchmarkBatchSummary struct {
+	BatchID      string  `json:"batch_id"`
+	SkillID      string  `json:"skill_id"`
+	TotalCount   int32   `json:"total_count"`
+	SuccessCount int32   `json:"success_count"`
+	AverageScore *int32  `json:"average_score,omitempty"`
+	StartedAt    string  `json:"started_at"`
+	FinishedAt   *string `json:"finished_at,omitempty"`
+}
+
 // TopAgentForSkill /skills 列表页 top-N 行。
 type TopAgentForSkill struct {
 	AgentID           string  `json:"agent_id"`

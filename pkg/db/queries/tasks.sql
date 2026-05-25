@@ -38,12 +38,14 @@ LIMIT $2;
 
 -- name: GetAgentsByIDs :many
 -- 任务推荐回填：按一组 agent_id 批量取详情（含 creator 显示名）。
--- 仅回填当前仍为 approved 的已公开 Agent；已下架 / 被禁用的历史推荐不再展示。
+-- 只回当前仍公开运行的 Agent；已下架 / private / unlisted 的历史推荐不再展示。
 SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
-       a.endpoint_auth_header, a.price_per_call_cents, a.tags, a.status,
-       a.rejection_reason, a.approved_at, a.total_calls, a.total_revenue_cents,
+       a.endpoint_auth_header, a.price_per_call_cents, a.tags,
+       a.lifecycle_status, a.visibility, a.certification_status,
+       a.rejection_reason, a.certified_at, a.total_calls, a.total_revenue_cents,
        a.created_at, a.updated_at, u.display_name AS creator_name
 FROM agents a
 JOIN users u ON u.id = a.creator_id
 WHERE a.id = ANY($1::uuid[])
-  AND a.status = 'approved';
+  AND a.visibility = 'public'
+  AND a.lifecycle_status = 'active';

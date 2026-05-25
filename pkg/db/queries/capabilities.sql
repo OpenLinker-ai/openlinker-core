@@ -48,7 +48,9 @@ SELECT c.id, c.agent_id, c.input_schema, c.output_schema, c.summary,
        c.version, c.published_at, c.updated_at
 FROM agent_capabilities c
 JOIN agents a ON a.id = c.agent_id
-WHERE a.slug = $1 AND a.status = 'approved';
+WHERE a.slug = $1
+  AND a.visibility IN ('public', 'unlisted')
+  AND a.lifecycle_status = 'active';
 
 -- ──────────────────────────────────────────────────────
 -- agent_examples
@@ -80,7 +82,9 @@ SELECT e.id, e.agent_id, e.title, e.input_json, e.expected_output_json,
        e.sort_order, e.created_at, e.updated_at
 FROM agent_examples e
 JOIN agents a ON a.id = e.agent_id
-WHERE a.slug = $1 AND a.status = 'approved'
+WHERE a.slug = $1
+  AND a.visibility IN ('public', 'unlisted')
+  AND a.lifecycle_status = 'active'
 ORDER BY e.sort_order, e.created_at;
 
 -- name: DeleteAgentExampleForOwner :execrows

@@ -108,17 +108,26 @@ func insertTaskCreator(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 func insertTaskAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, slug, status string) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
-	var approvedAt *time.Time
-	if status == "approved" || status == "disabled" {
-		now := time.Now()
-		approvedAt = &now
+	lifecycle := "active"
+	cert := "unreviewed"
+	switch status {
+	case "approved":
+		// defaults
+	case "disabled":
+		lifecycle = "disabled"
+	case "pending":
+		cert = "pending"
+	case "rejected":
+		cert = "rejected"
+	default:
+		require.Failf(t, "insertTaskAgent unknown legacy status", "%q", status)
 	}
 	_, err := pool.Exec(context.Background(),
 		`INSERT INTO agents (
 			id, creator_id, slug, name, description, endpoint_url, price_per_call_cents,
-			tags, status, approved_at
-		) VALUES ($1, $2, $3, $4, 'Task test agent', $5, 100, '{data}', $6, $7)`,
-		id, creatorID, slug, "Task Agent "+slug, "https://example.com/agent/"+slug, status, approvedAt)
+			tags, lifecycle_status, visibility, certification_status
+		) VALUES ($1, $2, $3, $4, 'Task test agent', $5, 100, '{data}', $6, 'public', $7)`,
+		id, creatorID, slug, "Task Agent "+slug, "https://example.com/agent/"+slug, lifecycle, cert)
 	require.NoError(t, err)
 	return id
 }

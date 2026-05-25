@@ -64,31 +64,35 @@ type Withdrawal struct {
 	PaidAt      *time.Time `db:"paid_at" json:"paid_at"`
 }
 
-// Agent 对应 agents 表。
+// Agent 对应 agents 表（Phase 2 缺口 2 后的三维状态机模型）。
 //
-// status: 'pending' | 'approved' | 'rejected' | 'disabled'
+// lifecycle_status     active | disabled                              （docs/29 §三）
+// visibility           public | unlisted | private
+// certification_status unreviewed | pending | certified | rejected
 // 金额：price_per_call_cents 用 int32（INTEGER）；累计 total_revenue_cents 用 int64（BIGINT）。
 // tags 用 []string（Postgres TEXT[]）。
 // webhook_url / webhook_secret 子轮 2.1 引入，可为 NULL（未配置）。
 type Agent struct {
-	ID                 uuid.UUID  `db:"id" json:"id"`
-	CreatorID          uuid.UUID  `db:"creator_id" json:"creator_id"`
-	Slug               string     `db:"slug" json:"slug"`
-	Name               string     `db:"name" json:"name"`
-	Description        string     `db:"description" json:"description"`
-	EndpointURL        string     `db:"endpoint_url" json:"endpoint_url"`
-	EndpointAuthHeader *string    `db:"endpoint_auth_header" json:"endpoint_auth_header"`
-	PricePerCallCents  int32      `db:"price_per_call_cents" json:"price_per_call_cents"`
-	Tags               []string   `db:"tags" json:"tags"`
-	Status             string     `db:"status" json:"status"`
-	RejectionReason    *string    `db:"rejection_reason" json:"rejection_reason"`
-	ApprovedAt         *time.Time `db:"approved_at" json:"approved_at"`
-	TotalCalls         int32      `db:"total_calls" json:"total_calls"`
-	TotalRevenueCents  int64      `db:"total_revenue_cents" json:"total_revenue_cents"`
-	WebhookURL         *string    `db:"webhook_url" json:"webhook_url"`
-	WebhookSecret      *string    `db:"webhook_secret" json:"-"` // 不暴露给前端
-	CreatedAt          time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt          time.Time  `db:"updated_at" json:"updated_at"`
+	ID                  uuid.UUID  `db:"id" json:"id"`
+	CreatorID           uuid.UUID  `db:"creator_id" json:"creator_id"`
+	Slug                string     `db:"slug" json:"slug"`
+	Name                string     `db:"name" json:"name"`
+	Description         string     `db:"description" json:"description"`
+	EndpointURL         string     `db:"endpoint_url" json:"endpoint_url"`
+	EndpointAuthHeader  *string    `db:"endpoint_auth_header" json:"endpoint_auth_header"`
+	PricePerCallCents   int32      `db:"price_per_call_cents" json:"price_per_call_cents"`
+	Tags                []string   `db:"tags" json:"tags"`
+	LifecycleStatus     string     `db:"lifecycle_status" json:"lifecycle_status"`
+	Visibility          string     `db:"visibility" json:"visibility"`
+	CertificationStatus string     `db:"certification_status" json:"certification_status"`
+	RejectionReason     *string    `db:"rejection_reason" json:"rejection_reason"`
+	CertifiedAt         *time.Time `db:"certified_at" json:"certified_at"`
+	TotalCalls          int32      `db:"total_calls" json:"total_calls"`
+	TotalRevenueCents   int64      `db:"total_revenue_cents" json:"total_revenue_cents"`
+	WebhookURL          *string    `db:"webhook_url" json:"webhook_url"`
+	WebhookSecret       *string    `db:"webhook_secret" json:"-"` // 不暴露给前端
+	CreatedAt           time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt           time.Time  `db:"updated_at" json:"updated_at"`
 }
 
 // Run 对应 runs 表（每次调用一行）。
@@ -126,6 +130,41 @@ type RunEvent struct {
 	EventType   string     `db:"event_type" json:"event_type"`
 	Payload     []byte     `db:"payload" json:"payload"`
 	CreatedAt   time.Time  `db:"created_at" json:"created_at"`
+}
+
+// AgentActionApprovalRequest Phase 2 缺口 2：高风险动作审批记录（docs/29 §3.4）。
+//
+// status: 'pending' | 'confirmed' | 'rejected' | 'expired'
+// PayloadJSON 是 JSONB 原始字节，调用方按 action 解析。
+// RequestedByTokenID 允许 NULL：人类直接发起的审批不绑 Runtime Token。
+type AgentActionApprovalRequest struct {
+	ID                 uuid.UUID  `db:"id" json:"id"`
+	AgentID            uuid.UUID  `db:"agent_id" json:"agent_id"`
+	RequestedByUserID  *uuid.UUID `db:"requested_by_user_id" json:"requested_by_user_id"`
+	RequestedByTokenID *uuid.UUID `db:"requested_by_token_id" json:"requested_by_token_id"`
+	Action             string     `db:"action" json:"action"`
+	PayloadJSON        []byte     `db:"payload_json" json:"payload_json"`
+	Status             string     `db:"status" json:"status"`
+	ApprovalURLSlug    string     `db:"approval_url_slug" json:"approval_url_slug"`
+	ExpiresAt          time.Time  `db:"expires_at" json:"expires_at"`
+	DecidedAt          *time.Time `db:"decided_at" json:"decided_at"`
+	DecidedByUserID    *uuid.UUID `db:"decided_by_user_id" json:"decided_by_user_id"`
+	DecisionNote       *string    `db:"decision_note" json:"decision_note"`
+	CreatedAt          time.Time  `db:"created_at" json:"created_at"`
+}
+
+// AgentMetricSnapshot Phase 2 缺口 2：Agent 指标快照（docs/29 §3.4）。
+// 由 metric worker 每 5 分钟为每个 active Agent × {24h, 7d, 30d} upsert 一行。
+type AgentMetricSnapshot struct {
+	AgentID         uuid.UUID `db:"agent_id" json:"agent_id"`
+	TimeWindow      string    `db:"time_window" json:"time_window"`
+	CallCount       int32     `db:"call_count" json:"call_count"`
+	SuccessCount    int32     `db:"success_count" json:"success_count"`
+	FailureCount    int32     `db:"failure_count" json:"failure_count"`
+	SuccessRateBps  int32     `db:"success_rate_bps" json:"success_rate_bps"`
+	MedianLatencyMs *int32    `db:"median_latency_ms" json:"median_latency_ms"`
+	P95LatencyMs    *int32    `db:"p95_latency_ms" json:"p95_latency_ms"`
+	SnapshottedAt   time.Time `db:"snapshotted_at" json:"snapshotted_at"`
 }
 
 // AgentRegistrationToken 是创作者侧短期 Bootstrap Token，供 Agent 自注册流程使用。

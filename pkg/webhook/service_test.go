@@ -59,8 +59,8 @@ func insertWebhookAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, s
 	_, err := pool.Exec(context.Background(),
 		`INSERT INTO agents (
 			id, creator_id, slug, name, description, endpoint_url, price_per_call_cents,
-			tags, status, approved_at
-		) VALUES ($1, $2, $3, $4, 'Webhook test agent', $5, 100, '{ops}', 'approved', NOW())`,
+			tags, lifecycle_status, visibility, certification_status
+		) VALUES ($1, $2, $3, $4, 'Webhook test agent', $5, 100, '{ops}', 'active', 'public', 'unreviewed')`,
 		id, creatorID, slug, "Webhook Agent "+slug, "https://example.com/agent/"+slug)
 	require.NoError(t, err)
 	return id

@@ -143,23 +143,36 @@ func insertCreator(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 	return uid
 }
 
-// insertAgent 直接 SQL 插一个 agent，可指定 status / endpoint / price。
+// insertAgent 直接 SQL 插一个 agent，把旧 status 文案翻译成新三维字段。
+//   approved → lifecycle=active, visibility=public, cert=unreviewed
+//   disabled → lifecycle=disabled
+//   pending  → lifecycle=active, visibility=public, cert=pending
+//   rejected → lifecycle=active, visibility=public, cert=rejected
 func insertAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, endpoint string, priceCents int32, status string) uuid.UUID {
 	t.Helper()
 	ctx := context.Background()
 	id := uuid.New()
 	slug := "rt-a-" + id.String()[:8]
-	var approvedAt *time.Time
-	if status == "approved" || status == "disabled" {
-		now := time.Now()
-		approvedAt = &now
+	lifecycle := "active"
+	cert := "unreviewed"
+	switch status {
+	case "approved":
+		// defaults
+	case "disabled":
+		lifecycle = "disabled"
+	case "pending":
+		cert = "pending"
+	case "rejected":
+		cert = "rejected"
+	default:
+		require.Failf(t, "insertAgent unknown legacy status", "%q", status)
 	}
 	_, err := pool.Exec(ctx,
 		`INSERT INTO agents (
 			id, creator_id, slug, name, description, endpoint_url, endpoint_auth_header,
-			price_per_call_cents, tags, status, approved_at
-		) VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, '{}', $8, $9)`,
-		id, creatorID, slug, "Runtime Agent", "test agent", endpoint, priceCents, status, approvedAt)
+			price_per_call_cents, tags, lifecycle_status, visibility, certification_status
+		) VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, '{}', $8, 'public', $9)`,
+		id, creatorID, slug, "Runtime Agent", "test agent", endpoint, priceCents, lifecycle, cert)
 	require.NoError(t, err, "insert agent")
 	return id
 }

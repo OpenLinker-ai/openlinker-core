@@ -124,14 +124,31 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 	return &resp, nil
 }
 
-// UpdateAgent 创作者编辑 Agent 基础信息。
+// UpdateAgent 创作者编辑 Agent 基础信息（含 visibility）。
 //
-// SQL 已校验 status IN ('approved','pending','rejected') AND creator_id=...；
+// SQL 仅在 lifecycle_status='active' 且 creator_id 匹配时返回；
 // RETURNING 命中 0 行 → pgx.ErrNoRows，service 层再用 GetAgentByIDForOwner 区分两种 case：
-//   - 不存在 → NotFound
-//   - disabled → Forbidden（已下架不可改）
+//   - 不存在 / 不属于该 creator → NotFound
+//   - disabled → Forbidden
+//
+// Visibility 空串视为不改（默认沿用旧值）；显式传值则按 public/unlisted/private 校验。
 func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID, req *UpdateAgentRequest) (*AgentResponse, error) {
 	authHeader := normalizeAuthHeader(req.EndpointAuthHeader)
+	visibility := strings.TrimSpace(req.Visibility)
+	if visibility == "" {
+		existing, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
+			ID:        agentID,
+			CreatorID: creatorID,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, httpx.NotFound("Agent 不存在")
+			}
+			log.Error().Err(err).Msg("agent.UpdateAgent: GetAgentByIDForOwner (visibility lookup)")
+			return nil, httpx.Internal("查询 Agent 失败")
+		}
+		visibility = existing.Visibility
+	}
 	updated, err := s.queries.UpdateAgentDraft(ctx, db.UpdateAgentDraftParams{
 		ID:                 agentID,
 		Name:               strings.TrimSpace(req.Name),
@@ -141,6 +158,7 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 		PricePerCallCents:  req.PricePerCallCents,
 		Tags:               normalizeTagsForInsert(req.Tags),
 		CreatorID:          creatorID,
+		Visibility:         visibility,
 	})
 	if err == nil {
 		resp := toAgentResponse(&updated)
@@ -166,13 +184,11 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 		log.Error().Err(err).Msg("agent.UpdateAgent: GetAgentByIDForOwner")
 		return nil, httpx.Internal("查询 Agent 失败")
 	}
-	switch existing.Status {
-	case "disabled":
+	if existing.LifecycleStatus == "disabled" {
 		return nil, httpx.Forbidden("已下架的 Agent 不可编辑")
-	default:
-		// 理论上 approved/pending/rejected 应当命中 RETURNING；走到这里说明并发导致状态变化
-		return nil, httpx.Conflict("Agent 状态已变化，请刷新后重试")
 	}
+	// 理论上 active 应当命中 RETURNING；走到这里说明并发导致状态变化
+	return nil, httpx.Conflict("Agent 状态已变化，请刷新后重试")
 }
 
 // DisableAgent 创作者主动下架。
@@ -572,41 +588,40 @@ func (s *Service) ListPendingForAdmin(ctx context.Context) ([]AgentResponse, err
 	return out, nil
 }
 
-// ApproveAgent admin/运营手动放行。状态机：pending/rejected → approved。
-func (s *Service) ApproveAgent(ctx context.Context, agentID uuid.UUID) error {
-	rows, err := s.queries.ApproveAgent(ctx, agentID)
+// RequestCertification 创作者发起认证申请。unreviewed/rejected → pending。
+func (s *Service) RequestCertification(ctx context.Context, agentID, creatorID uuid.UUID) error {
+	rows, err := s.queries.RequestCertification(ctx, db.RequestCertificationParams{
+		ID:        agentID,
+		CreatorID: creatorID,
+	})
 	if err != nil {
-		log.Error().Err(err).Msg("agent.ApproveAgent")
-		return httpx.Internal("放行失败")
+		log.Error().Err(err).Msg("agent.RequestCertification")
+		return httpx.Internal("申请认证失败")
 	}
 	if rows == 0 {
-		// 区分：不存在 vs 状态不允许（如 approved/disabled）
-		a, getErr := s.queries.GetAgentByID(ctx, agentID)
+		// 区分：不属于该 creator vs 状态不允许重复触发
+		a, getErr := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
+			ID:        agentID,
+			CreatorID: creatorID,
+		})
 		if getErr != nil {
 			if errors.Is(getErr, pgx.ErrNoRows) {
 				return httpx.NotFound("Agent 不存在")
 			}
-			log.Error().Err(getErr).Msg("agent.ApproveAgent: GetAgentByID")
+			log.Error().Err(getErr).Msg("agent.RequestCertification: GetAgentByIDForOwner")
 			return httpx.Internal("查询 Agent 失败")
 		}
-		return httpx.Conflict("当前状态 " + a.Status + " 不允许放行")
+		return httpx.Conflict("当前认证状态 " + a.CertificationStatus + " 不允许重复申请")
 	}
 	return nil
 }
 
-// RejectAgent admin/运营手动拒绝。状态机：仅 pending → rejected。
-func (s *Service) RejectAgent(ctx context.Context, agentID uuid.UUID, reason string) error {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return httpx.BadRequest("拒绝原因不能为空")
-	}
-	rows, err := s.queries.RejectAgent(ctx, db.RejectAgentParams{
-		ID:              agentID,
-		RejectionReason: reason,
-	})
+// CertifyAgent 运营授予认证。pending → certified。
+func (s *Service) CertifyAgent(ctx context.Context, agentID uuid.UUID) error {
+	rows, err := s.queries.CertifyAgent(ctx, agentID)
 	if err != nil {
-		log.Error().Err(err).Msg("agent.RejectAgent")
-		return httpx.Internal("拒绝失败")
+		log.Error().Err(err).Msg("agent.CertifyAgent")
+		return httpx.Internal("授予认证失败")
 	}
 	if rows == 0 {
 		a, getErr := s.queries.GetAgentByID(ctx, agentID)
@@ -614,10 +629,38 @@ func (s *Service) RejectAgent(ctx context.Context, agentID uuid.UUID, reason str
 			if errors.Is(getErr, pgx.ErrNoRows) {
 				return httpx.NotFound("Agent 不存在")
 			}
-			log.Error().Err(getErr).Msg("agent.RejectAgent: GetAgentByID")
+			log.Error().Err(getErr).Msg("agent.CertifyAgent: GetAgentByID")
 			return httpx.Internal("查询 Agent 失败")
 		}
-		return httpx.Conflict("当前状态 " + a.Status + " 不允许拒绝")
+		return httpx.Conflict("当前认证状态 " + a.CertificationStatus + " 不允许授予认证")
+	}
+	return nil
+}
+
+// RejectCertification 运营拒绝认证申请。pending → rejected。
+func (s *Service) RejectCertification(ctx context.Context, agentID uuid.UUID, reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return httpx.BadRequest("拒绝原因不能为空")
+	}
+	rows, err := s.queries.RejectCertification(ctx, db.RejectCertificationParams{
+		ID:              agentID,
+		RejectionReason: reason,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("agent.RejectCertification")
+		return httpx.Internal("拒绝认证失败")
+	}
+	if rows == 0 {
+		a, getErr := s.queries.GetAgentByID(ctx, agentID)
+		if getErr != nil {
+			if errors.Is(getErr, pgx.ErrNoRows) {
+				return httpx.NotFound("Agent 不存在")
+			}
+			log.Error().Err(getErr).Msg("agent.RejectCertification: GetAgentByID")
+			return httpx.Internal("查询 Agent 失败")
+		}
+		return httpx.Conflict("当前认证状态 " + a.CertificationStatus + " 不允许拒绝认证")
 	}
 	return nil
 }
@@ -657,27 +700,52 @@ func normalizeTagsForInsert(in []string) []string {
 }
 
 // toAgentResponse db.Agent → API DTO。
+//
+// Status 字段从三维状态机派生，保留给老前端读：
+//   - lifecycle=disabled         → "disabled"
+//   - cert=pending               → "pending"
+//   - cert=rejected              → "rejected"
+//   - 否则                       → "approved"
+//
+// 新前端应直接读 lifecycle_status / visibility / certification_status。
 func toAgentResponse(a *db.Agent) AgentResponse {
 	resp := AgentResponse{
-		ID:                a.ID.String(),
-		Slug:              a.Slug,
-		Name:              a.Name,
-		Description:       a.Description,
-		EndpointURL:       a.EndpointURL,
-		PricePerCallCents: a.PricePerCallCents,
-		Tags:              normalizeTags(a.Tags),
-		Status:            a.Status,
-		RejectionReason:   a.RejectionReason,
-		TotalCalls:        a.TotalCalls,
-		TotalRevenueCents: a.TotalRevenueCents,
-		WebhookURL:        a.WebhookURL,
-		CreatedAt:         a.CreatedAt.UTC().Format(time.RFC3339),
+		ID:                  a.ID.String(),
+		Slug:                a.Slug,
+		Name:                a.Name,
+		Description:         a.Description,
+		EndpointURL:         a.EndpointURL,
+		PricePerCallCents:   a.PricePerCallCents,
+		Tags:                normalizeTags(a.Tags),
+		Status:              deriveLegacyStatus(a),
+		LifecycleStatus:     a.LifecycleStatus,
+		Visibility:          a.Visibility,
+		CertificationStatus: a.CertificationStatus,
+		RejectionReason:     a.RejectionReason,
+		TotalCalls:          a.TotalCalls,
+		TotalRevenueCents:   a.TotalRevenueCents,
+		WebhookURL:          a.WebhookURL,
+		CreatedAt:           a.CreatedAt.UTC().Format(time.RFC3339),
 	}
-	if a.ApprovedAt != nil {
-		ts := a.ApprovedAt.UTC().Format(time.RFC3339)
-		resp.ApprovedAt = &ts
+	if a.CertifiedAt != nil {
+		ts := a.CertifiedAt.UTC().Format(time.RFC3339)
+		resp.CertifiedAt = &ts
 	}
 	return resp
+}
+
+// deriveLegacyStatus 用三维字段还原老的 status 文案（仅给老消费者读）。
+func deriveLegacyStatus(a *db.Agent) string {
+	switch {
+	case a.LifecycleStatus == "disabled":
+		return "disabled"
+	case a.CertificationStatus == "pending":
+		return "pending"
+	case a.CertificationStatus == "rejected":
+		return "rejected"
+	default:
+		return "approved"
+	}
 }
 
 func (s *Service) ensureOnboardingStatusBestEffort(ctx context.Context, agentID uuid.UUID) {

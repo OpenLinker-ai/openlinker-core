@@ -395,6 +395,118 @@ func (b *BenchmarkService) GetBatchDetail(ctx context.Context, agentID, creatorI
 	return detail, nil
 }
 
+// ListBatchSummariesPublic 公开 GET /agents/:id/benchmarks：
+// 仅校验 Agent 公开运行（visibility != private + lifecycle = active）；不再校验 owner。
+// 单批返回汇总（success/total/avg），不含 raw_output / judge_reasoning。
+func (b *BenchmarkService) ListBatchSummariesPublic(ctx context.Context, agentID uuid.UUID, limit int) ([]BenchmarkBatchSummary, error) {
+	if err := b.assertPublicVisible(ctx, agentID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 50 {
+		limit = 10
+	}
+	rows, err := b.q.ListBenchmarkBatchSummariesByAgent(ctx, db.ListBenchmarkBatchSummariesByAgentParams{
+		AgentID: agentID,
+		Limit:   int32(limit),
+	})
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("benchmark.ListBatchSummariesPublic")
+		return nil, httpx.Internal("查询 benchmark 列表失败")
+	}
+	out := make([]BenchmarkBatchSummary, 0, len(rows))
+	for _, r := range rows {
+		item := BenchmarkBatchSummary{
+			BatchID:      r.BatchID.String(),
+			SkillID:      r.SkillID,
+			TotalCount:   r.TotalCount,
+			SuccessCount: r.SuccessCount,
+			AverageScore: r.AverageScore,
+			StartedAt:    r.StartedAt.UTC().Format(time.RFC3339),
+		}
+		if r.FinishedAt != nil {
+			v := r.FinishedAt.UTC().Format(time.RFC3339)
+			item.FinishedAt = &v
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+// GetBatchDetailPublic 公开 GET /agents/:id/benchmarks/:batchID：
+// 仅校验 Agent 公开运行，并把 raw_output / judge_reasoning 脱敏（不返回）。
+func (b *BenchmarkService) GetBatchDetailPublic(ctx context.Context, agentID, batchID uuid.UUID) (*BenchmarkBatchDetail, error) {
+	if err := b.assertPublicVisible(ctx, agentID); err != nil {
+		return nil, err
+	}
+	rows, err := b.q.ListBenchmarkRunsByBatch(ctx, batchID)
+	if err != nil {
+		log.Error().Err(err).Str("batch_id", batchID.String()).Msg("benchmark.GetBatchDetailPublic")
+		return nil, httpx.Internal("查询 benchmark 明细失败")
+	}
+	if len(rows) == 0 || rows[0].AgentID != agentID {
+		return nil, httpx.NotFound("benchmark 不存在")
+	}
+	skillID := rows[0].SkillID
+	items := make([]BenchmarkRunItem, 0, len(rows))
+	var sum, count int32
+	allFinal := true
+	for i := range rows {
+		r := &rows[i]
+		// 公开侧脱敏：不返回 RawOutput / JudgeReasoning / ErrorMessage 详情。
+		items = append(items, BenchmarkRunItem{
+			ID:            r.ID.String(),
+			TestCaseTitle: r.TestCaseTitle,
+			Status:        r.Status,
+			Score:         r.Score,
+			StartedAt:     r.StartedAt.UTC().Format(time.RFC3339),
+			FinishedAt:    formatTimePtr(r.FinishedAt),
+		})
+		if r.Status == "pending" {
+			allFinal = false
+		}
+		if r.Status == "success" && r.Score != nil {
+			sum += *r.Score
+			count++
+		}
+	}
+	detail := &BenchmarkBatchDetail{
+		BatchID: batchID.String(),
+		AgentID: agentID.String(),
+		SkillID: skillID,
+		Status:  "running",
+		Items:   items,
+	}
+	if allFinal {
+		if count > 0 {
+			avg := sum / count
+			detail.AverageScore = &avg
+			if avg >= VerifiedThreshold {
+				detail.Status = BenchmarkStatusVerified
+			} else {
+				detail.Status = BenchmarkStatusFailed
+			}
+		} else {
+			detail.Status = BenchmarkStatusFailed
+		}
+	}
+	return detail, nil
+}
+
+// assertPublicVisible 检查 Agent 处于 visibility=public/unlisted 且 lifecycle=active。
+func (b *BenchmarkService) assertPublicVisible(ctx context.Context, agentID uuid.UUID) error {
+	agent, err := b.q.GetAgentByID(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return httpx.NotFound("Agent 不存在")
+		}
+		return httpx.Internal("查询 Agent 失败")
+	}
+	if agent.LifecycleStatus != "active" || agent.Visibility == "private" {
+		return httpx.NotFound("Agent 不存在")
+	}
+	return nil
+}
+
 // ListTopAgents /skills 列表页：某 skill 下 top-N verified Agent。
 func (b *BenchmarkService) ListTopAgents(ctx context.Context, skillID string, limit int) ([]TopAgentForSkill, error) {
 	if limit <= 0 || limit > 10 {

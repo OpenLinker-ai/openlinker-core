@@ -349,12 +349,12 @@ func TestDeleteAgent(t *testing.T) {
 	assert.Contains(t, []int{http.StatusNoContent, http.StatusOK}, rec.Code,
 		"body=%s", string(raw))
 
-	// 直接 DB 校验
-	var status string
+	// 直接 DB 校验：DisableAgent 现在改 lifecycle_status='disabled'。
+	var lifecycle string
 	require.NoError(t,
 		pool.QueryRow(context.Background(),
-			`SELECT status FROM agents WHERE id=$1`, created.ID).Scan(&status))
-	assert.Equal(t, "disabled", status)
+			`SELECT lifecycle_status FROM agents WHERE id=$1`, created.ID).Scan(&lifecycle))
+	assert.Equal(t, "disabled", lifecycle)
 }
 
 // ────────────────────────────────────────────────────────────
@@ -390,116 +390,114 @@ func TestGetListMyAgents(t *testing.T) {
 }
 
 // ────────────────────────────────────────────────────────────
-// POST /admin/agents/:id/approve
+// POST /admin/agents/:id/certify   (Phase 2 缺口 2 后)
 // ────────────────────────────────────────────────────────────
 
-func TestPostApproveAgent_AsRegularUser(t *testing.T) {
+func TestPostCertifyAgent_AsRegularUser(t *testing.T) {
 	e, pool := setupHandlerTest(t)
 
 	creator := insertUserHandler(t, pool, true, false)
 	creatorTok := signJWT(t, creator)
 	createRec, createRaw := doRequest(t, e, http.MethodPost, "/api/v1/creator/agents",
-		validBody(freshSlug("h-approve-1")), map[string]string{"Authorization": creatorTok})
+		validBody(freshSlug("h-certify-1")), map[string]string{"Authorization": creatorTok})
 	require.Equal(t, http.StatusCreated, createRec.Code)
 	var created agentRespBody
 	require.NoError(t, json.Unmarshal(createRaw, &created))
 
-	// 普通用户尝试 approve -> 403
+	// 普通用户尝试 certify -> 403
 	regular := insertUserHandler(t, pool, false, false)
 	rec, raw := doRequest(t, e, http.MethodPost,
-		"/api/v1/admin/agents/"+created.ID+"/approve", nil,
+		"/api/v1/admin/agents/"+created.ID+"/certify", nil,
 		map[string]string{"Authorization": signJWT(t, regular)})
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body=%s", string(raw))
 }
 
-func TestPostApproveAgent_AsAdmin(t *testing.T) {
+func TestPostCertifyAgent_AsAdmin(t *testing.T) {
 	e, pool := setupHandlerTest(t)
 
 	creator := insertUserHandler(t, pool, true, false)
 	creatorTok := signJWT(t, creator)
 	createRec, createRaw := doRequest(t, e, http.MethodPost, "/api/v1/creator/agents",
-		validBody(freshSlug("h-approve-2")), map[string]string{"Authorization": creatorTok})
+		validBody(freshSlug("h-certify-2")), map[string]string{"Authorization": creatorTok})
 	require.Equal(t, http.StatusCreated, createRec.Code)
 	var created agentRespBody
 	require.NoError(t, json.Unmarshal(createRaw, &created))
-	_, err := pool.Exec(context.Background(),
-		`UPDATE agents SET status='pending', approved_at=NULL, rejection_reason=NULL WHERE id=$1`,
-		created.ID)
-	require.NoError(t, err)
+	// 创作者发起认证申请 → certification_status='pending'
+	reqRec, reqRaw := doRequest(t, e, http.MethodPost,
+		"/api/v1/creator/agents/"+created.ID+"/request-certification", nil,
+		map[string]string{"Authorization": creatorTok})
+	require.Equal(t, http.StatusOK, reqRec.Code, "body=%s", string(reqRaw))
 
 	admin := insertUserHandler(t, pool, false, true)
 	rec, raw := doRequest(t, e, http.MethodPost,
-		"/api/v1/admin/agents/"+created.ID+"/approve", nil,
+		"/api/v1/admin/agents/"+created.ID+"/certify", nil,
 		map[string]string{"Authorization": signJWT(t, admin)})
 	assert.Equal(t, http.StatusOK, rec.Code, "body=%s", string(raw))
 
-	// DB 校验
-	var status string
+	var certStatus string
 	require.NoError(t,
 		pool.QueryRow(context.Background(),
-			`SELECT status FROM agents WHERE id=$1`, created.ID).Scan(&status))
-	assert.Equal(t, "approved", status)
+			`SELECT certification_status FROM agents WHERE id=$1`, created.ID).Scan(&certStatus))
+	assert.Equal(t, "certified", certStatus)
 }
 
 // ────────────────────────────────────────────────────────────
-// POST /admin/agents/:id/reject
+// POST /admin/agents/:id/reject-certification
 // ────────────────────────────────────────────────────────────
 
-func TestPostRejectAgent_MissingReason(t *testing.T) {
+func TestPostRejectCertification_MissingReason(t *testing.T) {
 	e, pool := setupHandlerTest(t)
 
 	creator := insertUserHandler(t, pool, true, false)
 	creatorTok := signJWT(t, creator)
 	createRec, createRaw := doRequest(t, e, http.MethodPost, "/api/v1/creator/agents",
-		validBody(freshSlug("h-reject-1")), map[string]string{"Authorization": creatorTok})
+		validBody(freshSlug("h-reject-cert-1")), map[string]string{"Authorization": creatorTok})
 	require.Equal(t, http.StatusCreated, createRec.Code)
 	var created agentRespBody
 	require.NoError(t, json.Unmarshal(createRaw, &created))
-	_, err := pool.Exec(context.Background(),
-		`UPDATE agents SET status='pending', approved_at=NULL, rejection_reason=NULL WHERE id=$1`,
-		created.ID)
-	require.NoError(t, err)
+	reqRec, _ := doRequest(t, e, http.MethodPost,
+		"/api/v1/creator/agents/"+created.ID+"/request-certification", nil,
+		map[string]string{"Authorization": creatorTok})
+	require.Equal(t, http.StatusOK, reqRec.Code)
 
 	admin := insertUserHandler(t, pool, false, true)
-	// 空 body / 缺 reason -> 422 / 400
 	rec, raw := doRequest(t, e, http.MethodPost,
-		"/api/v1/admin/agents/"+created.ID+"/reject",
-		map[string]any{}, // 空 body
+		"/api/v1/admin/agents/"+created.ID+"/reject-certification",
+		map[string]any{},
 		map[string]string{"Authorization": signJWT(t, admin)})
 	assert.Contains(t,
 		[]int{http.StatusUnprocessableEntity, http.StatusBadRequest},
 		rec.Code, "missing reason should be 4xx; body=%s", string(raw))
 }
 
-func TestPostRejectAgent_AsAdmin(t *testing.T) {
+func TestPostRejectCertification_AsAdmin(t *testing.T) {
 	e, pool := setupHandlerTest(t)
 
 	creator := insertUserHandler(t, pool, true, false)
 	creatorTok := signJWT(t, creator)
 	createRec, createRaw := doRequest(t, e, http.MethodPost, "/api/v1/creator/agents",
-		validBody(freshSlug("h-reject-2")), map[string]string{"Authorization": creatorTok})
+		validBody(freshSlug("h-reject-cert-2")), map[string]string{"Authorization": creatorTok})
 	require.Equal(t, http.StatusCreated, createRec.Code)
 	var created agentRespBody
 	require.NoError(t, json.Unmarshal(createRaw, &created))
-	_, err := pool.Exec(context.Background(),
-		`UPDATE agents SET status='pending', approved_at=NULL, rejection_reason=NULL WHERE id=$1`,
-		created.ID)
-	require.NoError(t, err)
+	reqRec, _ := doRequest(t, e, http.MethodPost,
+		"/api/v1/creator/agents/"+created.ID+"/request-certification", nil,
+		map[string]string{"Authorization": creatorTok})
+	require.Equal(t, http.StatusOK, reqRec.Code)
 
 	admin := insertUserHandler(t, pool, false, true)
 	body := map[string]any{"reason": "endpoint not reachable"}
 	rec, raw := doRequest(t, e, http.MethodPost,
-		"/api/v1/admin/agents/"+created.ID+"/reject", body,
+		"/api/v1/admin/agents/"+created.ID+"/reject-certification", body,
 		map[string]string{"Authorization": signJWT(t, admin)})
 	assert.Equal(t, http.StatusOK, rec.Code, "body=%s", string(raw))
 
-	// DB 校验
-	var status string
+	var certStatus string
 	var reason *string
 	require.NoError(t, pool.QueryRow(context.Background(),
-		`SELECT status, rejection_reason FROM agents WHERE id=$1`, created.ID).
-		Scan(&status, &reason))
-	assert.Equal(t, "rejected", status)
+		`SELECT certification_status, rejection_reason FROM agents WHERE id=$1`, created.ID).
+		Scan(&certStatus, &reason))
+	assert.Equal(t, "rejected", certStatus)
 	require.NotNil(t, reason)
 	assert.Contains(t, *reason, "endpoint not reachable")
 }

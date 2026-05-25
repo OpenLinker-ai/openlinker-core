@@ -142,40 +142,56 @@ func assertHTTPStatusIn(t *testing.T, err error, allowed ...int) {
 	t.Fatalf("status %d not in allowed %v (msg=%s)", he.Status, allowed, he.Message)
 }
 
-// readAgentStatus 直接 SQL 读 agent 表 status / approved_at / rejection_reason。
-func readAgentStatus(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) (status string, approvedAt *time.Time, rejectionReason *string) {
+// readAgentStatus 直接 SQL 读 agent 表派生 status（与 toAgentResponse 的 deriveLegacyStatus 同口径）
+// 以及 certified_at / rejection_reason。Phase 2 缺口 2 后保留旧签名以兼容已有用例。
+func readAgentStatus(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) (status string, certifiedAt *time.Time, rejectionReason *string) {
 	t.Helper()
 	err := pool.QueryRow(context.Background(),
-		`SELECT status, approved_at, rejection_reason FROM agents WHERE id=$1`, agentID).
-		Scan(&status, &approvedAt, &rejectionReason)
+		`SELECT (CASE
+		            WHEN lifecycle_status='disabled' THEN 'disabled'
+		            WHEN certification_status='pending' THEN 'pending'
+		            WHEN certification_status='rejected' THEN 'rejected'
+		            ELSE 'approved'
+		        END)::text, certified_at, rejection_reason
+		 FROM agents WHERE id=$1`, agentID).
+		Scan(&status, &certifiedAt, &rejectionReason)
 	require.NoError(t, err)
 	return
 }
 
-// forceAgentStatus 直接 SQL 改写 agent 状态（为了测各种状态过渡）。
+// forceAgentStatus 直接 SQL 改写 agent 三维状态（为了测各种状态过渡）。
+// 接受旧 status 文案；映射如下：
+//   approved → lifecycle=active, cert=unreviewed   （不写 certified_at）
+//   pending  → lifecycle=active, cert=pending
+//   rejected → lifecycle=active, cert=rejected
+//   disabled → lifecycle=disabled
+//   certified→ lifecycle=active, cert=certified, certified_at=NOW()
 func forceAgentStatus(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, status string) {
 	t.Helper()
+	ctx := context.Background()
 	switch status {
 	case "approved":
-		_, err := pool.Exec(context.Background(),
-			`UPDATE agents SET status='approved', approved_at=COALESCE(approved_at, NOW()), rejection_reason=NULL WHERE id=$1`, agentID)
+		_, err := pool.Exec(ctx,
+			`UPDATE agents SET lifecycle_status='active', certification_status='unreviewed', rejection_reason=NULL WHERE id=$1`, agentID)
 		require.NoError(t, err)
 	case "pending":
-		_, err := pool.Exec(context.Background(),
-			`UPDATE agents SET status='pending', approved_at=NULL, rejection_reason=NULL WHERE id=$1`, agentID)
+		_, err := pool.Exec(ctx,
+			`UPDATE agents SET lifecycle_status='active', certification_status='pending', rejection_reason=NULL WHERE id=$1`, agentID)
 		require.NoError(t, err)
 	case "rejected":
-		_, err := pool.Exec(context.Background(),
-			`UPDATE agents SET status='rejected', approved_at=NULL, rejection_reason='forced rejection' WHERE id=$1`, agentID)
+		_, err := pool.Exec(ctx,
+			`UPDATE agents SET lifecycle_status='active', certification_status='rejected', rejection_reason='forced rejection' WHERE id=$1`, agentID)
 		require.NoError(t, err)
 	case "disabled":
-		_, err := pool.Exec(context.Background(),
-			`UPDATE agents SET status='disabled', approved_at=COALESCE(approved_at, NOW()) WHERE id=$1`, agentID)
+		_, err := pool.Exec(ctx,
+			`UPDATE agents SET lifecycle_status='disabled' WHERE id=$1`, agentID)
+		require.NoError(t, err)
+	case "certified":
+		_, err := pool.Exec(ctx,
+			`UPDATE agents SET lifecycle_status='active', certification_status='certified', certified_at=NOW(), rejection_reason=NULL WHERE id=$1`, agentID)
 		require.NoError(t, err)
 	default:
-		_, err := pool.Exec(context.Background(),
-			`UPDATE agents SET status=$2 WHERE id=$1`, agentID, status)
-		require.NoError(t, err)
+		t.Fatalf("forceAgentStatus: unknown legacy status %q", status)
 	}
 }
 
@@ -206,8 +222,10 @@ func TestCreateAgent_HappyPath(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, req.Slug, resp.Slug)
 	assert.Equal(t, req.Name, resp.Name)
-	assert.Equal(t, "approved", resp.Status, "new agent should be public immediately")
-	assert.NotNil(t, resp.ApprovedAt, "approved_at should be set when public immediately")
+	assert.Equal(t, "approved", resp.Status, "new agent should be public immediately (derived)")
+	assert.Equal(t, "active", resp.LifecycleStatus)
+	assert.Equal(t, "public", resp.Visibility)
+	assert.Equal(t, "unreviewed", resp.CertificationStatus)
 	assert.Equal(t, req.PricePerCallCents, resp.PricePerCallCents)
 	assert.ElementsMatch(t, req.Tags, resp.Tags)
 
@@ -507,107 +525,113 @@ func TestBecomeCreator(t *testing.T) {
 // Approve / Reject
 // ────────────────────────────────────────────────────────────
 
-func TestApproveAgent(t *testing.T) {
+// Phase 2 缺口 2 后：原 ApproveAgent/RejectAgent 改名为 CertifyAgent/RejectCertification，
+// 仅对 certification_status='pending' 生效（创作者先 RequestCertification）。
+//
+// 旧测试里 "approved" 的语义不再对应 certification 字段——新建即 lifecycle=active +
+// cert=unreviewed，所以测 happy-path 时要先 RequestCertification → pending。
+
+func TestCertifyAgent_HappyPath(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
 	ctx := context.Background()
 
 	uid := insertCreatorWithWallet(t, pool)
-	created, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("approve")))
+	created, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("certify")))
 	require.NoError(t, err)
 	agentID, _ := uuid.Parse(created.ID)
-	forceAgentStatus(t, pool, agentID, "pending")
 
-	require.NoError(t, svc.ApproveAgent(ctx, agentID))
+	require.NoError(t, svc.RequestCertification(ctx, agentID, uid))
+	require.NoError(t, svc.CertifyAgent(ctx, agentID))
 
-	status, approvedAt, _ := readAgentStatus(t, pool, agentID)
-	assert.Equal(t, "approved", status)
-	require.NotNil(t, approvedAt, "approved_at must be set")
-	assert.WithinDuration(t, time.Now(), *approvedAt, 5*time.Second)
+	derived, certifiedAt, _ := readAgentStatus(t, pool, agentID)
+	assert.Equal(t, "approved", derived, "certified 在派生 status 中表现为 approved")
+	require.NotNil(t, certifiedAt, "certified_at 必须写入")
+	assert.WithinDuration(t, time.Now(), *certifiedAt, 5*time.Second)
 }
 
-func TestApproveAgent_AlreadyApproved(t *testing.T) {
+func TestCertifyAgent_RequiresPending(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
 	ctx := context.Background()
 
 	uid := insertCreatorWithWallet(t, pool)
-	created, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("approve-twice")))
+	created, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("certify-direct")))
 	require.NoError(t, err)
 	agentID, _ := uuid.Parse(created.ID)
 
-	status, firstApprovedAt, _ := readAgentStatus(t, pool, agentID)
-	assert.Equal(t, "approved", status)
-	require.NotNil(t, firstApprovedAt)
-
-	// 已公开 Agent 不应重复刷新 approved_at。
-	err = svc.ApproveAgent(ctx, agentID)
+	// 未 request-certification 直接 certify → 409
+	err = svc.CertifyAgent(ctx, agentID)
 	assertHTTPStatusIn(t, err, http.StatusConflict, http.StatusBadRequest)
-	_, secondApprovedAt, _ := readAgentStatus(t, pool, agentID)
-	require.NotNil(t, secondApprovedAt)
-	assert.Equal(t, firstApprovedAt.Unix(), secondApprovedAt.Unix(),
-		"approved_at must NOT be updated on idempotent re-approve")
 }
 
-func TestRejectAgent(t *testing.T) {
+func TestRequestCertification_NotRepeatable(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
 	ctx := context.Background()
 
 	uid := insertCreatorWithWallet(t, pool)
-	created, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("reject")))
+	created, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("request-cert-twice")))
 	require.NoError(t, err)
 	agentID, _ := uuid.Parse(created.ID)
-	forceAgentStatus(t, pool, agentID, "pending")
+
+	require.NoError(t, svc.RequestCertification(ctx, agentID, uid))
+	// 第二次再申请：已 pending → 409
+	err = svc.RequestCertification(ctx, agentID, uid)
+	assertHTTPStatusIn(t, err, http.StatusConflict, http.StatusBadRequest)
+}
+
+func TestRejectCertification_HappyPath(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	uid := insertCreatorWithWallet(t, pool)
+	created, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("reject-cert")))
+	require.NoError(t, err)
+	agentID, _ := uuid.Parse(created.ID)
+	require.NoError(t, svc.RequestCertification(ctx, agentID, uid))
 
 	reason := "endpoint not reachable"
-	require.NoError(t, svc.RejectAgent(ctx, agentID, reason))
+	require.NoError(t, svc.RejectCertification(ctx, agentID, reason))
 
-	status, _, rejReason := readAgentStatus(t, pool, agentID)
-	assert.Equal(t, "rejected", status)
+	derived, _, rejReason := readAgentStatus(t, pool, agentID)
+	assert.Equal(t, "rejected", derived)
 	require.NotNil(t, rejReason)
 	assert.Equal(t, reason, *rejReason)
 }
 
-func TestRejectAgent_NonPending(t *testing.T) {
+func TestRejectCertification_NonPending(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
 	ctx := context.Background()
 
 	uid := insertCreatorWithWallet(t, pool)
-	created, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("reject-approved")))
+	created, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("reject-cert-nonpending")))
 	require.NoError(t, err)
 	agentID, _ := uuid.Parse(created.ID)
 
-	// 强制 approved
-	forceAgentStatus(t, pool, agentID, "approved")
+	// 没有先 request-certification，状态是 unreviewed → 拒绝失败
+	err = svc.RejectCertification(ctx, agentID, "too late")
+	assertHTTPStatusIn(t, err, http.StatusConflict, http.StatusBadRequest)
 
-	err = svc.RejectAgent(ctx, agentID, "too late")
-	// approved 之后再 reject -> 4xx 错误
-	assertHTTPStatusIn(t, err,
-		http.StatusBadRequest,
-		http.StatusConflict,
-		http.StatusUnprocessableEntity)
-
-	// status 不应改变
-	status, _, _ := readAgentStatus(t, pool, agentID)
-	assert.Equal(t, "approved", status, "rejected attempt must NOT mutate approved status")
+	derived, _, _ := readAgentStatus(t, pool, agentID)
+	assert.Equal(t, "approved", derived, "未申请认证的 Agent 不应被状态改写")
 }
 
-func TestRejectAgent_EmptyReason(t *testing.T) {
+func TestRejectCertification_EmptyReason(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
 	ctx := context.Background()
 
 	uid := insertCreatorWithWallet(t, pool)
-	created, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("reject-no-reason")))
+	created, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("reject-cert-no-reason")))
 	require.NoError(t, err)
 	agentID, _ := uuid.Parse(created.ID)
+	require.NoError(t, svc.RequestCertification(ctx, agentID, uid))
 
-	err = svc.RejectAgent(ctx, agentID, "")
-	assertHTTPStatusIn(t, err,
-		http.StatusBadRequest,
-		http.StatusUnprocessableEntity)
+	err = svc.RejectCertification(ctx, agentID, "")
+	assertHTTPStatusIn(t, err, http.StatusBadRequest, http.StatusUnprocessableEntity)
 }
 
 // ────────────────────────────────────────────────────────────

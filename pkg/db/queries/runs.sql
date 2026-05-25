@@ -128,7 +128,14 @@ WHERE a.creator_id = $1 AND r.status = 'success' AND r.started_at >= date_trunc(
 
 -- name: ListAgentStatsForCreator :many
 -- 创作者每个 Agent 的本月调用 + 收入（用于 creator dashboard）
-SELECT a.id, a.slug, a.name, a.status, a.price_per_call_cents,
+SELECT a.id, a.slug, a.name,
+       (CASE
+            WHEN a.lifecycle_status = 'disabled' THEN 'disabled'
+            WHEN a.certification_status = 'pending' THEN 'pending'
+            WHEN a.certification_status = 'rejected' THEN 'rejected'
+            ELSE 'approved'
+       END)::text AS status,
+       a.price_per_call_cents,
        a.total_calls AS lifetime_calls, a.total_revenue_cents AS lifetime_revenue,
        COALESCE(monthly.calls_this_month, 0) AS calls_this_month,
        COALESCE(monthly.revenue_this_month, 0) AS revenue_this_month

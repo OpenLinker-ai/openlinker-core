@@ -15,6 +15,7 @@ type CreateAgentRequest struct {
 }
 
 // UpdateAgentRequest 编辑 Agent 请求体。slug 不可改。
+// Visibility 可空字符串视为不改，否则只接受 public / unlisted / private。
 type UpdateAgentRequest struct {
 	Name               string   `json:"name" validate:"required,min=3,max=80"`
 	Description        string   `json:"description" validate:"required,max=500"`
@@ -22,28 +23,35 @@ type UpdateAgentRequest struct {
 	EndpointAuthHeader string   `json:"endpoint_auth_header" validate:"max=500"`
 	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"required,min=1,max=1000000"`
 	Tags               []string `json:"tags" validate:"required,min=1,max=5,dive,min=2,max=30"`
+	Visibility         string   `json:"visibility" validate:"omitempty,oneof=public unlisted private"`
 }
 
 // AgentResponse 单个 Agent 的统一返回 DTO。
 //
+// Phase 2 缺口 2：Status 是从 LifecycleStatus / CertificationStatus 派生的字段，
+// 仅供尚未切换的老前端读取；新前端应直接读 LifecycleStatus / Visibility / CertificationStatus。
+//
 // Creator 字段仅在 admin 人工处理队列等接口填充，普通创作者列表为空。
 // EndpointAuthHeader 不返回（避免泄露），仅 owner GET 需要时才单独返回。
 type AgentResponse struct {
-	ID                string   `json:"id"`
-	Slug              string   `json:"slug"`
-	Name              string   `json:"name"`
-	Description       string   `json:"description"`
-	EndpointURL       string   `json:"endpoint_url"`
-	PricePerCallCents int32    `json:"price_per_call_cents"`
-	Tags              []string `json:"tags"`
-	Status            string   `json:"status"`
-	RejectionReason   *string  `json:"rejection_reason,omitempty"`
-	TotalCalls        int32    `json:"total_calls"`
-	TotalRevenueCents int64    `json:"total_revenue_cents"`
-	WebhookURL        *string  `json:"webhook_url,omitempty"`
-	CreatedAt         string   `json:"created_at"`
-	ApprovedAt        *string  `json:"approved_at,omitempty"`
-	Creator           *Creator `json:"creator,omitempty"`
+	ID                  string   `json:"id"`
+	Slug                string   `json:"slug"`
+	Name                string   `json:"name"`
+	Description         string   `json:"description"`
+	EndpointURL         string   `json:"endpoint_url"`
+	PricePerCallCents   int32    `json:"price_per_call_cents"`
+	Tags                []string `json:"tags"`
+	Status              string   `json:"status"` // 派生，老前端兼容
+	LifecycleStatus     string   `json:"lifecycle_status"`
+	Visibility          string   `json:"visibility"`
+	CertificationStatus string   `json:"certification_status"`
+	RejectionReason     *string  `json:"rejection_reason,omitempty"`
+	TotalCalls          int32    `json:"total_calls"`
+	TotalRevenueCents   int64    `json:"total_revenue_cents"`
+	WebhookURL          *string  `json:"webhook_url,omitempty"`
+	CreatedAt           string   `json:"created_at"`
+	CertifiedAt         *string  `json:"certified_at,omitempty"`
+	Creator             *Creator `json:"creator,omitempty"`
 }
 
 // Creator admin 视图嵌入的创作者信息。

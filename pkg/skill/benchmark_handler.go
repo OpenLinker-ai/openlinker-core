@@ -26,11 +26,17 @@ func NewBenchmarkHandler(svc *BenchmarkService) *BenchmarkHandler {
 
 // Register 公开端点（无需 JWT）。
 //
-//	GET /skills/:id/top-agents       某 skill 下 top-N verified Agent
-//	GET /agents/:slug/skill-scores   按 slug 列出 agent 的 skill 评分
+//	GET /skills/:id/top-agents                      某 skill 下 top-N verified Agent
+//	GET /agents/:slug/skill-scores                  按 slug 列出 agent 的 skill 评分
+//	GET /agents/:id/benchmarks                      Phase 2 缺口 3：公开 batch 概览
+//	GET /agents/:id/benchmarks/:batchID             Phase 2 缺口 3：公开 batch 详情（脱敏）
+//	GET /agents/:id/benchmark-results               docs/25 §5.3 别名 → 转发 skill-scores by id
 func (h *BenchmarkHandler) Register(api *echo.Group) {
 	api.GET("/skills/:id/top-agents", h.ListTopAgents)
 	api.GET("/agents/:slug/skill-scores", h.ListScoresBySlug)
+	api.GET("/agents/:id/benchmarks", h.ListBatchSummariesPublic)
+	api.GET("/agents/:id/benchmarks/:batchID", h.GetBatchPublic)
+	api.GET("/agents/:id/benchmark-results", h.ListBenchmarkResults)
 }
 
 // RegisterProtected 创作者侧端点（需 JWT）。
@@ -138,6 +144,59 @@ func (h *BenchmarkHandler) ListTopAgents(c echo.Context) error {
 		}
 	}
 	items, err := h.svc.ListTopAgents(c.Request().Context(), skillID, limit)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
+// ListBatchSummariesPublic GET /agents/:id/benchmarks
+func (h *BenchmarkHandler) ListBatchSummariesPublic(c echo.Context) error {
+	agentID, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	limit := 10
+	if raw := c.QueryParam("limit"); raw != "" {
+		if n := parseLimit(raw); n > 0 {
+			limit = n
+		}
+	}
+	items, err := h.svc.ListBatchSummariesPublic(c.Request().Context(), agentID, limit)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
+// GetBatchPublic GET /agents/:id/benchmarks/:batchID
+func (h *BenchmarkHandler) GetBatchPublic(c echo.Context) error {
+	agentID, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	batchID, err := pathUUIDParam(c, "batchID")
+	if err != nil {
+		return err
+	}
+	detail, err := h.svc.GetBatchDetailPublic(c.Request().Context(), agentID, batchID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, detail)
+}
+
+// ListBenchmarkResults GET /agents/:id/benchmark-results — docs/25 §5.3 别名。
+// 行为与 ListAgentScoresBySlug 对齐，但用 id 查；公开可见性已在 service 层强制。
+func (h *BenchmarkHandler) ListBenchmarkResults(c echo.Context) error {
+	agentID, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	if err := h.svc.assertPublicVisible(c.Request().Context(), agentID); err != nil {
+		return err
+	}
+	items, err := h.svc.ListAgentScores(c.Request().Context(), agentID)
 	if err != nil {
 		return err
 	}

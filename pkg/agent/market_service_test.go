@@ -127,7 +127,10 @@ func TestListMarket_KeywordSearch(t *testing.T) {
 	assert.Len(t, resp2.Items, 2)
 }
 
-func TestListMarket_FiltersOutNonApproved(t *testing.T) {
+func TestListMarket_FiltersOutDisabled(t *testing.T) {
+	// Phase 2 缺口 2 后语义：市场过滤只看 visibility=public + lifecycle=active。
+	// pending / rejected 这些 certification_status 仍出现在市场（只是不挂认证徽章）；
+	// 只有 disabled 不出现。private/unlisted 也通过 visibility 过滤掉。
 	pool := setupTestDB(t)
 	svc := agent.NewMarketService(pool)
 	creatorID, _ := setupTestData(t, pool)
@@ -139,9 +142,12 @@ func TestListMarket_FiltersOutNonApproved(t *testing.T) {
 
 	resp, err := svc.ListMarket(context.Background(), nil, "", 1, 12)
 	require.NoError(t, err)
-	assert.Equal(t, int32(1), resp.Total, "only approved should be returned")
-	require.Len(t, resp.Items, 1)
-	assert.Equal(t, "ag-approved", resp.Items[0].Slug)
+	assert.Equal(t, int32(3), resp.Total, "disabled 不进市场；approved/pending/rejected 都进")
+	slugs := make([]string, 0, len(resp.Items))
+	for _, it := range resp.Items {
+		slugs = append(slugs, it.Slug)
+	}
+	assert.ElementsMatch(t, []string{"ag-approved", "ag-pending", "ag-rejected"}, slugs)
 }
 
 func TestListMarket_Pagination(t *testing.T) {
@@ -267,15 +273,16 @@ func TestGetBySlug_NotFound(t *testing.T) {
 	assertHTTPStatus(t, err, http.StatusNotFound)
 }
 
-func TestGetBySlug_PendingNotReturned(t *testing.T) {
+func TestGetBySlug_DisabledNotReturned(t *testing.T) {
+	// Phase 2 缺口 2 后：pending/rejected 仍能按 slug 访问（与市场列表一致），
+	// 详情页拒绝的是 disabled (lifecycle) 与 private (visibility)。unlisted 凭直链可访问。
 	pool := setupTestDB(t)
 	svc := agent.NewMarketService(pool)
 	creatorID, _ := setupTestData(t, pool)
 
-	createApprovedAgent(t, pool, creatorID, "secret-pending", WithStatus("pending"))
+	createApprovedAgent(t, pool, creatorID, "ag-disabled", WithStatus("disabled"))
 
-	// pending 不应通过 slug 暴露
-	_, err := svc.GetBySlug(context.Background(), "secret-pending")
+	_, err := svc.GetBySlug(context.Background(), "ag-disabled")
 	assertHTTPStatus(t, err, http.StatusNotFound)
 }
 

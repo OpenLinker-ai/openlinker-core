@@ -58,23 +58,23 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 
 	offset := (page - 1) * size
 
-	rows, err := s.queries.ListApprovedAgents(ctx, db.ListApprovedAgentsParams{
+	rows, err := s.queries.ListPublicAgents(ctx, db.ListPublicAgentsParams{
 		Tags:    tags,
 		Keyword: keyword,
 		Limit:   size,
 		Offset:  offset,
 	})
 	if err != nil {
-		log.Error().Err(err).Msg("agent.MarketService.ListMarket: ListApprovedAgents")
+		log.Error().Err(err).Msg("agent.MarketService.ListMarket: ListPublicAgents")
 		return nil, httpx.Internal("查询 Agent 列表失败")
 	}
 
-	total, err := s.queries.CountApprovedAgents(ctx, db.CountApprovedAgentsParams{
+	total, err := s.queries.CountPublicAgents(ctx, db.CountPublicAgentsParams{
 		Tags:    tags,
 		Keyword: keyword,
 	})
 	if err != nil {
-		log.Error().Err(err).Msg("agent.MarketService.ListMarket: CountApprovedAgents")
+		log.Error().Err(err).Msg("agent.MarketService.ListMarket: CountPublicAgents")
 		return nil, httpx.Internal("统计 Agent 数量失败")
 	}
 
@@ -131,9 +131,20 @@ func (s *MarketService) GetBySlug(ctx context.Context, slug string) (*AgentDetai
 		CreatedAt:         r.CreatedAt.UTC().Format(time.RFC3339),
 		Skills:            []SkillMini{},
 	}
-	if r.ApprovedAt != nil {
-		s := r.ApprovedAt.UTC().Format(time.RFC3339)
-		resp.ApprovedAt = &s
+	if r.CertifiedAt != nil {
+		s := r.CertifiedAt.UTC().Format(time.RFC3339)
+		resp.CertifiedAt = &s
+	}
+	resp.LifecycleStatus = r.LifecycleStatus
+	resp.Visibility = r.Visibility
+	resp.CertificationStatus = r.CertificationStatus
+
+	if stats, err := s.queries.GetAgentVerifiedSkillStats(ctx, r.ID); err == nil {
+		resp.VerifiedSkillCount = stats.VerifiedCount
+		if stats.LatestBatchID != nil {
+			id := stats.LatestBatchID.String()
+			resp.LatestBenchmarkID = &id
+		}
 	}
 
 	skills, err := s.queries.ListAgentSkills(ctx, r.ID)
