@@ -15,8 +15,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -68,6 +70,14 @@ type eventsResponse struct {
 	} `json:"events"`
 }
 
+type demoResult struct {
+	Email       string
+	ParentAgent agentResponse
+	ChildAgent  agentResponse
+	ParentRunID string
+	ChildRunID  string
+}
+
 type endpointConfig struct {
 	mu           sync.RWMutex
 	apiURL       string
@@ -77,6 +87,7 @@ type endpointConfig struct {
 
 func main() {
 	apiURL := flag.String("api", "http://localhost:8080", "OpenLinker API base URL")
+	serve := flag.Bool("serve", false, "Keep demo endpoints online for repeated Playground calls")
 	flag.Parse()
 
 	cfg := &endpointConfig{apiURL: strings.TrimRight(*apiURL, "/")}
@@ -86,41 +97,51 @@ func main() {
 	defer caller.Close()
 
 	api := &client{baseURL: cfg.apiURL, http: &http.Client{Timeout: 10 * time.Second}}
-	if err := run(api, cfg, caller.URL, worker.URL); err != nil {
+	result, err := run(api, cfg, caller.URL, worker.URL)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "A2A demo failed: %v\n", err)
 		os.Exit(1)
 	}
+	if *serve {
+		fmt.Println("Local demo endpoints are online until interrupted.")
+		fmt.Printf("playground: /playground/%s\n", result.ParentAgent.Slug)
+		fmt.Printf("a2a trace: /a2a?run_id=%s\n", result.ParentRunID)
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+		<-stop
+		fmt.Println("Stopping local demo endpoints.")
+	}
 }
 
-func run(api *client, cfg *endpointConfig, callerURL, workerURL string) error {
+func run(api *client, cfg *endpointConfig, callerURL, workerURL string) (*demoResult, error) {
 	email := fmt.Sprintf("a2a-demo-%d@example.local", time.Now().UnixNano())
 	var signedUp authResponse
 	if err := api.do(http.MethodPost, "/api/v1/auth/register", map[string]any{
 		"email": email, "password": "local-demo-pass-123", "display_name": "Local A2A Demo",
 	}, &signedUp); err != nil {
-		return fmt.Errorf("register user: %w", err)
+		return nil, fmt.Errorf("register user: %w", err)
 	}
 	api.token = signedUp.JWT
 
 	if err := api.do(http.MethodPost, "/api/v1/me/become-creator", map[string]any{}, nil); err != nil {
-		return fmt.Errorf("become creator: %w", err)
+		return nil, fmt.Errorf("become creator: %w", err)
 	}
 
 	var bootstrap bootstrapResponse
 	if err := api.do(http.MethodPost, "/api/v1/creator/agent-registration-tokens", map[string]any{
 		"label": "local a2a demo", "expires_in_minutes": 30, "max_agents": 2,
 	}, &bootstrap); err != nil {
-		return fmt.Errorf("mint bootstrap token: %w", err)
+		return nil, fmt.Errorf("mint bootstrap token: %w", err)
 	}
 
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	workerAgent, err := registerAgent(api, bootstrap.PlaintextToken, "demo-worker-"+suffix, "Local Worker Agent", workerURL)
 	if err != nil {
-		return fmt.Errorf("self-register worker: %w", err)
+		return nil, fmt.Errorf("self-register worker: %w", err)
 	}
 	callerAgent, err := registerAgent(api, bootstrap.PlaintextToken, "demo-planner-"+suffix, "Local Planner Agent", callerURL)
 	if err != nil {
-		return fmt.Errorf("self-register planner: %w", err)
+		return nil, fmt.Errorf("self-register planner: %w", err)
 	}
 
 	cfg.mu.Lock()
@@ -133,26 +154,26 @@ func run(api *client, cfg *endpointConfig, callerURL, workerURL string) error {
 		"agent_id": callerAgent.Agent.ID,
 		"input":    map[string]any{"task": "plan then delegate this task"},
 	}, &parent); err != nil {
-		return fmt.Errorf("invoke parent: %w", err)
+		return nil, fmt.Errorf("invoke parent: %w", err)
 	}
 	if parent.Status != "success" {
-		return fmt.Errorf("parent run ended with status %q", parent.Status)
+		return nil, fmt.Errorf("parent run ended with status %q", parent.Status)
 	}
 
 	var children childrenResponse
 	if err := api.do(http.MethodGet, "/api/v1/runs/"+parent.RunID+"/children", nil, &children); err != nil {
-		return fmt.Errorf("read child runs: %w", err)
+		return nil, fmt.Errorf("read child runs: %w", err)
 	}
 	if len(children.Items) != 1 || children.Items[0].Status != "success" {
-		return fmt.Errorf("expected one successful child run, got %+v", children.Items)
+		return nil, fmt.Errorf("expected one successful child run, got %+v", children.Items)
 	}
 
 	var events eventsResponse
 	if err := api.do(http.MethodGet, "/api/v1/runs/"+parent.RunID+"/events", nil, &events); err != nil {
-		return fmt.Errorf("read parent events: %w", err)
+		return nil, fmt.Errorf("read parent events: %w", err)
 	}
 	if !hasEvent(events, "run.child.created") || !hasEvent(events, "run.child.completed") {
-		return errors.New("parent trace is missing delegation lifecycle events")
+		return nil, errors.New("parent trace is missing delegation lifecycle events")
 	}
 
 	fmt.Println("A2A local completion verified")
@@ -161,7 +182,13 @@ func run(api *client, cfg *endpointConfig, callerURL, workerURL string) error {
 	fmt.Printf("child agent: %s (%s)\n", workerAgent.Agent.Slug, workerAgent.Agent.ID)
 	fmt.Printf("parent run: %s [success]\n", parent.RunID)
 	fmt.Printf("child run: %s [success]\n", children.Items[0].ChildRunID)
-	return nil
+	return &demoResult{
+		Email:       email,
+		ParentAgent: callerAgent.Agent,
+		ChildAgent:  workerAgent.Agent,
+		ParentRunID: parent.RunID,
+		ChildRunID:  children.Items[0].ChildRunID,
+	}, nil
 }
 
 func registerAgent(api *client, bootstrap, slug, name, endpoint string) (*registrationResponse, error) {

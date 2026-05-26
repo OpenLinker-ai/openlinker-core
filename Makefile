@@ -1,6 +1,7 @@
-.PHONY: help dev build run test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status deps demo-a2a
+.PHONY: help dev build run test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status deps demo-a2a demo-a2a-live
 
 ENV_FILE ?= .env
+API_URL ?= http://localhost:8080
 
 help: ## 显示所有命令
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -24,7 +25,10 @@ test: ## 运行测试(race + cover)
 	go test ./... -race -cover
 
 demo-a2a: ## 对已启动的本地 API 跑真实 Agent-to-Agent 闭环
-	go run ./cmd/a2a-demo -api http://localhost:8080
+	go run ./cmd/a2a-demo -api $(API_URL)
+
+demo-a2a-live: ## 注册并保持可从 Playground 反复调用的本地 Agent
+	go run ./cmd/a2a-demo -api $(API_URL) -serve
 
 lint: ## golangci-lint
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "请先安装 golangci-lint"; exit 1; }
