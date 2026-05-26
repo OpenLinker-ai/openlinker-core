@@ -24,6 +24,9 @@ const (
 	runtimeTokenPrefixLen  = 12
 	runtimeTokenRandomSize = 32
 	maxRuntimeTokens       = 10
+	defaultParentPage      = 1
+	defaultParentPageSize  = 10
+	maxParentPageSize      = 50
 )
 
 type Service struct {
@@ -209,6 +212,48 @@ func (s *Service) ListChildren(ctx context.Context, userID, parentRunID uuid.UUI
 		items = append(items, item)
 	}
 	return items, nil
+}
+
+func (s *Service) ListParentRuns(ctx context.Context, userID uuid.UUID, page, size int32) (*ParentRunListResponse, error) {
+	if page < 1 {
+		page = defaultParentPage
+	}
+	if size < 1 {
+		size = defaultParentPageSize
+	}
+	if size > maxParentPageSize {
+		size = maxParentPageSize
+	}
+	rows, err := s.queries.ListParentRunsWithDelegationsByUser(ctx, db.ListParentRunsWithDelegationsByUserParams{
+		UserID: userID,
+		Limit:  size,
+		Offset: (page - 1) * size,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID.String()).Msg("a2a.ListParentRuns: list")
+		return nil, httpx.Internal("查询 Parent 调用链失败")
+	}
+	total, err := s.queries.CountParentRunsWithDelegationsByUser(ctx, userID)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID.String()).Msg("a2a.ListParentRuns: count")
+		return nil, httpx.Internal("查询 Parent 调用链失败")
+	}
+	items := make([]ParentRunSummary, 0, len(rows))
+	for _, row := range rows {
+		item := ParentRunSummary{
+			ParentRunID: row.ParentRunID.String(), CallerAgentID: row.CallerAgentID.String(),
+			CallerAgentSlug: row.CallerAgentSlug, CallerAgentName: row.CallerAgentName,
+			Status: row.Status, DurationMs: row.DurationMs, StartedAt: row.StartedAt.UTC().Format(time.RFC3339),
+			ChildCount: row.ChildCount, SuccessfulChildCount: row.SuccessfulChildCount,
+			RunningChildCount: row.RunningChildCount,
+		}
+		if row.FinishedAt != nil {
+			formatted := row.FinishedAt.UTC().Format(time.RFC3339)
+			item.FinishedAt = &formatted
+		}
+		items = append(items, item)
+	}
+	return &ParentRunListResponse{Items: items, Total: total, Page: page, Size: size}, nil
 }
 
 func (s *Service) ownerAgent(ctx context.Context, userID, agentID uuid.UUID) (db.Agent, error) {

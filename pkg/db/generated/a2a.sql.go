@@ -261,3 +261,71 @@ func (q *Queries) ListChildRunsByParentAndUser(ctx context.Context, arg ListChil
 	}
 	return items, rows.Err()
 }
+
+const listParentRunsWithDelegationsByUser = `-- name: ListParentRunsWithDelegationsByUser :many
+SELECT p.id AS parent_run_id, a.id AS caller_agent_id, a.slug AS caller_agent_slug,
+       a.name AS caller_agent_name, p.status, p.duration_ms, p.started_at, p.finished_at,
+       COUNT(d.child_run_id)::int AS child_count,
+       (COUNT(d.child_run_id) FILTER (WHERE c.status = 'success'))::int AS successful_child_count,
+       (COUNT(d.child_run_id) FILTER (WHERE c.status = 'running'))::int AS running_child_count
+FROM runs p
+JOIN run_delegations d ON d.parent_run_id = p.id
+JOIN runs c ON c.id = d.child_run_id
+JOIN agents a ON a.id = p.agent_id
+WHERE p.user_id = $1
+GROUP BY p.id, a.id, a.slug, a.name, p.status, p.duration_ms, p.started_at, p.finished_at
+ORDER BY p.started_at DESC
+LIMIT $2 OFFSET $3`
+
+type ListParentRunsWithDelegationsByUserParams struct {
+	UserID uuid.UUID `db:"user_id" json:"user_id"`
+	Limit  int32     `db:"limit" json:"limit"`
+	Offset int32     `db:"offset" json:"offset"`
+}
+
+type ListParentRunsWithDelegationsByUserRow struct {
+	ParentRunID          uuid.UUID  `json:"parent_run_id"`
+	CallerAgentID        uuid.UUID  `json:"caller_agent_id"`
+	CallerAgentSlug      string     `json:"caller_agent_slug"`
+	CallerAgentName      string     `json:"caller_agent_name"`
+	Status               string     `json:"status"`
+	DurationMs           *int32     `json:"duration_ms"`
+	StartedAt            time.Time  `json:"started_at"`
+	FinishedAt           *time.Time `json:"finished_at"`
+	ChildCount           int32      `json:"child_count"`
+	SuccessfulChildCount int32      `json:"successful_child_count"`
+	RunningChildCount    int32      `json:"running_child_count"`
+}
+
+func (q *Queries) ListParentRunsWithDelegationsByUser(ctx context.Context, arg ListParentRunsWithDelegationsByUserParams) ([]ListParentRunsWithDelegationsByUserRow, error) {
+	rows, err := q.db.Query(ctx, listParentRunsWithDelegationsByUser, arg.UserID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListParentRunsWithDelegationsByUserRow
+	for rows.Next() {
+		var item ListParentRunsWithDelegationsByUserRow
+		if err := rows.Scan(
+			&item.ParentRunID, &item.CallerAgentID, &item.CallerAgentSlug, &item.CallerAgentName,
+			&item.Status, &item.DurationMs, &item.StartedAt, &item.FinishedAt, &item.ChildCount,
+			&item.SuccessfulChildCount, &item.RunningChildCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+const countParentRunsWithDelegationsByUser = `-- name: CountParentRunsWithDelegationsByUser :one
+SELECT COUNT(DISTINCT d.parent_run_id)::int AS total
+FROM run_delegations d
+JOIN runs p ON p.id = d.parent_run_id
+WHERE p.user_id = $1`
+
+func (q *Queries) CountParentRunsWithDelegationsByUser(ctx context.Context, userID uuid.UUID) (int32, error) {
+	var total int32
+	err := q.db.QueryRow(ctx, countParentRunsWithDelegationsByUser, userID).Scan(&total)
+	return total, err
+}

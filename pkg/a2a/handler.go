@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
@@ -30,6 +31,7 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.
 
 	api.DELETE("/creator/runtime-tokens/:tokenID", h.RevokeRuntimeToken, jwtMiddleware)
 	api.POST("/agent-runtime/call-agent", h.CallAgent)
+	api.GET("/a2a/parents", h.ListParentRuns, queryMiddleware)
 	api.GET("/runs/:id/children", h.ListChildren, queryMiddleware)
 }
 
@@ -159,6 +161,34 @@ func (h *Handler) ListChildren(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusOK, map[string]any{"parent_run_id": parentRunID.String(), "items": items})
+}
+
+func (h *Handler) ListParentRuns(c echo.Context) error {
+	userID, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.ListParentRuns(
+		c.Request().Context(),
+		userID,
+		parseInt32Query(c.QueryParam("page"), 1),
+		parseInt32Query(c.QueryParam("size"), 10),
+	)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func parseInt32Query(raw string, fallback int32) int32 {
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return int32(value)
 }
 
 func bearerToken(header string) (string, error) {

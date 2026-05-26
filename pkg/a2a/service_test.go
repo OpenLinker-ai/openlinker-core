@@ -201,6 +201,16 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 	assert.Equal(t, "success", children[0].Status)
 	assert.Equal(t, targetID.String(), children[0].TargetAgentID)
 
+	parents, err := svc.ListParentRuns(context.Background(), owner, 1, 10)
+	require.NoError(t, err)
+	require.Len(t, parents.Items, 1)
+	assert.Equal(t, int32(1), parents.Total)
+	assert.Equal(t, parent.RunID, parents.Items[0].ParentRunID)
+	assert.Equal(t, callerID.String(), parents.Items[0].CallerAgentID)
+	assert.Equal(t, "A2A Agent", parents.Items[0].CallerAgentName)
+	assert.Equal(t, int32(1), parents.Items[0].ChildCount)
+	assert.Equal(t, int32(1), parents.Items[0].SuccessfulChildCount)
+
 	events, err := runtimeSvc.ListRunEvents(context.Background(), owner, uuid.MustParse(parent.RunID), 0, 20)
 	require.NoError(t, err)
 	var eventTypes []string

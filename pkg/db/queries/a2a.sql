@@ -78,3 +78,24 @@ JOIN runs c ON c.id = d.child_run_id
 JOIN agents a ON a.id = c.agent_id
 WHERE d.parent_run_id = $1 AND p.user_id = $2
 ORDER BY d.created_at ASC;
+
+-- name: ListParentRunsWithDelegationsByUser :many
+SELECT p.id AS parent_run_id, a.id AS caller_agent_id, a.slug AS caller_agent_slug,
+       a.name AS caller_agent_name, p.status, p.duration_ms, p.started_at, p.finished_at,
+       COUNT(d.child_run_id)::int AS child_count,
+       (COUNT(d.child_run_id) FILTER (WHERE c.status = 'success'))::int AS successful_child_count,
+       (COUNT(d.child_run_id) FILTER (WHERE c.status = 'running'))::int AS running_child_count
+FROM runs p
+JOIN run_delegations d ON d.parent_run_id = p.id
+JOIN runs c ON c.id = d.child_run_id
+JOIN agents a ON a.id = p.agent_id
+WHERE p.user_id = $1
+GROUP BY p.id, a.id, a.slug, a.name, p.status, p.duration_ms, p.started_at, p.finished_at
+ORDER BY p.started_at DESC
+LIMIT $2 OFFSET $3;
+
+-- name: CountParentRunsWithDelegationsByUser :one
+SELECT COUNT(DISTINCT d.parent_run_id)::int AS total
+FROM run_delegations d
+JOIN runs p ON p.id = d.parent_run_id
+WHERE p.user_id = $1;
