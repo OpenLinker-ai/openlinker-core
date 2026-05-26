@@ -258,6 +258,33 @@ func (s *Service) ListMine(ctx context.Context, userID uuid.UUID, limit int32) (
 	return out, nil
 }
 
+// ListBoard 返回任务广场最近公开任务。列表不暴露发布者身份。
+func (s *Service) ListBoard(ctx context.Context, limit int32) ([]PublicTaskItem, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	rows, err := s.queries.ListPublicTaskQueries(ctx, limit)
+	if err != nil {
+		log.Error().Err(err).Msg("task.ListBoard: query")
+		return nil, httpx.Internal("查询任务广场失败")
+	}
+	skills := s.allSkills
+	if len(skills) == 0 {
+		if loaded, err := s.skillSvc.ListAll(ctx); err == nil {
+			skills = loaded
+			s.allSkills = loaded
+		} else {
+			log.Warn().Err(err).Msg("task.ListBoard: ListAll")
+		}
+	}
+	skillByID := skillCatalogByID(skills)
+	out := make([]PublicTaskItem, 0, len(rows))
+	for i := range rows {
+		out = append(out, toPublicTaskItem(&rows[i], skillByID))
+	}
+	return out, nil
+}
+
 // GetByID 取单个任务 + 回填推荐卡。用于冷链接（sessionStorage 缓存丢失）。
 //
 // 权限：task 必须属于该 user，否则 404。
@@ -478,4 +505,22 @@ func toHistoryItem(t *db.TaskQuery) HistoryItem {
 		item.ChosenAt = &ts
 	}
 	return item
+}
+
+func toPublicTaskItem(t *db.TaskQuery, skillByID map[string]db.Skill) PublicTaskItem {
+	status := "open"
+	if t.ChosenAgentID != nil {
+		status = "matched"
+	} else if len(t.RecommendedAgentIDs) == 0 {
+		status = "needs_agent"
+	}
+	return PublicTaskItem{
+		ID:                    t.ID.String(),
+		Query:                 t.Query,
+		ParsedSkills:          append([]string{}, t.ParsedSkills...),
+		ParsedSkillRefs:       skillRefsForIDs(t.ParsedSkills, skillByID),
+		RecommendedAgentCount: len(t.RecommendedAgentIDs),
+		Status:                status,
+		CreatedAt:             t.CreatedAt.UTC().Format(time.RFC3339),
+	}
 }

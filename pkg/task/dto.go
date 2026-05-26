@@ -71,6 +71,19 @@ type HistoryItem struct {
 	CreatedAt           string   `json:"created_at"`
 }
 
+// PublicTaskItem 任务广场公开列表项。
+//
+// 不包含 user_id / email / display_name；创作者只看到需求、Skill 和匹配状态。
+type PublicTaskItem struct {
+	ID                    string     `json:"id"`
+	Query                 string     `json:"query"`
+	ParsedSkills          []string   `json:"parsed_skills"`
+	ParsedSkillRefs       []SkillRef `json:"parsed_skill_refs"`
+	RecommendedAgentCount int        `json:"recommended_agent_count"`
+	Status                string     `json:"status"` // open / matched / needs_agent
+	CreatedAt             string     `json:"created_at"`
+}
+
 // DetailResponse GET /tasks/:id 详情响应。
 //
 // 用于冷链接（直接打开 /tasks/<id> URL，sessionStorage 无缓存）时

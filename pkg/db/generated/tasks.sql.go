@@ -129,6 +129,37 @@ func (q *Queries) ListTaskQueriesByUser(ctx context.Context, arg ListTaskQueries
 	return items, nil
 }
 
+const listPublicTaskQueries = `-- name: ListPublicTaskQueries :many
+SELECT id, user_id, query, parsed_skills, recommended_agent_ids,
+       chosen_agent_id, chosen_at, created_at
+FROM task_queries
+ORDER BY created_at DESC
+LIMIT $1`
+
+// ListPublicTaskQueries 最近公开任务流（任务广场用）。
+//
+// 当前 task_queries 暂无 visibility 字段；本查询不返回用户邮箱/姓名，仅用于展示
+// 需求文本、Skill 和匹配状态。
+func (q *Queries) ListPublicTaskQueries(ctx context.Context, limit int32) ([]TaskQuery, error) {
+	rows, err := q.db.Query(ctx, listPublicTaskQueries, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TaskQuery
+	for rows.Next() {
+		var t TaskQuery
+		if err := scanTaskQuery(rows, &t); err != nil {
+			return nil, err
+		}
+		items = append(items, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getAgentsByIDs = `-- name: GetAgentsByIDs :many
 SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        a.endpoint_auth_header, a.price_per_call_cents, a.tags,

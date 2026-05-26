@@ -200,6 +200,15 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	assert.Equal(t, secondAgent.String(), detail.Recommendations[1].Agent.ID)
 	require.Len(t, detail.Recommendations[1].MatchedSkills, 1)
 
+	board, err := svc.ListBoard(context.Background(), 20)
+	require.NoError(t, err)
+	require.Len(t, board, 1)
+	assert.Equal(t, resp.TaskID.String(), board[0].ID)
+	assert.Equal(t, "open", board[0].Status)
+	assert.Equal(t, 2, board[0].RecommendedAgentCount)
+	require.Len(t, board[0].ParsedSkillRefs, 2)
+	assert.Equal(t, "数据分析", board[0].ParsedSkillRefs[1].Name)
+
 	require.NoError(t, svc.Choose(context.Background(), resp.TaskID, userID, secondAgent))
 	history, err := svc.ListMine(context.Background(), userID, 20)
 	require.NoError(t, err)

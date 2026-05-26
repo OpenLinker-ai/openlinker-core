@@ -29,9 +29,12 @@ func NewHandler(svc *Service) *Handler {
 //
 //	POST /tasks/recommend       自然语言 → 推荐 Top3 Agent
 //	POST /tasks/:id/choose      用户选定推荐里某个 Agent
+//	GET  /tasks/board           任务广场公开列表
 //	GET  /tasks/me              我的任务历史（最多 20 条）
 //	GET  /tasks/:id             单个任务详情（含推荐卡回填）
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
+	api.GET("/tasks/board", h.ListBoard)
+
 	g := api.Group("/tasks", jwtMiddleware)
 	g.POST("/recommend", h.Recommend)
 	g.POST("/:id/choose", h.Choose)
@@ -98,6 +101,24 @@ func (h *Handler) ListMine(c echo.Context) error {
 		}
 	}
 	items, err := h.svc.ListMine(c.Request().Context(), uid, limit)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
+// ListBoard GET /tasks/board?limit=20
+func (h *Handler) ListBoard(c echo.Context) error {
+	limit := int32(20)
+	if v := c.QueryParam("limit"); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+			if n > 50 {
+				n = 50
+			}
+			limit = int32(n)
+		}
+	}
+	items, err := h.svc.ListBoard(c.Request().Context(), limit)
 	if err != nil {
 		return err
 	}
