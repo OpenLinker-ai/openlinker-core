@@ -47,9 +47,10 @@ type Config struct {
 	SentryDSN string `envconfig:"SENTRY_DSN"`
 
 	// 业务参数
-	PlatformFeeRate     float64 `envconfig:"PLATFORM_FEE_RATE" default:"0.25"`
-	RunTimeoutSeconds   int     `envconfig:"RUN_TIMEOUT_SECONDS" default:"60"`
-	MinWithdrawalCents  int     `envconfig:"MIN_WITHDRAWAL_CENTS" default:"5000"`
+	PlatformFeeRate         float64 `envconfig:"PLATFORM_FEE_RATE" default:"0.25"`
+	RunTimeoutSeconds       int     `envconfig:"RUN_TIMEOUT_SECONDS" default:"60"`
+	MinWithdrawalCents      int     `envconfig:"MIN_WITHDRAWAL_CENTS" default:"5000"`
+	AllowLocalHTTPEndpoints bool    `envconfig:"ALLOW_LOCAL_HTTP_ENDPOINTS" default:"false"`
 }
 
 // Load 从环境变量加载配置。

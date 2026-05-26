@@ -119,7 +119,7 @@ func main() {
 	agentHandler.Register(api)
 	agentHandler.RegisterProtected(api, jwtMiddleware)
 
-	registrationSvc := agent.NewRegistrationService(pool)
+	registrationSvc := agent.NewRegistrationService(pool, cfg)
 	registrationHandler := agent.NewRegistrationHandler(registrationSvc)
 	registrationHandler.RegisterProtected(api, jwtMiddleware)
 	registrationHandler.RegisterPublic(api)

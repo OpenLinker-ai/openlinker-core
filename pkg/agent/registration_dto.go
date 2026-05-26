@@ -33,7 +33,7 @@ type RegisterAgentViaBootstrapRequest struct {
 	Slug               string   `json:"slug" validate:"omitempty,min=3,max=80"`
 	Name               string   `json:"name" validate:"required,min=3,max=80"`
 	Description        string   `json:"description" validate:"max=500"`
-	EndpointURL        string   `json:"endpoint_url" validate:"required,url,startswith=https://,max=500"`
+	EndpointURL        string   `json:"endpoint_url" validate:"required,url,max=500"`
 	EndpointAuthHeader string   `json:"endpoint_auth_header" validate:"max=500"`
 	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"max=1000000"`
 	Tags               []string `json:"tags" validate:"required,min=1,max=5,dive,min=2,max=30"`

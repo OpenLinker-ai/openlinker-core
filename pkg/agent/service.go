@@ -15,6 +15,7 @@ import (
 
 	"github.com/kinzhi/openlinker-core/pkg/config"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
+	"github.com/kinzhi/openlinker-core/pkg/endpointurl"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
@@ -85,6 +86,9 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 	if !isValidSlug(slug) {
 		return nil, httpx.Unprocessable("slug 格式不合法：仅允许小写字母 / 数字 / 连字符，3..80 字符，且不能以连字符开头或结尾")
 	}
+	if err := endpointurl.Validate(req.EndpointURL, s.cfg.AllowLocalHTTPEndpoints); err != nil {
+		return nil, httpx.Unprocessable(err.Error())
+	}
 
 	avail, err := s.queries.CheckSlugAvailable(ctx, slug)
 	if err != nil {
@@ -138,6 +142,9 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 //
 // Visibility 空串视为不改（默认沿用旧值）；显式传值则按 public/unlisted/private 校验。
 func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID, req *UpdateAgentRequest) (*AgentResponse, error) {
+	if err := endpointurl.Validate(req.EndpointURL, s.cfg.AllowLocalHTTPEndpoints); err != nil {
+		return nil, httpx.Unprocessable(err.Error())
+	}
 	authHeader := normalizeAuthHeader(req.EndpointAuthHeader)
 	visibility := strings.TrimSpace(req.Visibility)
 	if visibility == "" {

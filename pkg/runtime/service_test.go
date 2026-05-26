@@ -28,7 +28,7 @@
 //
 // 错误：service 层返回 *httpx.HTTPError，
 //   - agent 不存在 -> 404
-//   - agent 未审批 -> 403
+//   - agent 已下架或 private -> 403；认证状态不阻塞公开调用
 //   - 当前免费阶段不要求余额
 //
 // 平台抽成：cfg.PlatformFeeRate=0.25 → 平台 25%, creator 75%, floor 取整。
@@ -548,7 +548,7 @@ func TestRun_AgentNotFound(t *testing.T) {
 	assertHTTPStatus(t, err, http.StatusNotFound)
 }
 
-func TestRun_AgentNotApproved(t *testing.T) {
+func TestRun_CertificationPendingStillCallable(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
 	ctx := context.Background()
@@ -558,9 +558,9 @@ func TestRun_AgentNotApproved(t *testing.T) {
 	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
 	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "pending")
 
-	_, err := svc.Run(ctx, userID, makeRunReq(agentID, nil), "")
-	// 未审批：403 Forbidden（也接受 404，看实现策略；spec 要 Forbidden）
-	assertHTTPStatus(t, err, http.StatusForbidden)
+	resp, err := svc.Run(ctx, userID, makeRunReq(agentID, nil), "")
+	require.NoError(t, err)
+	assert.Equal(t, "success", resp.Status)
 }
 
 // ────────────────────────────────────────────────────────────

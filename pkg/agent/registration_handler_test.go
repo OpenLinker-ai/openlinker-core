@@ -19,7 +19,9 @@ func TestRegistrationHandler_AcceptsBearerDesignContract(t *testing.T) {
 	pool := setupTestDB(t)
 	creatorID := insertCreatorUser(t, pool, "Bearer Creator")
 	svc := agent.NewRegistrationService(pool)
-	minted, err := svc.MintBootstrapToken(context.Background(), creatorID, &agent.CreateBootstrapTokenRequest{})
+	minted, err := svc.MintBootstrapToken(context.Background(), creatorID, &agent.CreateBootstrapTokenRequest{
+		Label: "bearer-contract",
+	})
 	require.NoError(t, err)
 
 	e := echo.New()

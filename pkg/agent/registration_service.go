@@ -15,7 +15,9 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/kinzhi/openlinker-core/pkg/config"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
+	"github.com/kinzhi/openlinker-core/pkg/endpointurl"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
@@ -42,12 +44,21 @@ var slugDeriveSanitize = regexp.MustCompile(`[^a-z0-9]+`)
 //   - Bootstrap 验证不走 JWT，不复用 ownerAgent 等创作者侧检查
 //   - 消费 token + 建 Agent + 发 Runtime Token 必须在同一个事务
 type RegistrationService struct {
-	queries *db.Queries
-	pool    *pgxpool.Pool
+	queries                 *db.Queries
+	pool                    *pgxpool.Pool
+	allowLocalHTTPEndpoints bool
 }
 
-func NewRegistrationService(pool *pgxpool.Pool) *RegistrationService {
-	return &RegistrationService{queries: db.New(pool), pool: pool}
+func NewRegistrationService(pool *pgxpool.Pool, cfg ...*config.Config) *RegistrationService {
+	allowLocalHTTP := false
+	if len(cfg) > 0 && cfg[0] != nil {
+		allowLocalHTTP = cfg[0].AllowLocalHTTPEndpoints
+	}
+	return &RegistrationService{
+		queries:                 db.New(pool),
+		pool:                    pool,
+		allowLocalHTTPEndpoints: allowLocalHTTP,
+	}
 }
 
 // MintBootstrapToken 创作者侧铸新 Bootstrap Token。明文 token 仅本次返回。
@@ -145,6 +156,9 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 	}
 	if !isValidSlug(slug) {
 		return nil, httpx.Unprocessable("slug 格式不合法：仅允许小写字母 / 数字 / 连字符，3..80 字符，且不能以连字符开头或结尾")
+	}
+	if err := endpointurl.Validate(req.EndpointURL, s.allowLocalHTTPEndpoints); err != nil {
+		return nil, httpx.Unprocessable(err.Error())
 	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})

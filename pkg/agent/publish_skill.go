@@ -43,6 +43,10 @@ curl -X POST https://api.openlinker.ai/api/v1/agent-registration/agents \
 
 Public listing is immediate. Certification and recommendation are optional later actions.
 Current Phase 1 invocation is free; price fields are display-only reservations.
+
+## Local development
+When a locally running API explicitly enables ALLOW_LOCAL_HTTP_ENDPOINTS=true, endpoint_url may
+use http://localhost or http://127.0.0.1 for local testing only. Production endpoints remain HTTPS.
 `
 
 // ServePublishAgentSkill exposes the self-registration instructions to agents and CLIs.

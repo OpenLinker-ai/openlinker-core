@@ -157,7 +157,11 @@ SELECT COUNT(*)::int AS total FROM agents WHERE creator_id = $1;
 
 -- name: CountPendingAgentsByCreator :one
 -- 创作者人工处理队列 Agent 数
-SELECT COUNT(*)::int AS total FROM agents WHERE creator_id = $1 AND status = 'pending';
+SELECT COUNT(*)::int AS total
+FROM agents
+WHERE creator_id = $1
+  AND lifecycle_status = 'active'
+  AND certification_status = 'pending';
 
 -- ## 共用 - 占位
 -- name: RunsCount :one

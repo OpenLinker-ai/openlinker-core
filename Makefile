@@ -1,4 +1,4 @@
-.PHONY: help dev build run test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status deps
+.PHONY: help dev build run test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status deps demo-a2a
 
 ENV_FILE ?= .env
 
@@ -22,6 +22,9 @@ run: build ## 编译并运行
 
 test: ## 运行测试(race + cover)
 	go test ./... -race -cover
+
+demo-a2a: ## 对已启动的本地 API 跑真实 Agent-to-Agent 闭环
+	go run ./cmd/a2a-demo -api http://localhost:8080
 
 lint: ## golangci-lint
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "请先安装 golangci-lint"; exit 1; }

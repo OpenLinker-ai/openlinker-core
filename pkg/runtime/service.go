@@ -19,6 +19,7 @@ import (
 
 	"github.com/kinzhi/openlinker-core/pkg/config"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
+	"github.com/kinzhi/openlinker-core/pkg/endpointurl"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
@@ -194,6 +195,10 @@ func (s *Service) createRunningRun(
 	}
 	if agent.LifecycleStatus != "active" || agent.Visibility == "private" {
 		return nil, nil, httpx.Forbidden("Agent 未公开或已下架")
+	}
+	if err := endpointurl.Validate(agent.EndpointURL, s.cfg.AllowLocalHTTPEndpoints); err != nil {
+		log.Warn().Err(err).Str("agent_id", agent.ID.String()).Msg("runtime.Run: endpoint policy rejected")
+		return nil, nil, httpx.Forbidden("Agent endpoint 当前不可调用")
 	}
 
 	// 2. 计算费用：抽成 = floor(cost × rate)，creator_revenue = cost - fee

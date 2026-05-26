@@ -293,7 +293,11 @@ func (q *Queries) CountAgentsByCreator(ctx context.Context, creatorID uuid.UUID)
 }
 
 const countPendingAgentsByCreator = `-- name: CountPendingAgentsByCreator :one
-SELECT COUNT(*)::int AS total FROM agents WHERE creator_id = $1 AND status = 'pending'`
+SELECT COUNT(*)::int AS total
+FROM agents
+WHERE creator_id = $1
+  AND lifecycle_status = 'active'
+  AND certification_status = 'pending'`
 
 // CountPendingAgentsByCreator 创作者人工处理队列 Agent 数。
 func (q *Queries) CountPendingAgentsByCreator(ctx context.Context, creatorID uuid.UUID) (int32, error) {

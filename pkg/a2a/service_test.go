@@ -140,6 +140,78 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	assert.Equal(t, 2, parentEvents)
 }
 
+func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
+	pool, svc, runtimeSvc := setupService(t)
+	owner := insertCreator(t, pool)
+
+	var callerID uuid.UUID
+	var targetID uuid.UUID
+	var runtimeToken string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Input map[string]any `json:"input"`
+			RunID string         `json:"run_id"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.URL.Path == "/worker" {
+			_, _ = w.Write([]byte(`{"output":{"answer":"worker completed"}}`))
+			return
+		}
+
+		child, err := svc.CallAgent(r.Context(), runtimeToken, &a2a.CallAgentRequest{
+			ParentRunID:   request.RunID,
+			TargetAgentID: targetID.String(),
+			Reason:        "delegate a verifiable subtask",
+			Input:         map[string]any{"question": "finish child"},
+		})
+		require.NoError(t, err)
+		require.Equal(t, "success", child.Status)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"output": map[string]any{
+				"answer":       "parent completed",
+				"child_run_id": child.RunID,
+			},
+		})
+	}))
+	defer server.Close()
+
+	defaultTransport := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
+
+	callerID = insertAgent(t, pool, owner, server.URL+"/caller")
+	targetID = insertAgent(t, pool, owner, server.URL+"/worker")
+	token, err := svc.CreateRuntimeToken(context.Background(), owner, callerID, &a2a.CreateRuntimeTokenRequest{Name: "orchestrator"})
+	require.NoError(t, err)
+	runtimeToken = token.PlaintextToken
+
+	parent, err := runtimeSvc.Run(context.Background(), owner, &runtime.RunRequest{
+		AgentID: callerID.String(),
+		Input:   map[string]any{"task": "complete through delegation"},
+	}, "web")
+	require.NoError(t, err)
+	assert.Equal(t, "success", parent.Status)
+	assert.Equal(t, "parent completed", parent.Output["answer"])
+
+	children, err := svc.ListChildren(context.Background(), owner, uuid.MustParse(parent.RunID))
+	require.NoError(t, err)
+	require.Len(t, children, 1)
+	assert.Equal(t, "success", children[0].Status)
+	assert.Equal(t, targetID.String(), children[0].TargetAgentID)
+
+	events, err := runtimeSvc.ListRunEvents(context.Background(), owner, uuid.MustParse(parent.RunID), 0, 20)
+	require.NoError(t, err)
+	var eventTypes []string
+	for _, event := range events {
+		eventTypes = append(eventTypes, event.EventType)
+	}
+	assert.Contains(t, eventTypes, "run.child.created")
+	assert.Contains(t, eventTypes, "run.child.completed")
+	assert.Contains(t, eventTypes, "run.completed")
+}
+
 func TestCallAgent_RespectsPrivateTargetPolicy(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	callerOwner := insertCreator(t, pool)
