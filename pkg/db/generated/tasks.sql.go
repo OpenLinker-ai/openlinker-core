@@ -13,7 +13,7 @@ import (
 
 // scanTaskQuery 把一行扫描成 TaskQuery（按声明列顺序，给 RETURNING / SELECT 共用）。
 //
-// parsed_skills 是 TEXT[]、recommended_agent_ids 是 UUID[]，pgx/v5 都能直接
+// parsed_skills / mcp_tools 是 TEXT[]、recommended_agent_ids 是 UUID[]，pgx/v5 都能直接
 // scan 到 []string / []uuid.UUID。
 func scanTaskQuery(row interface {
 	Scan(dest ...any) error
@@ -23,6 +23,7 @@ func scanTaskQuery(row interface {
 		&t.UserID,
 		&t.Query,
 		&t.ParsedSkills,
+		&t.MCPTools,
 		&t.RecommendedAgentIDs,
 		&t.ChosenAgentID,
 		&t.ChosenAt,
@@ -31,9 +32,9 @@ func scanTaskQuery(row interface {
 }
 
 const createTaskQuery = `-- name: CreateTaskQuery :one
-INSERT INTO task_queries (user_id, query, parsed_skills, recommended_agent_ids)
-VALUES ($1, $2, $3, $4)
-RETURNING id, user_id, query, parsed_skills, recommended_agent_ids,
+INSERT INTO task_queries (user_id, query, parsed_skills, mcp_tools, recommended_agent_ids)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           chosen_agent_id, chosen_at, created_at`
 
 // CreateTaskQueryParams 入参。
@@ -41,6 +42,7 @@ type CreateTaskQueryParams struct {
 	UserID              uuid.UUID   `db:"user_id" json:"user_id"`
 	Query               string      `db:"query" json:"query"`
 	ParsedSkills        []string    `db:"parsed_skills" json:"parsed_skills"`
+	MCPTools            []string    `db:"mcp_tools" json:"mcp_tools"`
 	RecommendedAgentIDs []uuid.UUID `db:"recommended_agent_ids" json:"recommended_agent_ids"`
 }
 
@@ -50,6 +52,7 @@ func (q *Queries) CreateTaskQuery(ctx context.Context, arg CreateTaskQueryParams
 		arg.UserID,
 		arg.Query,
 		arg.ParsedSkills,
+		arg.MCPTools,
 		arg.RecommendedAgentIDs,
 	)
 	var t TaskQuery
@@ -58,7 +61,7 @@ func (q *Queries) CreateTaskQuery(ctx context.Context, arg CreateTaskQueryParams
 }
 
 const getTaskQuery = `-- name: GetTaskQuery :one
-SELECT id, user_id, query, parsed_skills, recommended_agent_ids,
+SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
        chosen_agent_id, chosen_at, created_at
 FROM task_queries
 WHERE id = $1`
@@ -76,7 +79,7 @@ UPDATE task_queries
 SET chosen_agent_id = $3,
     chosen_at = NOW()
 WHERE id = $1 AND user_id = $2
-RETURNING id, user_id, query, parsed_skills, recommended_agent_ids,
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           chosen_agent_id, chosen_at, created_at`
 
 // MarkTaskQueryChosenParams 入参。
@@ -95,7 +98,7 @@ func (q *Queries) MarkTaskQueryChosen(ctx context.Context, arg MarkTaskQueryChos
 }
 
 const listTaskQueriesByUser = `-- name: ListTaskQueriesByUser :many
-SELECT id, user_id, query, parsed_skills, recommended_agent_ids,
+SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
        chosen_agent_id, chosen_at, created_at
 FROM task_queries
 WHERE user_id = $1
@@ -130,7 +133,7 @@ func (q *Queries) ListTaskQueriesByUser(ctx context.Context, arg ListTaskQueries
 }
 
 const listPublicTaskQueries = `-- name: ListPublicTaskQueries :many
-SELECT id, user_id, query, parsed_skills, recommended_agent_ids,
+SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
        chosen_agent_id, chosen_at, created_at
 FROM task_queries
 ORDER BY created_at DESC

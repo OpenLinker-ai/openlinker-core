@@ -11,7 +11,9 @@ import (
 
 // RecommendRequest 推荐请求体。Query 长度由 schema CHECK 与 validator 双重保障。
 type RecommendRequest struct {
-	Query string `json:"query" validate:"required,min=4,max=500"`
+	Query    string   `json:"query" validate:"required,min=4,max=500"`
+	SkillIDs []string `json:"skill_ids,omitempty" validate:"omitempty,max=5,dive,min=1,max=80"`
+	MCPTools []string `json:"mcp_tools,omitempty" validate:"omitempty,max=5,dive,min=1,max=80"`
 }
 
 // AgentSummary 推荐返回的 Agent 简要信息（不含 endpoint / 鉴权头）。
@@ -37,6 +39,12 @@ type SkillRef struct {
 	Description string `json:"description,omitempty"`
 }
 
+// MCPToolRef 是任务发布流对 OpenLinker MCP 工具的稳定引用。
+type MCPToolRef struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
 // Recommendation 单条推荐：Agent + 匹配分 + 解释。
 type Recommendation struct {
 	Agent         AgentSummary `json:"agent"`
@@ -52,6 +60,8 @@ type RecommendResponse struct {
 	TaskID          uuid.UUID        `json:"task_id"`
 	ParsedSkills    []string         `json:"parsed_skills"`
 	ParsedSkillRefs []SkillRef       `json:"parsed_skill_refs"`
+	MCPTools        []string         `json:"mcp_tools"`
+	MCPToolRefs     []MCPToolRef     `json:"mcp_tool_refs"`
 	Recommendations []Recommendation `json:"recommendations"`
 }
 
@@ -65,6 +75,7 @@ type HistoryItem struct {
 	ID                  string   `json:"id"`
 	Query               string   `json:"query"`
 	ParsedSkills        []string `json:"parsed_skills"`
+	MCPTools            []string `json:"mcp_tools"`
 	RecommendedAgentIDs []string `json:"recommended_agent_ids"`
 	ChosenAgentID       *string  `json:"chosen_agent_id,omitempty"`
 	ChosenAt            *string  `json:"chosen_at,omitempty"`
@@ -75,13 +86,15 @@ type HistoryItem struct {
 //
 // 不包含 user_id / email / display_name；创作者只看到需求、Skill 和匹配状态。
 type PublicTaskItem struct {
-	ID                    string     `json:"id"`
-	Query                 string     `json:"query"`
-	ParsedSkills          []string   `json:"parsed_skills"`
-	ParsedSkillRefs       []SkillRef `json:"parsed_skill_refs"`
-	RecommendedAgentCount int        `json:"recommended_agent_count"`
-	Status                string     `json:"status"` // open / matched / needs_agent
-	CreatedAt             string     `json:"created_at"`
+	ID                    string       `json:"id"`
+	Query                 string       `json:"query"`
+	ParsedSkills          []string     `json:"parsed_skills"`
+	ParsedSkillRefs       []SkillRef   `json:"parsed_skill_refs"`
+	MCPTools              []string     `json:"mcp_tools"`
+	MCPToolRefs           []MCPToolRef `json:"mcp_tool_refs"`
+	RecommendedAgentCount int          `json:"recommended_agent_count"`
+	Status                string       `json:"status"` // open / matched / needs_agent
+	CreatedAt             string       `json:"created_at"`
 }
 
 // DetailResponse GET /tasks/:id 详情响应。
@@ -94,6 +107,8 @@ type DetailResponse struct {
 	Query           string           `json:"query"`
 	ParsedSkills    []string         `json:"parsed_skills"`
 	ParsedSkillRefs []SkillRef       `json:"parsed_skill_refs"`
+	MCPTools        []string         `json:"mcp_tools"`
+	MCPToolRefs     []MCPToolRef     `json:"mcp_tool_refs"`
 	ChosenAgentID   *string          `json:"chosen_agent_id,omitempty"`
 	ChosenAt        *string          `json:"chosen_at,omitempty"`
 	CreatedAt       string           `json:"created_at"`

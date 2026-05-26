@@ -253,13 +253,14 @@ type AgentSkill struct {
 
 // TaskQuery 对应 task_queries 表（任务驱动 A 形态）。
 //
-// query 是用户自然语言描述；parsed_skills 是 LLM 解析出的 skill_id 列表。
+// query 是用户自然语言描述；parsed_skills 是关联/解析出的 skill_id 列表；mcp_tools 是任务关联的 MCP 工具名。
 // recommended_agent_ids 按推荐顺序保存（top 3）；chosen_agent_id 记录用户最终选择（可空）。
 type TaskQuery struct {
 	ID                  uuid.UUID   `db:"id" json:"id"`
 	UserID              uuid.UUID   `db:"user_id" json:"user_id"`
 	Query               string      `db:"query" json:"query"`
 	ParsedSkills        []string    `db:"parsed_skills" json:"parsed_skills"`
+	MCPTools            []string    `db:"mcp_tools" json:"mcp_tools"`
 	RecommendedAgentIDs []uuid.UUID `db:"recommended_agent_ids" json:"recommended_agent_ids"`
 	ChosenAgentID       *uuid.UUID  `db:"chosen_agent_id" json:"chosen_agent_id"`
 	ChosenAt            *time.Time  `db:"chosen_at" json:"chosen_at"`

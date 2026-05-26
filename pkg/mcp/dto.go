@@ -55,5 +55,7 @@ type GetRunRequest struct {
 //
 // query 长度与 task.RecommendRequest 保持一致（4-500 字符）。
 type CreateTaskRequest struct {
-	Query string `json:"query" validate:"required,min=4,max=500"`
+	Query    string   `json:"query" validate:"required,min=4,max=500"`
+	SkillIDs []string `json:"skill_ids,omitempty" validate:"omitempty,max=5,dive,min=1,max=80"`
+	MCPTools []string `json:"mcp_tools,omitempty" validate:"omitempty,max=5,dive,min=1,max=80"`
 }

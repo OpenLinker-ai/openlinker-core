@@ -16,8 +16,20 @@ import (
 	"github.com/kinzhi/openlinker-core/pkg/llm"
 )
 
-// 默认占位值。评分系统未上线前所有 Agent 显示统一评分。
-const placeholderAvgRating float32 = 4.8
+const (
+	// 默认占位值。评分系统未上线前所有 Agent 显示统一评分。
+	placeholderAvgRating float32 = 4.8
+	maxTaskSkillRefs             = 5
+	maxTaskMCPTools              = 5
+)
+
+var mcpToolCatalog = []MCPToolRef{
+	{Name: "create_task", Description: "发布自然语言任务，解析 Skill/MCP 引用并返回推荐 Agent"},
+	{Name: "search_agents", Description: "按关键词或标签搜索市场里的 Agent"},
+	{Name: "get_agent", Description: "读取单个 Agent 的详情、能力声明和示例"},
+	{Name: "run_agent", Description: "调用选定 Agent 并记录一次运行"},
+	{Name: "get_run", Description: "查询一次 Agent 调用的运行状态和结果"},
+}
 
 // AgentMatch skill 模块返回给推荐器的最小信息。
 //
@@ -73,7 +85,11 @@ func NewService(pool *pgxpool.Pool, llmClient llm.Client, skillSvc SkillRecommen
 }
 
 // Recommend 主流程：解析 → 推荐 → 回填 → 持久化。
-func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, query string) (*RecommendResponse, error) {
+func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *RecommendRequest) (*RecommendResponse, error) {
+	if req == nil {
+		return nil, httpx.Unprocessable("请求体不能为空")
+	}
+	query := req.Query
 	query = strings.TrimSpace(query)
 	if n := len(query); n < 4 || n > 500 {
 		return nil, httpx.Unprocessable("query 长度需在 4-500 字符之间")
@@ -90,6 +106,16 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, query string)
 		}
 		s.allSkills = skills
 	}
+	skillByID := skillCatalogByID(skills)
+
+	explicitSkills, err := normalizeExplicitSkillIDs(req.SkillIDs, skillByID)
+	if err != nil {
+		return nil, err
+	}
+	mcpTools, err := normalizeMCPTools(req.MCPTools)
+	if err != nil {
+		return nil, err
+	}
 
 	// 1. 解析 skill：优先 LLM；失败/未配置 → 规则
 	var parsed []string
@@ -104,17 +130,19 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, query string)
 	if len(parsed) == 0 {
 		parsed = ruleParse(query, skills)
 	}
-	skillByID := skillCatalogByID(skills)
+	parsed = mergeSkillIDs(explicitSkills, parsed, maxTaskSkillRefs)
 
 	// 2. 解析空 → 写入 task_query 但 recommendations 为空，便于离线追踪 miss
 	resp := &RecommendResponse{
 		ParsedSkills:    parsed,
 		ParsedSkillRefs: skillRefsForIDs(parsed, skillByID),
+		MCPTools:        append([]string{}, mcpTools...),
+		MCPToolRefs:     mcpToolRefsForNames(mcpTools),
 		Recommendations: []Recommendation{},
 	}
 
 	if len(parsed) == 0 {
-		taskID, err := s.persist(ctx, userID, query, parsed, nil)
+		taskID, err := s.persist(ctx, userID, query, parsed, mcpTools, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -130,7 +158,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, query string)
 	}
 
 	if len(matches) == 0 {
-		taskID, err := s.persist(ctx, userID, query, parsed, nil)
+		taskID, err := s.persist(ctx, userID, query, parsed, mcpTools, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -187,7 +215,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, query string)
 		id, _ := uuid.Parse(recs[i].Agent.ID)
 		storedIDs = append(storedIDs, id)
 	}
-	taskID, err := s.persist(ctx, userID, query, parsed, storedIDs)
+	taskID, err := s.persist(ctx, userID, query, parsed, mcpTools, storedIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -307,6 +335,8 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 		ID:           t.ID.String(),
 		Query:        t.Query,
 		ParsedSkills: append([]string{}, t.ParsedSkills...),
+		MCPTools:     append([]string{}, t.MCPTools...),
+		MCPToolRefs:  mcpToolRefsForNames(t.MCPTools),
 		CreatedAt:    t.CreatedAt.UTC().Format(time.RFC3339),
 
 		Recommendations: []Recommendation{},
@@ -375,17 +405,21 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 }
 
 // persist 写入 task_queries 并返回 id；recommended 为 nil 时存空数组。
-func (s *Service) persist(ctx context.Context, userID uuid.UUID, query string, parsed []string, recommended []uuid.UUID) (uuid.UUID, error) {
+func (s *Service) persist(ctx context.Context, userID uuid.UUID, query string, parsed []string, mcpTools []string, recommended []uuid.UUID) (uuid.UUID, error) {
 	if recommended == nil {
 		recommended = []uuid.UUID{}
 	}
 	if parsed == nil {
 		parsed = []string{}
 	}
+	if mcpTools == nil {
+		mcpTools = []string{}
+	}
 	t, err := s.queries.CreateTaskQuery(ctx, db.CreateTaskQueryParams{
 		UserID:              userID,
 		Query:               query,
 		ParsedSkills:        parsed,
+		MCPTools:            mcpTools,
 		RecommendedAgentIDs: recommended,
 	})
 	if err != nil {
@@ -423,6 +457,97 @@ func skillCatalogByID(skills []db.Skill) map[string]db.Skill {
 	out := make(map[string]db.Skill, len(skills))
 	for i := range skills {
 		out[skills[i].ID] = skills[i]
+	}
+	return out
+}
+
+func normalizeExplicitSkillIDs(ids []string, byID map[string]db.Skill) ([]string, error) {
+	if len(ids) > maxTaskSkillRefs {
+		return nil, httpx.Unprocessable("skill_ids 最多关联 5 个")
+	}
+	out := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			return nil, httpx.Unprocessable("skill_ids 不能包含空值")
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		if _, ok := byID[id]; !ok {
+			return nil, httpx.Unprocessable("未知 Skill: " + id)
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func mergeSkillIDs(explicit []string, parsed []string, max int) []string {
+	if max <= 0 {
+		return []string{}
+	}
+	out := make([]string, 0, max)
+	seen := make(map[string]struct{}, max)
+	add := func(id string) {
+		if len(out) >= max {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for _, id := range explicit {
+		add(id)
+	}
+	for _, id := range parsed {
+		add(id)
+	}
+	return out
+}
+
+func normalizeMCPTools(names []string) ([]string, error) {
+	if len(names) > maxTaskMCPTools {
+		return nil, httpx.Unprocessable("mcp_tools 最多关联 5 个")
+	}
+	byName := mcpToolCatalogByName()
+	out := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return nil, httpx.Unprocessable("mcp_tools 不能包含空值")
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		if _, ok := byName[name]; !ok {
+			return nil, httpx.Unprocessable("未知 MCP 工具: " + name)
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out, nil
+}
+
+func mcpToolRefsForNames(names []string) []MCPToolRef {
+	byName := mcpToolCatalogByName()
+	out := make([]MCPToolRef, 0, len(names))
+	for _, name := range names {
+		if ref, ok := byName[name]; ok {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+func mcpToolCatalogByName() map[string]MCPToolRef {
+	out := make(map[string]MCPToolRef, len(mcpToolCatalog))
+	for _, tool := range mcpToolCatalog {
+		out[tool.Name] = tool
 	}
 	return out
 }
@@ -490,6 +615,7 @@ func toHistoryItem(t *db.TaskQuery) HistoryItem {
 		ID:                  t.ID.String(),
 		Query:               t.Query,
 		ParsedSkills:        append([]string{}, t.ParsedSkills...),
+		MCPTools:            append([]string{}, t.MCPTools...),
 		RecommendedAgentIDs: make([]string, 0, len(t.RecommendedAgentIDs)),
 		CreatedAt:           t.CreatedAt.UTC().Format(time.RFC3339),
 	}
@@ -519,6 +645,8 @@ func toPublicTaskItem(t *db.TaskQuery, skillByID map[string]db.Skill) PublicTask
 		Query:                 t.Query,
 		ParsedSkills:          append([]string{}, t.ParsedSkills...),
 		ParsedSkillRefs:       skillRefsForIDs(t.ParsedSkills, skillByID),
+		MCPTools:              append([]string{}, t.MCPTools...),
+		MCPToolRefs:           mcpToolRefsForNames(t.MCPTools),
 		RecommendedAgentCount: len(t.RecommendedAgentIDs),
 		Status:                status,
 		CreatedAt:             t.CreatedAt.UTC().Format(time.RFC3339),

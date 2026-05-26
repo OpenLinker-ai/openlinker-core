@@ -68,7 +68,11 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*runtime
 // CreateTask 把自然语言任务交给 task.Recommend，返回解析出的 skill + 推荐 Agent。
 // 客户端拿到推荐后通常用 run_agent 实际调用。
 func (s *Service) CreateTask(ctx context.Context, userID uuid.UUID, req *CreateTaskRequest) (*task.RecommendResponse, error) {
-	return s.task.Recommend(ctx, userID, req.Query)
+	return s.task.Recommend(ctx, userID, &task.RecommendRequest{
+		Query:    req.Query,
+		SkillIDs: req.SkillIDs,
+		MCPTools: req.MCPTools,
+	})
 }
 
 // Tools 返回工具描述，硬编码常量；MCP 客户端用 InputSchema 决定参数表单。
@@ -131,16 +135,20 @@ var mcpTools = []ToolDescriptor{
 			"type":     "object",
 			"required": []string{"query"},
 			"properties": map[string]interface{}{
-				"query": map[string]interface{}{"type": "string", "minLength": 4, "maxLength": 500, "description": "自然语言任务描述，4-500 字符"},
+				"query":     map[string]interface{}{"type": "string", "minLength": 4, "maxLength": 500, "description": "自然语言任务描述，4-500 字符"},
+				"skill_ids": map[string]interface{}{"type": "array", "maxItems": 5, "items": map[string]interface{}{"type": "string"}, "description": "可选。主动关联的 Skill ID，最多 5 个；会与自然语言解析结果合并后用于推荐。"},
+				"mcp_tools": map[string]interface{}{"type": "array", "maxItems": 5, "items": map[string]interface{}{"type": "string", "enum": []string{"create_task", "search_agents", "get_agent", "run_agent", "get_run"}}, "description": "可选。该任务期望串联的 MCP 工具名，最多 5 个。"},
 			},
 		},
 		OutputSchema: map[string]interface{}{
 			"type":     "object",
-			"required": []string{"task_id", "parsed_skills", "parsed_skill_refs", "recommendations"},
+			"required": []string{"task_id", "parsed_skills", "parsed_skill_refs", "mcp_tools", "mcp_tool_refs", "recommendations"},
 			"properties": map[string]interface{}{
 				"task_id":           map[string]interface{}{"type": "string", "format": "uuid"},
-				"parsed_skills":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "解析出的 skill_id 列表，按任务相关性排序"},
+				"parsed_skills":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "关联/解析出的 skill_id 列表，按任务相关性排序"},
 				"parsed_skill_refs": skillRefsSchema(),
+				"mcp_tools":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"mcp_tool_refs":     mcpToolRefsSchema(),
 				"recommendations": map[string]interface{}{
 					"type": "array",
 					"items": map[string]interface{}{
@@ -171,6 +179,20 @@ var mcpTools = []ToolDescriptor{
 			},
 		},
 	},
+}
+
+func mcpToolRefsSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "array",
+		"items": map[string]interface{}{
+			"type":     "object",
+			"required": []string{"name", "description"},
+			"properties": map[string]interface{}{
+				"name":        map[string]interface{}{"type": "string"},
+				"description": map[string]interface{}{"type": "string"},
+			},
+		},
+	}
 }
 
 func skillRefsSchema() map[string]interface{} {

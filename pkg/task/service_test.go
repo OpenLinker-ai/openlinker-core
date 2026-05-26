@@ -168,12 +168,19 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	}
 	svc := task.NewService(pool, nil, fake)
 
-	resp, err := svc.Recommend(context.Background(), userID, "请帮我做 SQL 查询和数据分析")
+	resp, err := svc.Recommend(context.Background(), userID, &task.RecommendRequest{
+		Query:    "请帮我做 SQL 查询和数据分析",
+		SkillIDs: []string{"data/sql-query"},
+		MCPTools: []string{"create_task", "run_agent"},
+	})
 	require.NoError(t, err)
 	require.NotEqual(t, uuid.Nil, resp.TaskID)
-	assert.NotEmpty(t, fake.gotSkillIDs)
+	assert.Equal(t, []string{"data/sql-query", "data/analysis"}, fake.gotSkillIDs)
 	require.Len(t, resp.ParsedSkillRefs, 2)
 	assert.Equal(t, "SQL 查询", resp.ParsedSkillRefs[0].Name)
+	assert.Equal(t, []string{"create_task", "run_agent"}, resp.MCPTools)
+	require.Len(t, resp.MCPToolRefs, 2)
+	assert.Equal(t, "create_task", resp.MCPToolRefs[0].Name)
 	require.Len(t, resp.Recommendations, 2)
 	assert.Equal(t, firstAgent.String(), resp.Recommendations[0].Agent.ID)
 	assert.Equal(t, float32(1), resp.Recommendations[0].MatchScore)
@@ -186,14 +193,18 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	assert.Contains(t, resp.Recommendations[0].Why, "SQL 查询")
 
 	var stored []uuid.UUID
+	var storedMCP []string
 	err = pool.QueryRow(context.Background(),
-		`SELECT recommended_agent_ids FROM task_queries WHERE id=$1`, resp.TaskID).Scan(&stored)
+		`SELECT recommended_agent_ids, mcp_tools FROM task_queries WHERE id=$1`, resp.TaskID).Scan(&stored, &storedMCP)
 	require.NoError(t, err)
 	assert.Equal(t, []uuid.UUID{firstAgent, secondAgent}, stored)
+	assert.Equal(t, []string{"create_task", "run_agent"}, storedMCP)
 
 	detail, err := svc.GetByID(context.Background(), resp.TaskID, userID)
 	require.NoError(t, err)
 	require.Len(t, detail.ParsedSkillRefs, 2)
+	assert.Equal(t, []string{"create_task", "run_agent"}, detail.MCPTools)
+	require.Len(t, detail.MCPToolRefs, 2)
 	require.Len(t, detail.Recommendations, 2)
 	assert.Equal(t, firstAgent.String(), detail.Recommendations[0].Agent.ID)
 	require.Len(t, detail.Recommendations[0].MatchedSkills, 2)
@@ -208,6 +219,8 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	assert.Equal(t, 2, board[0].RecommendedAgentCount)
 	require.Len(t, board[0].ParsedSkillRefs, 2)
 	assert.Equal(t, "数据分析", board[0].ParsedSkillRefs[1].Name)
+	assert.Equal(t, []string{"create_task", "run_agent"}, board[0].MCPTools)
+	require.Len(t, board[0].MCPToolRefs, 2)
 
 	require.NoError(t, svc.Choose(context.Background(), resp.TaskID, userID, secondAgent))
 	history, err := svc.ListMine(context.Background(), userID, 20)
@@ -215,6 +228,25 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	require.Len(t, history, 1)
 	require.NotNil(t, history[0].ChosenAgentID)
 	assert.Equal(t, secondAgent.String(), *history[0].ChosenAgentID)
+	assert.Equal(t, []string{"create_task", "run_agent"}, history[0].MCPTools)
+}
+
+func TestRecommendRejectsUnknownAssociations(t *testing.T) {
+	pool := setupTaskTestDB(t)
+	userID := insertTaskUser(t, pool)
+	svc := task.NewService(pool, nil, &fakeSkillRecommender{skills: testSkills()})
+
+	_, err := svc.Recommend(context.Background(), userID, &task.RecommendRequest{
+		Query:    "请帮我做 SQL 查询和数据分析",
+		SkillIDs: []string{"missing/skill"},
+	})
+	assertTaskHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	_, err = svc.Recommend(context.Background(), userID, &task.RecommendRequest{
+		Query:    "请帮我做 SQL 查询和数据分析",
+		MCPTools: []string{"unknown_tool"},
+	})
+	assertTaskHTTPStatus(t, err, http.StatusUnprocessableEntity)
 }
 
 func TestChooseRejectsUnrecommendedAndWrongOwner(t *testing.T) {

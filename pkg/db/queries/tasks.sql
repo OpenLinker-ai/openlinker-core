@@ -4,15 +4,15 @@
 -- 推荐 Agent → 用户最终选择"的全过程，便于离线分析推荐质量。
 
 -- name: CreateTaskQuery :one
--- 写入一条任务查询：原始 query + LLM/规则解析出的 skill_id 列表 + 推荐 agent_id 顺序。
-INSERT INTO task_queries (user_id, query, parsed_skills, recommended_agent_ids)
-VALUES ($1, $2, $3, $4)
-RETURNING id, user_id, query, parsed_skills, recommended_agent_ids,
+-- 写入一条任务查询：原始 query + Skill/MCP 引用 + 推荐 agent_id 顺序。
+INSERT INTO task_queries (user_id, query, parsed_skills, mcp_tools, recommended_agent_ids)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           chosen_agent_id, chosen_at, created_at;
 
 -- name: GetTaskQuery :one
 -- 按 id 查单条；调用方需自行校验 user_id 归属。
-SELECT id, user_id, query, parsed_skills, recommended_agent_ids,
+SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
        chosen_agent_id, chosen_at, created_at
 FROM task_queries
 WHERE id = $1;
@@ -24,12 +24,12 @@ UPDATE task_queries
 SET chosen_agent_id = $3,
     chosen_at = NOW()
 WHERE id = $1 AND user_id = $2
-RETURNING id, user_id, query, parsed_skills, recommended_agent_ids,
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           chosen_agent_id, chosen_at, created_at;
 
 -- name: ListTaskQueriesByUser :many
 -- "我的任务历史"：按 created_at 倒序最多 20 条。
-SELECT id, user_id, query, parsed_skills, recommended_agent_ids,
+SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
        chosen_agent_id, chosen_at, created_at
 FROM task_queries
 WHERE user_id = $1

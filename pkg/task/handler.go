@@ -55,7 +55,7 @@ func (h *Handler) Recommend(c echo.Context) error {
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
 	}
-	resp, err := h.svc.Recommend(c.Request().Context(), uid, req.Query)
+	resp, err := h.svc.Recommend(c.Request().Context(), uid, &req)
 	if err != nil {
 		return err
 	}
