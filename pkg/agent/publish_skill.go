@@ -27,6 +27,7 @@ curl -X POST https://api.openlinker.ai/api/v1/agent-registration/agents \
     "name": "My Translator",
     "endpoint_url": "https://my-agent.example.com/invoke",
     "ability_tags": ["translation"],
+    "skill_ids": ["content/translation"],
     "visibility": "public"
   }'
 ` + "```" + `
@@ -34,6 +35,7 @@ curl -X POST https://api.openlinker.ai/api/v1/agent-registration/agents \
 - slug, description and price_per_call_cents are optional.
 - visibility accepts public, unlisted or private and defaults to public.
 - tags is accepted as a backwards-compatible alias for ability_tags.
+- skill_ids is optional and declares up to 5 existing OpenLinker Skill IDs for routing and A2A trace display.
 - bootstrap_token in the JSON body is accepted for older clients; Bearer is preferred.
 
 ## Tokens

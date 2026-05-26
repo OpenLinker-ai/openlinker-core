@@ -28,6 +28,7 @@ const (
 
 	bootstrapDefaultMinutes   = 30
 	bootstrapDefaultMaxAgents = 1
+	maxRegistrationSkills     = 5
 
 	runtimeTokenPrefix      = "rt_live_"
 	runtimeTokenPrefixLen   = 12
@@ -160,6 +161,10 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 	if err := endpointurl.Validate(req.EndpointURL, s.allowLocalHTTPEndpoints); err != nil {
 		return nil, httpx.Unprocessable(err.Error())
 	}
+	skillIDs, err := s.normalizeRegistrationSkillIDs(ctx, req.SkillIDs)
+	if err != nil {
+		return nil, err
+	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -203,6 +208,12 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 		}
 		log.Error().Err(err).Msg("registration.RegisterAgentViaBootstrap: insert agent")
 		return nil, httpx.Internal("创建 Agent 失败")
+	}
+	if len(skillIDs) > 0 {
+		if err := db.ReplaceAgentSkills(ctx, tx, created.ID, skillIDs); err != nil {
+			log.Error().Err(err).Str("agent_id", created.ID.String()).Msg("registration.RegisterAgentViaBootstrap: replace skills")
+			return nil, httpx.Internal("绑定 Agent skill 失败")
+		}
 	}
 
 	tokenName := strings.TrimSpace(req.RuntimeTokenName)
@@ -273,6 +284,38 @@ func (s *RegistrationService) verifyBootstrapToken(ctx context.Context, plaintex
 		}
 	}
 	return db.AgentRegistrationToken{}, httpx.Unauthorized("Bootstrap Token 无效或已失效")
+}
+
+func (s *RegistrationService) normalizeRegistrationSkillIDs(ctx context.Context, in []string) ([]string, error) {
+	if len(in) == 0 {
+		return []string{}, nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		skillID := strings.TrimSpace(raw)
+		if skillID == "" {
+			continue
+		}
+		if _, ok := seen[skillID]; ok {
+			continue
+		}
+		seen[skillID] = struct{}{}
+		out = append(out, skillID)
+	}
+	if len(out) > maxRegistrationSkills {
+		return nil, httpx.BadRequest("最多只能声明 5 个 skill")
+	}
+	for _, skillID := range out {
+		if _, err := s.queries.GetSkill(ctx, skillID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, httpx.BadRequest("skill_id 不存在: " + skillID)
+			}
+			log.Error().Err(err).Str("skill_id", skillID).Msg("registration.RegisterAgentViaBootstrap: GetSkill")
+			return nil, httpx.Internal("校验 skill 失败")
+		}
+	}
+	return out, nil
 }
 
 func generateBootstrapToken() (string, string, error) {

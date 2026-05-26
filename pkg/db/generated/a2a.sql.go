@@ -212,11 +212,33 @@ func (q *Queries) GetRunDelegationByChild(ctx context.Context, childRunID uuid.U
 const listChildRunsByParentAndUser = `-- name: ListChildRunsByParentAndUser :many
 SELECT c.id AS child_run_id, d.parent_run_id, d.caller_agent_id, d.reason,
        c.status, c.cost_cents, c.duration_ms, c.started_at, c.finished_at, c.source,
-       a.id AS target_agent_id, a.slug AS target_agent_slug, a.name AS target_agent_name
+       caller.slug AS caller_agent_slug, caller.name AS caller_agent_name,
+       caller.tags AS caller_agent_tags,
+       COALESCE(caller_skills.skill_ids, ARRAY[]::text[]) AS caller_skill_ids,
+       COALESCE(caller_skills.skill_names, ARRAY[]::text[]) AS caller_skill_names,
+       target.id AS target_agent_id, target.slug AS target_agent_slug,
+       target.name AS target_agent_name, target.tags AS target_agent_tags,
+       COALESCE(target_skills.skill_ids, ARRAY[]::text[]) AS target_skill_ids,
+       COALESCE(target_skills.skill_names, ARRAY[]::text[]) AS target_skill_names
 FROM run_delegations d
 JOIN runs p ON p.id = d.parent_run_id
 JOIN runs c ON c.id = d.child_run_id
-JOIN agents a ON a.id = c.agent_id
+JOIN agents caller ON caller.id = d.caller_agent_id
+JOIN agents target ON target.id = c.agent_id
+LEFT JOIN LATERAL (
+    SELECT ARRAY_AGG(s.id ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_ids,
+           ARRAY_AGG(s.name ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_names
+    FROM agent_skills ag
+    JOIN skills s ON s.id = ag.skill_id
+    WHERE ag.agent_id = caller.id
+) caller_skills ON TRUE
+LEFT JOIN LATERAL (
+    SELECT ARRAY_AGG(s.id ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_ids,
+           ARRAY_AGG(s.name ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_names
+    FROM agent_skills ag
+    JOIN skills s ON s.id = ag.skill_id
+    WHERE ag.agent_id = target.id
+) target_skills ON TRUE
 WHERE d.parent_run_id = $1 AND p.user_id = $2
 ORDER BY d.created_at ASC`
 
@@ -226,19 +248,27 @@ type ListChildRunsByParentAndUserParams struct {
 }
 
 type ListChildRunsByParentAndUserRow struct {
-	ChildRunID      uuid.UUID  `json:"child_run_id"`
-	ParentRunID     uuid.UUID  `json:"parent_run_id"`
-	CallerAgentID   uuid.UUID  `json:"caller_agent_id"`
-	Reason          string     `json:"reason"`
-	Status          string     `json:"status"`
-	CostCents       int32      `json:"cost_cents"`
-	DurationMs      *int32     `json:"duration_ms"`
-	StartedAt       time.Time  `json:"started_at"`
-	FinishedAt      *time.Time `json:"finished_at"`
-	Source          string     `json:"source"`
-	TargetAgentID   uuid.UUID  `json:"target_agent_id"`
-	TargetAgentSlug string     `json:"target_agent_slug"`
-	TargetAgentName string     `json:"target_agent_name"`
+	ChildRunID       uuid.UUID  `json:"child_run_id"`
+	ParentRunID      uuid.UUID  `json:"parent_run_id"`
+	CallerAgentID    uuid.UUID  `json:"caller_agent_id"`
+	Reason           string     `json:"reason"`
+	Status           string     `json:"status"`
+	CostCents        int32      `json:"cost_cents"`
+	DurationMs       *int32     `json:"duration_ms"`
+	StartedAt        time.Time  `json:"started_at"`
+	FinishedAt       *time.Time `json:"finished_at"`
+	Source           string     `json:"source"`
+	CallerAgentSlug  string     `json:"caller_agent_slug"`
+	CallerAgentName  string     `json:"caller_agent_name"`
+	CallerAgentTags  []string   `json:"caller_agent_tags"`
+	CallerSkillIDs   []string   `json:"caller_skill_ids"`
+	CallerSkillNames []string   `json:"caller_skill_names"`
+	TargetAgentID    uuid.UUID  `json:"target_agent_id"`
+	TargetAgentSlug  string     `json:"target_agent_slug"`
+	TargetAgentName  string     `json:"target_agent_name"`
+	TargetAgentTags  []string   `json:"target_agent_tags"`
+	TargetSkillIDs   []string   `json:"target_skill_ids"`
+	TargetSkillNames []string   `json:"target_skill_names"`
 }
 
 func (q *Queries) ListChildRunsByParentAndUser(ctx context.Context, arg ListChildRunsByParentAndUserParams) ([]ListChildRunsByParentAndUserRow, error) {
@@ -253,7 +283,9 @@ func (q *Queries) ListChildRunsByParentAndUser(ctx context.Context, arg ListChil
 		if err := rows.Scan(
 			&item.ChildRunID, &item.ParentRunID, &item.CallerAgentID, &item.Reason,
 			&item.Status, &item.CostCents, &item.DurationMs, &item.StartedAt, &item.FinishedAt,
-			&item.Source, &item.TargetAgentID, &item.TargetAgentSlug, &item.TargetAgentName,
+			&item.Source, &item.CallerAgentSlug, &item.CallerAgentName, &item.CallerAgentTags,
+			&item.CallerSkillIDs, &item.CallerSkillNames, &item.TargetAgentID, &item.TargetAgentSlug,
+			&item.TargetAgentName, &item.TargetAgentTags, &item.TargetSkillIDs, &item.TargetSkillNames,
 		); err != nil {
 			return nil, err
 		}
@@ -264,16 +296,37 @@ func (q *Queries) ListChildRunsByParentAndUser(ctx context.Context, arg ListChil
 
 const listParentRunsWithDelegationsByUser = `-- name: ListParentRunsWithDelegationsByUser :many
 SELECT p.id AS parent_run_id, a.id AS caller_agent_id, a.slug AS caller_agent_slug,
-       a.name AS caller_agent_name, p.status, p.duration_ms, p.started_at, p.finished_at,
+       a.name AS caller_agent_name, a.tags AS caller_agent_tags,
+       COALESCE(caller_skills.skill_ids, ARRAY[]::text[]) AS caller_skill_ids,
+       COALESCE(caller_skills.skill_names, ARRAY[]::text[]) AS caller_skill_names,
+       p.source AS parent_source, p.status, p.duration_ms, p.started_at, p.finished_at,
        COUNT(d.child_run_id)::int AS child_count,
        (COUNT(d.child_run_id) FILTER (WHERE c.status = 'success'))::int AS successful_child_count,
-       (COUNT(d.child_run_id) FILTER (WHERE c.status = 'running'))::int AS running_child_count
+       (COUNT(d.child_run_id) FILTER (WHERE c.status = 'running'))::int AS running_child_count,
+       COALESCE(token_stats.active_runtime_token_count, 0)::int AS active_runtime_token_count,
+       token_stats.last_runtime_token_used_at
 FROM runs p
 JOIN run_delegations d ON d.parent_run_id = p.id
 JOIN runs c ON c.id = d.child_run_id
 JOIN agents a ON a.id = p.agent_id
+LEFT JOIN LATERAL (
+    SELECT ARRAY_AGG(s.id ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_ids,
+           ARRAY_AGG(s.name ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_names
+    FROM agent_skills ag
+    JOIN skills s ON s.id = ag.skill_id
+    WHERE ag.agent_id = a.id
+) caller_skills ON TRUE
+LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS active_runtime_token_count,
+           MAX(last_used_at) AS last_runtime_token_used_at
+    FROM agent_runtime_tokens
+    WHERE agent_id = a.id AND revoked_at IS NULL
+) token_stats ON TRUE
 WHERE p.user_id = $1
-GROUP BY p.id, a.id, a.slug, a.name, p.status, p.duration_ms, p.started_at, p.finished_at
+GROUP BY p.id, a.id, a.slug, a.name, a.tags, caller_skills.skill_ids,
+         caller_skills.skill_names, token_stats.active_runtime_token_count,
+         token_stats.last_runtime_token_used_at, p.source, p.status, p.duration_ms,
+         p.started_at, p.finished_at
 ORDER BY p.started_at DESC
 LIMIT $2 OFFSET $3`
 
@@ -284,17 +337,23 @@ type ListParentRunsWithDelegationsByUserParams struct {
 }
 
 type ListParentRunsWithDelegationsByUserRow struct {
-	ParentRunID          uuid.UUID  `json:"parent_run_id"`
-	CallerAgentID        uuid.UUID  `json:"caller_agent_id"`
-	CallerAgentSlug      string     `json:"caller_agent_slug"`
-	CallerAgentName      string     `json:"caller_agent_name"`
-	Status               string     `json:"status"`
-	DurationMs           *int32     `json:"duration_ms"`
-	StartedAt            time.Time  `json:"started_at"`
-	FinishedAt           *time.Time `json:"finished_at"`
-	ChildCount           int32      `json:"child_count"`
-	SuccessfulChildCount int32      `json:"successful_child_count"`
-	RunningChildCount    int32      `json:"running_child_count"`
+	ParentRunID             uuid.UUID  `json:"parent_run_id"`
+	CallerAgentID           uuid.UUID  `json:"caller_agent_id"`
+	CallerAgentSlug         string     `json:"caller_agent_slug"`
+	CallerAgentName         string     `json:"caller_agent_name"`
+	CallerAgentTags         []string   `json:"caller_agent_tags"`
+	CallerSkillIDs          []string   `json:"caller_skill_ids"`
+	CallerSkillNames        []string   `json:"caller_skill_names"`
+	ParentSource            string     `json:"parent_source"`
+	Status                  string     `json:"status"`
+	DurationMs              *int32     `json:"duration_ms"`
+	StartedAt               time.Time  `json:"started_at"`
+	FinishedAt              *time.Time `json:"finished_at"`
+	ChildCount              int32      `json:"child_count"`
+	SuccessfulChildCount    int32      `json:"successful_child_count"`
+	RunningChildCount       int32      `json:"running_child_count"`
+	ActiveRuntimeTokenCount int32      `json:"active_runtime_token_count"`
+	LastRuntimeTokenUsedAt  *time.Time `json:"last_runtime_token_used_at"`
 }
 
 func (q *Queries) ListParentRunsWithDelegationsByUser(ctx context.Context, arg ListParentRunsWithDelegationsByUserParams) ([]ListParentRunsWithDelegationsByUserRow, error) {
@@ -308,8 +367,10 @@ func (q *Queries) ListParentRunsWithDelegationsByUser(ctx context.Context, arg L
 		var item ListParentRunsWithDelegationsByUserRow
 		if err := rows.Scan(
 			&item.ParentRunID, &item.CallerAgentID, &item.CallerAgentSlug, &item.CallerAgentName,
+			&item.CallerAgentTags, &item.CallerSkillIDs, &item.CallerSkillNames, &item.ParentSource,
 			&item.Status, &item.DurationMs, &item.StartedAt, &item.FinishedAt, &item.ChildCount,
-			&item.SuccessfulChildCount, &item.RunningChildCount,
+			&item.SuccessfulChildCount, &item.RunningChildCount, &item.ActiveRuntimeTokenCount,
+			&item.LastRuntimeTokenUsedAt,
 		); err != nil {
 			return nil, err
 		}

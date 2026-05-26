@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -52,17 +53,38 @@ func insertCreator(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 	return id
 }
 
-func insertAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, endpoint string) uuid.UUID {
+func insertAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, endpoint string, tags ...string) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
+	agentTags := tags
+	if agentTags == nil {
+		agentTags = []string{}
+	}
 	_, err := pool.Exec(context.Background(),
 		`INSERT INTO agents (
 		  id, creator_id, slug, name, description, endpoint_url, price_per_call_cents, tags,
 		  lifecycle_status, visibility, certification_status
-		) VALUES ($1, $2, $3, 'A2A Agent', 'test', $4, 25, '{}', 'active', 'public', 'unreviewed')`,
-		id, creatorID, "a2a-"+id.String()[:8], endpoint)
+		) VALUES ($1, $2, $3, 'A2A Agent', 'test', $4, 25, $5, 'active', 'public', 'unreviewed')`,
+		id, creatorID, "a2a-"+id.String()[:8], endpoint, agentTags)
 	require.NoError(t, err)
 	return id
+}
+
+func attachSkill(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, skillID, skillName string) {
+	t.Helper()
+	category := strings.Split(skillID, "/")[0]
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO skills (id, category, name, description, sort_order)
+		 VALUES ($1, $2, $3, 'test skill', 0)
+		 ON CONFLICT (id) DO NOTHING`,
+		skillID, category, skillName)
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(),
+		`INSERT INTO agent_skills (agent_id, skill_id)
+		 VALUES ($1, $2)
+		 ON CONFLICT DO NOTHING`,
+		agentID, skillID)
+	require.NoError(t, err)
 }
 
 func insertParentRun(t *testing.T, pool *pgxpool.Pool, userID, callerAgentID uuid.UUID) uuid.UUID {
@@ -181,8 +203,10 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 	http.DefaultTransport = server.Client().Transport
 	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
 
-	callerID = insertAgent(t, pool, owner, server.URL+"/caller")
-	targetID = insertAgent(t, pool, owner, server.URL+"/worker")
+	callerID = insertAgent(t, pool, owner, server.URL+"/caller", "orchestration")
+	targetID = insertAgent(t, pool, owner, server.URL+"/worker", "worker")
+	attachSkill(t, pool, callerID, "ai/agent-orchestration", "Agent 编排")
+	attachSkill(t, pool, targetID, "content/summarization", "摘要")
 	token, err := svc.CreateRuntimeToken(context.Background(), owner, callerID, &a2a.CreateRuntimeTokenRequest{Name: "orchestrator"})
 	require.NoError(t, err)
 	runtimeToken = token.PlaintextToken
@@ -200,6 +224,12 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 	require.Len(t, children, 1)
 	assert.Equal(t, "success", children[0].Status)
 	assert.Equal(t, targetID.String(), children[0].TargetAgentID)
+	assert.Equal(t, []string{"orchestration"}, children[0].CallerAgentTags)
+	assert.Equal(t, []string{"worker"}, children[0].TargetAgentTags)
+	require.Len(t, children[0].CallerSkills, 1)
+	assert.Equal(t, "Agent 编排", children[0].CallerSkills[0].Name)
+	require.Len(t, children[0].TargetSkills, 1)
+	assert.Equal(t, "content/summarization", children[0].TargetSkills[0].ID)
 
 	parents, err := svc.ListParentRuns(context.Background(), owner, 1, 10)
 	require.NoError(t, err)
@@ -208,6 +238,12 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 	assert.Equal(t, parent.RunID, parents.Items[0].ParentRunID)
 	assert.Equal(t, callerID.String(), parents.Items[0].CallerAgentID)
 	assert.Equal(t, "A2A Agent", parents.Items[0].CallerAgentName)
+	assert.Equal(t, []string{"orchestration"}, parents.Items[0].CallerAgentTags)
+	require.Len(t, parents.Items[0].CallerSkills, 1)
+	assert.Equal(t, "ai/agent-orchestration", parents.Items[0].CallerSkills[0].ID)
+	assert.Equal(t, "web", parents.Items[0].Source)
+	assert.Equal(t, int32(1), parents.Items[0].ActiveRuntimeTokenCount)
+	require.NotNil(t, parents.Items[0].LastRuntimeTokenUsedAt)
 	assert.Equal(t, int32(1), parents.Items[0].ChildCount)
 	assert.Equal(t, int32(1), parents.Items[0].SuccessfulChildCount)
 

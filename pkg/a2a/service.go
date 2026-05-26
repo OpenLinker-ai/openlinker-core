@@ -200,7 +200,10 @@ func (s *Service) ListChildren(ctx context.Context, userID, parentRunID uuid.UUI
 		item := ChildRunResponse{
 			ChildRunID: row.ChildRunID.String(), ParentRunID: row.ParentRunID.String(),
 			CallerAgentID: row.CallerAgentID.String(), TargetAgentID: row.TargetAgentID.String(),
+			CallerAgentSlug: row.CallerAgentSlug, CallerAgentName: row.CallerAgentName,
+			CallerAgentTags: row.CallerAgentTags, CallerSkills: skillRefs(row.CallerSkillIDs, row.CallerSkillNames),
 			TargetAgentSlug: row.TargetAgentSlug, TargetAgentName: row.TargetAgentName,
+			TargetAgentTags: row.TargetAgentTags, TargetSkills: skillRefs(row.TargetSkillIDs, row.TargetSkillNames),
 			Reason: row.Reason, Status: row.Status, CostCents: row.CostCents,
 			DurationMs: row.DurationMs, StartedAt: row.StartedAt.UTC().Format(time.RFC3339),
 			Source: row.Source, BillingMode: "free_delegation",
@@ -243,6 +246,8 @@ func (s *Service) ListParentRuns(ctx context.Context, userID uuid.UUID, page, si
 		item := ParentRunSummary{
 			ParentRunID: row.ParentRunID.String(), CallerAgentID: row.CallerAgentID.String(),
 			CallerAgentSlug: row.CallerAgentSlug, CallerAgentName: row.CallerAgentName,
+			CallerAgentTags: row.CallerAgentTags, CallerSkills: skillRefs(row.CallerSkillIDs, row.CallerSkillNames),
+			Source: row.ParentSource, ActiveRuntimeTokenCount: row.ActiveRuntimeTokenCount,
 			Status: row.Status, DurationMs: row.DurationMs, StartedAt: row.StartedAt.UTC().Format(time.RFC3339),
 			ChildCount: row.ChildCount, SuccessfulChildCount: row.SuccessfulChildCount,
 			RunningChildCount: row.RunningChildCount,
@@ -251,9 +256,28 @@ func (s *Service) ListParentRuns(ctx context.Context, userID uuid.UUID, page, si
 			formatted := row.FinishedAt.UTC().Format(time.RFC3339)
 			item.FinishedAt = &formatted
 		}
+		if row.LastRuntimeTokenUsedAt != nil {
+			formatted := row.LastRuntimeTokenUsedAt.UTC().Format(time.RFC3339)
+			item.LastRuntimeTokenUsedAt = &formatted
+		}
 		items = append(items, item)
 	}
 	return &ParentRunListResponse{Items: items, Total: total, Page: page, Size: size}, nil
+}
+
+func skillRefs(ids, names []string) []SkillRef {
+	if len(ids) == 0 {
+		return []SkillRef{}
+	}
+	items := make([]SkillRef, 0, len(ids))
+	for i, id := range ids {
+		name := id
+		if i < len(names) && strings.TrimSpace(names[i]) != "" {
+			name = names[i]
+		}
+		items = append(items, SkillRef{ID: id, Name: name})
+	}
+	return items
 }
 
 func (s *Service) ownerAgent(ctx context.Context, userID, agentID uuid.UUID) (db.Agent, error) {

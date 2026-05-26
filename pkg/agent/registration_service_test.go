@@ -61,6 +61,7 @@ func TestRegistrationService_RegisterAgentViaBootstrap_HappyPath(t *testing.T) {
 		EndpointURL:       "https://example.com/agent/translator",
 		PricePerCallCents: 50,
 		Tags:              []string{"content/translation"},
+		SkillIDs:          []string{"content/translation", "ai/agent-orchestration", "content/translation"},
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, resp.Agent.ID)
@@ -72,6 +73,18 @@ func TestRegistrationService_RegisterAgentViaBootstrap_HappyPath(t *testing.T) {
 	require.True(t, strings.HasPrefix(resp.RuntimeToken.PlaintextToken, "rt_live_"))
 	require.Equal(t, int32(1), resp.UsedCount)
 	require.Equal(t, int32(1), resp.MaxAgents)
+
+	rows, err := pool.Query(ctx, `SELECT skill_id FROM agent_skills WHERE agent_id = $1 ORDER BY skill_id`, uuid.MustParse(resp.Agent.ID))
+	require.NoError(t, err)
+	defer rows.Close()
+	var declared []string
+	for rows.Next() {
+		var skillID string
+		require.NoError(t, rows.Scan(&skillID))
+		declared = append(declared, skillID)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []string{"ai/agent-orchestration", "content/translation"}, declared)
 }
 
 func TestRegistrationService_RegisterAgentViaBootstrap_ExhaustedToken(t *testing.T) {

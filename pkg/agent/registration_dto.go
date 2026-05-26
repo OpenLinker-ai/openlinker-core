@@ -38,6 +38,7 @@ type RegisterAgentViaBootstrapRequest struct {
 	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"max=1000000"`
 	Tags               []string `json:"tags" validate:"required,min=1,max=5,dive,min=2,max=30"`
 	AbilityTags        []string `json:"ability_tags" validate:"omitempty,max=5,dive,min=2,max=30"`
+	SkillIDs           []string `json:"skill_ids" validate:"omitempty,max=5,dive,min=3,max=80"`
 	Visibility         string   `json:"visibility" validate:"omitempty,oneof=public unlisted private"`
 	RuntimeTokenName   string   `json:"runtime_token_name" validate:"omitempty,min=1,max=80"`
 }

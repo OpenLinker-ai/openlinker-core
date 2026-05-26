@@ -135,11 +135,11 @@ func run(api *client, cfg *endpointConfig, callerURL, workerURL string) (*demoRe
 	}
 
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	workerAgent, err := registerAgent(api, bootstrap.PlaintextToken, "demo-worker-"+suffix, "Local Worker Agent", workerURL)
+	workerAgent, err := registerAgent(api, bootstrap.PlaintextToken, "demo-worker-"+suffix, "Local Worker Agent", workerURL, []string{"ops/document-generate"})
 	if err != nil {
 		return nil, fmt.Errorf("self-register worker: %w", err)
 	}
-	callerAgent, err := registerAgent(api, bootstrap.PlaintextToken, "demo-planner-"+suffix, "Local Planner Agent", callerURL)
+	callerAgent, err := registerAgent(api, bootstrap.PlaintextToken, "demo-planner-"+suffix, "Local Planner Agent", callerURL, []string{"ai/agent-orchestration"})
 	if err != nil {
 		return nil, fmt.Errorf("self-register planner: %w", err)
 	}
@@ -191,7 +191,7 @@ func run(api *client, cfg *endpointConfig, callerURL, workerURL string) (*demoRe
 	}, nil
 }
 
-func registerAgent(api *client, bootstrap, slug, name, endpoint string) (*registrationResponse, error) {
+func registerAgent(api *client, bootstrap, slug, name, endpoint string, skillIDs []string) (*registrationResponse, error) {
 	var registered registrationResponse
 	err := api.do(http.MethodPost, "/api/v1/agent-registration/agents", map[string]any{
 		"bootstrap_token":      bootstrap,
@@ -201,6 +201,7 @@ func registerAgent(api *client, bootstrap, slug, name, endpoint string) (*regist
 		"endpoint_url":         endpoint,
 		"price_per_call_cents": 0,
 		"tags":                 []string{"local-demo", "a2a"},
+		"skill_ids":            skillIDs,
 		"visibility":           "public",
 	}, &registered)
 	return &registered, err
