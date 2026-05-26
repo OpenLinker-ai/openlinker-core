@@ -18,21 +18,31 @@ type RecommendRequest struct {
 //
 // AvgRating 暂时用 4.8 占位（评分系统后续子轮接入）。
 type AgentSummary struct {
-	ID                string  `json:"id"`
-	Slug              string  `json:"slug"`
-	Name              string  `json:"name"`
-	Description       string  `json:"description"`
-	PricePerCallCents int32   `json:"price_per_call_cents"`
-	TotalCalls        int32   `json:"total_calls"`
-	AvgRating         float32 `json:"avg_rating"`
-	CreatorName       string  `json:"creator_name"`
+	ID                string   `json:"id"`
+	Slug              string   `json:"slug"`
+	Name              string   `json:"name"`
+	Description       string   `json:"description"`
+	PricePerCallCents int32    `json:"price_per_call_cents"`
+	TotalCalls        int32    `json:"total_calls"`
+	AvgRating         float32  `json:"avg_rating"`
+	CreatorName       string   `json:"creator_name"`
+	Tags              []string `json:"tags"`
+}
+
+// SkillRef 是任务发布流对 Skill catalog 的稳定引用。
+type SkillRef struct {
+	ID          string `json:"id"`
+	Category    string `json:"category"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 // Recommendation 单条推荐：Agent + 匹配分 + 解释。
 type Recommendation struct {
-	Agent      AgentSummary `json:"agent"`
-	MatchScore float32      `json:"match_score"` // [0,1]
-	Why        string       `json:"why"`         // 中文解释，如 "匹配 SQL 查询 + 数据分析"
+	Agent         AgentSummary `json:"agent"`
+	MatchScore    float32      `json:"match_score"` // [0,1]
+	Why           string       `json:"why"`         // 中文解释，如 "匹配 SQL 查询 + 数据分析"
+	MatchedSkills []SkillRef   `json:"matched_skills"`
 }
 
 // RecommendResponse 推荐响应。
@@ -41,6 +51,7 @@ type Recommendation struct {
 type RecommendResponse struct {
 	TaskID          uuid.UUID        `json:"task_id"`
 	ParsedSkills    []string         `json:"parsed_skills"`
+	ParsedSkillRefs []SkillRef       `json:"parsed_skill_refs"`
 	Recommendations []Recommendation `json:"recommendations"`
 }
 
@@ -51,13 +62,13 @@ type ChooseRequest struct {
 
 // HistoryItem "我的任务"列表项（GET /tasks/me）。
 type HistoryItem struct {
-	ID                  string    `json:"id"`
-	Query               string    `json:"query"`
-	ParsedSkills        []string  `json:"parsed_skills"`
-	RecommendedAgentIDs []string  `json:"recommended_agent_ids"`
-	ChosenAgentID       *string   `json:"chosen_agent_id,omitempty"`
-	ChosenAt            *string   `json:"chosen_at,omitempty"`
-	CreatedAt           string    `json:"created_at"`
+	ID                  string   `json:"id"`
+	Query               string   `json:"query"`
+	ParsedSkills        []string `json:"parsed_skills"`
+	RecommendedAgentIDs []string `json:"recommended_agent_ids"`
+	ChosenAgentID       *string  `json:"chosen_agent_id,omitempty"`
+	ChosenAt            *string  `json:"chosen_at,omitempty"`
+	CreatedAt           string   `json:"created_at"`
 }
 
 // DetailResponse GET /tasks/:id 详情响应。
@@ -69,6 +80,7 @@ type DetailResponse struct {
 	ID              string           `json:"id"`
 	Query           string           `json:"query"`
 	ParsedSkills    []string         `json:"parsed_skills"`
+	ParsedSkillRefs []SkillRef       `json:"parsed_skill_refs"`
 	ChosenAgentID   *string          `json:"chosen_agent_id,omitempty"`
 	ChosenAt        *string          `json:"chosen_at,omitempty"`
 	CreatedAt       string           `json:"created_at"`

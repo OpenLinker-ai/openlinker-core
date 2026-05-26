@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/kinzhi/openlinker-core/pkg/task"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/kinzhi/openlinker-core/pkg/task"
 )
 
 const truncateTaskTables = "TRUNCATE webhook_deliveries, wallets, runs, charges, withdrawals, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"
@@ -132,6 +132,16 @@ func insertTaskAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, slug
 	return id
 }
 
+func insertTaskAgentSkills(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, skillIDs ...string) {
+	t.Helper()
+	for _, skillID := range skillIDs {
+		_, err := pool.Exec(context.Background(),
+			`INSERT INTO agent_skills (agent_id, skill_id) VALUES ($1, $2)`,
+			agentID, skillID)
+		require.NoError(t, err)
+	}
+}
+
 func assertTaskHTTPStatus(t *testing.T, err error, want int) {
 	t.Helper()
 	require.Error(t, err)
@@ -146,6 +156,8 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	creatorID := insertTaskCreator(t, pool)
 	firstAgent := insertTaskAgent(t, pool, creatorID, "task-first-"+uuid.NewString()[:8], "approved")
 	secondAgent := insertTaskAgent(t, pool, creatorID, "task-second-"+uuid.NewString()[:8], "approved")
+	insertTaskAgentSkills(t, pool, firstAgent, "data/sql-query", "data/analysis")
+	insertTaskAgentSkills(t, pool, secondAgent, "data/sql-query")
 
 	fake := &fakeSkillRecommender{
 		skills: testSkills(),
@@ -160,10 +172,17 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, uuid.Nil, resp.TaskID)
 	assert.NotEmpty(t, fake.gotSkillIDs)
+	require.Len(t, resp.ParsedSkillRefs, 2)
+	assert.Equal(t, "SQL 查询", resp.ParsedSkillRefs[0].Name)
 	require.Len(t, resp.Recommendations, 2)
 	assert.Equal(t, firstAgent.String(), resp.Recommendations[0].Agent.ID)
 	assert.Equal(t, float32(1), resp.Recommendations[0].MatchScore)
+	assert.Equal(t, []string{"data"}, resp.Recommendations[0].Agent.Tags)
+	require.Len(t, resp.Recommendations[0].MatchedSkills, 2)
+	assert.Equal(t, "data/sql-query", resp.Recommendations[0].MatchedSkills[0].ID)
 	assert.Equal(t, secondAgent.String(), resp.Recommendations[1].Agent.ID)
+	require.Len(t, resp.Recommendations[1].MatchedSkills, 1)
+	assert.Equal(t, "data/sql-query", resp.Recommendations[1].MatchedSkills[0].ID)
 	assert.Contains(t, resp.Recommendations[0].Why, "SQL 查询")
 
 	var stored []uuid.UUID
@@ -174,9 +193,12 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 
 	detail, err := svc.GetByID(context.Background(), resp.TaskID, userID)
 	require.NoError(t, err)
+	require.Len(t, detail.ParsedSkillRefs, 2)
 	require.Len(t, detail.Recommendations, 2)
 	assert.Equal(t, firstAgent.String(), detail.Recommendations[0].Agent.ID)
+	require.Len(t, detail.Recommendations[0].MatchedSkills, 2)
 	assert.Equal(t, secondAgent.String(), detail.Recommendations[1].Agent.ID)
+	require.Len(t, detail.Recommendations[1].MatchedSkills, 1)
 
 	require.NoError(t, svc.Choose(context.Background(), resp.TaskID, userID, secondAgent))
 	history, err := svc.ListMine(context.Background(), userID, 20)

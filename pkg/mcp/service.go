@@ -102,7 +102,7 @@ var mcpTools = []ToolDescriptor{
 	},
 	{
 		Name:        "run_agent",
-		Description: "调用一个 Agent。同步等待结果；当前阶段免费运行，不扣除余额。",
+		Description: "调用一个 Agent。可直接传 search_agents/get_agent 的 agent_id，也可先用 create_task 让 OpenLinker 推荐后再选择 agent_id；同步等待结果，当前阶段免费运行，不扣除余额。",
 		InputSchema: map[string]interface{}{
 			"type":     "object",
 			"required": []string{"agent_id", "input"},
@@ -126,7 +126,7 @@ var mcpTools = []ToolDescriptor{
 	},
 	{
 		Name:        "create_task",
-		Description: "把一段自然语言任务交给 OpenLinker 解析。返回任务 ID、抽取出的 skill 标签和 Top 3 推荐 Agent；调用方通常再用 run_agent 触发选定的 Agent。",
+		Description: "把一段自然语言任务交给 OpenLinker 的发布任务流解析。返回任务 ID、解析出的 skill 引用、Top 3 推荐 Agent 以及每个 Agent 命中的 matched_skills；调用方通常再用 run_agent 触发选定的 Agent。",
 		InputSchema: map[string]interface{}{
 			"type":     "object",
 			"required": []string{"query"},
@@ -134,5 +134,57 @@ var mcpTools = []ToolDescriptor{
 				"query": map[string]interface{}{"type": "string", "minLength": 4, "maxLength": 500, "description": "自然语言任务描述，4-500 字符"},
 			},
 		},
+		OutputSchema: map[string]interface{}{
+			"type":     "object",
+			"required": []string{"task_id", "parsed_skills", "parsed_skill_refs", "recommendations"},
+			"properties": map[string]interface{}{
+				"task_id":           map[string]interface{}{"type": "string", "format": "uuid"},
+				"parsed_skills":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "解析出的 skill_id 列表，按任务相关性排序"},
+				"parsed_skill_refs": skillRefsSchema(),
+				"recommendations": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{
+						"type":     "object",
+						"required": []string{"agent", "match_score", "why", "matched_skills"},
+						"properties": map[string]interface{}{
+							"agent": map[string]interface{}{
+								"type":     "object",
+								"required": []string{"id", "slug", "name", "description", "price_per_call_cents", "total_calls", "creator_name", "tags"},
+								"properties": map[string]interface{}{
+									"id":                   map[string]interface{}{"type": "string", "format": "uuid"},
+									"slug":                 map[string]interface{}{"type": "string"},
+									"name":                 map[string]interface{}{"type": "string"},
+									"description":          map[string]interface{}{"type": "string"},
+									"price_per_call_cents": map[string]interface{}{"type": "integer"},
+									"total_calls":          map[string]interface{}{"type": "integer"},
+									"avg_rating":           map[string]interface{}{"type": "number"},
+									"creator_name":         map[string]interface{}{"type": "string"},
+									"tags":                 map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+								},
+							},
+							"match_score":    map[string]interface{}{"type": "number", "minimum": 0, "maximum": 1},
+							"why":            map[string]interface{}{"type": "string"},
+							"matched_skills": skillRefsSchema(),
+						},
+					},
+				},
+			},
+		},
 	},
+}
+
+func skillRefsSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "array",
+		"items": map[string]interface{}{
+			"type":     "object",
+			"required": []string{"id", "category", "name"},
+			"properties": map[string]interface{}{
+				"id":          map[string]interface{}{"type": "string"},
+				"category":    map[string]interface{}{"type": "string"},
+				"name":        map[string]interface{}{"type": "string"},
+				"description": map[string]interface{}{"type": "string"},
+			},
+		},
+	}
 }

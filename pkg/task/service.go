@@ -104,10 +104,12 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, query string)
 	if len(parsed) == 0 {
 		parsed = ruleParse(query, skills)
 	}
+	skillByID := skillCatalogByID(skills)
 
 	// 2. 解析空 → 写入 task_query 但 recommendations 为空，便于离线追踪 miss
 	resp := &RecommendResponse{
 		ParsedSkills:    parsed,
+		ParsedSkillRefs: skillRefsForIDs(parsed, skillByID),
 		Recommendations: []Recommendation{},
 	}
 
@@ -152,10 +154,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, query string)
 	}
 
 	// skill_id → 中文名（用于 Why 文案）
-	nameByID := make(map[string]string, len(skills))
-	for i := range skills {
-		nameByID[skills[i].ID] = skills[i].Name
-	}
+	nameByID := skillNameByID(skills)
 	parsedCount := float32(len(parsed))
 
 	recs := make([]Recommendation, 0, len(matches))
@@ -169,10 +168,16 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, query string)
 		if score > 1 {
 			score = 1
 		}
+		matchedSkills, err := s.matchedSkillRefs(ctx, matches[i].AgentID, parsed)
+		if err != nil {
+			log.Error().Err(err).Str("agent_id", matches[i].AgentID.String()).Msg("task.Recommend: ListAgentSkills")
+			return nil, httpx.Internal("加载 Agent Skill 详情失败")
+		}
 		recs = append(recs, Recommendation{
-			Agent:      toAgentSummary(row),
-			MatchScore: score,
-			Why:        buildWhy(parsed, nameByID),
+			Agent:         toAgentSummary(row),
+			MatchScore:    score,
+			Why:           buildWhy(parsed, nameByID),
+			MatchedSkills: matchedSkills,
 		})
 	}
 
@@ -272,10 +277,11 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 	}
 
 	resp := &DetailResponse{
-		ID:              t.ID.String(),
-		Query:           t.Query,
-		ParsedSkills:    append([]string{}, t.ParsedSkills...),
-		CreatedAt:       t.CreatedAt.UTC().Format(time.RFC3339),
+		ID:           t.ID.String(),
+		Query:        t.Query,
+		ParsedSkills: append([]string{}, t.ParsedSkills...),
+		CreatedAt:    t.CreatedAt.UTC().Format(time.RFC3339),
+
 		Recommendations: []Recommendation{},
 	}
 	if t.ChosenAgentID != nil {
@@ -286,6 +292,17 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 		ts := t.ChosenAt.UTC().Format(time.RFC3339)
 		resp.ChosenAt = &ts
 	}
+
+	// 用 catalog 回填 Why 文案（与 Recommend 一致）
+	skills := s.allSkills
+	if len(skills) == 0 {
+		if loaded, err := s.skillSvc.ListAll(ctx); err == nil {
+			skills = loaded
+			s.allSkills = loaded
+		}
+	}
+	skillByID := skillCatalogByID(skills)
+	resp.ParsedSkillRefs = skillRefsForIDs(t.ParsedSkills, skillByID)
 
 	if len(t.RecommendedAgentIDs) == 0 {
 		return resp, nil
@@ -300,19 +317,7 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 	for i := range rows {
 		byID[rows[i].ID] = &rows[i]
 	}
-
-	// 用 catalog 回填 Why 文案（与 Recommend 一致）
-	skills := s.allSkills
-	if len(skills) == 0 {
-		if loaded, err := s.skillSvc.ListAll(ctx); err == nil {
-			skills = loaded
-			s.allSkills = loaded
-		}
-	}
-	nameByID := make(map[string]string, len(skills))
-	for i := range skills {
-		nameByID[skills[i].ID] = skills[i].Name
-	}
+	nameByID := skillNameByID(skills)
 
 	parsedCount := float32(len(t.ParsedSkills))
 	if parsedCount == 0 {
@@ -323,12 +328,20 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 		if !ok {
 			continue
 		}
-		// match_count 未持久化；冷链接下不重算精确分，统一给 1.0（已被选过的就是 top 命中）。
-		// 前端只用来排序展示，不参与计费/逻辑，1.0 是稳妥的"占位"。
+		matchedSkills, err := s.matchedSkillRefs(ctx, aid, t.ParsedSkills)
+		if err != nil {
+			log.Error().Err(err).Str("agent_id", aid.String()).Msg("task.GetByID: ListAgentSkills")
+			return nil, httpx.Internal("加载 Agent Skill 详情失败")
+		}
+		score := float32(len(matchedSkills)) / parsedCount
+		if score > 1 {
+			score = 1
+		}
 		resp.Recommendations = append(resp.Recommendations, Recommendation{
-			Agent:      toAgentSummary(row),
-			MatchScore: 1,
-			Why:        buildWhy(t.ParsedSkills, nameByID),
+			Agent:         toAgentSummary(row),
+			MatchScore:    score,
+			Why:           buildWhy(t.ParsedSkills, nameByID),
+			MatchedSkills: matchedSkills,
 		})
 	}
 	return resp, nil
@@ -371,6 +384,64 @@ func buildWhy(parsed []string, nameByID map[string]string) string {
 	return "匹配 " + strings.Join(parts, " + ")
 }
 
+func skillNameByID(skills []db.Skill) map[string]string {
+	out := make(map[string]string, len(skills))
+	for i := range skills {
+		out[skills[i].ID] = skills[i].Name
+	}
+	return out
+}
+
+func skillCatalogByID(skills []db.Skill) map[string]db.Skill {
+	out := make(map[string]db.Skill, len(skills))
+	for i := range skills {
+		out[skills[i].ID] = skills[i]
+	}
+	return out
+}
+
+func skillRefsForIDs(ids []string, byID map[string]db.Skill) []SkillRef {
+	out := make([]SkillRef, 0, len(ids))
+	for _, id := range ids {
+		if s, ok := byID[id]; ok {
+			out = append(out, skillRefFromSkill(s))
+			continue
+		}
+		out = append(out, SkillRef{ID: id, Name: id})
+	}
+	return out
+}
+
+func skillRefFromSkill(s db.Skill) SkillRef {
+	return SkillRef{
+		ID:          s.ID,
+		Category:    s.Category,
+		Name:        s.Name,
+		Description: s.Description,
+	}
+}
+
+func (s *Service) matchedSkillRefs(ctx context.Context, agentID uuid.UUID, parsed []string) ([]SkillRef, error) {
+	if len(parsed) == 0 {
+		return []SkillRef{}, nil
+	}
+	declared, err := s.queries.ListAgentSkills(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	declaredByID := make(map[string]db.Skill, len(declared))
+	for i := range declared {
+		declaredByID[declared[i].ID] = declared[i]
+	}
+	out := make([]SkillRef, 0, len(parsed))
+	for _, id := range parsed {
+		if s, ok := declaredByID[id]; ok {
+			out = append(out, skillRefFromSkill(s))
+		}
+	}
+	return out, nil
+}
+
 // toAgentSummary 把 GetAgentsByIDsRow 转成响应 DTO。
 func toAgentSummary(r *db.GetAgentsByIDsRow) AgentSummary {
 	return AgentSummary{
@@ -382,6 +453,7 @@ func toAgentSummary(r *db.GetAgentsByIDsRow) AgentSummary {
 		TotalCalls:        r.TotalCalls,
 		AvgRating:         placeholderAvgRating,
 		CreatorName:       r.CreatorName,
+		Tags:              append([]string{}, r.Tags...),
 	}
 }
 
