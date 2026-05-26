@@ -55,7 +55,7 @@ func (h *Handler) GetTools(c echo.Context) error {
 
 // PostSearchAgents 市场搜索。
 func (h *Handler) PostSearchAgents(c echo.Context) error {
-	if err := assertAPIKeyAuth(c); err != nil {
+	if err := requireAPIKeyScope(c, "agents:read"); err != nil {
 		return err
 	}
 	var req SearchAgentsRequest
@@ -71,7 +71,7 @@ func (h *Handler) PostSearchAgents(c echo.Context) error {
 
 // PostGetAgent 详情。
 func (h *Handler) PostGetAgent(c echo.Context) error {
-	if err := assertAPIKeyAuth(c); err != nil {
+	if err := requireAPIKeyScope(c, "agents:read"); err != nil {
 		return err
 	}
 	var req GetAgentRequest
@@ -90,7 +90,7 @@ func (h *Handler) PostGetAgent(c echo.Context) error {
 
 // PostRunAgent 同步调用。把 source 设为 'mcp'。
 func (h *Handler) PostRunAgent(c echo.Context) error {
-	if err := assertAPIKeyAuth(c); err != nil {
+	if err := requireAPIKeyScope(c, "agents:run"); err != nil {
 		return err
 	}
 	uid, err := userIDFromCtx(c)
@@ -113,7 +113,7 @@ func (h *Handler) PostRunAgent(c echo.Context) error {
 
 // PostGetRun 查 run 详情。
 func (h *Handler) PostGetRun(c echo.Context) error {
-	if err := assertAPIKeyAuth(c); err != nil {
+	if err := requireAPIKeyScope(c, "runs:read"); err != nil {
 		return err
 	}
 	uid, err := userIDFromCtx(c)
@@ -140,7 +140,7 @@ func (h *Handler) PostGetRun(c echo.Context) error {
 
 // PostCreateTask 把自然语言任务转 task.Recommend，返回 Top 3 Agent 推荐。
 func (h *Handler) PostCreateTask(c echo.Context) error {
-	if err := assertAPIKeyAuth(c); err != nil {
+	if err := requireAPIKeyScope(c, "tasks:write"); err != nil {
 		return err
 	}
 	uid, err := userIDFromCtx(c)
@@ -165,6 +165,16 @@ func (h *Handler) PostCreateTask(c echo.Context) error {
 func assertAPIKeyAuth(c echo.Context) error {
 	if httpx.AuthMethodFrom(c) != "apikey" {
 		return httpx.Forbidden("MCP 端点仅接受 API Key（sk_live_...）")
+	}
+	return nil
+}
+
+func requireAPIKeyScope(c echo.Context, scope string) error {
+	if err := assertAPIKeyAuth(c); err != nil {
+		return err
+	}
+	if !httpx.HasScope(c, scope) {
+		return httpx.Forbidden("API Key 缺少 scope: " + scope)
 	}
 	return nil
 }

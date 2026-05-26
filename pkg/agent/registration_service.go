@@ -24,7 +24,7 @@ const (
 	bootstrapTokenPrefixLen = 12
 	bootstrapRandomBytes    = 32
 
-	bootstrapDefaultMinutes = 30
+	bootstrapDefaultMinutes   = 30
 	bootstrapDefaultMaxAgents = 1
 
 	runtimeTokenPrefix      = "rt_live_"
@@ -165,6 +165,10 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 	}
 
 	authHeader := normalizeAuthHeader(req.EndpointAuthHeader)
+	visibility := strings.TrimSpace(req.Visibility)
+	if visibility == "" {
+		visibility = "public"
+	}
 	created, err := q.CreateAgent(ctx, db.CreateAgentParams{
 		CreatorID:          consumed.CreatorUserID,
 		Slug:               slug,
@@ -174,6 +178,7 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 		EndpointAuthHeader: authHeader,
 		PricePerCallCents:  req.PricePerCallCents,
 		Tags:               normalizeTagsForInsert(req.Tags),
+		Visibility:         visibility,
 	})
 	if err != nil {
 		if isUniqueViolation(err) {

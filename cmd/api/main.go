@@ -133,7 +133,7 @@ func main() {
 	metricHandler.Register(api)
 	agent.StartMetricWorker(rootCtx, metricSvc, approvalSvc)
 
-	e.GET("/skill/publish-agent", servePublishAgentSkill)
+	e.GET("/skill/publish-agent", agent.ServePublishAgentSkill)
 
 	skillSvc := skill.NewService(pool)
 	skillHandler := skill.NewHandler(skillSvc, pool)
@@ -320,39 +320,4 @@ func runMigrate(args []string) {
 		fmt.Fprintf(os.Stderr, "unknown migrate command: %s\n", cmd)
 		os.Exit(2)
 	}
-}
-
-// publishAgentSkillMarkdown 是 Agent 自注册流程的"一句话接入"指南。
-// docs/22 §2.1，docs/29 §2。Agent / CLI Agent 读取后即可拼出一个 curl 完成注册。
-const publishAgentSkillMarkdown = "# OpenLinker · Publish Agent Skill\n\n" +
-	"> 把任意可被 HTTPS POST 调用的 Agent 接入 OpenLinker，得到长期 Runtime Token。\n\n" +
-	"## 1. 拿到 Bootstrap Token\n\n" +
-	"人类在 https://openlinker.ai/hub 点 **Agent 自注册**，得到一枚 `br_live_...` Bootstrap Token。\n" +
-	"默认有效期 30 分钟、可换 1 个 Agent。Token 只展示一次，请妥善保存。\n\n" +
-	"## 2. 让 Agent 提交自己\n\n" +
-	"```bash\n" +
-	"curl -X POST https://api.openlinker.ai/api/v1/agent-registration/agents \\\n" +
-	"  -H 'Content-Type: application/json' \\\n" +
-	"  -d '{\n" +
-	"    \"bootstrap_token\": \"br_live_xxx\",\n" +
-	"    \"name\": \"My Translator\",\n" +
-	"    \"description\": \"中英互译，保留专有名词。\",\n" +
-	"    \"endpoint_url\": \"https://my-agent.example.com/invoke\",\n" +
-	"    \"price_per_call_cents\": 50,\n" +
-	"    \"tags\": [\"content/translation\"]\n" +
-	"  }'\n" +
-	"```\n\n" +
-	"`slug` 可选，省略时由 `name` 自动派生（追加 6 位随机 hex）。\n\n" +
-	"## 3. 收到 Runtime Token\n\n" +
-	"响应里有 `runtime_token.plaintext_token`，形如 `rt_live_...`。把它保存到 Agent 进程，\n" +
-	"OpenLinker 调用你的 endpoint 时会在 `Authorization` 头里带。\n\n" +
-	"## 4. 边界\n\n" +
-	"- Bootstrap Token 用尽 / 过期 / 撤销后立即失效，不可循环使用。\n" +
-	"- 注册成功的 Agent 默认进入公开市场（`status=approved`）。\n" +
-	"- 认证、推荐、官方榜单仍走人工审核或 Benchmark，不通过 Bootstrap 通道。\n"
-
-// servePublishAgentSkill 返回上面的 SKILL.md，文本格式，便于 Agent / CLI 直接读取。
-func servePublishAgentSkill(c echo.Context) error {
-	c.Response().Header().Set("Cache-Control", "public, max-age=300")
-	return c.String(http.StatusOK, publishAgentSkillMarkdown)
 }

@@ -15,7 +15,7 @@ import (
 // 实现方（internal/apikey.Service）应在命中后异步刷新 last_used_at，
 // 失败时返回固定错误（不暴露内部细节）。
 type ApiKeyVerifier interface {
-	Verify(ctx context.Context, plaintextKey string) (uuid.UUID, error)
+	Verify(ctx context.Context, plaintextKey string) (uuid.UUID, []string, error)
 }
 
 // 与 apikey 包同步：明文 API Key 都以此前缀开头。
@@ -50,12 +50,13 @@ func HybridAuthMiddleware(jwtSecret string, verifier ApiKeyVerifier) echo.Middle
 					// 配置错误：API Key 验证器未注入
 					return httpx.Unauthorized("API Key 鉴权未启用")
 				}
-				uid, err := verifier.Verify(c.Request().Context(), token)
+				uid, scopes, err := verifier.Verify(c.Request().Context(), token)
 				if err != nil {
 					return httpx.Unauthorized("API Key 无效或已撤销")
 				}
 				userID = uid.String()
 				authMethod = "apikey"
+				c.Set(string(httpx.CtxKeyAuthScopes), scopes)
 			} else {
 				uid, err := ParseToken(token, jwtSecret)
 				if err != nil {

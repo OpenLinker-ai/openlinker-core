@@ -29,7 +29,7 @@
 // 错误：service 层返回 *httpx.HTTPError，
 //   - agent 不存在 -> 404
 //   - agent 未审批 -> 403
-//   - 余额不足   -> 402
+//   - 当前免费阶段不要求余额
 //
 // 平台抽成：cfg.PlatformFeeRate=0.25 → 平台 25%, creator 75%, floor 取整。
 //
@@ -54,9 +54,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/kinzhi/openlinker-core/pkg/runtime"
 	"github.com/kinzhi/openlinker-core/pkg/config"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/kinzhi/openlinker-core/pkg/runtime"
 )
 
 const truncateAll = "TRUNCATE wallets, runs, charges, withdrawals, agents, users RESTART IDENTITY CASCADE"
@@ -144,10 +144,11 @@ func insertCreator(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 }
 
 // insertAgent 直接 SQL 插一个 agent，把旧 status 文案翻译成新三维字段。
-//   approved → lifecycle=active, visibility=public, cert=unreviewed
-//   disabled → lifecycle=disabled
-//   pending  → lifecycle=active, visibility=public, cert=pending
-//   rejected → lifecycle=active, visibility=public, cert=rejected
+//
+//	approved → lifecycle=active, visibility=public, cert=unreviewed
+//	disabled → lifecycle=disabled
+//	pending  → lifecycle=active, visibility=public, cert=pending
+//	rejected → lifecycle=active, visibility=public, cert=rejected
 func insertAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, endpoint string, priceCents int32, status string) uuid.UUID {
 	t.Helper()
 	ctx := context.Background()
@@ -372,29 +373,25 @@ func TestRun_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, "success", resp.Status)
-	assert.Equal(t, int32(10), resp.CostCents)
+	assert.Equal(t, int32(0), resp.CostCents)
 
 	user := readWallet(t, pool, userID)
 	creator := readWallet(t, pool, creatorID)
-	// fee = floor(10 * 0.25) = 2，creator = 10 - 2 = 8
-	// (注意 spec 写 creator=$0.075 = 7.5 → floor 取 7，但 cost-fee 模型下 creator=8。
-	//  这里采用 cost = fee + revenue 的强约束。subagent-4a 应保证 fee = floor(price*rate)，
-	//  revenue = price - fee。)
-	assert.Equal(t, int64(990), user.BalanceCents, "user balance = $10 - $0.10")
-	assert.Equal(t, int64(10), user.TotalSpentCents)
-	assert.Equal(t, int64(8), creator.EarningsCents)
-	assert.Equal(t, int64(8), creator.TotalEarnedCents)
+	assert.Equal(t, int64(1000), user.BalanceCents, "Phase 1 does not deduct balance")
+	assert.Equal(t, int64(0), user.TotalSpentCents)
+	assert.Equal(t, int64(0), creator.EarningsCents)
+	assert.Equal(t, int64(0), creator.TotalEarnedCents)
 
 	assert.Equal(t, 1, countRunsForUser(t, pool, userID))
 	totalCalls, totalRevenue := readAgentStats(t, pool, agentID)
 	assert.Equal(t, int32(1), totalCalls)
-	assert.Equal(t, int64(8), totalRevenue)
+	assert.Equal(t, int64(0), totalRevenue)
 
 	run := readRun(t, pool, mustParseUUID(t, resp.RunID))
 	assert.Equal(t, "success", run.Status)
-	assert.Equal(t, int32(10), run.CostCents)
-	assert.Equal(t, int32(2), run.PlatformFeeCents)
-	assert.Equal(t, int32(8), run.CreatorRevenueCents)
+	assert.Equal(t, int32(0), run.CostCents)
+	assert.Equal(t, int32(0), run.PlatformFeeCents)
+	assert.Equal(t, int32(0), run.CreatorRevenueCents)
 
 	events := readRunEvents(t, pool, mustParseUUID(t, resp.RunID))
 	require.Len(t, events, 3)
@@ -478,7 +475,7 @@ func TestStartRun_ReturnsRunningAndCompletesInBackground(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, "running", resp.Status)
 	assert.NotEmpty(t, resp.RunID)
-	assert.Equal(t, int32(10), resp.CostCents)
+	assert.Equal(t, int32(0), resp.CostCents)
 
 	runID := mustParseUUID(t, resp.RunID)
 	running, err := svc.GetRun(ctx, userID, runID)
@@ -518,7 +515,7 @@ func TestStartRun_ReturnsRunningAndCompletesInBackground(t *testing.T) {
 // Run - 错误路径
 // ────────────────────────────────────────────────────────────
 
-func TestRun_InsufficientBalance(t *testing.T) {
+func TestRun_FreePhaseAllowsZeroBalance(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
 	ctx := context.Background()
@@ -529,14 +526,14 @@ func TestRun_InsufficientBalance(t *testing.T) {
 	endpoint := startMockEndpointForService(t, svc, called)
 	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
 
-	_, err := svc.Run(ctx, userID, makeRunReq(agentID, nil), "")
-	assertHTTPStatus(t, err, http.StatusPaymentRequired)
+	resp, err := svc.Run(ctx, userID, makeRunReq(agentID, nil), "")
+	require.NoError(t, err)
+	assert.Equal(t, "success", resp.Status)
 
-	// 不创建 run / wallet 不变 / 没调 endpoint
-	assert.Equal(t, 0, countRunsForUser(t, pool, userID))
+	assert.Equal(t, 1, countRunsForUser(t, pool, userID))
 	w := readWallet(t, pool, userID)
 	assert.Equal(t, int64(1), w.BalanceCents)
-	assert.Equal(t, int64(0), getCount(), "endpoint must NOT be called when balance insufficient")
+	assert.Equal(t, int64(1), getCount(), "free run must call endpoint without balance")
 
 	assertNoLostMoney(t, pool)
 }
@@ -684,20 +681,18 @@ func TestRun_EndpointReturnsInvalidJSON(t *testing.T) {
 }
 
 // ────────────────────────────────────────────────────────────
-// Run - 计费表驱动
+// Run - 免费阶段财务字段
 // ────────────────────────────────────────────────────────────
 
-func TestRun_FeeCalculation(t *testing.T) {
+func TestRun_FreePhaseRecordsNoSettlement(t *testing.T) {
 	cases := []struct {
-		name        string
-		price       int32
-		wantFee     int32
-		wantRevenue int32
+		name  string
+		price int32
 	}{
-		{"100c", 100, 25, 75},
-		{"10c", 10, 2, 8},
-		{"4c", 4, 1, 3},
-		{"1c", 1, 0, 1},
+		{"100c", 100},
+		{"10c", 10},
+		{"4c", 4},
+		{"1c", 1},
 	}
 
 	for _, tc := range cases {
@@ -717,12 +712,12 @@ func TestRun_FeeCalculation(t *testing.T) {
 			require.Equal(t, "success", resp.Status)
 
 			run := readRun(t, pool, mustParseUUID(t, resp.RunID))
-			assert.Equal(t, tc.price, run.CostCents)
-			assert.Equal(t, tc.wantFee, run.PlatformFeeCents)
-			assert.Equal(t, tc.wantRevenue, run.CreatorRevenueCents)
+			assert.Equal(t, int32(0), run.CostCents)
+			assert.Equal(t, int32(0), run.PlatformFeeCents)
+			assert.Equal(t, int32(0), run.CreatorRevenueCents)
 
 			creator := readWallet(t, pool, creatorID)
-			assert.Equal(t, int64(tc.wantRevenue), creator.EarningsCents)
+			assert.Equal(t, int64(0), creator.EarningsCents)
 
 			assertNoLostMoney(t, pool)
 		})
@@ -733,7 +728,7 @@ func TestRun_FeeCalculation(t *testing.T) {
 // Run - 并发安全
 // ────────────────────────────────────────────────────────────
 
-func TestRun_ConcurrentCallsNoNegativeBalance(t *testing.T) {
+func TestRun_ConcurrentFreeCallsDoNotTouchBalance(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
 
@@ -773,13 +768,12 @@ func TestRun_ConcurrentCallsNoNegativeBalance(t *testing.T) {
 	wg.Wait()
 
 	assert.Equal(t, int64(0), atomic.LoadInt64(&otherErrs), "no unexpected errors")
-	assert.Equal(t, int64(1), atomic.LoadInt64(&successes), "exactly one Run should succeed")
-	assert.Equal(t, int64(N-1), atomic.LoadInt64(&paymentRequired),
-		"N-1 calls must hit PaymentRequired")
+	assert.Equal(t, int64(N), atomic.LoadInt64(&successes), "all free runs should succeed")
+	assert.Equal(t, int64(0), atomic.LoadInt64(&paymentRequired))
 
 	user := readWallet(t, pool, userID)
 	assert.GreaterOrEqual(t, user.BalanceCents, int64(0), "balance never negative")
-	assert.Equal(t, int64(0), user.BalanceCents, "after one $1 success, balance=$0")
+	assert.Equal(t, int64(100), user.BalanceCents, "free runs leave balance untouched")
 
 	assertNoLostMoney(t, pool)
 }

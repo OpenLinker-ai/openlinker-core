@@ -44,6 +44,7 @@ func (h *Handler) Register(api *echo.Group) {
 //	GET    /creator/agents
 //	GET    /creator/agents/:id
 //	PATCH  /creator/agents/:id
+//	PATCH  /creator/agents/:id/visibility
 //	DELETE /creator/agents/:id
 //	GET    /creator/agents/:id/onboarding
 //	PUT    /creator/agents/:id/capabilities
@@ -58,6 +59,7 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	creator.GET("/agents", h.ListMyAgents)
 	creator.GET("/agents/:id", h.GetMyAgent)
 	creator.PATCH("/agents/:id", h.UpdateAgent)
+	creator.PATCH("/agents/:id/visibility", h.UpdateVisibility)
 	creator.DELETE("/agents/:id", h.DisableAgent)
 
 	creator.GET("/agents/:id/onboarding", h.GetAgentOnboarding)
@@ -176,6 +178,30 @@ func (h *Handler) UpdateAgent(c echo.Context) error {
 		return httpx.Unprocessable(err.Error())
 	}
 	resp, err := h.svc.UpdateAgent(c.Request().Context(), id, uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// UpdateVisibility 创作者仅切换 Agent 市场可见性。
+func (h *Handler) UpdateVisibility(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	var req UpdateVisibilityRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.SetVisibility(c.Request().Context(), id, uid, req.Visibility)
 	if err != nil {
 		return err
 	}

@@ -27,12 +27,13 @@ func (q *Queries) AgentsCount(ctx context.Context) (int32, error) {
 // scanAgent 把一行扫描成 Agent 结构（按声明列顺序，给 RETURNING / SELECT 共用）。
 //
 // Phase 2 缺口 2 后列顺序：
-//   id, creator_id, slug, name, description, endpoint_url,
-//   endpoint_auth_header, price_per_call_cents, tags,
-//   lifecycle_status, visibility, certification_status,
-//   rejection_reason, certified_at,
-//   total_calls, total_revenue_cents,
-//   webhook_url, created_at, updated_at
+//
+//	id, creator_id, slug, name, description, endpoint_url,
+//	endpoint_auth_header, price_per_call_cents, tags,
+//	lifecycle_status, visibility, certification_status,
+//	rejection_reason, certified_at,
+//	total_calls, total_revenue_cents,
+//	webhook_url, created_at, updated_at
 func scanAgent(row interface {
 	Scan(dest ...any) error
 }, a *Agent) error {
@@ -62,9 +63,9 @@ func scanAgent(row interface {
 const createAgent = `-- name: CreateAgent :one
 INSERT INTO agents (
     creator_id, slug, name, description, endpoint_url,
-    endpoint_auth_header, price_per_call_cents, tags
+    endpoint_auth_header, price_per_call_cents, tags, visibility
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8
+    $1, $2, $3, $4, $5, $6, $7, $8, $9
 )
 RETURNING id, creator_id, slug, name, description, endpoint_url,
           endpoint_auth_header, price_per_call_cents, tags,
@@ -83,6 +84,7 @@ type CreateAgentParams struct {
 	EndpointAuthHeader *string   `db:"endpoint_auth_header" json:"endpoint_auth_header"`
 	PricePerCallCents  int32     `db:"price_per_call_cents" json:"price_per_call_cents"`
 	Tags               []string  `db:"tags" json:"tags"`
+	Visibility         string    `db:"visibility" json:"visibility"`
 }
 
 // CreateAgent 创作者新建 Agent。默认 lifecycle=active, visibility=public, certification=unreviewed。
@@ -96,6 +98,7 @@ func (q *Queries) CreateAgent(ctx context.Context, arg CreateAgentParams) (Agent
 		arg.EndpointAuthHeader,
 		arg.PricePerCallCents,
 		arg.Tags,
+		arg.Visibility,
 	)
 	var a Agent
 	err := scanAgent(row, &a)
@@ -149,6 +152,24 @@ func (q *Queries) UpdateAgentDraft(ctx context.Context, arg UpdateAgentDraftPara
 	var a Agent
 	err := scanAgent(row, &a)
 	return a, err
+}
+
+const setAgentVisibilityForOwner = `-- name: SetAgentVisibilityForOwner :exec
+UPDATE agents
+SET visibility = $3,
+    updated_at = NOW()
+WHERE id = $1 AND creator_id = $2
+  AND lifecycle_status = 'active'`
+
+type SetAgentVisibilityForOwnerParams struct {
+	ID         uuid.UUID `db:"id" json:"id"`
+	CreatorID  uuid.UUID `db:"creator_id" json:"creator_id"`
+	Visibility string    `db:"visibility" json:"visibility"`
+}
+
+func (q *Queries) SetAgentVisibilityForOwner(ctx context.Context, arg SetAgentVisibilityForOwnerParams) error {
+	_, err := q.db.Exec(ctx, setAgentVisibilityForOwner, arg.ID, arg.CreatorID, arg.Visibility)
+	return err
 }
 
 const getAgentByIDForOwner = `-- name: GetAgentByIDForOwner :one

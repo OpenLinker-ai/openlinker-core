@@ -54,13 +54,13 @@ type DeliveryEnqueuer interface {
 	EnqueueIfDefault(ctx context.Context, run *db.Run) error
 }
 
-// Service 调用 Agent + 计费业务逻辑。
+// Service 调用 Agent，并为未来计费保留可选结算能力。
 //
 // 关键时序约束（见 docs/13 模块 4 / docs/10 章四）：
-//  1. 事务 A：扣余额 + INSERT runs(status=running)
+//  1. 事务 A：可选扣余额 + INSERT runs(status=running)
 //  2. 事务外：HTTP POST 创作者 endpoint（60s 超时）
-//  3. 事务 B：成功 → MarkRunSuccess + AddCreatorEarnings + IncrementAgentStats
-//     失败 → MarkRunFailed + RefundUserBalance
+//  3. 事务 B：成功 → MarkRunSuccess + 可选 AddCreatorEarnings + IncrementAgentStats
+//     失败 → MarkRunFailed + 可选 RefundUserBalance
 //  4. 事务外：异步触发 webhook 投递（不阻塞响应）
 //
 // HTTP 调用必须在事务外，否则会长时间锁住 wallets 行。
@@ -105,9 +105,8 @@ func (s *Service) SetDeliveryEnqueuer(d DeliveryEnqueuer) {
 	s.deliverySvc = d
 }
 
-// SetWalletCharger 注入钱包扣费/退款实现（cloud 部署时由 main.go 调用）。
-//
-// 未注入(core 单独部署 / 测试)时:扣费跳过,余额无限;退款也跳过。
+// SetWalletCharger 启用未来商业化结算并注入钱包扣费/退款实现。
+// 当前 Phase 1 入口不应调用本方法：未注入时运行免费，财务字段记为 0。
 func (s *Service) SetWalletCharger(w WalletCharger) {
 	s.walletCharger = w
 }
@@ -130,13 +129,12 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 
 // Run 调用 Agent。
 //
-// 流程见 Service 注释。即使分账事务失败也返回结果给调用方
-// （已扣过钱的成功结果不能因为补抽成失败就掩盖；对账系统补救）。
+// 流程见 Service 注释。只有明确注入 WalletCharger 后才执行结算。
 //
 // source 标记调用来源：'web' / 'mcp' / 'api'，写入 runs.source 以便 /usage 分类显示。
 // 传空字符串时默认 'web'，便于旧调用方零修改。
 func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
-	invocation, _, err := s.createRunningRun(ctx, userID, req, source, nil, true)
+	invocation, _, err := s.createRunningRun(ctx, userID, req, source, nil, s.walletCharger != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +143,7 @@ func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, so
 
 // StartRun 创建 running run 并在后台执行；调用方可用 GetRun/ListRunEvents/SSE 查询进度。
 func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
-	invocation, resp, err := s.createRunningRun(ctx, userID, req, source, nil, true)
+	invocation, resp, err := s.createRunningRun(ctx, userID, req, source, nil, s.walletCharger != nil)
 	if err != nil {
 		return nil, err
 	}

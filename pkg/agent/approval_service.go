@@ -132,7 +132,10 @@ func (s *ApprovalService) ConfirmApproval(ctx context.Context, creatorID, approv
 		log.Error().Err(err).Msg("approval.ConfirmApproval")
 		return httpx.Internal("确认审批失败")
 	}
-	return s.translateDecisionResult(ctx, affected, creatorID, approvalID)
+	if err := s.translateDecisionResult(ctx, affected, creatorID, approvalID); err != nil {
+		return err
+	}
+	return s.applyConfirmedAction(ctx, creatorID, approvalID)
 }
 
 // RejectApproval 创作者拒绝审批。pending+未过期 → rejected。
@@ -174,6 +177,30 @@ func (s *ApprovalService) translateDecisionResult(ctx context.Context, affected 
 		return httpx.Conflict("审批当前状态 " + row.Status + " 不可再决策")
 	}
 	return httpx.Conflict("审批已过期")
+}
+
+func (s *ApprovalService) applyConfirmedAction(ctx context.Context, creatorID, approvalID uuid.UUID) error {
+	approval, err := s.queries.GetAgentApprovalForCreator(ctx, db.GetAgentApprovalForCreatorParams{
+		ID: approvalID, CreatorID: creatorID,
+	})
+	if err != nil {
+		return httpx.Internal("读取已确认审批失败")
+	}
+	switch approval.Action {
+	case "request-certification", "request_certification":
+		if _, err := s.queries.RequestCertification(ctx, db.RequestCertificationParams{
+			ID: approval.AgentID, CreatorID: creatorID,
+		}); err != nil {
+			return httpx.Internal("提交认证请求失败")
+		}
+	case "set-visibility-public", "set_visibility=public":
+		if err := s.queries.SetAgentVisibilityForOwner(ctx, db.SetAgentVisibilityForOwnerParams{
+			ID: approval.AgentID, CreatorID: creatorID, Visibility: "public",
+		}); err != nil {
+			return httpx.Internal("公开 Agent 失败")
+		}
+	}
+	return nil
 }
 
 func (s *ApprovalService) toApprovalResponse(a *db.AgentActionApprovalRequest) ApprovalResponse {

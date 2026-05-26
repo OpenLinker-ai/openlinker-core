@@ -127,6 +127,7 @@ const (
 	CtxKeyUserID     CtxKey = "user_id"
 	CtxKeyAdmin      CtxKey = "is_admin"
 	CtxKeyAuthMethod CtxKey = "auth_method"
+	CtxKeyAuthScopes CtxKey = "auth_scopes"
 )
 
 // UserIDFrom 从 echo.Context 取出 user_id（鉴权中间件设置）。
@@ -135,11 +136,22 @@ func UserIDFrom(c echo.Context) string {
 	return v
 }
 
-// AuthMethodFrom 返回当前请求的鉴权方式：'jwt' / 'apikey' / ''（未鉴权）。
+// AuthMethodFrom 返回当前请求的鉴权方式：'jwt' / 'apikey' / ”（未鉴权）。
 // HybridAuthMiddleware 命中后设置。
 func AuthMethodFrom(c echo.Context) string {
 	v, _ := c.Get(string(CtxKeyAuthMethod)).(string)
 	return v
+}
+
+// HasScope reports whether the authenticated API key carries a required permission.
+func HasScope(c echo.Context, expected string) bool {
+	scopes, _ := c.Get(string(CtxKeyAuthScopes)).([]string)
+	for _, scope := range scopes {
+		if scope == expected {
+			return true
+		}
+	}
+	return false
 }
 
 // IsAdmin 是否管理员。

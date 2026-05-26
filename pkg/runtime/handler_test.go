@@ -36,8 +36,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/kinzhi/openlinker-core/pkg/auth"
-	"github.com/kinzhi/openlinker-core/pkg/runtime"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/kinzhi/openlinker-core/pkg/runtime"
 )
 
 const testHandlerSecret = "test-secret-32-chars-aaaaaaaaaaaa"
@@ -150,7 +150,7 @@ func TestPostRun_HappyPath(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &out))
 	assert.Equal(t, "success", out.Status)
 	assert.NotEmpty(t, out.RunID)
-	assert.Equal(t, int32(10), out.CostCents)
+	assert.Equal(t, int32(0), out.CostCents)
 
 	assertNoLostMoney(t, pool)
 }
@@ -194,7 +194,7 @@ func TestPostRun_MissingAgentID(t *testing.T) {
 		"body=%s", string(raw))
 }
 
-func TestPostRun_InsufficientBalance(t *testing.T) {
+func TestPostRun_FreePhaseDoesNotRequireBalance(t *testing.T) {
 	e, pool, svc := setupHandlerTest(t)
 	userID := insertUserWithBalance(t, pool, 1) // $0.01
 	creatorID := insertCreator(t, pool)
@@ -205,7 +205,7 @@ func TestPostRun_InsufficientBalance(t *testing.T) {
 	rec, raw := doRequest(t, e, http.MethodPost, "/api/v1/run", body, map[string]string{
 		"Authorization": signJWT(t, userID),
 	})
-	assert.Equal(t, http.StatusPaymentRequired, rec.Code, "body=%s", string(raw))
+	assert.Equal(t, http.StatusOK, rec.Code, "body=%s", string(raw))
 }
 
 func TestPostRunsAsync_Handler_ReturnsAccepted(t *testing.T) {

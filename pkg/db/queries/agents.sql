@@ -21,9 +21,9 @@
 -- 创作者新建 Agent：默认 lifecycle=active, visibility=public, certification=unreviewed。
 INSERT INTO agents (
     creator_id, slug, name, description, endpoint_url,
-    endpoint_auth_header, price_per_call_cents, tags
+    endpoint_auth_header, price_per_call_cents, tags, visibility
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8
+    $1, $2, $3, $4, $5, $6, $7, $8, $9
 )
 RETURNING id, creator_id, slug, name, description, endpoint_url,
           endpoint_auth_header, price_per_call_cents, tags,
@@ -99,6 +99,13 @@ SET certification_status = 'pending',
     updated_at = NOW()
 WHERE id = $1 AND creator_id = $2
   AND certification_status IN ('unreviewed', 'rejected');
+
+-- name: SetAgentVisibilityForOwner :exec
+UPDATE agents
+SET visibility = $3,
+    updated_at = NOW()
+WHERE id = $1 AND creator_id = $2
+  AND lifecycle_status = 'active';
 
 -- name: CertifyAgent :exec
 -- 运营授予认证：pending → certified。

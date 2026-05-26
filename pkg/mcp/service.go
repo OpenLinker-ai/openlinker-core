@@ -102,7 +102,7 @@ var mcpTools = []ToolDescriptor{
 	},
 	{
 		Name:        "run_agent",
-		Description: "调用一个 Agent。同步等待结果；扣除 API Key 所属用户的余额。",
+		Description: "调用一个 Agent。同步等待结果；当前阶段免费运行，不扣除余额。",
 		InputSchema: map[string]interface{}{
 			"type":     "object",
 			"required": []string{"agent_id", "input"},

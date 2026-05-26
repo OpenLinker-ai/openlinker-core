@@ -225,6 +225,7 @@ type ApiKey struct {
 	Name       string     `db:"name" json:"name"`
 	Prefix     string     `db:"prefix" json:"prefix"` // sk_live_abcd 前缀（UI 展示）
 	KeyHash    string     `db:"key_hash" json:"-"`    // 不暴露
+	Scopes     []string   `db:"scopes" json:"scopes"`
 	LastUsedAt *time.Time `db:"last_used_at" json:"last_used_at"`
 	RevokedAt  *time.Time `db:"revoked_at" json:"revoked_at"`
 	CreatedAt  time.Time  `db:"created_at" json:"created_at"`

@@ -78,6 +78,32 @@ func TestApprovalService_ConfirmTransitionsStatus(t *testing.T) {
 	require.NotNil(t, got.DecidedAt)
 	require.NotNil(t, got.DecisionNote)
 	require.Equal(t, "looks good", *got.DecisionNote)
+	var certification string
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT certification_status FROM agents WHERE id=$1`, agentID).Scan(&certification))
+	require.Equal(t, "pending", certification)
+}
+
+func TestApprovalService_ConfirmPublicVisibilityAppliesAction(t *testing.T) {
+	pool := setupTestDB(t)
+	creator := insertCreatorUser(t, pool, "Visibility Confirmer")
+	agentID := createApprovedAgent(t, pool, creator, "approval-public")
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, `UPDATE agents SET visibility='private' WHERE id=$1`, agentID)
+	require.NoError(t, err)
+
+	svc := agent.NewApprovalService(pool, nil)
+	created, err := svc.CreateApproval(ctx, creator, &agent.CreateApprovalRequest{
+		AgentID: agentID.String(),
+		Action:  "set_visibility=public",
+	})
+	require.NoError(t, err)
+	require.NoError(t, svc.ConfirmApproval(ctx, creator, uuid.MustParse(created.ID), "publish"))
+
+	var visibility string
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT visibility FROM agents WHERE id=$1`, agentID).Scan(&visibility))
+	require.Equal(t, "public", visibility)
 }
 
 func TestApprovalService_RejectTransitionsStatus(t *testing.T) {

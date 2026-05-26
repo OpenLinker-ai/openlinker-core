@@ -1,13 +1,30 @@
 package runtime
 
 import (
+	"errors"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
+
+func TestPostRunRejectsAPIKeyWithoutRunScope(t *testing.T) {
+	e := echo.New()
+	c := e.NewContext(httptest.NewRequest(http.MethodPost, "/api/v1/run", nil), httptest.NewRecorder())
+	c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+	c.Set(string(httpx.CtxKeyAuthScopes), []string{"runs:read"})
+
+	err := NewHandler(nil).PostRun(c)
+	var httpErr *httpx.HTTPError
+	require.True(t, errors.As(err, &httpErr))
+	require.Equal(t, http.StatusForbidden, httpErr.Status)
+}
 
 func TestWriteSSEHeartbeat(t *testing.T) {
 	rec := httptest.NewRecorder()

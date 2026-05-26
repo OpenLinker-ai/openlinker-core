@@ -32,11 +32,13 @@ type RegisterAgentViaBootstrapRequest struct {
 	BootstrapToken     string   `json:"bootstrap_token" validate:"required,min=24,max=128"`
 	Slug               string   `json:"slug" validate:"omitempty,min=3,max=80"`
 	Name               string   `json:"name" validate:"required,min=3,max=80"`
-	Description        string   `json:"description" validate:"required,max=500"`
+	Description        string   `json:"description" validate:"max=500"`
 	EndpointURL        string   `json:"endpoint_url" validate:"required,url,startswith=https://,max=500"`
 	EndpointAuthHeader string   `json:"endpoint_auth_header" validate:"max=500"`
-	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"required,min=1,max=1000000"`
+	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"max=1000000"`
 	Tags               []string `json:"tags" validate:"required,min=1,max=5,dive,min=2,max=30"`
+	AbilityTags        []string `json:"ability_tags" validate:"omitempty,max=5,dive,min=2,max=30"`
+	Visibility         string   `json:"visibility" validate:"omitempty,oneof=public unlisted private"`
 	RuntimeTokenName   string   `json:"runtime_token_name" validate:"omitempty,min=1,max=80"`
 }
 

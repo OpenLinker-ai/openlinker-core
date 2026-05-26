@@ -67,7 +67,7 @@ func (s *Service) SetDryRunner(r DryRunner) {
 //  1. 校验用户存在且 is_creator=true → 否则 Forbidden
 //  2. 校验 slug 格式 → 否则 Unprocessable
 //  3. CheckSlugAvailable → 否则 Conflict
-//  4. INSERT agents（status='approved'，立即公开）；UNIQUE 兜底再次 Conflict
+//  4. INSERT agents（默认 public，可显式选择 unlisted/private）；UNIQUE 兜底再次 Conflict
 func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *CreateAgentRequest) (*AgentResponse, error) {
 	user, err := s.queries.GetUserByID(ctx, creatorID)
 	if err != nil {
@@ -96,6 +96,10 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 	}
 
 	authHeader := normalizeAuthHeader(req.EndpointAuthHeader)
+	visibility := strings.TrimSpace(req.Visibility)
+	if visibility == "" {
+		visibility = "public"
+	}
 	created, err := s.queries.CreateAgent(ctx, db.CreateAgentParams{
 		CreatorID:          creatorID,
 		Slug:               slug,
@@ -105,6 +109,7 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 		EndpointAuthHeader: authHeader,
 		PricePerCallCents:  req.PricePerCallCents,
 		Tags:               normalizeTagsForInsert(req.Tags),
+		Visibility:         visibility,
 	})
 	if err != nil {
 		// UNIQUE violation 兜底（并发场景）
@@ -189,6 +194,45 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 	}
 	// 理论上 active 应当命中 RETURNING；走到这里说明并发导致状态变化
 	return nil, httpx.Conflict("Agent 状态已变化，请刷新后重试")
+}
+
+// SetVisibility 仅变更市场可见范围，避免客户端为了改状态而重传 endpoint 凭据。
+func (s *Service) SetVisibility(ctx context.Context, agentID, creatorID uuid.UUID, visibility string) (*AgentResponse, error) {
+	existing, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
+		ID:        agentID,
+		CreatorID: creatorID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("Agent 不存在")
+		}
+		log.Error().Err(err).Msg("agent.SetVisibility: GetAgentByIDForOwner")
+		return nil, httpx.Internal("查询 Agent 失败")
+	}
+	if existing.LifecycleStatus == "disabled" {
+		return nil, httpx.Forbidden("已下架的 Agent 不可编辑")
+	}
+	if err := s.queries.SetAgentVisibilityForOwner(ctx, db.SetAgentVisibilityForOwnerParams{
+		ID:         agentID,
+		CreatorID:  creatorID,
+		Visibility: strings.TrimSpace(visibility),
+	}); err != nil {
+		if isCheckViolation(err) {
+			return nil, httpx.Unprocessable("可见性不符合约束")
+		}
+		log.Error().Err(err).Msg("agent.SetVisibility: update")
+		return nil, httpx.Internal("更新可见性失败")
+	}
+	updated, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
+		ID:        agentID,
+		CreatorID: creatorID,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("agent.SetVisibility: refresh")
+		return nil, httpx.Internal("查询 Agent 失败")
+	}
+	resp := toAgentResponse(&updated)
+	return &resp, nil
 }
 
 // DisableAgent 创作者主动下架。

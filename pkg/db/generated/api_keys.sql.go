@@ -21,6 +21,7 @@ func scanApiKey(row interface {
 		&k.Name,
 		&k.Prefix,
 		&k.KeyHash,
+		&k.Scopes,
 		&k.LastUsedAt,
 		&k.RevokedAt,
 		&k.CreatedAt,
@@ -28,9 +29,9 @@ func scanApiKey(row interface {
 }
 
 const createApiKey = `-- name: CreateApiKey :one
-INSERT INTO api_keys (user_id, name, prefix, key_hash)
-VALUES ($1, $2, $3, $4)
-RETURNING id, user_id, name, prefix, key_hash, last_used_at, revoked_at, created_at`
+INSERT INTO api_keys (user_id, name, prefix, key_hash, scopes)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, user_id, name, prefix, key_hash, scopes, last_used_at, revoked_at, created_at`
 
 // CreateApiKeyParams 入参。
 type CreateApiKeyParams struct {
@@ -38,6 +39,7 @@ type CreateApiKeyParams struct {
 	Name    string    `db:"name" json:"name"`
 	Prefix  string    `db:"prefix" json:"prefix"`
 	KeyHash string    `db:"key_hash" json:"key_hash"`
+	Scopes  []string  `db:"scopes" json:"scopes"`
 }
 
 // CreateApiKey 创建 API Key 行（key_hash 应为 bcrypt 完整明文后的值）。
@@ -47,6 +49,7 @@ func (q *Queries) CreateApiKey(ctx context.Context, arg CreateApiKeyParams) (Api
 		arg.Name,
 		arg.Prefix,
 		arg.KeyHash,
+		arg.Scopes,
 	)
 	var k ApiKey
 	err := scanApiKey(row, &k)
@@ -54,7 +57,7 @@ func (q *Queries) CreateApiKey(ctx context.Context, arg CreateApiKeyParams) (Api
 }
 
 const listApiKeysByUser = `-- name: ListApiKeysByUser :many
-SELECT id, user_id, name, prefix, key_hash, last_used_at, revoked_at, created_at
+SELECT id, user_id, name, prefix, key_hash, scopes, last_used_at, revoked_at, created_at
 FROM api_keys
 WHERE user_id = $1
 ORDER BY created_at DESC`
@@ -94,7 +97,7 @@ func (q *Queries) CountActiveApiKeysByUser(ctx context.Context, userID uuid.UUID
 }
 
 const getApiKeyByID = `-- name: GetApiKeyByID :one
-SELECT id, user_id, name, prefix, key_hash, last_used_at, revoked_at, created_at
+SELECT id, user_id, name, prefix, key_hash, scopes, last_used_at, revoked_at, created_at
 FROM api_keys
 WHERE id = $1`
 
@@ -107,7 +110,7 @@ func (q *Queries) GetApiKeyByID(ctx context.Context, id uuid.UUID) (ApiKey, erro
 }
 
 const listApiKeysByPrefix = `-- name: ListApiKeysByPrefix :many
-SELECT id, user_id, name, prefix, key_hash, last_used_at, revoked_at, created_at
+SELECT id, user_id, name, prefix, key_hash, scopes, last_used_at, revoked_at, created_at
 FROM api_keys
 WHERE prefix = $1 AND revoked_at IS NULL`
 

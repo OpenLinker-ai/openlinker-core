@@ -2,6 +2,7 @@ package agent
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
@@ -96,6 +97,18 @@ func (h *RegistrationHandler) RegisterAgentViaBootstrap(c echo.Context) error {
 	var req RegisterAgentViaBootstrapRequest
 	if err := c.Bind(&req); err != nil {
 		return httpx.BadRequest("请求体格式错误")
+	}
+	if req.BootstrapToken == "" {
+		parts := strings.SplitN(c.Request().Header.Get(echo.HeaderAuthorization), " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			req.BootstrapToken = strings.TrimSpace(parts[1])
+		}
+	}
+	if len(req.Tags) == 0 {
+		req.Tags = req.AbilityTags
+	}
+	if req.Visibility == "" {
+		req.Visibility = "public"
 	}
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())

@@ -7,23 +7,29 @@ package agent
 type CreateAgentRequest struct {
 	Slug               string   `json:"slug" validate:"required,min=3,max=80"`
 	Name               string   `json:"name" validate:"required,min=3,max=80"`
-	Description        string   `json:"description" validate:"required,max=500"`
+	Description        string   `json:"description" validate:"max=500"`
 	EndpointURL        string   `json:"endpoint_url" validate:"required,url,startswith=https://,max=500"`
 	EndpointAuthHeader string   `json:"endpoint_auth_header" validate:"max=500"`
-	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"required,min=1,max=1000000"`
+	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"max=1000000"`
 	Tags               []string `json:"tags" validate:"required,min=1,max=5,dive,min=2,max=30"`
+	Visibility         string   `json:"visibility" validate:"omitempty,oneof=public unlisted private"`
 }
 
 // UpdateAgentRequest 编辑 Agent 请求体。slug 不可改。
 // Visibility 可空字符串视为不改，否则只接受 public / unlisted / private。
 type UpdateAgentRequest struct {
 	Name               string   `json:"name" validate:"required,min=3,max=80"`
-	Description        string   `json:"description" validate:"required,max=500"`
+	Description        string   `json:"description" validate:"max=500"`
 	EndpointURL        string   `json:"endpoint_url" validate:"required,url,startswith=https://,max=500"`
 	EndpointAuthHeader string   `json:"endpoint_auth_header" validate:"max=500"`
-	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"required,min=1,max=1000000"`
+	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"max=1000000"`
 	Tags               []string `json:"tags" validate:"required,min=1,max=5,dive,min=2,max=30"`
 	Visibility         string   `json:"visibility" validate:"omitempty,oneof=public unlisted private"`
+}
+
+// UpdateVisibilityRequest 仅切换市场可见性，不要求重传 endpoint 鉴权等敏感配置。
+type UpdateVisibilityRequest struct {
+	Visibility string `json:"visibility" validate:"required,oneof=public unlisted private"`
 }
 
 // AgentResponse 单个 Agent 的统一返回 DTO。

@@ -161,11 +161,12 @@ func readAgentStatus(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) (statu
 
 // forceAgentStatus 直接 SQL 改写 agent 三维状态（为了测各种状态过渡）。
 // 接受旧 status 文案；映射如下：
-//   approved → lifecycle=active, cert=unreviewed   （不写 certified_at）
-//   pending  → lifecycle=active, cert=pending
-//   rejected → lifecycle=active, cert=rejected
-//   disabled → lifecycle=disabled
-//   certified→ lifecycle=active, cert=certified, certified_at=NOW()
+//
+//	approved → lifecycle=active, cert=unreviewed   （不写 certified_at）
+//	pending  → lifecycle=active, cert=pending
+//	rejected → lifecycle=active, cert=rejected
+//	disabled → lifecycle=disabled
+//	certified→ lifecycle=active, cert=certified, certified_at=NOW()
 func forceAgentStatus(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, status string) {
 	t.Helper()
 	ctx := context.Background()
@@ -329,6 +330,23 @@ func TestUpdateAgent_HappyPath(t *testing.T) {
 	assert.Equal(t, "Updated Name", resp.Name)
 	assert.Equal(t, int32(999), resp.PricePerCallCents)
 	assert.ElementsMatch(t, []string{"updated"}, resp.Tags)
+}
+
+func TestSetVisibility_HappyPath(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	uid := insertCreatorWithWallet(t, pool)
+	created, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("visibility")))
+	require.NoError(t, err)
+	agentID, err := uuid.Parse(created.ID)
+	require.NoError(t, err)
+
+	resp, err := svc.SetVisibility(ctx, agentID, uid, "private")
+	require.NoError(t, err)
+	require.Equal(t, "private", resp.Visibility)
+	require.Equal(t, "active", resp.LifecycleStatus)
 }
 
 func TestUpdateAgent_ApprovedEditable(t *testing.T) {

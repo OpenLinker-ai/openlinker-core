@@ -65,6 +65,9 @@ func (h *Handler) RegisterProtected(api *echo.Group, runMw, queryMw echo.Middlew
 // 同步等待创作者 endpoint 返回（Phase 1 不做流式 / 异步队列）。
 // 失败 / 超时 → status='failed' or 'timeout'，已退款。
 func (h *Handler) PostRun(c echo.Context) error {
+	if err := requireAPIKeyScope(c, "agents:run"); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -85,6 +88,9 @@ func (h *Handler) PostRun(c echo.Context) error {
 
 // PostRunAsync 启动异步调用，立即返回 run_id，调用结果通过 GET /runs/:id 或 SSE 查询。
 func (h *Handler) PostRunAsync(c echo.Context) error {
+	if err := requireAPIKeyScope(c, "agents:run"); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -105,6 +111,9 @@ func (h *Handler) PostRunAsync(c echo.Context) error {
 
 // GetRun 查询单条调用详情（仅 owner）。
 func (h *Handler) GetRun(c echo.Context) error {
+	if err := requireAPIKeyScope(c, "runs:read"); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -123,6 +132,9 @@ func (h *Handler) GetRun(c echo.Context) error {
 
 // GetRunEvents 查询 run 事件流。SSE 接口后续会复用同一 service 方法。
 func (h *Handler) GetRunEvents(c echo.Context) error {
+	if err := requireAPIKeyScope(c, "runs:read"); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -152,6 +164,9 @@ func (h *Handler) GetRunEvents(c echo.Context) error {
 //
 // 已结束的 run 会回放事件后关闭；运行中的 run 会轮询等待新事件直到终态或客户端断开。
 func (h *Handler) StreamRunEvents(c echo.Context) error {
+	if err := requireAPIKeyScope(c, "runs:read"); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -271,6 +286,13 @@ func sourceFromCtx(c echo.Context) string {
 	default:
 		return "web"
 	}
+}
+
+func requireAPIKeyScope(c echo.Context, scope string) error {
+	if httpx.AuthMethodFrom(c) == "apikey" && !httpx.HasScope(c, scope) {
+		return httpx.Forbidden("API Key 缺少 scope: " + scope)
+	}
+	return nil
 }
 
 func parseOptionalInt32(raw string) (int32, error) {
