@@ -31,6 +31,37 @@ type DeliveryListItem struct {
 	UpdatedAt      string  `json:"updated_at"`
 }
 
+// CreateRunWebhookRequest POST /api/v1/runs/:id/webhooks.
+type CreateRunWebhookRequest struct {
+	URL        string   `json:"target_url" validate:"required,url,max=500"`
+	EventTypes []string `json:"event_types,omitempty" validate:"omitempty,dive,oneof=run.created run.started run.dispatch.pending run.dispatch.claimed run.requirements.snapshotted run.message.delta run.artifact.delta run.status.changed run.child.created run.child.completed run.completed run.failed"`
+}
+
+// RunWebhookSubscriptionResponse is returned to the run owner.
+type RunWebhookSubscriptionResponse struct {
+	ID                  string   `json:"id"`
+	RunID               string   `json:"run_id"`
+	TargetURL           string   `json:"target_url"`
+	EventTypes          []string `json:"event_types"`
+	Status              string   `json:"status"`
+	ConsecutiveFailures int32    `json:"consecutive_failures"`
+	Secret              string   `json:"secret,omitempty"`
+	CreatedAt           string   `json:"created_at"`
+	UpdatedAt           string   `json:"updated_at"`
+}
+
+// RunWebhookPayload is the A2A-style push body derived from run_events.
+type RunWebhookPayload struct {
+	EventID        string                 `json:"event_id"`
+	RunID          string                 `json:"run_id"`
+	ParentRunID    string                 `json:"parent_run_id,omitempty"`
+	EventType      string                 `json:"event_type"`
+	Sequence       int32                  `json:"sequence"`
+	Payload        map[string]interface{} `json:"payload"`
+	SubscriptionID string                 `json:"subscription_id"`
+	CreatedAt      string                 `json:"created_at"`
+}
+
 // WebhookPayload 投递给创作者 webhook_url 的 body。
 //
 // 字段含义：

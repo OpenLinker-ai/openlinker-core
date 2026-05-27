@@ -70,6 +70,41 @@ type ChooseRequest struct {
 	AgentID uuid.UUID `json:"agent_id" validate:"required"`
 }
 
+// ClaimRequest 创作者用自己的 Agent 接入任务广场任务。
+type ClaimRequest struct {
+	AgentID uuid.UUID `json:"agent_id" validate:"required"`
+}
+
+// CompleteRequest 把一次成功 run 写回任务。
+type CompleteRequest struct {
+	AgentID            uuid.UUID              `json:"agent_id" validate:"required"`
+	RunID              uuid.UUID              `json:"run_id" validate:"required"`
+	ResultSummary      string                 `json:"result_summary" validate:"required,min=1,max=2000"`
+	ResultArtifact     map[string]interface{} `json:"result_artifact,omitempty"`
+	DeliveryVisibility string                 `json:"delivery_visibility,omitempty" validate:"omitempty,oneof=private shared public_example"`
+}
+
+// RunTaskRequest 从任务详情直接启动一次 Agent 运行。
+type RunTaskRequest struct {
+	AgentID uuid.UUID              `json:"agent_id" validate:"required"`
+	Input   map[string]interface{} `json:"input,omitempty"`
+}
+
+// RunTaskResponse 返回任务级启动结果。run 字段保持 runtime.RunResponse 的 JSON 形状。
+type RunTaskResponse struct {
+	TaskID string      `json:"task_id"`
+	Status string      `json:"status"`
+	Run    interface{} `json:"run"`
+}
+
+// RevisionRequest 请求接单方修订交付结果。
+type RevisionRequest struct {
+	Note string `json:"note" validate:"required,min=1,max=2000"`
+}
+
+// DeliveryArtifact 是任务详情公开给任务相关方的结构化产物。
+type DeliveryArtifact map[string]interface{}
+
 // HistoryItem "我的任务"列表项（GET /tasks/me）。
 type HistoryItem struct {
 	ID                  string   `json:"id"`
@@ -77,8 +112,20 @@ type HistoryItem struct {
 	ParsedSkills        []string `json:"parsed_skills"`
 	MCPTools            []string `json:"mcp_tools"`
 	RecommendedAgentIDs []string `json:"recommended_agent_ids"`
+	Status              string   `json:"status"`
 	ChosenAgentID       *string  `json:"chosen_agent_id,omitempty"`
 	ChosenAt            *string  `json:"chosen_at,omitempty"`
+	ClaimedAgentID      *string  `json:"claimed_agent_id,omitempty"`
+	ClaimedByUserID     *string  `json:"claimed_by_user_id,omitempty"`
+	ClaimedAt           *string  `json:"claimed_at,omitempty"`
+	CompletionRunID     *string  `json:"completion_run_id,omitempty"`
+	CompletedAt         *string  `json:"completed_at,omitempty"`
+	CompletionSummary   *string  `json:"completion_summary,omitempty"`
+	DeliveryStatus      string   `json:"delivery_status"`
+	DeliveryVisibility  string   `json:"delivery_visibility"`
+	AcceptedAt          *string  `json:"accepted_at,omitempty"`
+	RevisionRequestedAt *string  `json:"revision_requested_at,omitempty"`
+	RevisionNote        *string  `json:"revision_note,omitempty"`
 	CreatedAt           string   `json:"created_at"`
 }
 
@@ -93,7 +140,11 @@ type PublicTaskItem struct {
 	MCPTools              []string     `json:"mcp_tools"`
 	MCPToolRefs           []MCPToolRef `json:"mcp_tool_refs"`
 	RecommendedAgentCount int          `json:"recommended_agent_count"`
-	Status                string       `json:"status"` // open / matched / needs_agent
+	Status                string       `json:"status"` // open / matched / in_progress / completed / needs_agent
+	ClaimedAgentID        *string      `json:"claimed_agent_id,omitempty"`
+	ClaimedAt             *string      `json:"claimed_at,omitempty"`
+	CompletedAt           *string      `json:"completed_at,omitempty"`
+	DeliveryStatus        string       `json:"delivery_status"`
 	CreatedAt             string       `json:"created_at"`
 }
 
@@ -103,14 +154,44 @@ type PublicTaskItem struct {
 // 让前端依然能渲染 3 张推荐卡。recommendations 按 recommended_agent_ids 顺序回填；
 // 若某 agent 已下架则跳过该位置。
 type DetailResponse struct {
-	ID              string           `json:"id"`
-	Query           string           `json:"query"`
-	ParsedSkills    []string         `json:"parsed_skills"`
-	ParsedSkillRefs []SkillRef       `json:"parsed_skill_refs"`
-	MCPTools        []string         `json:"mcp_tools"`
-	MCPToolRefs     []MCPToolRef     `json:"mcp_tool_refs"`
-	ChosenAgentID   *string          `json:"chosen_agent_id,omitempty"`
-	ChosenAt        *string          `json:"chosen_at,omitempty"`
-	CreatedAt       string           `json:"created_at"`
-	Recommendations []Recommendation `json:"recommendations"`
+	ID                  string           `json:"id"`
+	Query               string           `json:"query"`
+	ParsedSkills        []string         `json:"parsed_skills"`
+	ParsedSkillRefs     []SkillRef       `json:"parsed_skill_refs"`
+	MCPTools            []string         `json:"mcp_tools"`
+	MCPToolRefs         []MCPToolRef     `json:"mcp_tool_refs"`
+	Status              string           `json:"status"`
+	ChosenAgentID       *string          `json:"chosen_agent_id,omitempty"`
+	ChosenAt            *string          `json:"chosen_at,omitempty"`
+	ClaimedAgentID      *string          `json:"claimed_agent_id,omitempty"`
+	ClaimedByUserID     *string          `json:"claimed_by_user_id,omitempty"`
+	ClaimedAt           *string          `json:"claimed_at,omitempty"`
+	CompletionRunID     *string          `json:"completion_run_id,omitempty"`
+	CompletedAt         *string          `json:"completed_at,omitempty"`
+	CompletionSummary   *string          `json:"completion_summary,omitempty"`
+	DeliveryStatus      string           `json:"delivery_status"`
+	DeliveryVisibility  string           `json:"delivery_visibility"`
+	DeliveryArtifact    DeliveryArtifact `json:"delivery_artifact,omitempty"`
+	AcceptedAt          *string          `json:"accepted_at,omitempty"`
+	RevisionRequestedAt *string          `json:"revision_requested_at,omitempty"`
+	RevisionNote        *string          `json:"revision_note,omitempty"`
+	CreatedAt           string           `json:"created_at"`
+	Recommendations     []Recommendation `json:"recommendations"`
+}
+
+// WorkResponse 是 claim/complete 共享返回体。
+type WorkResponse struct {
+	TaskID              string  `json:"task_id"`
+	Status              string  `json:"status"`
+	Query               string  `json:"query"`
+	AgentID             string  `json:"agent_id"`
+	ClaimedAt           *string `json:"claimed_at,omitempty"`
+	CompletionRunID     *string `json:"completion_run_id,omitempty"`
+	CompletedAt         *string `json:"completed_at,omitempty"`
+	CompletionSummary   *string `json:"completion_summary,omitempty"`
+	DeliveryStatus      string  `json:"delivery_status"`
+	DeliveryVisibility  string  `json:"delivery_visibility"`
+	AcceptedAt          *string `json:"accepted_at,omitempty"`
+	RevisionRequestedAt *string `json:"revision_requested_at,omitempty"`
+	RevisionNote        *string `json:"revision_note,omitempty"`
 }

@@ -53,10 +53,15 @@ func (s *Service) GetAgent(ctx context.Context, req *GetAgentRequest) (*agent.Ag
 
 // RunAgent 转 runtime.Run，并标记 source='mcp'，让 /usage 能识别来源。
 func (s *Service) RunAgent(ctx context.Context, userID uuid.UUID, req *RunAgentRequest) (*runtime.RunResponse, error) {
+	metadata := map[string]interface{}{}
+	for k, v := range req.Metadata {
+		metadata[k] = v
+	}
+	metadata["used_mcp_tools"] = appendStringList(metadata["used_mcp_tools"], "run_agent")
 	return s.runtime.Run(ctx, userID, &runtime.RunRequest{
 		AgentID:  req.AgentID,
 		Input:    req.Input,
-		Metadata: req.Metadata,
+		Metadata: metadata,
 	}, "mcp")
 }
 
@@ -113,7 +118,7 @@ var mcpTools = []ToolDescriptor{
 			"properties": map[string]interface{}{
 				"agent_id": map[string]interface{}{"type": "string", "format": "uuid"},
 				"input":    map[string]interface{}{"type": "object", "description": "透传给创作者 endpoint 的输入"},
-				"metadata": map[string]interface{}{"type": "object", "description": "可选 metadata，原样透传"},
+				"metadata": map[string]interface{}{"type": "object", "description": "可选 metadata。传 task_id 可把本次 run 绑定到任务要求证据；used_mcp_tools 会与 run_agent 自动合并后记录。"},
 			},
 		},
 	},
@@ -209,4 +214,28 @@ func skillRefsSchema() map[string]interface{} {
 			},
 		},
 	}
+}
+
+func appendStringList(raw interface{}, item string) []string {
+	out := []string{}
+	switch v := raw.(type) {
+	case []string:
+		out = append(out, v...)
+	case []interface{}:
+		for _, entry := range v {
+			if s, ok := entry.(string); ok {
+				out = append(out, s)
+			}
+		}
+	case string:
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	for _, existing := range out {
+		if existing == item {
+			return out
+		}
+	}
+	return append(out, item)
 }

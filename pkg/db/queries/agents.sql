@@ -161,11 +161,18 @@ WHERE id = $1;
 SELECT a.*, u.display_name AS creator_name
 FROM agents a
 JOIN users u ON u.id = a.creator_id
+LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
 WHERE a.visibility = 'public'
   AND a.lifecycle_status = 'active'
   AND (cardinality($1::text[]) = 0 OR a.tags && $1::text[])
   AND ($2::text = '' OR a.name ILIKE '%' || $2 || '%' OR a.description ILIKE '%' || $2 || '%')
-ORDER BY a.created_at DESC
+ORDER BY CASE COALESCE(av.availability_status, 'unknown')
+    WHEN 'healthy' THEN 0
+    WHEN 'unknown' THEN 1
+    WHEN 'degraded' THEN 2
+    ELSE 3
+END ASC,
+    a.created_at DESC
 LIMIT $3 OFFSET $4;
 
 -- name: CountPublicAgents :one

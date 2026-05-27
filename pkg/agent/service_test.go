@@ -73,6 +73,7 @@ import (
 
 	"github.com/kinzhi/openlinker-core/pkg/agent"
 	"github.com/kinzhi/openlinker-core/pkg/config"
+	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
@@ -128,6 +129,15 @@ func validCreateReq(slug string) *agent.CreateAgentRequest {
 	}
 }
 
+type mockDryRunner struct {
+	output map[string]interface{}
+	errMsg string
+}
+
+func (m mockDryRunner) DryRun(_ context.Context, _ *db.Agent, _ map[string]interface{}) (map[string]interface{}, string) {
+	return m.output, m.errMsg
+}
+
 // assertHTTPStatusIn 接受多种允许的状态码（如 400 或 422）。
 func assertHTTPStatusIn(t *testing.T, err error, allowed ...int) {
 	t.Helper()
@@ -140,6 +150,35 @@ func assertHTTPStatusIn(t *testing.T, err error, allowed ...int) {
 		}
 	}
 	t.Fatalf("status %d not in allowed %v (msg=%s)", he.Status, allowed, he.Message)
+}
+
+func createDryRunReadyAgent(t *testing.T, svc *agent.Service, creatorID uuid.UUID, slug string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	created, err := svc.CreateAgent(ctx, creatorID, validCreateReq(slug))
+	require.NoError(t, err)
+	agentID := uuid.MustParse(created.ID)
+	_, err = svc.UpsertCapability(ctx, agentID, creatorID, &agent.UpsertCapabilityRequest{
+		InputSchema: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{"query": map[string]interface{}{"type": "string"}},
+			"required":   []interface{}{"query"},
+		},
+		OutputSchema: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{"result": map[string]interface{}{"type": "string"}},
+			"required":   []interface{}{"result"},
+		},
+		Summary: "dry run ready",
+	})
+	require.NoError(t, err)
+	_, err = svc.CreateExample(ctx, agentID, creatorID, &agent.CreateExampleRequest{
+		Title:              "health example",
+		InputJSON:          map[string]interface{}{"query": "ping"},
+		ExpectedOutputJSON: map[string]interface{}{"result": "pong"},
+	})
+	require.NoError(t, err)
+	return agentID
 }
 
 // readAgentStatus 直接 SQL 读 agent 表派生 status（与 toAgentResponse 的 deriveLegacyStatus 同口径）
@@ -650,6 +689,125 @@ func TestRejectCertification_EmptyReason(t *testing.T) {
 
 	err = svc.RejectCertification(ctx, agentID, "")
 	assertHTTPStatusIn(t, err, http.StatusBadRequest, http.StatusUnprocessableEntity)
+}
+
+func TestRunDryRunMarksAvailabilityHealthy(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	svc.SetDryRunner(mockDryRunner{output: map[string]interface{}{"result": "pong"}})
+	ctx := context.Background()
+
+	uid := insertCreatorWithWallet(t, pool)
+	agentID := createDryRunReadyAgent(t, svc, uid, freshSlug("dryrun-health"))
+
+	resp, err := svc.RunDryRun(ctx, agentID, uid)
+	require.NoError(t, err)
+	assert.Equal(t, "pass", resp.Result)
+	assert.Equal(t, "healthy", resp.Availability.Status)
+	assert.Empty(t, resp.RepairHints)
+
+	var status string
+	var failures int32
+	err = pool.QueryRow(ctx,
+		`SELECT availability_status, consecutive_failures
+		 FROM agent_availability_snapshots WHERE agent_id=$1`, agentID).
+		Scan(&status, &failures)
+	require.NoError(t, err)
+	assert.Equal(t, "healthy", status)
+	assert.Equal(t, int32(0), failures)
+}
+
+func TestRunDryRunFailureReturnsRepairHintsAndMarksDegraded(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	svc.SetDryRunner(mockDryRunner{errMsg: "endpoint 调用失败: connection refused"})
+	ctx := context.Background()
+
+	uid := insertCreatorWithWallet(t, pool)
+	agentID := createDryRunReadyAgent(t, svc, uid, freshSlug("dryrun-fail"))
+
+	resp, err := svc.RunDryRun(ctx, agentID, uid)
+	require.NoError(t, err)
+	assert.Equal(t, "fail", resp.Result)
+	assert.Equal(t, "degraded", resp.Availability.Status)
+	assert.NotEmpty(t, resp.RepairHints)
+
+	var status string
+	var failures int32
+	err = pool.QueryRow(ctx,
+		`SELECT availability_status, consecutive_failures
+		 FROM agent_availability_snapshots WHERE agent_id=$1`, agentID).
+		Scan(&status, &failures)
+	require.NoError(t, err)
+	assert.Equal(t, "degraded", status)
+	assert.Equal(t, int32(1), failures)
+}
+
+func TestRunDueAvailabilityChecksCreatesUnreadAlert(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	svc.SetDryRunner(mockDryRunner{errMsg: "endpoint 调用失败: connection refused"})
+	ctx := context.Background()
+
+	uid := insertCreatorWithWallet(t, pool)
+	agentID := createDryRunReadyAgent(t, svc, uid, freshSlug("monitor-fail"))
+
+	resp, err := svc.RunDueAvailabilityChecks(ctx, 10, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), resp.Checked)
+	assert.Equal(t, int32(1), resp.Failed)
+	require.Len(t, resp.Alerts, 1)
+	assert.Equal(t, agentID.String(), resp.Alerts[0].AgentID)
+	assert.Equal(t, "availability_failed", resp.Alerts[0].Type)
+	assert.Equal(t, "degraded", resp.Alerts[0].AvailabilityStatus)
+	assert.NotEmpty(t, resp.Alerts[0].RepairHints)
+
+	alerts, err := svc.ListAvailabilityAlerts(ctx, uid, 20)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), alerts.Total)
+	assert.Equal(t, int32(1), alerts.Unread)
+	require.Len(t, alerts.Items, 1)
+	assert.Equal(t, resp.Alerts[0].ID, alerts.Items[0].ID)
+	assert.Equal(t, "availability_failed", alerts.Items[0].Type)
+
+	alertID := uuid.MustParse(alerts.Items[0].ID)
+	_, err = svc.MarkAvailabilityAlertRead(ctx, uid, alertID)
+	require.NoError(t, err)
+	alerts, err = svc.ListAvailabilityAlerts(ctx, uid, 20)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), alerts.Unread)
+}
+
+func TestRunDueAvailabilityChecksCreatesRecoveryAlert(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	uid := insertCreatorWithWallet(t, pool)
+	agentID := createDryRunReadyAgent(t, svc, uid, freshSlug("monitor-recover"))
+
+	svc.SetDryRunner(mockDryRunner{errMsg: "endpoint 调用失败: timeout"})
+	_, err := svc.RunDueAvailabilityChecks(ctx, 10, 0)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx,
+		`UPDATE agent_availability_snapshots
+		 SET last_checked_at = NOW() - INTERVAL '1 hour'
+		 WHERE agent_id = $1`, agentID)
+	require.NoError(t, err)
+
+	svc.SetDryRunner(mockDryRunner{output: map[string]interface{}{"result": "pong"}})
+	resp, err := svc.RunDueAvailabilityChecks(ctx, 10, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), resp.Checked)
+	assert.Equal(t, int32(1), resp.Passed)
+	require.Len(t, resp.Alerts, 1)
+	assert.Equal(t, "availability_recovered", resp.Alerts[0].Type)
+	assert.Equal(t, "healthy", resp.Alerts[0].AvailabilityStatus)
+
+	alerts, err := svc.ListAvailabilityAlerts(ctx, uid, 20)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), alerts.Total)
+	assert.Contains(t, []string{alerts.Items[0].Type, alerts.Items[1].Type}, "availability_recovered")
 }
 
 // ────────────────────────────────────────────────────────────

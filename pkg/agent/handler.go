@@ -2,6 +2,7 @@ package agent
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
@@ -50,6 +51,9 @@ func (h *Handler) Register(api *echo.Group) {
 //	PUT    /creator/agents/:id/capabilities
 //	POST   /creator/agents/:id/examples
 //	DELETE /creator/agents/:id/examples/:exampleID
+//	POST   /creator/agents/:id/health-check
+//	GET    /creator/availability-alerts
+//	POST   /creator/availability-alerts/:alertID/read
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
 	me := api.Group("/me", jwtMiddleware)
 	me.POST("/become-creator", h.BecomeCreator)
@@ -67,7 +71,10 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	creator.POST("/agents/:id/examples", h.CreateExample)
 	creator.DELETE("/agents/:id/examples/:exampleID", h.DeleteExample)
 	creator.POST("/agents/:id/dry-run", h.RunDryRun)
+	creator.POST("/agents/:id/health-check", h.RunHealthCheck)
 	creator.POST("/agents/:id/request-certification", h.RequestCertification)
+	creator.GET("/availability-alerts", h.ListAvailabilityAlerts)
+	creator.POST("/availability-alerts/:alertID/read", h.MarkAvailabilityAlertRead)
 }
 
 // RegisterAdmin 管理员/运营人工处理端点（需 JWT + admin 双重中间件）。
@@ -320,6 +327,49 @@ func (h *Handler) RunDryRun(c echo.Context) error {
 		return err
 	}
 	resp, err := h.svc.RunDryRun(c.Request().Context(), id, uid)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// RunHealthCheck 是 dry-run 的产品化入口：同时刷新 Agent availability。
+func (h *Handler) RunHealthCheck(c echo.Context) error {
+	return h.RunDryRun(c)
+}
+
+// ListAvailabilityAlerts lists creator-visible Agent availability alerts.
+func (h *Handler) ListAvailabilityAlerts(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	limit := int32(50)
+	if raw := c.QueryParam("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return httpx.BadRequest("limit 不是合法数字")
+		}
+		limit = int32(n)
+	}
+	resp, err := h.svc.ListAvailabilityAlerts(c.Request().Context(), uid, limit)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// MarkAvailabilityAlertRead marks a creator availability alert as read.
+func (h *Handler) MarkAvailabilityAlertRead(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	alertID, err := pathUUID(c, "alertID")
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.MarkAvailabilityAlertRead(c.Request().Context(), uid, alertID)
 	if err != nil {
 		return err
 	}

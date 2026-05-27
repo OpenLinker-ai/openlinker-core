@@ -51,6 +51,18 @@ type Config struct {
 	RunTimeoutSeconds       int     `envconfig:"RUN_TIMEOUT_SECONDS" default:"60"`
 	MinWithdrawalCents      int     `envconfig:"MIN_WITHDRAWAL_CENTS" default:"5000"`
 	AllowLocalHTTPEndpoints bool    `envconfig:"ALLOW_LOCAL_HTTP_ENDPOINTS" default:"false"`
+
+	// Agent availability monitor.
+	AvailabilityMonitorEnabled             bool `envconfig:"AVAILABILITY_MONITOR_ENABLED" default:"true"`
+	AvailabilityMonitorIntervalSeconds     int  `envconfig:"AVAILABILITY_MONITOR_INTERVAL_SECONDS" default:"300"`
+	AvailabilityMonitorInitialDelaySeconds int  `envconfig:"AVAILABILITY_MONITOR_INITIAL_DELAY_SECONDS" default:"60"`
+	AvailabilityMonitorStaleSeconds        int  `envconfig:"AVAILABILITY_MONITOR_STALE_SECONDS" default:"900"`
+	AvailabilityMonitorBatchSize           int  `envconfig:"AVAILABILITY_MONITOR_BATCH_SIZE" default:"20"`
+
+	// Registry / Bridge proxy run timeout worker.
+	RegistryProxyRunWorkerEnabled         bool `envconfig:"REGISTRY_PROXY_RUN_WORKER_ENABLED" default:"true"`
+	RegistryProxyRunWorkerIntervalSeconds int  `envconfig:"REGISTRY_PROXY_RUN_WORKER_INTERVAL_SECONDS" default:"30"`
+	RegistryProxyRunTimeoutSeconds        int  `envconfig:"REGISTRY_PROXY_RUN_TIMEOUT_SECONDS" default:"900"`
 }
 
 // Load 从环境变量加载配置。

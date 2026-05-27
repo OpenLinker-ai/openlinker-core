@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -14,13 +15,16 @@ import (
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 	"github.com/kinzhi/openlinker-core/pkg/llm"
+	"github.com/kinzhi/openlinker-core/pkg/runtime"
 )
 
 const (
 	// 默认占位值。评分系统未上线前所有 Agent 显示统一评分。
-	placeholderAvgRating float32 = 4.8
-	maxTaskSkillRefs             = 5
-	maxTaskMCPTools              = 5
+	placeholderAvgRating    float32 = 4.8
+	maxTaskSkillRefs                = 5
+	maxTaskMCPTools                 = 5
+	maxTaskResultSummaryLen         = 2000
+	maxTaskRevisionNoteLen          = 2000
 )
 
 var mcpToolCatalog = []MCPToolRef{
@@ -49,6 +53,11 @@ type SkillRecommender interface {
 	RecommendAgentsBySkills(ctx context.Context, skillIDs []string, limit int) ([]AgentMatch, error)
 }
 
+// RuntimeStarter 是任务直接运行 Agent 时需要的最小 runtime 能力。
+type RuntimeStarter interface {
+	StartRun(ctx context.Context, userID uuid.UUID, req *runtime.RunRequest, source string) (*runtime.RunResponse, error)
+}
+
 // Service 任务驱动 A 形态业务逻辑。
 //
 // allSkills 在 NewService 时一次性预热，后续仅读不写；30 个固定值，内存可忽略。
@@ -57,6 +66,7 @@ type Service struct {
 	queries   *db.Queries
 	llm       llm.Client
 	skillSvc  SkillRecommender
+	runner    RuntimeStarter
 	allSkills []db.Skill
 }
 
@@ -82,6 +92,11 @@ func NewService(pool *pgxpool.Pool, llmClient llm.Client, skillSvc SkillRecommen
 	log.Info().Int("skill_count", len(skills)).Bool("llm_enabled", llmClient != nil).
 		Msg("task service ready")
 	return s
+}
+
+// SetRunStarter 注入 runtime.Service，使任务详情可以直接启动一次 Agent run。
+func (s *Service) SetRunStarter(runner RuntimeStarter) {
+	s.runner = runner
 }
 
 // Recommend 主流程：解析 → 推荐 → 回填 → 持久化。
@@ -266,6 +281,269 @@ func (s *Service) Choose(ctx context.Context, taskID, userID, agentID uuid.UUID)
 	return nil
 }
 
+// Claim 让创作者用自己的 Agent 接入公开任务。它只登记任务工作关系；
+// 实际运行仍走 /runs，成功后再调用 Complete 写回结果。
+func (s *Service) Claim(ctx context.Context, taskID, userID, agentID uuid.UUID) (*WorkResponse, error) {
+	if agentID == uuid.Nil {
+		return nil, httpx.Unprocessable("agent_id 不能为空")
+	}
+	agent, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
+		ID:        agentID,
+		CreatorID: userID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("Agent 不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("task.Claim: GetAgentByIDForOwner")
+		return nil, httpx.Internal("查询 Agent 失败")
+	}
+	if agent.LifecycleStatus != "active" || agent.Visibility == "private" {
+		return nil, httpx.Conflict("Agent 当前不可用于接任务")
+	}
+
+	t, err := s.queries.GetTaskQuery(ctx, taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("任务不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Claim: GetTaskQuery")
+		return nil, httpx.Internal("查询任务失败")
+	}
+	if t.CompletedAt != nil {
+		return nil, httpx.Conflict("任务已完成，不能重复接入")
+	}
+	if t.ClaimedAgentID != nil {
+		return nil, httpx.Conflict("任务已经有 Agent 接入")
+	}
+	if t.ChosenAgentID != nil {
+		return nil, httpx.Conflict("任务发布者已经选择了 Agent")
+	}
+
+	claimed, err := s.queries.ClaimTaskQuery(ctx, db.ClaimTaskQueryParams{
+		ID:      taskID,
+		UserID:  userID,
+		AgentID: agentID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.Conflict("任务已经被接入或完成")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Claim: ClaimTaskQuery")
+		return nil, httpx.Internal("接入任务失败")
+	}
+	return toWorkResponse(&claimed, agentID), nil
+}
+
+// Complete 把一次成功 run 绑定回任务。任务发布者选择推荐 Agent 后可完成；
+// 任务广场接单方也可在自己的 Agent 跑完后完成。
+func (s *Service) Complete(ctx context.Context, taskID, userID uuid.UUID, req *CompleteRequest) (*WorkResponse, error) {
+	if req == nil {
+		return nil, httpx.Unprocessable("请求体不能为空")
+	}
+	summary := strings.TrimSpace(req.ResultSummary)
+	if summary == "" || len(summary) > maxTaskResultSummaryLen {
+		return nil, httpx.Unprocessable("result_summary 长度需在 1-2000 字符之间")
+	}
+	if req.AgentID == uuid.Nil || req.RunID == uuid.Nil {
+		return nil, httpx.Unprocessable("agent_id 和 run_id 不能为空")
+	}
+
+	t, err := s.queries.GetTaskQuery(ctx, taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("任务不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Complete: GetTaskQuery")
+		return nil, httpx.Internal("查询任务失败")
+	}
+	if t.CompletedAt != nil && t.DeliveryStatus != "revision_requested" {
+		return nil, httpx.Conflict("任务已完成，不能重复提交结果")
+	}
+	allowed := t.UserID == userID
+	if t.ClaimedByUserID != nil && *t.ClaimedByUserID == userID {
+		allowed = true
+	}
+	if !allowed {
+		return nil, httpx.NotFound("任务不存在")
+	}
+
+	if t.ClaimedAgentID != nil {
+		if *t.ClaimedAgentID != req.AgentID {
+			return nil, httpx.Conflict("run 的 Agent 与接入任务的 Agent 不一致")
+		}
+	} else if t.ChosenAgentID != nil {
+		if *t.ChosenAgentID != req.AgentID {
+			return nil, httpx.Conflict("run 的 Agent 与任务选择的 Agent 不一致")
+		}
+	} else {
+		return nil, httpx.Conflict("任务还没有接入 Agent")
+	}
+
+	run, err := s.queries.GetRunByID(ctx, req.RunID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("运行记录不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("run_id", req.RunID.String()).Msg("task.Complete: GetRunByID")
+		return nil, httpx.Internal("查询运行记录失败")
+	}
+	if run.UserID != userID || run.AgentID != req.AgentID {
+		return nil, httpx.NotFound("运行记录不存在")
+	}
+	if run.Status != "success" {
+		return nil, httpx.Conflict("只有成功完成的 run 才能写回任务结果")
+	}
+	artifact := req.ResultArtifact
+	if artifact == nil {
+		artifact = map[string]interface{}{}
+		if len(run.Output) > 0 {
+			_ = json.Unmarshal(run.Output, &artifact)
+		}
+	}
+	artifactJSON, err := json.Marshal(artifact)
+	if err != nil {
+		return nil, httpx.BadRequest("result_artifact 不是合法 JSON")
+	}
+	visibility := normalizeDeliveryVisibility(req.DeliveryVisibility)
+
+	completed, err := s.queries.CompleteTaskQuery(ctx, db.CompleteTaskQueryParams{
+		ID:                 taskID,
+		UserID:             userID,
+		AgentID:            req.AgentID,
+		CompletionRunID:    req.RunID,
+		CompletionSummary:  summary,
+		DeliveryArtifact:   artifactJSON,
+		DeliveryVisibility: visibility,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.Conflict("任务状态已变化，请刷新后重试")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Complete: CompleteTaskQuery")
+		return nil, httpx.Internal("提交任务结果失败")
+	}
+	return toWorkResponse(&completed, req.AgentID), nil
+}
+
+// AcceptDelivery marks a submitted task result as accepted. Only the task
+// poster can accept a delivery.
+func (s *Service) AcceptDelivery(ctx context.Context, taskID, userID uuid.UUID) (*WorkResponse, error) {
+	accepted, err := s.queries.AcceptTaskDelivery(ctx, db.AcceptTaskDeliveryParams{
+		ID:     taskID,
+		UserID: userID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.Conflict("任务结果不可验收，请确认已提交且未验收")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.AcceptDelivery")
+		return nil, httpx.Internal("验收任务失败")
+	}
+	agentID := uuid.Nil
+	if accepted.ClaimedAgentID != nil {
+		agentID = *accepted.ClaimedAgentID
+	} else if accepted.ChosenAgentID != nil {
+		agentID = *accepted.ChosenAgentID
+	}
+	return toWorkResponse(&accepted, agentID), nil
+}
+
+// RequestRevision asks the worker to resubmit a completed task delivery.
+func (s *Service) RequestRevision(ctx context.Context, taskID, userID uuid.UUID, req *RevisionRequest) (*WorkResponse, error) {
+	if req == nil {
+		return nil, httpx.Unprocessable("请求体不能为空")
+	}
+	note := strings.TrimSpace(req.Note)
+	if note == "" || len(note) > maxTaskRevisionNoteLen {
+		return nil, httpx.Unprocessable("note 长度需在 1-2000 字符之间")
+	}
+	revision, err := s.queries.RequestTaskRevision(ctx, db.RequestTaskRevisionParams{
+		ID:           taskID,
+		UserID:       userID,
+		RevisionNote: note,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.Conflict("任务结果不可要求修订，请确认已提交且未验收")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.RequestRevision")
+		return nil, httpx.Internal("请求修订失败")
+	}
+	agentID := uuid.Nil
+	if revision.ClaimedAgentID != nil {
+		agentID = *revision.ClaimedAgentID
+	} else if revision.ChosenAgentID != nil {
+		agentID = *revision.ChosenAgentID
+	}
+	return toWorkResponse(&revision, agentID), nil
+}
+
+// RunTask 从任务详情启动一次运行。它要求任务已经被发布者选择 Agent，
+// 或已经由创作者接入；结果终态仍由 Complete 写回，便于 async run 统一处理。
+func (s *Service) RunTask(ctx context.Context, taskID, userID uuid.UUID, req *RunTaskRequest) (*RunTaskResponse, error) {
+	if s.runner == nil {
+		return nil, httpx.Internal("任务运行服务未配置")
+	}
+	if req == nil {
+		return nil, httpx.Unprocessable("请求体不能为空")
+	}
+	if req.AgentID == uuid.Nil {
+		return nil, httpx.Unprocessable("agent_id 不能为空")
+	}
+	t, err := s.queries.GetTaskQuery(ctx, taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("任务不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.RunTask: GetTaskQuery")
+		return nil, httpx.Internal("查询任务失败")
+	}
+	if t.CompletedAt != nil && t.DeliveryStatus != "revision_requested" {
+		return nil, httpx.Conflict("任务已完成，不能重复运行")
+	}
+	allowed := t.UserID == userID
+	if t.ClaimedByUserID != nil && *t.ClaimedByUserID == userID {
+		allowed = true
+	}
+	if !allowed {
+		return nil, httpx.NotFound("任务不存在")
+	}
+
+	if t.ClaimedAgentID != nil {
+		if *t.ClaimedAgentID != req.AgentID {
+			return nil, httpx.Conflict("只能运行已接入任务的 Agent")
+		}
+	} else if t.ChosenAgentID != nil {
+		if *t.ChosenAgentID != req.AgentID {
+			return nil, httpx.Conflict("只能运行任务发布者已选择的 Agent")
+		}
+	} else {
+		return nil, httpx.Conflict("请先选择或接入 Agent")
+	}
+
+	input := req.Input
+	if input == nil {
+		input = map[string]interface{}{"text": t.Query}
+	}
+	resp, err := s.runner.StartRun(ctx, userID, &runtime.RunRequest{
+		AgentID: req.AgentID.String(),
+		Input:   input,
+		Metadata: map[string]interface{}{
+			"task_id": taskID.String(),
+			"source":  "task",
+		},
+	}, "web")
+	if err != nil {
+		return nil, err
+	}
+	return &RunTaskResponse{
+		TaskID: taskID.String(),
+		Status: taskStatus(&t),
+		Run:    resp,
+	}, nil
+}
+
 // ListMine 用户最近 limit 条任务历史（默认上限 20）。
 func (s *Service) ListMine(ctx context.Context, userID uuid.UUID, limit int32) ([]HistoryItem, error) {
 	if limit <= 0 || limit > 20 {
@@ -337,6 +615,7 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 		ParsedSkills: append([]string{}, t.ParsedSkills...),
 		MCPTools:     append([]string{}, t.MCPTools...),
 		MCPToolRefs:  mcpToolRefsForNames(t.MCPTools),
+		Status:       taskStatus(&t),
 		CreatedAt:    t.CreatedAt.UTC().Format(time.RFC3339),
 
 		Recommendations: []Recommendation{},
@@ -349,6 +628,8 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 		ts := t.ChosenAt.UTC().Format(time.RFC3339)
 		resp.ChosenAt = &ts
 	}
+	attachTaskWorkFields(&t, &resp.ClaimedAgentID, &resp.ClaimedByUserID, &resp.ClaimedAt, &resp.CompletionRunID, &resp.CompletedAt, &resp.CompletionSummary)
+	attachTaskDeliveryFields(&t, &resp.DeliveryStatus, &resp.DeliveryVisibility, &resp.DeliveryArtifact, &resp.AcceptedAt, &resp.RevisionRequestedAt, &resp.RevisionNote)
 
 	// 用 catalog 回填 Why 文案（与 Recommend 一致）
 	skills := s.allSkills
@@ -617,6 +898,7 @@ func toHistoryItem(t *db.TaskQuery) HistoryItem {
 		ParsedSkills:        append([]string{}, t.ParsedSkills...),
 		MCPTools:            append([]string{}, t.MCPTools...),
 		RecommendedAgentIDs: make([]string, 0, len(t.RecommendedAgentIDs)),
+		Status:              taskStatus(t),
 		CreatedAt:           t.CreatedAt.UTC().Format(time.RFC3339),
 	}
 	for _, id := range t.RecommendedAgentIDs {
@@ -630,17 +912,13 @@ func toHistoryItem(t *db.TaskQuery) HistoryItem {
 		ts := t.ChosenAt.UTC().Format(time.RFC3339)
 		item.ChosenAt = &ts
 	}
+	attachTaskWorkFields(t, &item.ClaimedAgentID, &item.ClaimedByUserID, &item.ClaimedAt, &item.CompletionRunID, &item.CompletedAt, &item.CompletionSummary)
+	attachTaskDeliveryFields(t, &item.DeliveryStatus, &item.DeliveryVisibility, nil, &item.AcceptedAt, &item.RevisionRequestedAt, &item.RevisionNote)
 	return item
 }
 
 func toPublicTaskItem(t *db.TaskQuery, skillByID map[string]db.Skill) PublicTaskItem {
-	status := "open"
-	if t.ChosenAgentID != nil {
-		status = "matched"
-	} else if len(t.RecommendedAgentIDs) == 0 {
-		status = "needs_agent"
-	}
-	return PublicTaskItem{
+	item := PublicTaskItem{
 		ID:                    t.ID.String(),
 		Query:                 t.Query,
 		ParsedSkills:          append([]string{}, t.ParsedSkills...),
@@ -648,7 +926,164 @@ func toPublicTaskItem(t *db.TaskQuery, skillByID map[string]db.Skill) PublicTask
 		MCPTools:              append([]string{}, t.MCPTools...),
 		MCPToolRefs:           mcpToolRefsForNames(t.MCPTools),
 		RecommendedAgentCount: len(t.RecommendedAgentIDs),
-		Status:                status,
+		Status:                taskStatus(t),
 		CreatedAt:             t.CreatedAt.UTC().Format(time.RFC3339),
 	}
+	if t.ClaimedAgentID != nil {
+		s := t.ClaimedAgentID.String()
+		item.ClaimedAgentID = &s
+	}
+	if t.ClaimedAt != nil {
+		ts := t.ClaimedAt.UTC().Format(time.RFC3339)
+		item.ClaimedAt = &ts
+	}
+	if t.CompletedAt != nil {
+		ts := t.CompletedAt.UTC().Format(time.RFC3339)
+		item.CompletedAt = &ts
+	}
+	item.DeliveryStatus = t.DeliveryStatus
+	if item.DeliveryStatus == "" {
+		item.DeliveryStatus = "pending"
+	}
+	return item
+}
+
+func taskStatus(t *db.TaskQuery) string {
+	switch {
+	case t.DeliveryStatus == "accepted":
+		return "accepted"
+	case t.DeliveryStatus == "revision_requested":
+		return "revision_requested"
+	case t.CompletedAt != nil:
+		return "completed"
+	case t.ClaimedAgentID != nil:
+		return "in_progress"
+	case t.ChosenAgentID != nil:
+		return "matched"
+	case len(t.RecommendedAgentIDs) == 0:
+		return "needs_agent"
+	default:
+		return "open"
+	}
+}
+
+func normalizeDeliveryVisibility(raw string) string {
+	raw = strings.TrimSpace(raw)
+	switch raw {
+	case "shared", "public_example":
+		return raw
+	default:
+		return "private"
+	}
+}
+
+func deliveryArtifact(raw []byte) DeliveryArtifact {
+	if len(raw) == 0 {
+		return nil
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	return DeliveryArtifact(out)
+}
+
+func attachTaskDeliveryFields(
+	t *db.TaskQuery,
+	deliveryStatus *string,
+	deliveryVisibility *string,
+	deliveryArtifactOut *DeliveryArtifact,
+	acceptedAt **string,
+	revisionRequestedAt **string,
+	revisionNote **string,
+) {
+	if deliveryStatus != nil {
+		*deliveryStatus = t.DeliveryStatus
+		if *deliveryStatus == "" {
+			*deliveryStatus = "pending"
+		}
+	}
+	if deliveryVisibility != nil {
+		*deliveryVisibility = t.DeliveryVisibility
+		if *deliveryVisibility == "" {
+			*deliveryVisibility = "private"
+		}
+	}
+	if deliveryArtifactOut != nil {
+		*deliveryArtifactOut = deliveryArtifact(t.DeliveryArtifact)
+	}
+	if acceptedAt != nil && t.AcceptedAt != nil {
+		ts := t.AcceptedAt.UTC().Format(time.RFC3339)
+		*acceptedAt = &ts
+	}
+	if revisionRequestedAt != nil && t.RevisionRequestedAt != nil {
+		ts := t.RevisionRequestedAt.UTC().Format(time.RFC3339)
+		*revisionRequestedAt = &ts
+	}
+	if revisionNote != nil && t.RevisionNote != nil {
+		s := *t.RevisionNote
+		*revisionNote = &s
+	}
+}
+
+func attachTaskWorkFields(
+	t *db.TaskQuery,
+	claimedAgentID **string,
+	claimedByUserID **string,
+	claimedAt **string,
+	completionRunID **string,
+	completedAt **string,
+	completionSummary **string,
+) {
+	if t.ClaimedAgentID != nil {
+		s := t.ClaimedAgentID.String()
+		*claimedAgentID = &s
+	}
+	if t.ClaimedByUserID != nil {
+		s := t.ClaimedByUserID.String()
+		*claimedByUserID = &s
+	}
+	if t.ClaimedAt != nil {
+		ts := t.ClaimedAt.UTC().Format(time.RFC3339)
+		*claimedAt = &ts
+	}
+	if t.CompletionRunID != nil {
+		s := t.CompletionRunID.String()
+		*completionRunID = &s
+	}
+	if t.CompletedAt != nil {
+		ts := t.CompletedAt.UTC().Format(time.RFC3339)
+		*completedAt = &ts
+	}
+	if t.CompletionSummary != nil {
+		s := *t.CompletionSummary
+		*completionSummary = &s
+	}
+}
+
+func toWorkResponse(t *db.TaskQuery, agentID uuid.UUID) *WorkResponse {
+	resp := &WorkResponse{
+		TaskID:  t.ID.String(),
+		Status:  taskStatus(t),
+		Query:   t.Query,
+		AgentID: agentID.String(),
+	}
+	if t.ClaimedAt != nil {
+		ts := t.ClaimedAt.UTC().Format(time.RFC3339)
+		resp.ClaimedAt = &ts
+	}
+	if t.CompletionRunID != nil {
+		s := t.CompletionRunID.String()
+		resp.CompletionRunID = &s
+	}
+	if t.CompletedAt != nil {
+		ts := t.CompletedAt.UTC().Format(time.RFC3339)
+		resp.CompletedAt = &ts
+	}
+	if t.CompletionSummary != nil {
+		s := *t.CompletionSummary
+		resp.CompletionSummary = &s
+	}
+	attachTaskDeliveryFields(t, &resp.DeliveryStatus, &resp.DeliveryVisibility, nil, &resp.AcceptedAt, &resp.RevisionRequestedAt, &resp.RevisionNote)
+	return resp
 }

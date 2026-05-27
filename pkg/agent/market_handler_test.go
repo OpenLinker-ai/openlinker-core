@@ -232,6 +232,28 @@ func TestGetBySlug_HandlerNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "body=%s", string(raw))
 }
 
+func TestGetAgentCard_HandlerHappyPath(t *testing.T) {
+	srv, pool := setupTestServer(t)
+	creatorID, _ := setupTestData(t, pool)
+
+	createApprovedAgent(t, pool, creatorID, "agent-card",
+		WithName("Agent Card"),
+		WithTags([]string{"finance"}))
+
+	resp, raw := getJSON(t, srv.URL, "/api/v1/agents/agent-card/agent-card.json", nil)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "body=%s", string(raw))
+	assert.Equal(t, "public, max-age=300", resp.Header.Get("Cache-Control"))
+
+	var card map[string]any
+	require.NoError(t, json.Unmarshal(raw, &card), "raw=%s", string(raw))
+	assert.Equal(t, "Agent Card", card["name"])
+	assert.Equal(t, "/api/v1/run", card["url"])
+	openlinker, ok := card["openlinker"].(map[string]any)
+	require.True(t, ok, "openlinker extension must exist; body=%s", string(raw))
+	assert.Equal(t, "agent-card", openlinker["slug"])
+	assert.NotContains(t, string(raw), "endpoint_auth_header")
+}
+
 // TestGetBySlug_NoAuthRequired 验证市场端点完全公开 —— 不带 Authorization 仍 200。
 func TestGetBySlug_NoAuthRequired(t *testing.T) {
 	srv, pool := setupTestServer(t)

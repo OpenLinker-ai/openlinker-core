@@ -18,7 +18,7 @@ import (
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 )
 
-const truncateWebhookTables = "TRUNCATE webhook_deliveries, api_keys, wallets, runs, charges, withdrawals, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"
+const truncateWebhookTables = "TRUNCATE run_webhook_deliveries, run_webhook_subscriptions, webhook_deliveries, api_keys, wallets, runs, charges, withdrawals, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"
 
 func setupWebhookTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -188,6 +188,137 @@ func TestEnqueueDeliveryPostsSignedPayload(t *testing.T) {
 		items, err := svc.ListDeliveries(context.Background(), agentID, creatorID, 20)
 		return err == nil && len(items) == 1 && items[0].Status == "success" && items[0].AttemptCount == 1
 	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestRunWebhookSubscriptionDeliversSignedRunEvent(t *testing.T) {
+	pool := setupWebhookTestDB(t)
+	svc := NewService(pool)
+	userID := insertWebhookUser(t, pool, false)
+	creatorID := insertWebhookUser(t, pool, true)
+	agentID := insertWebhookAgent(t, pool, creatorID, "run-webhook-"+uuid.NewString()[:8])
+	run := insertWebhookRun(t, pool, userID, agentID)
+
+	type receivedRequest struct {
+		body      []byte
+		signature string
+		event     string
+		delivery  string
+	}
+	gotCh := make(chan receivedRequest, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotCh <- receivedRequest{
+			body:      body,
+			signature: r.Header.Get("X-OpenLinker-Signature"),
+			event:     r.Header.Get("X-OpenLinker-Event"),
+			delivery:  r.Header.Get("X-OpenLinker-Delivery"),
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	svc.httpClient = server.Client()
+
+	sub, err := svc.CreateRunWebhookSubscription(context.Background(), run.ID, userID, &CreateRunWebhookRequest{
+		URL:        server.URL,
+		EventTypes: []string{"run.completed"},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, sub.Secret)
+
+	event, err := db.New(pool).CreateRunEvent(context.Background(), db.CreateRunEventParams{
+		RunID:     run.ID,
+		EventType: "run.completed",
+		Payload:   []byte(`{"status":"success"}`),
+	})
+	require.NoError(t, err)
+	require.NoError(t, svc.EnqueueRunEvent(context.Background(), event))
+
+	var got receivedRequest
+	select {
+	case got = <-gotCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run webhook endpoint was not called")
+	}
+	assert.Equal(t, "run.completed", got.event)
+	assert.NotEmpty(t, got.delivery)
+	assert.Equal(t, "sha256="+signPayload(got.body, sub.Secret), got.signature)
+
+	var payload RunWebhookPayload
+	require.NoError(t, json.Unmarshal(got.body, &payload))
+	assert.Equal(t, event.ID.String(), payload.EventID)
+	assert.Equal(t, run.ID.String(), payload.RunID)
+	assert.Equal(t, int32(1), payload.Sequence)
+	assert.Equal(t, "success", payload.Payload["status"])
+
+	require.Eventually(t, func() bool {
+		var status string
+		var attemptCount int32
+		err := pool.QueryRow(context.Background(),
+			`SELECT status, attempt_count FROM run_webhook_deliveries WHERE run_event_id=$1`,
+			event.ID).Scan(&status, &attemptCount)
+		return err == nil && status == "success" && attemptCount == 1
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestRunWebhookSubscriptionCanPauseAndResumeNonTerminalEvents(t *testing.T) {
+	pool := setupWebhookTestDB(t)
+	svc := NewService(pool)
+	userID := insertWebhookUser(t, pool, false)
+	creatorID := insertWebhookUser(t, pool, true)
+	agentID := insertWebhookAgent(t, pool, creatorID, "run-webhook-pause-"+uuid.NewString()[:8])
+	run := insertWebhookRun(t, pool, userID, agentID)
+
+	gotCh := make(chan string, 2)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCh <- r.Header.Get("X-OpenLinker-Event")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	svc.httpClient = server.Client()
+
+	sub, err := svc.CreateRunWebhookSubscription(context.Background(), run.ID, userID, &CreateRunWebhookRequest{
+		URL:        server.URL,
+		EventTypes: []string{"run.message.delta"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"run.message.delta"}, sub.EventTypes)
+
+	paused, err := svc.UpdateRunWebhookSubscriptionStatus(context.Background(), run.ID, uuid.MustParse(sub.ID), userID, "paused")
+	require.NoError(t, err)
+	assert.Equal(t, "paused", paused.Status)
+
+	messageEvent, err := db.New(pool).CreateRunEvent(context.Background(), db.CreateRunEventParams{
+		RunID:     run.ID,
+		EventType: "run.message.delta",
+		Payload:   []byte(`{"text":"intermediate update"}`),
+	})
+	require.NoError(t, err)
+	require.NoError(t, svc.EnqueueRunEvent(context.Background(), messageEvent))
+
+	select {
+	case event := <-gotCh:
+		t.Fatalf("paused run webhook should not receive event, got %s", event)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	resumed, err := svc.UpdateRunWebhookSubscriptionStatus(context.Background(), run.ID, uuid.MustParse(sub.ID), userID, "active")
+	require.NoError(t, err)
+	assert.Equal(t, "active", resumed.Status)
+
+	messageEvent2, err := db.New(pool).CreateRunEvent(context.Background(), db.CreateRunEventParams{
+		RunID:     run.ID,
+		EventType: "run.message.delta",
+		Payload:   []byte(`{"text":"after resume"}`),
+	})
+	require.NoError(t, err)
+	require.NoError(t, svc.EnqueueRunEvent(context.Background(), messageEvent2))
+
+	select {
+	case event := <-gotCh:
+		assert.Equal(t, "run.message.delta", event)
+	case <-time.After(2 * time.Second):
+		t.Fatal("resumed run webhook endpoint was not called")
+	}
 }
 
 func TestAttemptDeliveryRetriesAndThenFailsFinal(t *testing.T) {

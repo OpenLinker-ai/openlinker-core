@@ -9,16 +9,17 @@ package agent
 //
 // 仅暴露公开字段；endpoint_url / endpoint_auth_header 不出现在列表里。
 type MarketListItem struct {
-	ID                string      `json:"id"`
-	Slug              string      `json:"slug"`
-	Name              string      `json:"name"`
-	Description       string      `json:"description"`
-	PricePerCallCents int32       `json:"price_per_call_cents"`
-	Tags              []string    `json:"tags"`
-	TotalCalls        int32       `json:"total_calls"`
-	Creator           CreatorMini `json:"creator"`
-	ConnectionMode    string      `json:"connection_mode"`
-	MCPToolName       *string     `json:"mcp_tool_name,omitempty"`
+	ID                string       `json:"id"`
+	Slug              string       `json:"slug"`
+	Name              string       `json:"name"`
+	Description       string       `json:"description"`
+	PricePerCallCents int32        `json:"price_per_call_cents"`
+	Tags              []string     `json:"tags"`
+	TotalCalls        int32        `json:"total_calls"`
+	Creator           CreatorMini  `json:"creator"`
+	ConnectionMode    string       `json:"connection_mode"`
+	MCPToolName       *string      `json:"mcp_tool_name,omitempty"`
+	Availability      Availability `json:"availability"`
 }
 
 // CreatorMini 列表 / 详情里嵌入的创作者轻量信息。
@@ -46,6 +47,19 @@ type MarketListResponse struct {
 	Size  int32            `json:"size"`
 }
 
+// Availability is the public availability signal derived from real run results.
+//
+// It deliberately separates "registered/listed" from "recently reachable".
+type Availability struct {
+	Status              string  `json:"status"`
+	Label               string  `json:"label"`
+	Hint                string  `json:"hint"`
+	LastSuccessfulRunAt *string `json:"last_successful_run_at,omitempty"`
+	LastFailedRunAt     *string `json:"last_failed_run_at,omitempty"`
+	LastCheckedAt       *string `json:"last_checked_at,omitempty"`
+	ConsecutiveFailures int32   `json:"consecutive_failures"`
+}
+
 // AgentDetailResponse GET /agents/:slug 响应。
 //
 // 详情页比列表多 endpoint_url / created_at / certified_at 等字段，
@@ -67,9 +81,64 @@ type AgentDetailResponse struct {
 	CertificationStatus string              `json:"certification_status"`
 	ConnectionMode      string              `json:"connection_mode"`
 	MCPToolName         *string             `json:"mcp_tool_name,omitempty"`
+	Availability        Availability        `json:"availability"`
 	VerifiedSkillCount  int32               `json:"verified_skill_count"`
 	LatestBenchmarkID   *string             `json:"latest_benchmark_batch_id,omitempty"`
 	Skills              []SkillMini         `json:"skills"`
 	Capability          *CapabilityResponse `json:"capability,omitempty"`
 	Examples            []ExampleResponse   `json:"examples"`
+}
+
+// AgentCardResponse is a public, machine-readable card for Agent discovery.
+//
+// It intentionally points clients at OpenLinker platform invocation endpoints
+// instead of exposing private endpoint secrets.
+type AgentCardResponse struct {
+	Name               string                 `json:"name"`
+	Description        string                 `json:"description"`
+	URL                string                 `json:"url"`
+	Version            string                 `json:"version"`
+	Provider           AgentCardProvider      `json:"provider"`
+	Capabilities       AgentCardCapabilities  `json:"capabilities"`
+	DefaultInputModes  []string               `json:"default_input_modes"`
+	DefaultOutputModes []string               `json:"default_output_modes"`
+	Skills             []AgentCardSkill       `json:"skills"`
+	Authentication     AgentCardAuth          `json:"authentication"`
+	OpenLinker         AgentCardOpenLinkerExt `json:"openlinker"`
+}
+
+type AgentCardProvider struct {
+	Organization string `json:"organization"`
+}
+
+type AgentCardCapabilities struct {
+	Streaming         bool `json:"streaming"`
+	PushNotifications bool `json:"push_notifications"`
+	Delegation        bool `json:"delegation"`
+}
+
+type AgentCardSkill struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Tags        []string `json:"tags,omitempty"`
+}
+
+type AgentCardAuth struct {
+	Schemes []string `json:"schemes"`
+	Scopes  []string `json:"scopes"`
+}
+
+type AgentCardOpenLinkerExt struct {
+	AgentID                string   `json:"agent_id"`
+	Slug                   string   `json:"slug"`
+	ConnectionMode         string   `json:"connection_mode"`
+	MCPToolName            *string  `json:"mcp_tool_name,omitempty"`
+	AvailabilityStatus     string   `json:"availability_status"`
+	CertificationStatus    string   `json:"certification_status"`
+	VerifiedSkillCount     int32    `json:"verified_skill_count"`
+	LatestBenchmarkBatchID *string  `json:"latest_benchmark_batch_id,omitempty"`
+	InvocationEndpoint     string   `json:"invocation_endpoint"`
+	RunLookupEndpoint      string   `json:"run_lookup_endpoint"`
+	SkillIDs               []string `json:"skill_ids"`
 }

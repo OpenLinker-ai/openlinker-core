@@ -7,15 +7,25 @@
 -- 写入一条任务查询：原始 query + Skill/MCP 引用 + 推荐 agent_id 顺序。
 INSERT INTO task_queries (user_id, query, parsed_skills, mcp_tools, recommended_agent_ids)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
-          chosen_agent_id, chosen_at, created_at;
+	RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+	          chosen_agent_id, chosen_at,
+	          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+	          completed_at, completion_summary, completion_run_id,
+	          delivery_status, delivery_visibility, delivery_artifact,
+	          accepted_at, revision_requested_at, revision_note,
+	          created_at;
 
 -- name: GetTaskQuery :one
 -- 按 id 查单条；调用方需自行校验 user_id 归属。
-SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
-       chosen_agent_id, chosen_at, created_at
-FROM task_queries
-WHERE id = $1;
+	SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+	       chosen_agent_id, chosen_at,
+	       claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+	       completed_at, completion_summary, completion_run_id,
+	       delivery_status, delivery_visibility, delivery_artifact,
+	       accepted_at, revision_requested_at, revision_note,
+	       created_at
+	FROM task_queries
+	WHERE id = $1;
 
 -- name: MarkTaskQueryChosen :one
 -- 用户选定推荐里某个 agent：写入 chosen_agent_id + chosen_at。
@@ -24,17 +34,123 @@ UPDATE task_queries
 SET chosen_agent_id = $3,
     chosen_at = NOW()
 WHERE id = $1 AND user_id = $2
+	RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+	          chosen_agent_id, chosen_at,
+	          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+	          completed_at, completion_summary, completion_run_id,
+	          delivery_status, delivery_visibility, delivery_artifact,
+	          accepted_at, revision_requested_at, revision_note,
+	          created_at;
+
+-- name: ClaimTaskQuery :one
+-- 创作者用自己的 Agent 接入公开任务。已被用户选择 / 已被接入 / 已完成的任务不可重复接入。
+UPDATE task_queries
+SET claimed_agent_id = $3,
+    claimed_by_user_id = $2,
+    claimed_at = NOW()
+WHERE id = $1
+  AND claimed_agent_id IS NULL
+  AND completed_at IS NULL
+  AND chosen_agent_id IS NULL
 RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
-          chosen_agent_id, chosen_at, created_at;
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          created_at;
+
+-- name: CompleteTaskQuery :one
+-- 接单方或任务发布者把成功 run 写回任务详情，形成"任务 -> run -> 结果"闭环。
+UPDATE task_queries
+SET claimed_agent_id = COALESCE(claimed_agent_id, $3),
+    claimed_by_user_id = COALESCE(claimed_by_user_id, $2),
+    claimed_at = COALESCE(claimed_at, NOW()),
+    claim_run_id = COALESCE(claim_run_id, $4),
+    completed_at = NOW(),
+    completion_summary = $5,
+    completion_run_id = $4,
+    delivery_status = 'submitted',
+    delivery_artifact = $6,
+    delivery_visibility = $7,
+    accepted_at = NULL,
+    revision_requested_at = NULL,
+    revision_note = NULL
+WHERE id = $1
+  AND (completed_at IS NULL OR delivery_status = 'revision_requested')
+  AND (user_id = $2 OR claimed_by_user_id = $2)
+  AND (
+      claimed_agent_id = $3
+      OR (claimed_agent_id IS NULL AND chosen_agent_id = $3)
+  )
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          created_at;
+
+-- name: AcceptTaskDelivery :one
+-- 任务发布者验收提交的结果。
+UPDATE task_queries
+SET delivery_status = 'accepted',
+    accepted_at = NOW()
+WHERE id = $1
+  AND user_id = $2
+  AND delivery_status = 'submitted'
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          created_at;
+
+-- name: RequestTaskRevision :one
+-- 任务发布者要求修订，接单方可以再次 Complete 提交。
+UPDATE task_queries
+SET delivery_status = 'revision_requested',
+    revision_requested_at = NOW(),
+    revision_note = $3,
+    accepted_at = NULL
+WHERE id = $1
+  AND user_id = $2
+  AND delivery_status = 'submitted'
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          created_at;
 
 -- name: ListTaskQueriesByUser :many
 -- "我的任务历史"：按 created_at 倒序最多 20 条。
-SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
-       chosen_agent_id, chosen_at, created_at
-FROM task_queries
+	SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+	       chosen_agent_id, chosen_at,
+	       claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+	       completed_at, completion_summary, completion_run_id,
+	       delivery_status, delivery_visibility, delivery_artifact,
+	       accepted_at, revision_requested_at, revision_note,
+	       created_at
+	FROM task_queries
 WHERE user_id = $1
 ORDER BY created_at DESC
 LIMIT $2;
+
+-- name: ListPublicTaskQueries :many
+-- 最近公开任务流（任务广场用）。当前 task_queries 暂无 visibility 字段；不返回用户邮箱/姓名。
+SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+       chosen_agent_id, chosen_at,
+       claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+       completed_at, completion_summary, completion_run_id,
+       delivery_status, delivery_visibility, delivery_artifact,
+       accepted_at, revision_requested_at, revision_note,
+       created_at
+FROM task_queries
+ORDER BY created_at DESC
+LIMIT $1;
 
 -- name: GetAgentsByIDs :many
 -- 任务推荐回填：按一组 agent_id 批量取详情（含 creator 显示名）。

@@ -136,6 +136,70 @@ type RunEvent struct {
 	CreatedAt   time.Time  `db:"created_at" json:"created_at"`
 }
 
+// RunArtifact 对应 run_artifacts 表。
+//
+// artifact_type: json | text | file | data
+// visibility: private | shared | public_example
+type RunArtifact struct {
+	ID               uuid.UUID `db:"id" json:"id"`
+	RunID            uuid.UUID `db:"run_id" json:"run_id"`
+	ArtifactType     string    `db:"artifact_type" json:"artifact_type"`
+	Title            string    `db:"title" json:"title"`
+	Content          []byte    `db:"content" json:"content"`
+	Visibility       string    `db:"visibility" json:"visibility"`
+	SourceArtifactID *string   `db:"source_artifact_id" json:"source_artifact_id"`
+	CreatedAt        time.Time `db:"created_at" json:"created_at"`
+}
+
+// RunArtifactChunk 对应 run_artifact_chunks 表。
+type RunArtifactChunk struct {
+	ID               uuid.UUID `db:"id" json:"id"`
+	RunID            uuid.UUID `db:"run_id" json:"run_id"`
+	RunArtifactID    uuid.UUID `db:"run_artifact_id" json:"run_artifact_id"`
+	SourceArtifactID string    `db:"source_artifact_id" json:"source_artifact_id"`
+	EventSequence    *int32    `db:"event_sequence" json:"event_sequence"`
+	ChunkIndex       int32     `db:"chunk_index" json:"chunk_index"`
+	Append           bool      `db:"append" json:"append"`
+	LastChunk        bool      `db:"last_chunk" json:"last_chunk"`
+	Parts            []byte    `db:"parts" json:"parts"`
+	Payload          []byte    `db:"payload" json:"payload"`
+	CreatedAt        time.Time `db:"created_at" json:"created_at"`
+}
+
+// RunMessage 对应 run_messages 表。
+//
+// role: user | agent | tool | platform
+type RunMessage struct {
+	ID            uuid.UUID `db:"id" json:"id"`
+	RunID         uuid.UUID `db:"run_id" json:"run_id"`
+	EventSequence *int32    `db:"event_sequence" json:"event_sequence"`
+	Role          string    `db:"role" json:"role"`
+	Content       string    `db:"content" json:"content"`
+	Payload       []byte    `db:"payload" json:"payload"`
+	CreatedAt     time.Time `db:"created_at" json:"created_at"`
+}
+
+// RunRequirementEvidence 对应 run_requirement_evidence 表。
+//
+// 它把任务发布时声明的 Skill/MCP 要求快照到一次实际 run，避免运行完成后
+// 只能从临时 metadata 猜测这次调用是否覆盖任务要求。
+type RunRequirementEvidence struct {
+	RunID            uuid.UUID `db:"run_id" json:"run_id"`
+	TaskID           uuid.UUID `db:"task_id" json:"task_id"`
+	AgentID          uuid.UUID `db:"agent_id" json:"agent_id"`
+	UserID           uuid.UUID `db:"user_id" json:"user_id"`
+	RequiredSkillIDs []string  `db:"required_skill_ids" json:"required_skill_ids"`
+	RequiredMCPTools []string  `db:"required_mcp_tools" json:"required_mcp_tools"`
+	AgentSkillIDs    []string  `db:"agent_skill_ids" json:"agent_skill_ids"`
+	MatchedSkillIDs  []string  `db:"matched_skill_ids" json:"matched_skill_ids"`
+	MissingSkillIDs  []string  `db:"missing_skill_ids" json:"missing_skill_ids"`
+	UsedMCPTools     []string  `db:"used_mcp_tools" json:"used_mcp_tools"`
+	MissingMCPTools  []string  `db:"missing_mcp_tools" json:"missing_mcp_tools"`
+	CoverageStatus   string    `db:"coverage_status" json:"coverage_status"`
+	EvidenceSource   string    `db:"evidence_source" json:"evidence_source"`
+	CreatedAt        time.Time `db:"created_at" json:"created_at"`
+}
+
 // AgentActionApprovalRequest Phase 2 缺口 2：高风险动作审批记录（docs/29 §3.4）。
 //
 // status: 'pending' | 'confirmed' | 'rejected' | 'expired'
@@ -169,6 +233,98 @@ type AgentMetricSnapshot struct {
 	MedianLatencyMs *int32    `db:"median_latency_ms" json:"median_latency_ms"`
 	P95LatencyMs    *int32    `db:"p95_latency_ms" json:"p95_latency_ms"`
 	SnapshottedAt   time.Time `db:"snapshotted_at" json:"snapshotted_at"`
+}
+
+// AgentAvailabilitySnapshot 对应 agent_availability_snapshots 表。
+//
+// availability_status: unknown | healthy | degraded | unreachable
+type AgentAvailabilitySnapshot struct {
+	AgentID             uuid.UUID  `db:"agent_id" json:"agent_id"`
+	AvailabilityStatus  string     `db:"availability_status" json:"availability_status"`
+	LastSuccessfulRunAt *time.Time `db:"last_successful_run_at" json:"last_successful_run_at"`
+	LastFailedRunAt     *time.Time `db:"last_failed_run_at" json:"last_failed_run_at"`
+	LastCheckedAt       *time.Time `db:"last_checked_at" json:"last_checked_at"`
+	ConsecutiveFailures int32      `db:"consecutive_failures" json:"consecutive_failures"`
+	UpdatedAt           time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// AgentAvailabilityAlert 是创作者侧站内可用性告警。
+type AgentAvailabilityAlert struct {
+	ID                  uuid.UUID  `db:"id" json:"id"`
+	AgentID             uuid.UUID  `db:"agent_id" json:"agent_id"`
+	CreatorID           uuid.UUID  `db:"creator_id" json:"creator_id"`
+	AlertType           string     `db:"alert_type" json:"alert_type"`
+	Severity            string     `db:"severity" json:"severity"`
+	AvailabilityStatus  string     `db:"availability_status" json:"availability_status"`
+	ConsecutiveFailures int32      `db:"consecutive_failures" json:"consecutive_failures"`
+	Title               string     `db:"title" json:"title"`
+	Message             string     `db:"message" json:"message"`
+	LastError           *string    `db:"last_error" json:"last_error"`
+	RepairHints         []string   `db:"repair_hints" json:"repair_hints"`
+	ReadAt              *time.Time `db:"read_at" json:"read_at"`
+	CreatedAt           time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt           time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// RegistryNode 对应 registry_nodes 表。
+//
+// 这是 Bridge / Proxy Node 的云侧身份；明文 secret 只在创建时返回，数据库只保存 hash。
+type RegistryNode struct {
+	ID              uuid.UUID  `db:"id" json:"id"`
+	OwnerUserID     uuid.UUID  `db:"owner_user_id" json:"owner_user_id"`
+	NodeName        string     `db:"node_name" json:"node_name"`
+	NodeType        string     `db:"node_type" json:"node_type"`
+	BaseURL         *string    `db:"base_url" json:"base_url"`
+	SecretPrefix    string     `db:"secret_prefix" json:"secret_prefix"`
+	SecretHash      string     `db:"secret_hash" json:"-"`
+	Scopes          []string   `db:"scopes" json:"scopes"`
+	HeartbeatStatus string     `db:"heartbeat_status" json:"heartbeat_status"`
+	LastHeartbeatAt *time.Time `db:"last_heartbeat_at" json:"last_heartbeat_at"`
+	RevokedAt       *time.Time `db:"revoked_at" json:"revoked_at"`
+	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// CloudListingLink 对应 cloud_listing_links 表。
+//
+// 它表达“用户显式把某个本地 Agent 暴露成 Cloud Listing”的关系。
+type CloudListingLink struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	CloudListingID uuid.UUID `db:"cloud_listing_id" json:"cloud_listing_id"`
+	RegistryNodeID uuid.UUID `db:"registry_node_id" json:"registry_node_id"`
+	LocalAgentID   uuid.UUID `db:"local_agent_id" json:"local_agent_id"`
+	RoutingMode    string    `db:"routing_mode" json:"routing_mode"`
+	PayloadPolicy  string    `db:"payload_policy" json:"payload_policy"`
+	SyncStatus     string    `db:"sync_status" json:"sync_status"`
+	LastSyncAt     time.Time `db:"last_sync_at" json:"last_sync_at"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time `db:"updated_at" json:"updated_at"`
+}
+
+// ProxyRun 对应 proxy_runs 表。
+//
+// 它是 Cloud Listing 经 Registry Node 拉取执行的云侧任务状态机。
+type ProxyRun struct {
+	ID                 uuid.UUID  `db:"id" json:"id"`
+	CloudRunID         uuid.UUID  `db:"cloud_run_id" json:"cloud_run_id"`
+	CloudListingLinkID uuid.UUID  `db:"cloud_listing_link_id" json:"cloud_listing_link_id"`
+	CloudListingID     uuid.UUID  `db:"cloud_listing_id" json:"cloud_listing_id"`
+	RegistryNodeID     uuid.UUID  `db:"registry_node_id" json:"registry_node_id"`
+	LocalAgentID       uuid.UUID  `db:"local_agent_id" json:"local_agent_id"`
+	RequestingUserID   uuid.UUID  `db:"requesting_user_id" json:"requesting_user_id"`
+	IdempotencyKey     string     `db:"idempotency_key" json:"idempotency_key"`
+	Status             string     `db:"status" json:"status"`
+	PayloadPolicy      string     `db:"payload_policy" json:"payload_policy"`
+	Input              []byte     `db:"input" json:"input"`
+	InputSummary       *string    `db:"input_summary" json:"input_summary"`
+	Output             []byte     `db:"output" json:"output"`
+	OutputSummary      *string    `db:"output_summary" json:"output_summary"`
+	ErrorCode          *string    `db:"error_code" json:"error_code"`
+	ErrorMessage       *string    `db:"error_message" json:"error_message"`
+	ClaimedAt          *time.Time `db:"claimed_at" json:"claimed_at"`
+	FinishedAt         *time.Time `db:"finished_at" json:"finished_at"`
+	CreatedAt          time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt          time.Time  `db:"updated_at" json:"updated_at"`
 }
 
 // AgentRegistrationToken 是创作者侧短期 Bootstrap Token，供 Agent 自注册流程使用。
@@ -259,6 +415,8 @@ type AgentSkill struct {
 //
 // query 是用户自然语言描述；parsed_skills 是关联/解析出的 skill_id 列表；mcp_tools 是任务关联的 MCP 工具名。
 // recommended_agent_ids 按推荐顺序保存（top 3）；chosen_agent_id 记录用户最终选择（可空）。
+// claimed_* / completion_* 让任务广场形成"接单 -> 运行 -> 结果回填"的最小闭环。
+// delivery_* / accepted_at / revision_* 记录任务交付、验收和修订状态。
 type TaskQuery struct {
 	ID                  uuid.UUID   `db:"id" json:"id"`
 	UserID              uuid.UUID   `db:"user_id" json:"user_id"`
@@ -268,6 +426,19 @@ type TaskQuery struct {
 	RecommendedAgentIDs []uuid.UUID `db:"recommended_agent_ids" json:"recommended_agent_ids"`
 	ChosenAgentID       *uuid.UUID  `db:"chosen_agent_id" json:"chosen_agent_id"`
 	ChosenAt            *time.Time  `db:"chosen_at" json:"chosen_at"`
+	ClaimedAgentID      *uuid.UUID  `db:"claimed_agent_id" json:"claimed_agent_id"`
+	ClaimedByUserID     *uuid.UUID  `db:"claimed_by_user_id" json:"claimed_by_user_id"`
+	ClaimedAt           *time.Time  `db:"claimed_at" json:"claimed_at"`
+	ClaimRunID          *uuid.UUID  `db:"claim_run_id" json:"claim_run_id"`
+	CompletedAt         *time.Time  `db:"completed_at" json:"completed_at"`
+	CompletionSummary   *string     `db:"completion_summary" json:"completion_summary"`
+	CompletionRunID     *uuid.UUID  `db:"completion_run_id" json:"completion_run_id"`
+	DeliveryStatus      string      `db:"delivery_status" json:"delivery_status"`
+	DeliveryVisibility  string      `db:"delivery_visibility" json:"delivery_visibility"`
+	DeliveryArtifact    []byte      `db:"delivery_artifact" json:"delivery_artifact"`
+	AcceptedAt          *time.Time  `db:"accepted_at" json:"accepted_at"`
+	RevisionRequestedAt *time.Time  `db:"revision_requested_at" json:"revision_requested_at"`
+	RevisionNote        *string     `db:"revision_note" json:"revision_note"`
 	CreatedAt           time.Time   `db:"created_at" json:"created_at"`
 }
 
@@ -423,6 +594,100 @@ type WebhookDelivery struct {
 	ErrorMessage   *string    `db:"error_message" json:"error_message"`
 	AttemptCount   int32      `db:"attempt_count" json:"attempt_count"`
 	NextRetryAt    *time.Time `db:"next_retry_at" json:"next_retry_at"`
+	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// RunWebhookSubscription 对应 run_webhook_subscriptions 表。
+//
+// status: 'active' | 'paused' | 'failed' | 'deleted'
+type RunWebhookSubscription struct {
+	ID                  uuid.UUID  `db:"id" json:"id"`
+	RunID               uuid.UUID  `db:"run_id" json:"run_id"`
+	OwnerUserID         uuid.UUID  `db:"owner_user_id" json:"owner_user_id"`
+	CallerAgentID       *uuid.UUID `db:"caller_agent_id" json:"caller_agent_id"`
+	TargetURL           string     `db:"target_url" json:"target_url"`
+	Secret              string     `db:"secret" json:"-"`
+	EventTypes          []string   `db:"event_types" json:"event_types"`
+	Status              string     `db:"status" json:"status"`
+	ConsecutiveFailures int32      `db:"consecutive_failures" json:"consecutive_failures"`
+	CreatedAt           time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt           time.Time  `db:"updated_at" json:"updated_at"`
+	DeletedAt           *time.Time `db:"deleted_at" json:"deleted_at"`
+}
+
+// RunWebhookDelivery 对应 run_webhook_deliveries 表。
+type RunWebhookDelivery struct {
+	ID             uuid.UUID  `db:"id" json:"id"`
+	SubscriptionID uuid.UUID  `db:"subscription_id" json:"subscription_id"`
+	RunEventID     uuid.UUID  `db:"run_event_id" json:"run_event_id"`
+	Payload        []byte     `db:"payload" json:"payload"`
+	Status         string     `db:"status" json:"status"`
+	ResponseStatus *int32     `db:"response_status" json:"response_status"`
+	ResponseBody   *string    `db:"response_body" json:"response_body"`
+	ErrorMessage   *string    `db:"error_message" json:"error_message"`
+	AttemptCount   int32      `db:"attempt_count" json:"attempt_count"`
+	NextRetryAt    *time.Time `db:"next_retry_at" json:"next_retry_at"`
+	DeliveredAt    *time.Time `db:"delivered_at" json:"delivered_at"`
+	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// Workflow 对应 workflows 表。
+type Workflow struct {
+	ID          uuid.UUID `db:"id" json:"id"`
+	UserID      uuid.UUID `db:"user_id" json:"user_id"`
+	Name        string    `db:"name" json:"name"`
+	Description string    `db:"description" json:"description"`
+	Status      string    `db:"status" json:"status"`
+	Edges       []byte    `db:"edges" json:"edges"`
+	CreatedAt   time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+}
+
+// WorkflowNode 对应 workflow_nodes 表。
+type WorkflowNode struct {
+	ID         uuid.UUID `db:"id" json:"id"`
+	WorkflowID uuid.UUID `db:"workflow_id" json:"workflow_id"`
+	NodeKey    string    `db:"node_key" json:"node_key"`
+	NodeType   string    `db:"node_type" json:"node_type"`
+	AgentID    uuid.UUID `db:"agent_id" json:"agent_id"`
+	Title      string    `db:"title" json:"title"`
+	Config     []byte    `db:"config" json:"config"`
+	Position   int32     `db:"position" json:"position"`
+	CreatedAt  time.Time `db:"created_at" json:"created_at"`
+}
+
+// WorkflowRun 对应 workflow_runs 表。
+type WorkflowRun struct {
+	ID           uuid.UUID  `db:"id" json:"id"`
+	WorkflowID   uuid.UUID  `db:"workflow_id" json:"workflow_id"`
+	UserID       uuid.UUID  `db:"user_id" json:"user_id"`
+	Status       string     `db:"status" json:"status"`
+	Input        []byte     `db:"input" json:"input"`
+	Output       []byte     `db:"output" json:"output"`
+	ErrorMessage *string    `db:"error_message" json:"error_message"`
+	StartedAt    time.Time  `db:"started_at" json:"started_at"`
+	FinishedAt   *time.Time `db:"finished_at" json:"finished_at"`
+	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// WorkflowRunStep 对应 workflow_run_steps 表。
+type WorkflowRunStep struct {
+	ID             uuid.UUID  `db:"id" json:"id"`
+	WorkflowRunID  uuid.UUID  `db:"workflow_run_id" json:"workflow_run_id"`
+	WorkflowNodeID uuid.UUID  `db:"workflow_node_id" json:"workflow_node_id"`
+	NodeKey        string     `db:"node_key" json:"node_key"`
+	AgentID        uuid.UUID  `db:"agent_id" json:"agent_id"`
+	RunID          *uuid.UUID `db:"run_id" json:"run_id"`
+	Status         string     `db:"status" json:"status"`
+	Input          []byte     `db:"input" json:"input"`
+	Output         []byte     `db:"output" json:"output"`
+	ErrorMessage   *string    `db:"error_message" json:"error_message"`
+	Sequence       int32      `db:"sequence" json:"sequence"`
+	StartedAt      time.Time  `db:"started_at" json:"started_at"`
+	FinishedAt     *time.Time `db:"finished_at" json:"finished_at"`
 	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
 }

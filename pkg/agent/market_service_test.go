@@ -77,6 +77,40 @@ func TestListMarket_HappyPath(t *testing.T) {
 	assert.Equal(t, int32(5), resp.Total, "total should be 5")
 }
 
+func TestListMarket_SortsByAvailability(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := agent.NewMarketService(pool)
+	creatorID, _ := setupTestData(t, pool)
+	ctx := context.Background()
+
+	createApprovedAgent(t, pool, creatorID, "sort-unreachable")
+	createApprovedAgent(t, pool, creatorID, "sort-healthy")
+	createApprovedAgent(t, pool, creatorID, "sort-unknown")
+
+	statusBySlug := map[string]string{
+		"sort-unreachable": "unreachable",
+		"sort-healthy":     "healthy",
+	}
+	for slug, status := range statusBySlug {
+		var agentID uuid.UUID
+		require.NoError(t, pool.QueryRow(ctx, `SELECT id FROM agents WHERE slug=$1`, slug).Scan(&agentID))
+		_, err := pool.Exec(ctx,
+			`INSERT INTO agent_availability_snapshots (
+				agent_id, availability_status, last_checked_at, consecutive_failures
+			) VALUES ($1, $2, NOW(), CASE WHEN $2 = 'unreachable' THEN 3 ELSE 0 END)`,
+			agentID,
+			status,
+		)
+		require.NoError(t, err)
+	}
+
+	resp, err := svc.ListMarket(ctx, nil, "", 1, 12)
+	require.NoError(t, err)
+	require.Len(t, resp.Items, 3)
+	assert.Equal(t, "sort-healthy", resp.Items[0].Slug)
+	assert.Equal(t, "sort-unreachable", resp.Items[2].Slug)
+}
+
 func TestListMarket_FilterByTags(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := agent.NewMarketService(pool)
@@ -251,6 +285,12 @@ func TestGetBySlug_HappyPath(t *testing.T) {
 		 VALUES ($1, 'data/sql-query'), ($1, 'data/analysis')`,
 		agentID)
 	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(),
+		`INSERT INTO agent_availability_snapshots (
+			agent_id, availability_status, last_successful_run_at, last_checked_at, consecutive_failures
+		) VALUES ($1, 'healthy', NOW(), NOW(), 0)`,
+		agentID)
+	require.NoError(t, err)
 
 	detail, err := svc.GetBySlug(context.Background(), "fin-review")
 	require.NoError(t, err)
@@ -262,6 +302,44 @@ func TestGetBySlug_HappyPath(t *testing.T) {
 	require.Len(t, detail.Skills, 2)
 	assert.Equal(t, "data/sql-query", detail.Skills[0].ID)
 	assert.Equal(t, "SQL 查询", detail.Skills[0].Name)
+	assert.Equal(t, "healthy", detail.Availability.Status)
+	assert.Equal(t, "可用", detail.Availability.Label)
+	assert.Equal(t, int32(0), detail.Availability.ConsecutiveFailures)
+	require.NotNil(t, detail.Availability.LastSuccessfulRunAt)
+}
+
+func TestGetAgentCardBySlug_HappyPath(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := agent.NewMarketService(pool)
+	creatorID, _ := setupTestData(t, pool)
+
+	createApprovedAgent(t, pool, creatorID, "card-agent",
+		WithName("Card Agent"),
+		WithDescription("Machine-readable card test"),
+		WithTags([]string{"data", "analysis"}),
+	)
+	var agentID uuid.UUID
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT id FROM agents WHERE slug=$1`, "card-agent").Scan(&agentID))
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO agent_skills (agent_id, skill_id)
+		 VALUES ($1, 'data/sql-query')`,
+		agentID)
+	require.NoError(t, err)
+
+	card, err := svc.GetAgentCardBySlug(context.Background(), "card-agent")
+	require.NoError(t, err)
+	require.NotNil(t, card)
+	assert.Equal(t, "Card Agent", card.Name)
+	assert.Equal(t, "/api/v1/run", card.URL)
+	assert.Equal(t, []string{"Bearer"}, card.Authentication.Schemes)
+	assert.Contains(t, card.Authentication.Scopes, "agents:run")
+	require.Len(t, card.Skills, 1)
+	assert.Equal(t, "data/sql-query", card.Skills[0].ID)
+	assert.Equal(t, "card-agent", card.OpenLinker.Slug)
+	assert.Equal(t, agentID.String(), card.OpenLinker.AgentID)
+	assert.Equal(t, []string{"data/sql-query"}, card.OpenLinker.SkillIDs)
+	assert.Equal(t, "unknown", card.OpenLinker.AvailabilityStatus)
 }
 
 func TestGetBySlug_NotFound(t *testing.T) {

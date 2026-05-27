@@ -141,6 +141,8 @@ type OnboardingResponse struct {
 	Status     OnboardingStatusResponse `json:"status"`
 	Capability *CapabilityResponse      `json:"capability,omitempty"`
 	Examples   []ExampleResponse        `json:"examples"`
+	// Availability 是创作者侧修复体验使用的实时可用性快照。
+	Availability Availability `json:"availability"`
 }
 
 // DryRunResponse POST /creator/agents/:id/dry-run 响应。
@@ -148,7 +150,43 @@ type OnboardingResponse struct {
 // result = "pass" / "fail"；fail 时 error 非空，pass 时 error 为 nil。
 // output 是创作者 endpoint 返回的原始 JSON object（pass 时存在；fail 时可能为 nil）。
 type DryRunResponse struct {
-	Result string                 `json:"result"`
-	Error  *string                `json:"error,omitempty"`
-	Output map[string]interface{} `json:"output,omitempty"`
+	Result       string                 `json:"result"`
+	Error        *string                `json:"error,omitempty"`
+	Output       map[string]interface{} `json:"output,omitempty"`
+	Availability Availability           `json:"availability"`
+	RepairHints  []string               `json:"repair_hints,omitempty"`
+}
+
+// AvailabilityAlertResponse 是创作者侧站内可用性告警。
+type AvailabilityAlertResponse struct {
+	ID                  string   `json:"id"`
+	AgentID             string   `json:"agent_id"`
+	AgentSlug           string   `json:"agent_slug,omitempty"`
+	AgentName           string   `json:"agent_name,omitempty"`
+	Type                string   `json:"type"`
+	Severity            string   `json:"severity"`
+	AvailabilityStatus  string   `json:"availability_status"`
+	ConsecutiveFailures int32    `json:"consecutive_failures"`
+	Title               string   `json:"title"`
+	Message             string   `json:"message"`
+	LastError           *string  `json:"last_error,omitempty"`
+	RepairHints         []string `json:"repair_hints,omitempty"`
+	ReadAt              *string  `json:"read_at,omitempty"`
+	CreatedAt           string   `json:"created_at"`
+	UpdatedAt           string   `json:"updated_at"`
+}
+
+// AvailabilityAlertListResponse GET /creator/availability-alerts 响应。
+type AvailabilityAlertListResponse struct {
+	Items  []AvailabilityAlertResponse `json:"items"`
+	Total  int32                       `json:"total"`
+	Unread int32                       `json:"unread"`
+}
+
+// AvailabilityCheckBatchResponse 平台巡检批次结果。
+type AvailabilityCheckBatchResponse struct {
+	Checked int32                       `json:"checked"`
+	Passed  int32                       `json:"passed"`
+	Failed  int32                       `json:"failed"`
+	Alerts  []AvailabilityAlertResponse `json:"alerts"`
 }

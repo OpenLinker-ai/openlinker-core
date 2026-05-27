@@ -46,6 +46,8 @@ func NewHandler(svc *Service, cfg ...*config.Config) *Handler {
 //	POST /runs           异步启动调用     —— runMw（JWT + API Key 混合）
 //	GET  /runs/:id       单条调用详情     —— queryMw（可按部署选择 JWT-only 或 hybrid）
 //	GET  /runs/:id/events 调用事件流      —— queryMw（轮询）
+//	GET  /runs/:id/artifacts 运行产物      —— queryMw
+//	GET  /runs/:id/messages 运行消息回放    —— queryMw
 //	GET  /runs/:id/stream 调用事件 SSE    —— queryMw
 //	POST /runs/:id/events Agent 上报事件  —— X-OpenLinker-Token（不使用用户 JWT）
 //
@@ -57,15 +59,19 @@ func (h *Handler) RegisterProtected(api *echo.Group, runMw, queryMw echo.Middlew
 	api.POST("/runs", h.PostRunAsync, runMw)
 	api.GET("/runs/:id", h.GetRun, queryMw)
 	api.GET("/runs/:id/events", h.GetRunEvents, queryMw)
+	api.GET("/runs/:id/artifacts", h.GetRunArtifacts, queryMw)
+	api.GET("/runs/:id/messages", h.GetRunMessages, queryMw)
 	api.GET("/runs/:id/stream", h.StreamRunEvents, queryMw)
 	api.POST("/runs/:id/events", h.PostRunEvent)
 }
 
 // RegisterAgentRuntime mounts Runtime Token based endpoints used by runtime_pull Agents.
 //
+//	POST /agent-runtime/heartbeat        Agent 主动上报存活
 //	GET  /agent-runtime/runs/claim       Agent 拉取一个 pending run
 //	POST /agent-runtime/runs/:id/result  Agent 回传终态结果
 func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
+	api.POST("/agent-runtime/heartbeat", h.PostAgentHeartbeat)
 	api.GET("/agent-runtime/runs/claim", h.ClaimRuntimePullRun)
 	api.POST("/agent-runtime/runs/:id/result", h.PostRuntimePullResult)
 }
@@ -168,6 +174,46 @@ func (h *Handler) GetRunEvents(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{"events": events})
+}
+
+// GetRunArtifacts 查询 run 持久化产物。只返回给 run owner。
+func (h *Handler) GetRunArtifacts(c echo.Context) error {
+	if err := requireAPIKeyScope(c, "runs:read"); err != nil {
+		return err
+	}
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	runID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	artifacts, err := h.svc.ListRunArtifacts(c.Request().Context(), uid, runID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{"items": artifacts})
+}
+
+// GetRunMessages 查询 run 的稳定消息回放。只返回给 run owner。
+func (h *Handler) GetRunMessages(c echo.Context) error {
+	if err := requireAPIKeyScope(c, "runs:read"); err != nil {
+		return err
+	}
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	runID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	messages, err := h.svc.ListRunMessages(c.Request().Context(), uid, runID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{"items": messages})
 }
 
 // StreamRunEvents 以 SSE 输出 run events。
@@ -281,6 +327,18 @@ func (h *Handler) ClaimRuntimePullRun(c echo.Context) error {
 	}
 	if resp == nil {
 		return c.NoContent(http.StatusNoContent)
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) PostAgentHeartbeat(c echo.Context) error {
+	token, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.HeartbeatAgent(c.Request().Context(), token)
+	if err != nil {
+		return err
 	}
 	return c.JSON(http.StatusOK, resp)
 }

@@ -27,6 +27,19 @@ func scanTaskQuery(row interface {
 		&t.RecommendedAgentIDs,
 		&t.ChosenAgentID,
 		&t.ChosenAt,
+		&t.ClaimedAgentID,
+		&t.ClaimedByUserID,
+		&t.ClaimedAt,
+		&t.ClaimRunID,
+		&t.CompletedAt,
+		&t.CompletionSummary,
+		&t.CompletionRunID,
+		&t.DeliveryStatus,
+		&t.DeliveryVisibility,
+		&t.DeliveryArtifact,
+		&t.AcceptedAt,
+		&t.RevisionRequestedAt,
+		&t.RevisionNote,
 		&t.CreatedAt,
 	)
 }
@@ -35,7 +48,12 @@ const createTaskQuery = `-- name: CreateTaskQuery :one
 INSERT INTO task_queries (user_id, query, parsed_skills, mcp_tools, recommended_agent_ids)
 VALUES ($1, $2, $3, $4, $5)
 RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
-          chosen_agent_id, chosen_at, created_at`
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          created_at`
 
 // CreateTaskQueryParams 入参。
 type CreateTaskQueryParams struct {
@@ -62,7 +80,12 @@ func (q *Queries) CreateTaskQuery(ctx context.Context, arg CreateTaskQueryParams
 
 const getTaskQuery = `-- name: GetTaskQuery :one
 SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
-       chosen_agent_id, chosen_at, created_at
+       chosen_agent_id, chosen_at,
+       claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+       completed_at, completion_summary, completion_run_id,
+       delivery_status, delivery_visibility, delivery_artifact,
+       accepted_at, revision_requested_at, revision_note,
+       created_at
 FROM task_queries
 WHERE id = $1`
 
@@ -80,7 +103,12 @@ SET chosen_agent_id = $3,
     chosen_at = NOW()
 WHERE id = $1 AND user_id = $2
 RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
-          chosen_agent_id, chosen_at, created_at`
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          created_at`
 
 // MarkTaskQueryChosenParams 入参。
 type MarkTaskQueryChosenParams struct {
@@ -97,9 +125,156 @@ func (q *Queries) MarkTaskQueryChosen(ctx context.Context, arg MarkTaskQueryChos
 	return t, err
 }
 
+const claimTaskQuery = `-- name: ClaimTaskQuery :one
+UPDATE task_queries
+SET claimed_agent_id = $3,
+    claimed_by_user_id = $2,
+    claimed_at = NOW()
+WHERE id = $1
+  AND claimed_agent_id IS NULL
+  AND completed_at IS NULL
+  AND chosen_agent_id IS NULL
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          created_at`
+
+type ClaimTaskQueryParams struct {
+	ID      uuid.UUID `db:"id" json:"id"`
+	UserID  uuid.UUID `db:"user_id" json:"user_id"`
+	AgentID uuid.UUID `db:"agent_id" json:"agent_id"`
+}
+
+func (q *Queries) ClaimTaskQuery(ctx context.Context, arg ClaimTaskQueryParams) (TaskQuery, error) {
+	row := q.db.QueryRow(ctx, claimTaskQuery, arg.ID, arg.UserID, arg.AgentID)
+	var t TaskQuery
+	err := scanTaskQuery(row, &t)
+	return t, err
+}
+
+const completeTaskQuery = `-- name: CompleteTaskQuery :one
+UPDATE task_queries
+SET claimed_agent_id = COALESCE(claimed_agent_id, $3),
+    claimed_by_user_id = COALESCE(claimed_by_user_id, $2),
+    claimed_at = COALESCE(claimed_at, NOW()),
+    claim_run_id = COALESCE(claim_run_id, $4),
+    completed_at = NOW(),
+    completion_summary = $5,
+    completion_run_id = $4,
+    delivery_status = 'submitted',
+    delivery_artifact = $6,
+    delivery_visibility = $7,
+    accepted_at = NULL,
+    revision_requested_at = NULL,
+    revision_note = NULL
+WHERE id = $1
+  AND (completed_at IS NULL OR delivery_status = 'revision_requested')
+  AND (user_id = $2 OR claimed_by_user_id = $2)
+  AND (
+      claimed_agent_id = $3
+      OR (claimed_agent_id IS NULL AND chosen_agent_id = $3)
+  )
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          created_at`
+
+type CompleteTaskQueryParams struct {
+	ID                 uuid.UUID `db:"id" json:"id"`
+	UserID             uuid.UUID `db:"user_id" json:"user_id"`
+	AgentID            uuid.UUID `db:"agent_id" json:"agent_id"`
+	CompletionRunID    uuid.UUID `db:"completion_run_id" json:"completion_run_id"`
+	CompletionSummary  string    `db:"completion_summary" json:"completion_summary"`
+	DeliveryArtifact   []byte    `db:"delivery_artifact" json:"delivery_artifact"`
+	DeliveryVisibility string    `db:"delivery_visibility" json:"delivery_visibility"`
+}
+
+func (q *Queries) CompleteTaskQuery(ctx context.Context, arg CompleteTaskQueryParams) (TaskQuery, error) {
+	row := q.db.QueryRow(ctx, completeTaskQuery,
+		arg.ID,
+		arg.UserID,
+		arg.AgentID,
+		arg.CompletionRunID,
+		arg.CompletionSummary,
+		arg.DeliveryArtifact,
+		arg.DeliveryVisibility,
+	)
+	var t TaskQuery
+	err := scanTaskQuery(row, &t)
+	return t, err
+}
+
+const acceptTaskDelivery = `-- name: AcceptTaskDelivery :one
+UPDATE task_queries
+SET delivery_status = 'accepted',
+    accepted_at = NOW()
+WHERE id = $1
+  AND user_id = $2
+  AND delivery_status = 'submitted'
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          created_at`
+
+type AcceptTaskDeliveryParams struct {
+	ID     uuid.UUID `db:"id" json:"id"`
+	UserID uuid.UUID `db:"user_id" json:"user_id"`
+}
+
+func (q *Queries) AcceptTaskDelivery(ctx context.Context, arg AcceptTaskDeliveryParams) (TaskQuery, error) {
+	row := q.db.QueryRow(ctx, acceptTaskDelivery, arg.ID, arg.UserID)
+	var t TaskQuery
+	err := scanTaskQuery(row, &t)
+	return t, err
+}
+
+const requestTaskRevision = `-- name: RequestTaskRevision :one
+UPDATE task_queries
+SET delivery_status = 'revision_requested',
+    revision_requested_at = NOW(),
+    revision_note = $3,
+    accepted_at = NULL
+WHERE id = $1
+  AND user_id = $2
+  AND delivery_status = 'submitted'
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          created_at`
+
+type RequestTaskRevisionParams struct {
+	ID           uuid.UUID `db:"id" json:"id"`
+	UserID       uuid.UUID `db:"user_id" json:"user_id"`
+	RevisionNote string    `db:"revision_note" json:"revision_note"`
+}
+
+func (q *Queries) RequestTaskRevision(ctx context.Context, arg RequestTaskRevisionParams) (TaskQuery, error) {
+	row := q.db.QueryRow(ctx, requestTaskRevision, arg.ID, arg.UserID, arg.RevisionNote)
+	var t TaskQuery
+	err := scanTaskQuery(row, &t)
+	return t, err
+}
+
 const listTaskQueriesByUser = `-- name: ListTaskQueriesByUser :many
 SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
-       chosen_agent_id, chosen_at, created_at
+       chosen_agent_id, chosen_at,
+       claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+       completed_at, completion_summary, completion_run_id,
+       delivery_status, delivery_visibility, delivery_artifact,
+       accepted_at, revision_requested_at, revision_note,
+       created_at
 FROM task_queries
 WHERE user_id = $1
 ORDER BY created_at DESC
@@ -134,7 +309,12 @@ func (q *Queries) ListTaskQueriesByUser(ctx context.Context, arg ListTaskQueries
 
 const listPublicTaskQueries = `-- name: ListPublicTaskQueries :many
 SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
-       chosen_agent_id, chosen_at, created_at
+       chosen_agent_id, chosen_at,
+       claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+       completed_at, completion_summary, completion_run_id,
+       delivery_status, delivery_visibility, delivery_artifact,
+       accepted_at, revision_requested_at, revision_note,
+       created_at
 FROM task_queries
 ORDER BY created_at DESC
 LIMIT $1`

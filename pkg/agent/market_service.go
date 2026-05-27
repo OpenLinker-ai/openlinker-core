@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
@@ -80,6 +81,7 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 
 	items := make([]MarketListItem, 0, len(rows))
 	for _, r := range rows {
+		availability := s.agentAvailability(ctx, r.ID)
 		items = append(items, MarketListItem{
 			ID:                r.ID.String(),
 			Slug:              r.Slug,
@@ -91,6 +93,7 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 			Creator:           CreatorMini{DisplayName: r.CreatorName},
 			ConnectionMode:    r.ConnectionMode,
 			MCPToolName:       r.MCPToolName,
+			Availability:      availability,
 		})
 	}
 
@@ -134,6 +137,7 @@ func (s *MarketService) GetBySlug(ctx context.Context, slug string) (*AgentDetai
 		Skills:            []SkillMini{},
 		ConnectionMode:    r.ConnectionMode,
 		MCPToolName:       r.MCPToolName,
+		Availability:      s.agentAvailability(ctx, r.ID),
 	}
 	if r.CertifiedAt != nil {
 		s := r.CertifiedAt.UTC().Format(time.RFC3339)
@@ -184,6 +188,121 @@ func (s *MarketService) GetBySlug(ctx context.Context, slug string) (*AgentDetai
 		resp.Examples = append(resp.Examples, toExampleResponse(&examples[i]))
 	}
 	return resp, nil
+}
+
+// GetAgentCardBySlug returns a public Agent Card derived from the same public
+// detail record used by the market page.
+func (s *MarketService) GetAgentCardBySlug(ctx context.Context, slug string) (*AgentCardResponse, error) {
+	detail, err := s.GetBySlug(ctx, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	cardSkills := make([]AgentCardSkill, 0, len(detail.Skills))
+	skillIDs := make([]string, 0, len(detail.Skills))
+	for _, skill := range detail.Skills {
+		skillIDs = append(skillIDs, skill.ID)
+		cardSkills = append(cardSkills, AgentCardSkill{
+			ID:          skill.ID,
+			Name:        skill.Name,
+			Description: skill.Description,
+			Tags:        []string{skill.Category},
+		})
+	}
+	if len(cardSkills) == 0 {
+		cardSkills = append(cardSkills, AgentCardSkill{
+			ID:          "openlinker/" + detail.Slug,
+			Name:        detail.Name,
+			Description: detail.Description,
+			Tags:        normalizeTags(detail.Tags),
+		})
+	}
+
+	return &AgentCardResponse{
+		Name:        detail.Name,
+		Description: detail.Description,
+		URL:         "/api/v1/run",
+		Version:     "v1",
+		Provider: AgentCardProvider{
+			Organization: detail.Creator.DisplayName,
+		},
+		Capabilities: AgentCardCapabilities{
+			Streaming:         true,
+			PushNotifications: detail.ConnectionMode == ConnectionModeRuntimePull,
+			Delegation:        true,
+		},
+		DefaultInputModes:  []string{"application/json"},
+		DefaultOutputModes: []string{"application/json"},
+		Skills:             cardSkills,
+		Authentication: AgentCardAuth{
+			Schemes: []string{"Bearer"},
+			Scopes:  []string{"agents:run", "runs:read"},
+		},
+		OpenLinker: AgentCardOpenLinkerExt{
+			AgentID:                detail.ID,
+			Slug:                   detail.Slug,
+			ConnectionMode:         detail.ConnectionMode,
+			MCPToolName:            detail.MCPToolName,
+			AvailabilityStatus:     detail.Availability.Status,
+			CertificationStatus:    detail.CertificationStatus,
+			VerifiedSkillCount:     detail.VerifiedSkillCount,
+			LatestBenchmarkBatchID: detail.LatestBenchmarkID,
+			InvocationEndpoint:     "/api/v1/run",
+			RunLookupEndpoint:      "/api/v1/runs/{run_id}",
+			SkillIDs:               skillIDs,
+		},
+	}, nil
+}
+
+func (s *MarketService) agentAvailability(ctx context.Context, agentID uuid.UUID) Availability {
+	snapshot, err := s.queries.GetAgentAvailabilitySnapshot(ctx, agentID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.MarketService.agentAvailability")
+		}
+		return availabilityResponse("unknown", nil, nil, nil, 0)
+	}
+	return availabilityResponse(
+		snapshot.AvailabilityStatus,
+		snapshot.LastSuccessfulRunAt,
+		snapshot.LastFailedRunAt,
+		snapshot.LastCheckedAt,
+		snapshot.ConsecutiveFailures,
+	)
+}
+
+func availabilityResponse(status string, successAt, failedAt, checkedAt *time.Time, failures int32) Availability {
+	label := "未验证"
+	hint := "Agent 已注册，但还没有成功运行或失败记录。首次调用后会更新可用性。"
+	switch status {
+	case "healthy":
+		label = "可用"
+		hint = "最近一次真实调用成功，当前可用性良好。"
+	case "degraded":
+		label = "不稳定"
+		hint = "最近调用失败。Agent 仍可尝试，但建议创作者检查 endpoint、认证或运行时。"
+	case "unreachable":
+		label = "不可达"
+		hint = "连续多次调用失败，暂不建议用于关键任务。"
+	default:
+		status = "unknown"
+	}
+	format := func(t *time.Time) *string {
+		if t == nil {
+			return nil
+		}
+		out := t.UTC().Format(time.RFC3339)
+		return &out
+	}
+	return Availability{
+		Status:              status,
+		Label:               label,
+		Hint:                hint,
+		LastSuccessfulRunAt: format(successAt),
+		LastFailedRunAt:     format(failedAt),
+		LastCheckedAt:       format(checkedAt),
+		ConsecutiveFailures: failures,
+	}
 }
 
 // normalizeTags 把 nil 切片归一化成空切片，确保 JSON 输出 [] 而不是 null。

@@ -36,14 +36,17 @@ import (
 	"github.com/kinzhi/openlinker-core/pkg/db"
 	dbgen "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/delivery"
+	"github.com/kinzhi/openlinker-core/pkg/discovery"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 	corellm "github.com/kinzhi/openlinker-core/pkg/llm"
 	openlinkerlog "github.com/kinzhi/openlinker-core/pkg/log"
 	"github.com/kinzhi/openlinker-core/pkg/mcp"
+	"github.com/kinzhi/openlinker-core/pkg/registry"
 	"github.com/kinzhi/openlinker-core/pkg/runtime"
 	"github.com/kinzhi/openlinker-core/pkg/skill"
 	"github.com/kinzhi/openlinker-core/pkg/task"
 	"github.com/kinzhi/openlinker-core/pkg/webhook"
+	"github.com/kinzhi/openlinker-core/pkg/workflow"
 )
 
 func main() {
@@ -100,6 +103,7 @@ func main() {
 		}
 		return c.JSON(http.StatusOK, map[string]string{"db": "ok"})
 	})
+	e.GET("/.well-known/openlinker.json", discovery.ServeOpenLinkerManifest(cfg))
 
 	api := e.Group("/api/v1")
 
@@ -151,15 +155,38 @@ func main() {
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
 	runtimeHandler.RegisterAgentRuntime(api)
 	agentSvc.SetDryRunner(runtimeSvc)
+	if cfg.AvailabilityMonitorEnabled {
+		agent.StartAvailabilityMonitor(rootCtx, agentSvc, agent.AvailabilityMonitorConfig{
+			Interval:     time.Duration(cfg.AvailabilityMonitorIntervalSeconds) * time.Second,
+			InitialDelay: time.Duration(cfg.AvailabilityMonitorInitialDelaySeconds) * time.Second,
+			StaleAfter:   time.Duration(cfg.AvailabilityMonitorStaleSeconds) * time.Second,
+			BatchSize:    int32(cfg.AvailabilityMonitorBatchSize),
+		})
+	}
 
 	a2aSvc := a2a.NewService(pool, runtimeSvc)
 	a2aHandler := a2a.NewHandler(a2aSvc)
 	a2aHandler.Register(api, jwtMiddleware, hybridMw)
 
-	webhookSvc := webhook.NewService(pool)
+	workflowSvc := workflow.NewService(pool, runtimeSvc)
+	workflowHandler := workflow.NewHandler(workflowSvc)
+	workflowHandler.RegisterProtected(api, jwtMiddleware)
+
+	registrySvc := registry.NewService(pool)
+	registryHandler := registry.NewHandler(registrySvc)
+	registryHandler.RegisterProtected(api, jwtMiddleware)
+	if cfg.RegistryProxyRunWorkerEnabled {
+		go registry.StartProxyRunWorker(rootCtx, registrySvc, registry.ProxyRunWorkerConfig{
+			Interval: time.Duration(cfg.RegistryProxyRunWorkerIntervalSeconds) * time.Second,
+			Timeout:  time.Duration(cfg.RegistryProxyRunTimeoutSeconds) * time.Second,
+		})
+	}
+
+	webhookSvc := webhook.NewService(pool, cfg)
 	webhookHandler := webhook.NewHandler(webhookSvc, cfg)
 	webhookHandler.RegisterProtected(api, jwtMiddleware)
 	runtimeSvc.SetWebhookEnqueuer(webhookSvc)
+	runtimeSvc.SetRunWebhookEnqueuer(webhookSvc)
 	go webhook.StartWorker(rootCtx, webhookSvc)
 
 	// core 部署:LLM client 注入 nil,task / benchmark 自动 fallback 到规则匹配 / 503。
@@ -170,6 +197,7 @@ func main() {
 	benchmarkHandler.RegisterProtected(api, jwtMiddleware)
 
 	taskSvc := task.NewService(pool, llmClient, skillAdapter{inner: skillSvc})
+	taskSvc.SetRunStarter(runtimeSvc)
 	taskHandler := task.NewHandler(taskSvc)
 	taskHandler.RegisterProtected(api, jwtMiddleware)
 

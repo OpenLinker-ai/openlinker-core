@@ -33,6 +33,7 @@ const errMsgMaxLen = 500
 const defaultRunEventsLimit int32 = 100
 const maxRunEventsLimit int32 = 500
 const maxAgentResponseEvents = 50
+const maxRunMessageContentLen = 10000
 const runtimePullClaimTTL = 5 * time.Minute
 
 const (
@@ -59,6 +60,11 @@ type WebhookEnqueuer interface {
 	EnqueueDelivery(ctx context.Context, run *db.Run, agentSlug string, output map[string]interface{}) error
 }
 
+// RunWebhookEnqueuer 触发 run 级别 push webhook，payload 来自 run_events。
+type RunWebhookEnqueuer interface {
+	EnqueueRunEvent(ctx context.Context, event db.RunEvent) error
+}
+
 // DeliveryEnqueuer 触发 run 完成后向用户的默认投递目标发送。
 //
 // 同 WebhookEnqueuer 用接口注入避免 runtime → delivery 硬依赖。
@@ -83,6 +89,7 @@ type Service struct {
 	cfg           *config.Config
 	httpClient    *http.Client
 	webhookSvc    WebhookEnqueuer
+	runWebhookSvc RunWebhookEnqueuer
 	deliverySvc   DeliveryEnqueuer
 	walletCharger WalletCharger
 }
@@ -111,6 +118,11 @@ type Delegation struct {
 // （webhook 内部要 import runtime 也不行；用接口隔离）。
 func (s *Service) SetWebhookEnqueuer(w WebhookEnqueuer) {
 	s.webhookSvc = w
+}
+
+// SetRunWebhookEnqueuer 注入 run 级别 push webhook 触发器。
+func (s *Service) SetRunWebhookEnqueuer(w RunWebhookEnqueuer) {
+	s.runWebhookSvc = w
 }
 
 // SetDeliveryEnqueuer 注入用户侧投递触发器（main.go 启动时调用）。
@@ -246,6 +258,10 @@ func (s *Service) createRunningRun(
 		log.Warn().Str("agent_id", agent.ID.String()).Msg("runtime.Run: missing mcp tool")
 		return nil, nil, httpx.Forbidden("Agent MCP tool 未配置")
 	}
+	requirementSnapshot, err := s.buildRunRequirementSnapshot(ctx, userID, agentID, req, source)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// 2. 计算费用：抽成 = floor(cost × rate)，creator_revenue = cost - fee
 	cost := agent.PricePerCallCents
@@ -338,6 +354,18 @@ func (s *Service) createRunningRun(
 		}); eventErr != nil {
 			return eventErr
 		}
+		if requirementSnapshot != nil {
+			evidence, createErr := q.CreateRunRequirementEvidence(ctx, requirementSnapshot.createParams(runID))
+			if createErr != nil {
+				return createErr
+			}
+			if eventErr := createRunEvent(ctx, q, runID, parentRunID, runRequirementsSnapshottedEvent, runRequirementEvidencePayload(evidence)); eventErr != nil {
+				return eventErr
+			}
+		}
+		if messageErr := createRunMessage(ctx, q, runID, nil, "user", messageContentFromMap(req.Input), req.Input); messageErr != nil {
+			return messageErr
+		}
 		return nil
 	})
 	if errors.Is(err, errInsufficientBalance) {
@@ -370,6 +398,8 @@ func (s *Service) createRunningRun(
 		resp.CallerAgentID = delegation.CallerAgentID.String()
 		resp.BillingMode = "free_delegation"
 	}
+	s.attachRunRequirementEvidence(ctx, runID, resp)
+	decorateNextAction(resp)
 	return invocation, resp, nil
 }
 
@@ -405,7 +435,7 @@ func (s *Service) executeRun(ctx context.Context, invocation *runInvocation) *Ru
 	// 处理结果
 	var resp *RunResponse
 	if callErr != nil || agentErr != nil {
-		resp = s.handleFailure(ctx, invocation.runID, invocation.userID, invocation.cost, duration, callErr, agentErr, invocation.settle)
+		resp = s.handleFailure(ctx, invocation.runID, invocation.userID, invocation.agent.ID, invocation.cost, duration, callErr, agentErr, invocation.settle)
 	} else {
 		resp = s.handleSuccess(
 			ctx,
@@ -430,7 +460,9 @@ func (s *Service) executeRun(ctx context.Context, invocation *runInvocation) *Ru
 			"target_agent_id": invocation.agent.ID.String(),
 			"status":          resp.Status,
 		})
+		decorateNextAction(resp)
 	}
+	s.attachRunRequirementEvidence(ctx, invocation.runID, resp)
 	return resp
 }
 
@@ -464,11 +496,13 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 		return nil, httpx.NotFound("调用记录不存在")
 	}
 	resp := runToResponse(&r)
+	s.attachRunRequirementEvidence(ctx, runID, resp)
 	delegation, err := s.queries.GetRunDelegationByChild(ctx, runID)
 	if err == nil {
 		resp.ParentRunID = delegation.ParentRunID.String()
 		resp.CallerAgentID = delegation.CallerAgentID.String()
 		resp.BillingMode = "free_delegation"
+		decorateNextAction(resp)
 		return resp, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -514,6 +548,56 @@ func (s *Service) ListRunEvents(ctx context.Context, userID, runID uuid.UUID, af
 	resp := make([]RunEventResponse, 0, len(events))
 	for _, event := range events {
 		resp = append(resp, runEventToResponse(event))
+	}
+	return resp, nil
+}
+
+// ListRunArtifacts returns persisted artifacts for a run. Only the run owner can read them.
+func (s *Service) ListRunArtifacts(ctx context.Context, userID, runID uuid.UUID) ([]RunArtifactResponse, error) {
+	r, err := s.queries.GetRunByID(ctx, runID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("调用记录不存在")
+		}
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.ListRunArtifacts: GetRunByID")
+		return nil, httpx.Internal("查询调用记录失败")
+	}
+	if r.UserID != userID {
+		return nil, httpx.NotFound("调用记录不存在")
+	}
+	artifacts, err := s.queries.ListRunArtifactsByRun(ctx, runID)
+	if err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.ListRunArtifacts: ListRunArtifactsByRun")
+		return nil, httpx.Internal("查询运行产物失败")
+	}
+	resp := make([]RunArtifactResponse, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		resp = append(resp, runArtifactToResponse(artifact))
+	}
+	return resp, nil
+}
+
+// ListRunMessages returns stable message replay records for a run.
+func (s *Service) ListRunMessages(ctx context.Context, userID, runID uuid.UUID) ([]RunMessageResponse, error) {
+	r, err := s.queries.GetRunByID(ctx, runID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("调用记录不存在")
+		}
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.ListRunMessages: GetRunByID")
+		return nil, httpx.Internal("查询调用记录失败")
+	}
+	if r.UserID != userID {
+		return nil, httpx.NotFound("调用记录不存在")
+	}
+	messages, err := s.queries.ListRunMessagesByRun(ctx, runID)
+	if err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.ListRunMessages: ListRunMessagesByRun")
+		return nil, httpx.Internal("查询运行消息失败")
+	}
+	resp := make([]RunMessageResponse, 0, len(messages))
+	for _, message := range messages {
+		resp = append(resp, runMessageToResponse(message))
 	}
 	return resp, nil
 }
@@ -575,13 +659,20 @@ func (s *Service) ReportRunEvent(ctx context.Context, runID uuid.UUID, token str
 			Msg("runtime.ReportRunEvent: CreateRunEvent")
 		return nil, httpx.Internal("记录运行事件失败")
 	}
+	s.triggerRunWebhookEvent(&event)
 	resp := runEventToResponse(event)
+	if eventType == "run.message.delta" {
+		s.recordRunMessageBestEffort(ctx, runID, &resp.Sequence, "agent", messageContentFromMap(payload), payload)
+	}
+	if eventType == "run.artifact.delta" {
+		s.recordArtifactDeltaBestEffort(ctx, runID, &resp.Sequence, payload)
+	}
 	return &resp, nil
 }
 
 // ClaimRuntimePullRun lets a private / IPv4 Agent actively pull the next pending run.
 func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string) (*RuntimePullRunResponse, error) {
-	token, err := s.verifyRuntimeToken(ctx, plaintextToken)
+	token, err := s.verifyRuntimeToken(ctx, plaintextToken, "agent:pull")
 	if err != nil {
 		return nil, err
 	}
@@ -628,7 +719,7 @@ func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string
 
 // CompleteRuntimePullRun accepts the result of a run previously claimed by the same Runtime Token.
 func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken string, runID uuid.UUID, req *RuntimePullResultRequest) (*RunResponse, error) {
-	token, err := s.verifyRuntimeToken(ctx, plaintextToken)
+	token, err := s.verifyRuntimeToken(ctx, plaintextToken, "agent:pull")
 	if err != nil {
 		return nil, err
 	}
@@ -673,13 +764,45 @@ func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken str
 		if agentErr == nil {
 			agentErr = &AgentError{Code: "AGENT_REPORTED_FAILURE", Message: "Agent runtime reported " + req.Status}
 		}
-		resp = s.handleFailure(ctx, runID, state.UserID, state.CostCents, duration, nil, agentErr, false)
+		resp = s.handleFailure(ctx, runID, state.UserID, token.AgentID, state.CostCents, duration, nil, agentErr, false)
 	default:
 		return nil, httpx.BadRequest("status 取值非法")
 	}
 	_ = s.queries.TouchAgentRuntimeToken(ctx, token.ID)
 	s.decorateDelegationCompletion(ctx, runID, token.AgentID, resp)
+	s.attachRunRequirementEvidence(ctx, runID, resp)
 	return resp, nil
+}
+
+// HeartbeatAgent lets an Agent proactively mark its Runtime Token owner alive.
+func (s *Service) HeartbeatAgent(ctx context.Context, plaintextToken string) (*AgentHeartbeatResponse, error) {
+	token, err := s.verifyRuntimeTokenAny(ctx, plaintextToken, "agent:pull", "agent:call")
+	if err != nil {
+		return nil, err
+	}
+	agent, err := s.queries.GetAgentByID(ctx, token.AgentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("Agent 不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", token.AgentID.String()).Msg("runtime.HeartbeatAgent: GetAgentByID")
+		return nil, httpx.Internal("查询 Agent 失败")
+	}
+	if agent.LifecycleStatus != "active" {
+		return nil, httpx.Forbidden("Agent 未启用")
+	}
+	snapshot, err := s.queries.MarkAgentAvailabilityHeartbeat(ctx, token.AgentID)
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", token.AgentID.String()).Msg("runtime.HeartbeatAgent: MarkAgentAvailabilityHeartbeat")
+		return nil, httpx.Internal("记录 Agent heartbeat 失败")
+	}
+	_ = s.queries.TouchAgentRuntimeToken(ctx, token.ID)
+	return &AgentHeartbeatResponse{
+		AgentID:             snapshot.AgentID.String(),
+		AvailabilityStatus:  snapshot.AvailabilityStatus,
+		LastCheckedAt:       snapshot.LastCheckedAt,
+		ConsecutiveFailures: snapshot.ConsecutiveFailures,
+	}, nil
 }
 
 func (s *Service) decorateDelegationCompletion(ctx context.Context, runID, targetAgentID uuid.UUID, resp *RunResponse) {
@@ -700,9 +823,14 @@ func (s *Service) decorateDelegationCompletion(ctx context.Context, runID, targe
 		"target_agent_id": targetAgentID.String(),
 		"status":          resp.Status,
 	})
+	decorateNextAction(resp)
 }
 
-func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext string) (db.AgentRuntimeToken, error) {
+func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext, requiredScope string) (db.AgentRuntimeToken, error) {
+	return s.verifyRuntimeTokenAny(ctx, plaintext, requiredScope)
+}
+
+func (s *Service) verifyRuntimeTokenAny(ctx context.Context, plaintext string, acceptedScopes ...string) (db.AgentRuntimeToken, error) {
 	plaintext = strings.TrimSpace(plaintext)
 	if !strings.HasPrefix(plaintext, runtimeTokenPrefix) ||
 		len(plaintext) != len(runtimeTokenPrefix)+runtimeTokenRandomSize*2 {
@@ -714,11 +842,20 @@ func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext string) (db.
 	}
 	for _, token := range tokens {
 		if bcrypt.CompareHashAndPassword([]byte(token.TokenHash), []byte(plaintext)) == nil &&
-			(hasRuntimeScope(token.Scopes, "agent:pull") || hasRuntimeScope(token.Scopes, "agent:call")) {
+			hasAnyRuntimeScope(token.Scopes, acceptedScopes...) {
 			return token, nil
 		}
 	}
 	return db.AgentRuntimeToken{}, httpx.Unauthorized("Runtime Token 无效或已撤销")
+}
+
+func hasAnyRuntimeScope(scopes []string, accepted ...string) bool {
+	for _, expected := range accepted {
+		if hasRuntimeScope(scopes, expected) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasRuntimeScope(scopes []string, expected string) bool {
@@ -994,10 +1131,19 @@ func (s *Service) handleSuccess(
 				return e
 			}
 		}
-		return q.IncrementAgentStats(ctx, db.IncrementAgentStatsParams{
+		if e := q.IncrementAgentStats(ctx, db.IncrementAgentStatsParams{
 			ID:           agentID,
 			RevenueCents: int64(revenue),
-		})
+		}); e != nil {
+			return e
+		}
+		if _, e := q.MarkAgentAvailabilitySuccess(ctx, agentID); e != nil {
+			return e
+		}
+		if e := s.createRunArtifacts(ctx, q, runID, output); e != nil {
+			return e
+		}
+		return nil
 	})
 	if err != nil {
 		// 已扣钱、已得到结果，事务失败仅影响分账与统计；记日志由对账补救
@@ -1025,6 +1171,7 @@ func (s *Service) handleSuccess(
 		Output:     output,
 		CostCents:  cost,
 		DurationMs: duration,
+		NextAction: nextActionForSuccess(output, "", ""),
 	}
 }
 
@@ -1036,7 +1183,7 @@ func (s *Service) handleSuccess(
 //   - 创作者业务错误 → 'failed' / 透传 agentErr.Code
 func (s *Service) handleFailure(
 	ctx context.Context,
-	runID, userID uuid.UUID,
+	runID, userID, agentID uuid.UUID,
 	cost, duration int32,
 	callErr error,
 	agentErr *AgentError,
@@ -1073,9 +1220,14 @@ func (s *Service) handleFailure(
 			return e
 		}
 		if !settle || s.walletCharger == nil {
-			return nil
+			_, e := q.MarkAgentAvailabilityFailure(ctx, agentID)
+			return e
 		}
-		return s.walletCharger.Refund(ctx, tx, userID, int64(cost))
+		if e := s.walletCharger.Refund(ctx, tx, userID, int64(cost)); e != nil {
+			return e
+		}
+		_, e := q.MarkAgentAvailabilityFailure(ctx, agentID)
+		return e
 	})
 	if err != nil {
 		// 退款失败：用户钱包未回滚，对账系统补救（极少见，DB 故障）
@@ -1104,6 +1256,360 @@ func (s *Service) handleFailure(
 		ErrorMsg:   errMsg,
 		CostCents:  0, // 失败已退款，对外口径不收钱
 		DurationMs: duration,
+		NextAction: nextActionForFailure(runStatus, errCode, errMsg),
+	}
+}
+
+type runArtifactDraft struct {
+	ArtifactType string
+	Title        string
+	Content      map[string]interface{}
+	Visibility   string
+}
+
+type runArtifactDeltaDraft struct {
+	SourceArtifactID string
+	ArtifactType     string
+	Title            string
+	Visibility       string
+	Append           bool
+	LastChunk        bool
+	Parts            []interface{}
+	Payload          map[string]interface{}
+}
+
+func (s *Service) createRunArtifacts(ctx context.Context, q *db.Queries, runID uuid.UUID, output map[string]interface{}) error {
+	for _, artifact := range runArtifactsFromOutput(output) {
+		raw, err := json.Marshal(artifact.Content)
+		if err != nil {
+			return err
+		}
+		if _, err := q.CreateRunArtifact(ctx, db.CreateRunArtifactParams{
+			RunID:        runID,
+			ArtifactType: artifact.ArtifactType,
+			Title:        artifact.Title,
+			Content:      raw,
+			Visibility:   artifact.Visibility,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) recordArtifactDeltaBestEffort(ctx context.Context, runID uuid.UUID, eventSequence *int32, payload map[string]interface{}) {
+	if err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		return s.upsertRunArtifactDelta(ctx, s.queries.WithTx(tx), runID, eventSequence, payload)
+	}); err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.recordArtifactDeltaBestEffort")
+	}
+}
+
+func (s *Service) upsertRunArtifactDelta(ctx context.Context, q *db.Queries, runID uuid.UUID, eventSequence *int32, payload map[string]interface{}) error {
+	draft := artifactDeltaDraftFromPayload(payload)
+	artifact, err := q.GetRunArtifactBySourceID(ctx, db.GetRunArtifactBySourceIDParams{
+		RunID:            runID,
+		SourceArtifactID: draft.SourceArtifactID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		emptyContent, marshalErr := json.Marshal(map[string]interface{}{
+			"artifact_id": draft.SourceArtifactID,
+			"streamed":    true,
+			"complete":    false,
+			"parts":       []interface{}{},
+			"chunks":      []interface{}{},
+		})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		sourceID := draft.SourceArtifactID
+		artifact, err = q.CreateRunArtifact(ctx, db.CreateRunArtifactParams{
+			RunID:            runID,
+			ArtifactType:     draft.ArtifactType,
+			Title:            draft.Title,
+			Content:          emptyContent,
+			Visibility:       draft.Visibility,
+			SourceArtifactID: &sourceID,
+		})
+	}
+	if err != nil {
+		return err
+	}
+
+	partsJSON, err := json.Marshal(draft.Parts)
+	if err != nil {
+		return err
+	}
+	payloadJSON, err := json.Marshal(draft.Payload)
+	if err != nil {
+		return err
+	}
+	chunk, err := q.CreateRunArtifactChunk(ctx, db.CreateRunArtifactChunkParams{
+		RunID:            runID,
+		RunArtifactID:    artifact.ID,
+		SourceArtifactID: draft.SourceArtifactID,
+		EventSequence:    eventSequence,
+		Append:           draft.Append,
+		LastChunk:        draft.LastChunk,
+		Parts:            partsJSON,
+		Payload:          payloadJSON,
+	})
+	if err != nil {
+		return err
+	}
+
+	content := map[string]interface{}{}
+	if len(artifact.Content) > 0 {
+		_ = json.Unmarshal(artifact.Content, &content)
+	}
+	content = mergeArtifactDeltaContent(content, draft, chunk)
+	contentJSON, err := json.Marshal(content)
+	if err != nil {
+		return err
+	}
+	_, err = q.UpdateRunArtifactContent(ctx, db.UpdateRunArtifactContentParams{
+		ID:           artifact.ID,
+		RunID:        runID,
+		ArtifactType: draft.ArtifactType,
+		Title:        draft.Title,
+		Content:      contentJSON,
+		Visibility:   draft.Visibility,
+	})
+	return err
+}
+
+func runArtifactsFromOutput(output map[string]interface{}) []runArtifactDraft {
+	if output == nil {
+		output = map[string]interface{}{}
+	}
+	if raw, ok := output["artifacts"].([]interface{}); ok && len(raw) > 0 {
+		items := make([]runArtifactDraft, 0, len(raw))
+		for i, item := range raw {
+			if m, ok := item.(map[string]interface{}); ok {
+				items = append(items, artifactDraftFromMap(m, fmt.Sprintf("Artifact %d", i+1)))
+			} else {
+				items = append(items, runArtifactDraft{
+					ArtifactType: "data",
+					Title:        fmt.Sprintf("Artifact %d", i+1),
+					Content:      map[string]interface{}{"value": item},
+					Visibility:   "private",
+				})
+			}
+		}
+		return items
+	}
+	if raw, ok := output["artifact"].(map[string]interface{}); ok {
+		return []runArtifactDraft{artifactDraftFromMap(raw, "Agent 产物")}
+	}
+	return []runArtifactDraft{{
+		ArtifactType: "json",
+		Title:        "Agent 输出",
+		Content:      output,
+		Visibility:   "private",
+	}}
+}
+
+func artifactDraftFromMap(raw map[string]interface{}, fallbackTitle string) runArtifactDraft {
+	title := normalizeArtifactTitle(coalesceArtifactString(raw, "title", fallbackTitle))
+	artifactType := coalesceArtifactString(raw, "artifact_type", "")
+	if artifactType == "" {
+		artifactType = coalesceArtifactString(raw, "type", "json")
+	}
+	if !validArtifactType(artifactType) {
+		artifactType = "json"
+	}
+	visibility := coalesceArtifactString(raw, "visibility", "private")
+	if !validArtifactVisibility(visibility) {
+		visibility = "private"
+	}
+	content := map[string]interface{}{}
+	if v, ok := raw["content"].(map[string]interface{}); ok {
+		content = v
+	} else if v, ok := raw["data"].(map[string]interface{}); ok {
+		content = v
+	} else {
+		for k, v := range raw {
+			content[k] = v
+		}
+	}
+	return runArtifactDraft{
+		ArtifactType: artifactType,
+		Title:        title,
+		Content:      content,
+		Visibility:   visibility,
+	}
+}
+
+func artifactDeltaDraftFromPayload(payload map[string]interface{}) runArtifactDeltaDraft {
+	if payload == nil {
+		payload = map[string]interface{}{}
+	}
+	sourceID := coalesceArtifactString(payload, "artifact_id", "")
+	if sourceID == "" {
+		sourceID = coalesceArtifactString(payload, "source_artifact_id", "")
+	}
+	if sourceID == "" {
+		sourceID = coalesceArtifactString(payload, "id", "default")
+	}
+	artifactType := coalesceArtifactString(payload, "artifact_type", "")
+	if artifactType == "" {
+		artifactType = coalesceArtifactString(payload, "type", "data")
+	}
+	if !validArtifactType(artifactType) {
+		artifactType = "data"
+	}
+	visibility := coalesceArtifactString(payload, "visibility", "private")
+	if !validArtifactVisibility(visibility) {
+		visibility = "private"
+	}
+	appendChunk := true
+	if raw, ok := payload["append"].(bool); ok {
+		appendChunk = raw
+	}
+	lastChunk := false
+	if raw, ok := payload["last_chunk"].(bool); ok {
+		lastChunk = raw
+	}
+	title := coalesceArtifactString(payload, "title", "")
+	if title == "" {
+		title = "Artifact " + normalizeArtifactSourceID(sourceID)
+	}
+	return runArtifactDeltaDraft{
+		SourceArtifactID: normalizeArtifactSourceID(sourceID),
+		ArtifactType:     artifactType,
+		Title:            normalizeArtifactTitle(title),
+		Visibility:       visibility,
+		Append:           appendChunk,
+		LastChunk:        lastChunk,
+		Parts:            artifactDeltaPartsFromPayload(payload),
+		Payload:          payload,
+	}
+}
+
+func artifactDeltaPartsFromPayload(payload map[string]interface{}) []interface{} {
+	if raw, ok := payload["parts"].([]interface{}); ok && len(raw) > 0 {
+		return raw
+	}
+	for _, key := range []string{"text", "content", "message"} {
+		if raw, ok := payload[key]; ok && raw != nil {
+			if s, ok := raw.(string); ok {
+				return []interface{}{map[string]interface{}{"type": "text", "text": s}}
+			}
+			return []interface{}{map[string]interface{}{"type": "data", "data": raw}}
+		}
+	}
+	if raw, ok := payload["data"]; ok && raw != nil {
+		return []interface{}{map[string]interface{}{"type": "data", "data": raw}}
+	}
+	return []interface{}{map[string]interface{}{"type": "data", "data": payload}}
+}
+
+func mergeArtifactDeltaContent(content map[string]interface{}, draft runArtifactDeltaDraft, chunk db.RunArtifactChunk) map[string]interface{} {
+	if content == nil {
+		content = map[string]interface{}{}
+	}
+	content["artifact_id"] = draft.SourceArtifactID
+	content["streamed"] = true
+	content["complete"] = draft.LastChunk
+	content["last_chunk_index"] = chunk.ChunkIndex
+
+	parts := interfaceSliceFromAny(content["parts"])
+	chunks := interfaceSliceFromAny(content["chunks"])
+	if !draft.Append {
+		parts = []interface{}{}
+		chunks = []interface{}{}
+	}
+	parts = append(parts, draft.Parts...)
+
+	chunkItem := map[string]interface{}{
+		"index":      chunk.ChunkIndex,
+		"append":     draft.Append,
+		"last_chunk": draft.LastChunk,
+		"parts":      draft.Parts,
+	}
+	if chunk.EventSequence != nil {
+		chunkItem["event_sequence"] = *chunk.EventSequence
+	}
+	chunks = append(chunks, chunkItem)
+	content["parts"] = parts
+	content["chunks"] = chunks
+	if text := artifactTextFromParts(parts); text != "" {
+		content["text"] = text
+	}
+	return content
+}
+
+func interfaceSliceFromAny(raw interface{}) []interface{} {
+	if raw == nil {
+		return []interface{}{}
+	}
+	if items, ok := raw.([]interface{}); ok {
+		return items
+	}
+	return []interface{}{raw}
+}
+
+func artifactTextFromParts(parts []interface{}) string {
+	var b strings.Builder
+	for _, part := range parts {
+		switch v := part.(type) {
+		case string:
+			b.WriteString(v)
+		case map[string]interface{}:
+			if text, ok := v["text"].(string); ok {
+				b.WriteString(text)
+			}
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func normalizeArtifactSourceID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = "default"
+	}
+	runes := []rune(value)
+	if len(runes) > 200 {
+		return string(runes[:200])
+	}
+	return value
+}
+
+func normalizeArtifactTitle(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = "Agent 产物"
+	}
+	runes := []rune(title)
+	if len(runes) > 200 {
+		return string(runes[:200])
+	}
+	return title
+}
+
+func coalesceArtifactString(m map[string]interface{}, key, fallback string) string {
+	if v, ok := m[key].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return fallback
+}
+
+func validArtifactType(v string) bool {
+	switch v {
+	case "json", "text", "file", "data":
+		return true
+	default:
+		return false
+	}
+}
+
+func validArtifactVisibility(v string) bool {
+	switch v {
+	case "private", "shared", "public_example":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1165,6 +1671,20 @@ func (s *Service) triggerWebhookByRun(runID uuid.UUID) {
 	}()
 }
 
+func (s *Service) triggerRunWebhookEvent(event *db.RunEvent) {
+	if s.runWebhookSvc == nil || event == nil {
+		return
+	}
+	go func(e db.RunEvent) {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.runWebhookSvc.EnqueueRunEvent(bgCtx, e); err != nil {
+			log.Error().Err(err).Str("event_id", e.ID.String()).Str("run_id", e.RunID.String()).
+				Msg("runtime.triggerRunWebhookEvent: EnqueueRunEvent")
+		}
+	}(*event)
+}
+
 // triggerDelivery 触发用户侧默认投递（无默认 target 时静默跳过）。
 //
 // 与 webhook 解耦：用户没配 webhook 但配了 delivery 时也能投。
@@ -1224,27 +1744,259 @@ func runToResponse(r *db.Run) *RunResponse {
 		// running（极少看到，因为同步返回；防御性兼容）
 		resp.CostCents = r.CostCents
 	}
+	decorateNextAction(resp)
 	return resp
 }
 
+func runArtifactToResponse(a db.RunArtifact) RunArtifactResponse {
+	content := map[string]interface{}{}
+	if len(a.Content) > 0 {
+		if err := json.Unmarshal(a.Content, &content); err != nil {
+			content = map[string]interface{}{"raw": string(a.Content)}
+		}
+	}
+	return RunArtifactResponse{
+		ID:               a.ID.String(),
+		RunID:            a.RunID.String(),
+		ArtifactType:     a.ArtifactType,
+		Title:            a.Title,
+		Content:          content,
+		Visibility:       a.Visibility,
+		SourceArtifactID: stringPtrValue(a.SourceArtifactID),
+		CreatedAt:        a.CreatedAt,
+	}
+}
+
+func runMessageToResponse(m db.RunMessage) RunMessageResponse {
+	payload := map[string]interface{}{}
+	if len(m.Payload) > 0 {
+		if err := json.Unmarshal(m.Payload, &payload); err != nil {
+			payload = map[string]interface{}{"raw": string(m.Payload)}
+		}
+	}
+	return RunMessageResponse{
+		ID:            m.ID.String(),
+		RunID:         m.RunID.String(),
+		EventSequence: m.EventSequence,
+		Role:          m.Role,
+		Content:       m.Content,
+		Payload:       payload,
+		CreatedAt:     m.CreatedAt,
+	}
+}
+
+func decorateNextAction(resp *RunResponse) {
+	if resp == nil {
+		return
+	}
+	switch resp.Status {
+	case "success":
+		resp.NextAction = nextActionForSuccess(resp.Output, resp.ParentRunID, resp.BillingMode)
+	case "failed", "timeout":
+		resp.NextAction = nextActionForFailure(resp.Status, resp.ErrorCode, resp.ErrorMsg)
+	case "running":
+		resp.NextAction = &RunNextAction{
+			Type:          "wait",
+			Label:         "等待运行完成",
+			Hint:          "运行仍在进行中。可以保持页面打开接收事件流，或稍后回到运行详情查看终态。",
+			Href:          "/run/" + resp.RunID,
+			ResourceType:  "run",
+			ResourceID:    resp.RunID,
+			Source:        "platform",
+			RequiresHuman: false,
+		}
+	default:
+		resp.NextAction = nil
+	}
+}
+
+func nextActionForSuccess(output map[string]interface{}, parentRunID, billingMode string) *RunNextAction {
+	if billingMode == "free_delegation" && parentRunID != "" {
+		return &RunNextAction{
+			Type:          "return_to_parent",
+			Label:         "返回父运行",
+			Hint:          "这个子运行的结果已经回写到父运行链路，不会单独外部投递。",
+			Href:          "/run/" + parentRunID,
+			ResourceType:  "run",
+			ResourceID:    parentRunID,
+			Source:        "platform",
+			RequiresHuman: false,
+		}
+	}
+	if action, ok := nextActionFromOutput(output); ok {
+		return action
+	}
+	return &RunNextAction{
+		Type:          "review_output",
+		Label:         "查看输出并投递",
+		Hint:          "运行已完成。可以在本页确认结果，必要时配置投递目标或把结果写回任务详情。",
+		Href:          "#delivery",
+		ResourceType:  "run",
+		Source:        "platform",
+		RequiresHuman: true,
+	}
+}
+
+func nextActionForFailure(status, code, message string) *RunNextAction {
+	label := "重试或检查 Agent"
+	hint := "运行失败。请检查输入、Agent endpoint 或认证配置，然后重新运行。"
+	if status == "timeout" {
+		label = "检查超时并重试"
+		hint = "Agent 没有在超时时间内返回。请确认 endpoint 响应时间、网络连通性或改用 runtime_pull。"
+	}
+	props := map[string]interface{}{}
+	if code != "" {
+		props["error_code"] = code
+	}
+	if message != "" {
+		props["error_message"] = message
+	}
+	return &RunNextAction{
+		Type:            "retry",
+		Label:           label,
+		Hint:            hint,
+		Href:            "/market",
+		ResourceType:    "agent",
+		Source:          "platform",
+		RequiresHuman:   true,
+		AdditionalProps: props,
+	}
+}
+
+func nextActionFromOutput(output map[string]interface{}) (*RunNextAction, bool) {
+	if output == nil {
+		return nil, false
+	}
+	raw, ok := output["next_action"]
+	if !ok {
+		return nil, false
+	}
+	switch v := raw.(type) {
+	case string:
+		hint := strings.TrimSpace(v)
+		if hint == "" {
+			return nil, false
+		}
+		return &RunNextAction{
+			Type:          "agent_suggested",
+			Label:         "执行 Agent 建议",
+			Hint:          hint,
+			Source:        "agent",
+			RequiresHuman: true,
+		}, true
+	case map[string]interface{}:
+		label := stringFromMap(v, "label")
+		hint := stringFromMap(v, "hint")
+		if hint == "" {
+			hint = stringFromMap(v, "description")
+		}
+		if label == "" && hint == "" {
+			return nil, false
+		}
+		if label == "" {
+			label = "执行 Agent 建议"
+		}
+		if hint == "" {
+			hint = label
+		}
+		return &RunNextAction{
+			Type:            coalesceString(stringFromMap(v, "type"), "agent_suggested"),
+			Label:           label,
+			Hint:            hint,
+			Href:            stringFromMap(v, "href"),
+			Method:          stringFromMap(v, "method"),
+			RequiresHuman:   true,
+			ResourceType:    stringFromMap(v, "resource_type"),
+			ResourceID:      stringFromMap(v, "resource_id"),
+			Source:          "agent",
+			AdditionalProps: v,
+		}, true
+	default:
+		return nil, false
+	}
+}
+
+func stringFromMap(values map[string]interface{}, key string) string {
+	raw, ok := values[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
+func coalesceString(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
+}
+
+func stringPtrValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 func createRunEvent(ctx context.Context, q *db.Queries, runID uuid.UUID, parentRunID *uuid.UUID, eventType string, payload map[string]interface{}) error {
+	_, err := createRunEventRecord(ctx, q, runID, parentRunID, eventType, payload)
+	return err
+}
+
+func createRunEventRecord(ctx context.Context, q *db.Queries, runID uuid.UUID, parentRunID *uuid.UUID, eventType string, payload map[string]interface{}) (db.RunEvent, error) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return db.RunEvent{}, err
 	}
-	_, err = q.CreateRunEvent(ctx, db.CreateRunEventParams{
+	return q.CreateRunEvent(ctx, db.CreateRunEventParams{
 		RunID:       runID,
 		ParentRunID: parentRunID,
 		EventType:   eventType,
 		Payload:     payloadJSON,
 	})
+}
+
+func createRunMessage(ctx context.Context, q *db.Queries, runID uuid.UUID, eventSequence *int32, role, content string, payload map[string]interface{}) error {
+	if payload == nil {
+		payload = map[string]interface{}{}
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	content = truncateRunMessageContent(strings.TrimSpace(content))
+	if role == "" {
+		role = "agent"
+	}
+	_, err = q.CreateRunMessage(ctx, db.CreateRunMessageParams{
+		RunID:         runID,
+		EventSequence: eventSequence,
+		Role:          role,
+		Content:       content,
+		Payload:       payloadJSON,
+	})
 	return err
 }
 
-func (s *Service) recordRunEventBestEffort(ctx context.Context, runID uuid.UUID, eventType string, payload map[string]interface{}) {
-	if err := createRunEvent(ctx, s.queries, runID, nil, eventType, payload); err != nil {
+func (s *Service) recordRunEventBestEffort(ctx context.Context, runID uuid.UUID, eventType string, payload map[string]interface{}) *db.RunEvent {
+	event, err := createRunEventRecord(ctx, s.queries, runID, nil, eventType, payload)
+	if err != nil {
 		log.Error().Err(err).Str("run_id", runID.String()).Str("event_type", eventType).
 			Msg("runtime.recordRunEventBestEffort")
+		return nil
+	}
+	s.triggerRunWebhookEvent(&event)
+	return &event
+}
+
+func (s *Service) recordRunMessageBestEffort(ctx context.Context, runID uuid.UUID, eventSequence *int32, role, content string, payload map[string]interface{}) {
+	if err := createRunMessage(ctx, s.queries, runID, eventSequence, role, content, payload); err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.recordRunMessageBestEffort")
 	}
 }
 
@@ -1263,8 +2015,44 @@ func (s *Service) recordAgentEventsBestEffort(ctx context.Context, runID uuid.UU
 		if payload == nil {
 			payload = map[string]interface{}{}
 		}
-		s.recordRunEventBestEffort(ctx, runID, eventType, payload)
+		event := s.recordRunEventBestEffort(ctx, runID, eventType, payload)
+		var eventSequence *int32
+		if event != nil {
+			eventSequence = &event.Sequence
+		}
+		if eventType == "run.message.delta" {
+			s.recordRunMessageBestEffort(ctx, runID, eventSequence, "agent", messageContentFromMap(payload), payload)
+		}
+		if eventType == "run.artifact.delta" {
+			s.recordArtifactDeltaBestEffort(ctx, runID, eventSequence, payload)
+		}
 	}
+}
+
+func messageContentFromMap(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	for _, key := range []string{"text", "content", "message", "summary", "query", "prompt"} {
+		if raw, ok := payload[key]; ok && raw != nil {
+			if s, ok := raw.(string); ok && strings.TrimSpace(s) != "" {
+				return truncateRunMessageContent(strings.TrimSpace(s))
+			}
+		}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return truncateRunMessageContent(string(raw))
+}
+
+func truncateRunMessageContent(s string) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunMessageContentLen {
+		return s
+	}
+	return string(runes[:maxRunMessageContentLen])
 }
 
 func constantTimeEqual(a, b string) bool {

@@ -150,6 +150,57 @@ func TestRuntimePull_OnlyClaimingTokenCanComplete(t *testing.T) {
 	assert.Equal(t, "LOCAL_ERROR", reloaded.ErrorCode)
 }
 
+func TestRuntimePull_RequiresPullScope(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	callOnlyToken := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call"})
+
+	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "scope"}), "")
+	require.NoError(t, err)
+	require.Equal(t, "running", started.Status)
+
+	claimed, err := svc.ClaimRuntimePullRun(ctx, callOnlyToken)
+	require.Nil(t, claimed)
+	assertHTTPStatus(t, err, 401)
+}
+
+func TestAgentHeartbeat_MarksAgentHealthy(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/heartbeat", 10, "approved")
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call"})
+
+	_, err := pool.Exec(ctx,
+		`INSERT INTO agent_availability_snapshots (
+			agent_id, availability_status, last_failed_run_at, last_checked_at, consecutive_failures
+		) VALUES ($1, 'degraded', NOW(), NOW(), 2)`,
+		agentID,
+	)
+	require.NoError(t, err)
+
+	resp, err := svc.HeartbeatAgent(ctx, token)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, agentID.String(), resp.AgentID)
+	assert.Equal(t, "healthy", resp.AvailabilityStatus)
+	assert.Equal(t, int32(0), resp.ConsecutiveFailures)
+	require.NotNil(t, resp.LastCheckedAt)
+
+	availability := readAgentAvailability(t, pool, agentID)
+	assert.Equal(t, "healthy", availability.Status)
+	assert.Equal(t, int32(0), availability.ConsecutiveFailures)
+	require.NotNil(t, availability.LastCheckedAt)
+}
+
 func TestRuntimePull_ReclaimsStaleClaim(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)

@@ -362,9 +362,10 @@ func (s *Service) GetAgentOnboarding(ctx context.Context, agentID, creatorID uui
 	}
 
 	return &OnboardingResponse{
-		Status:     toOnboardingStatusResponse(&status),
-		Capability: capability,
-		Examples:   examples,
+		Status:       toOnboardingStatusResponse(&status),
+		Capability:   capability,
+		Examples:     examples,
+		Availability: s.agentAvailability(ctx, agentID),
 	}, nil
 }
 
@@ -586,10 +587,14 @@ func (s *Service) RunDryRun(ctx context.Context, agentID, creatorID uuid.UUID) (
 		log.Warn().Err(dbErr).Str("agent_id", agentID.String()).Msg("agent.RunDryRun: UpdateDryRunResult")
 	}
 
+	availability := s.markAvailabilityAfterDryRun(ctx, agentID, result, errMsg)
+
 	return &DryRunResponse{
-		Result: result,
-		Error:  errPtr,
-		Output: output,
+		Result:       result,
+		Error:        errPtr,
+		Output:       output,
+		Availability: availability,
+		RepairHints:  repairHintsForDryRun(&agentRow, errMsg),
 	}, nil
 }
 
@@ -832,6 +837,76 @@ func deriveLegacyStatus(a *db.Agent) string {
 	default:
 		return "approved"
 	}
+}
+
+func (s *Service) markAvailabilityAfterDryRun(ctx context.Context, agentID uuid.UUID, result, errMsg string) Availability {
+	var (
+		snapshot db.AgentAvailabilitySnapshot
+		err      error
+	)
+	if result == "pass" {
+		snapshot, err = s.queries.MarkAgentAvailabilitySuccess(ctx, agentID)
+	} else {
+		snapshot, err = s.queries.MarkAgentAvailabilityFailure(ctx, agentID)
+	}
+	if err != nil {
+		log.Warn().Err(err).Str("agent_id", agentID.String()).Str("result", result).Str("error", errMsg).
+			Msg("agent.markAvailabilityAfterDryRun")
+		return s.agentAvailability(ctx, agentID)
+	}
+	return availabilityFromSnapshot(snapshot)
+}
+
+func availabilityFromSnapshot(snapshot db.AgentAvailabilitySnapshot) Availability {
+	return availabilityResponse(
+		snapshot.AvailabilityStatus,
+		snapshot.LastSuccessfulRunAt,
+		snapshot.LastFailedRunAt,
+		snapshot.LastCheckedAt,
+		snapshot.ConsecutiveFailures,
+	)
+}
+
+func (s *Service) agentAvailability(ctx context.Context, agentID uuid.UUID) Availability {
+	snapshot, err := s.queries.GetAgentAvailabilitySnapshot(ctx, agentID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.agentAvailability")
+		}
+		return availabilityResponse("unknown", nil, nil, nil, 0)
+	}
+	return availabilityFromSnapshot(snapshot)
+}
+
+func repairHintsForDryRun(agent *db.Agent, errMsg string) []string {
+	if strings.TrimSpace(errMsg) == "" {
+		return nil
+	}
+	hints := []string{}
+	switch agent.ConnectionMode {
+	case "runtime_pull":
+		hints = append(hints,
+			"确认本地 Agent 进程正在运行，并使用含 agent:pull scope 的 Runtime Token 轮询任务。",
+			"如果刚重启过 Agent，先调用 /api/v1/agent-runtime/heartbeat 刷新可用性。",
+		)
+	case "mcp_server":
+		hints = append(hints,
+			"确认 MCP Server 地址可被 OpenLinker 访问，且工具名与 mcp_tool_name 配置一致。",
+			"检查示例 input 是否能被目标 MCP tool 接受，并返回 JSON object。",
+		)
+	default:
+		hints = append(hints,
+			"确认 endpoint_url 可访问、认证头有效，并在超时时间内返回 2xx。",
+			"确认响应是 JSON object；如返回 { output: {...} }，平台会自动读取 output。",
+		)
+	}
+	if strings.Contains(errMsg, "schema") || strings.Contains(errMsg, "不匹配") {
+		hints = append(hints, "根据当前 input_schema / output_schema 调整示例或 Agent 输出字段。")
+	}
+	if strings.Contains(strings.ToLower(errMsg), "timeout") || strings.Contains(errMsg, "超时") {
+		hints = append(hints, "缩短 Agent 首包响应时间，或把长任务改成先返回运行已接收再通过事件上报进度。")
+	}
+	return hints
 }
 
 func (s *Service) ensureOnboardingStatusBestEffort(ctx context.Context, agentID uuid.UUID) {

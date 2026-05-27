@@ -19,17 +19,53 @@ type RunRequest struct {
 // 失败 / 超时 时 Output 为空、ErrorCode + ErrorMsg 必填，CostCents=0（已退款）。
 // Source: 'web' / 'mcp' / 'api'，由 handler 从鉴权方式推导。
 type RunResponse struct {
-	RunID         string                 `json:"run_id"`
-	Status        string                 `json:"status"`
-	Output        map[string]interface{} `json:"output,omitempty"`
-	ErrorCode     string                 `json:"error_code,omitempty"`
-	ErrorMsg      string                 `json:"error_message,omitempty"`
-	CostCents     int32                  `json:"cost_cents"`
-	DurationMs    int32                  `json:"duration_ms"`
-	Source        string                 `json:"source,omitempty"`
-	ParentRunID   string                 `json:"parent_run_id,omitempty"`
-	CallerAgentID string                 `json:"caller_agent_id,omitempty"`
-	BillingMode   string                 `json:"billing_mode,omitempty"`
+	RunID               string                          `json:"run_id"`
+	Status              string                          `json:"status"`
+	Output              map[string]interface{}          `json:"output,omitempty"`
+	ErrorCode           string                          `json:"error_code,omitempty"`
+	ErrorMsg            string                          `json:"error_message,omitempty"`
+	CostCents           int32                           `json:"cost_cents"`
+	DurationMs          int32                           `json:"duration_ms"`
+	Source              string                          `json:"source,omitempty"`
+	ParentRunID         string                          `json:"parent_run_id,omitempty"`
+	CallerAgentID       string                          `json:"caller_agent_id,omitempty"`
+	BillingMode         string                          `json:"billing_mode,omitempty"`
+	RequirementEvidence *RunRequirementEvidenceResponse `json:"requirement_evidence,omitempty"`
+	NextAction          *RunNextAction                  `json:"next_action,omitempty"`
+}
+
+// RunRequirementEvidenceResponse proves which task Skill/MCP requirements were
+// snapshotted onto a run and how the selected Agent covered them.
+type RunRequirementEvidenceResponse struct {
+	RunID            string    `json:"run_id"`
+	TaskID           string    `json:"task_id"`
+	AgentID          string    `json:"agent_id"`
+	RequiredSkillIDs []string  `json:"required_skill_ids"`
+	RequiredMCPTools []string  `json:"required_mcp_tools"`
+	AgentSkillIDs    []string  `json:"agent_skill_ids"`
+	MatchedSkillIDs  []string  `json:"matched_skill_ids"`
+	MissingSkillIDs  []string  `json:"missing_skill_ids"`
+	UsedMCPTools     []string  `json:"used_mcp_tools"`
+	MissingMCPTools  []string  `json:"missing_mcp_tools"`
+	CoverageStatus   string    `json:"coverage_status"`
+	EvidenceSource   string    `json:"evidence_source"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+// RunNextAction is a machine-readable hint for the UI or external clients.
+//
+// Type is stable enough for clients to branch on. Hint is human-facing.
+type RunNextAction struct {
+	Type            string                 `json:"type"`
+	Label           string                 `json:"label"`
+	Hint            string                 `json:"hint"`
+	Href            string                 `json:"href,omitempty"`
+	Method          string                 `json:"method,omitempty"`
+	RequiresHuman   bool                   `json:"requires_human,omitempty"`
+	ResourceType    string                 `json:"resource_type,omitempty"`
+	ResourceID      string                 `json:"resource_id,omitempty"`
+	Source          string                 `json:"source,omitempty"`
+	AdditionalProps map[string]interface{} `json:"additional_props,omitempty"`
 }
 
 // RunEventResponse GET /api/v1/runs/:id/events 响应项。
@@ -43,6 +79,37 @@ type RunEventResponse struct {
 	EventType   string                 `json:"event_type"`
 	Payload     map[string]interface{} `json:"payload"`
 	CreatedAt   time.Time              `json:"created_at"`
+}
+
+// RunArtifactResponse is a persisted, owner-readable artifact produced by a run.
+type RunArtifactResponse struct {
+	ID               string                 `json:"id"`
+	RunID            string                 `json:"run_id"`
+	ArtifactType     string                 `json:"artifact_type"`
+	Title            string                 `json:"title"`
+	Content          map[string]interface{} `json:"content"`
+	Visibility       string                 `json:"visibility"`
+	SourceArtifactID string                 `json:"source_artifact_id,omitempty"`
+	CreatedAt        time.Time              `json:"created_at"`
+}
+
+// RunMessageResponse is a stable replay record derived from user input and agent message events.
+type RunMessageResponse struct {
+	ID            string                 `json:"id"`
+	RunID         string                 `json:"run_id"`
+	EventSequence *int32                 `json:"event_sequence,omitempty"`
+	Role          string                 `json:"role"`
+	Content       string                 `json:"content"`
+	Payload       map[string]interface{} `json:"payload"`
+	CreatedAt     time.Time              `json:"created_at"`
+}
+
+// AgentHeartbeatResponse confirms that a Runtime Token owner is alive.
+type AgentHeartbeatResponse struct {
+	AgentID             string     `json:"agent_id"`
+	AvailabilityStatus  string     `json:"availability_status"`
+	LastCheckedAt       *time.Time `json:"last_checked_at,omitempty"`
+	ConsecutiveFailures int32      `json:"consecutive_failures"`
 }
 
 // AgentRequest 平台 → 创作者 endpoint 的请求体。

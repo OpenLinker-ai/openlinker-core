@@ -49,14 +49,20 @@ func TestParseToken_InvalidSignature(t *testing.T) {
 	tok, err := GenerateToken(uid, testSecret, defaultTTL)
 	require.NoError(t, err)
 
-	// 翻转最后一个字符
-	tampered := tok[:len(tok)-1]
-	last := tok[len(tok)-1]
+	// 翻转签名段的第一个字符；不要改最后一个字符，base64url 最后一位
+	// 可能只包含 padding bits，某些替换会解码成同一组签名字节。
+	parts := strings.Split(tok, ".")
+	require.Len(t, parts, 3)
+	signature := []byte(parts[2])
+	require.NotEmpty(t, signature)
+	last := signature[0]
 	if last == 'A' {
-		tampered += "B"
+		signature[0] = 'B'
 	} else {
-		tampered += "A"
+		signature[0] = 'A'
 	}
+	parts[2] = string(signature)
+	tampered := strings.Join(parts, ".")
 
 	got, err := ParseToken(tampered, testSecret)
 	assert.Error(t, err, "tampered token should fail parse")

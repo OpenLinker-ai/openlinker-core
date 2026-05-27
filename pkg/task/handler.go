@@ -29,6 +29,11 @@ func NewHandler(svc *Service) *Handler {
 //
 //	POST /tasks/recommend       自然语言 → 推荐 Top3 Agent
 //	POST /tasks/:id/choose      用户选定推荐里某个 Agent
+//	POST /tasks/:id/claim       创作者用自己的 Agent 接入任务广场任务
+//	POST /tasks/:id/run         从任务直接启动一次 Agent 运行
+//	POST /tasks/:id/complete    把成功 run 写回任务结果
+//	POST /tasks/:id/accept      任务发布者验收结果
+//	POST /tasks/:id/revision    任务发布者要求修订
 //	GET  /tasks/board           任务广场公开列表
 //	GET  /tasks/me              我的任务历史（最多 20 条）
 //	GET  /tasks/:id             单个任务详情（含推荐卡回填）
@@ -38,6 +43,11 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	g := api.Group("/tasks", jwtMiddleware)
 	g.POST("/recommend", h.Recommend)
 	g.POST("/:id/choose", h.Choose)
+	g.POST("/:id/claim", h.Claim)
+	g.POST("/:id/run", h.Run)
+	g.POST("/:id/complete", h.Complete)
+	g.POST("/:id/accept", h.Accept)
+	g.POST("/:id/revision", h.RequestRevision)
 	g.GET("/me", h.ListMine)
 	g.GET("/:id", h.GetByID)
 }
@@ -83,6 +93,119 @@ func (h *Handler) Choose(c echo.Context) error {
 		return err
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// Claim POST /tasks/:id/claim
+func (h *Handler) Claim(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	taskID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	var req ClaimRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.Claim(c.Request().Context(), taskID, uid, req.AgentID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// Complete POST /tasks/:id/complete
+func (h *Handler) Complete(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	taskID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	var req CompleteRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.Complete(c.Request().Context(), taskID, uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// Run POST /tasks/:id/run
+func (h *Handler) Run(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	taskID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	var req RunTaskRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.RunTask(c.Request().Context(), taskID, uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusAccepted, resp)
+}
+
+// Accept POST /tasks/:id/accept
+func (h *Handler) Accept(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	taskID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	resp, err := h.svc.AcceptDelivery(c.Request().Context(), taskID, uid)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// RequestRevision POST /tasks/:id/revision
+func (h *Handler) RequestRevision(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	taskID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	var req RevisionRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.RequestRevision(c.Request().Context(), taskID, uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 // ListMine GET /tasks/me?limit=20

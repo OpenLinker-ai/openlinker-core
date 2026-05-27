@@ -20,7 +20,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
+	"github.com/kinzhi/openlinker-core/pkg/config"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
+	"github.com/kinzhi/openlinker-core/pkg/endpointurl"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
@@ -81,20 +83,25 @@ func nextRetryDelay(attempt int) time.Duration {
 //   - 失败按 1min / 5min / 30min 三次重试，第 3 次失败终态 failed
 //   - 签名 HMAC-SHA256，header X-OpenLinker-Signature: sha256=<hex>
 type Service struct {
-	queries    *db.Queries
-	pool       *pgxpool.Pool
-	httpClient *http.Client
+	queries        *db.Queries
+	pool           *pgxpool.Pool
+	httpClient     *http.Client
+	allowLocalHTTP bool
 }
 
 // NewService 构造 Service。
-func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{
+func NewService(pool *pgxpool.Pool, cfg ...*config.Config) *Service {
+	s := &Service{
 		queries: db.New(pool),
 		pool:    pool,
 		httpClient: &http.Client{
 			Timeout: httpTimeout,
 		},
 	}
+	if len(cfg) > 0 && cfg[0] != nil {
+		s.allowLocalHTTP = cfg[0].AllowLocalHTTPEndpoints
+	}
+	return s
 }
 
 // SetWebhook 创作者设置 webhook_url，生成新 secret 并返回（仅本次返回）。
@@ -384,6 +391,236 @@ func (s *Service) ListDeliveries(ctx context.Context, agentID, userID uuid.UUID,
 	return out, nil
 }
 
+// CreateRunWebhookSubscription registers a signed push callback for one run.
+func (s *Service) CreateRunWebhookSubscription(ctx context.Context, runID, userID uuid.UUID, req *CreateRunWebhookRequest) (*RunWebhookSubscriptionResponse, error) {
+	if req == nil {
+		return nil, httpx.BadRequest("请求体不能为空")
+	}
+	targetURL := strings.TrimSpace(req.URL)
+	if err := endpointurl.Validate(targetURL, s.allowLocalHTTP); err != nil {
+		return nil, httpx.BadRequest("target_url 必须是 HTTPS；本地开发需开启 ALLOW_LOCAL_HTTP_ENDPOINTS 后才允许 loopback HTTP")
+	}
+	eventTypes := normalizeRunWebhookEventTypes(req.EventTypes)
+
+	run, err := s.queries.GetRunByID(ctx, runID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("调用记录不存在")
+		}
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.CreateRunWebhookSubscription: GetRunByID")
+		return nil, httpx.Internal("查询调用记录失败")
+	}
+	if run.UserID != userID {
+		return nil, httpx.NotFound("调用记录不存在")
+	}
+
+	secret, err := generateSecret()
+	if err != nil {
+		return nil, httpx.Internal("生成 webhook secret 失败")
+	}
+	sub, err := s.queries.CreateRunWebhookSubscription(ctx, db.CreateRunWebhookSubscriptionParams{
+		RunID:       runID,
+		OwnerUserID: userID,
+		TargetURL:   targetURL,
+		Secret:      secret,
+		EventTypes:  eventTypes,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.CreateRunWebhookSubscription: insert")
+		return nil, httpx.Internal("创建 run webhook 失败")
+	}
+
+	// If matching events already exist, enqueue the latest one immediately so late subscribers can catch up.
+	if event, err := s.queries.GetLatestRunEventForTypes(ctx, db.GetLatestRunEventForTypesParams{
+		RunID:      runID,
+		EventTypes: eventTypes,
+	}); err == nil {
+		_ = s.enqueueRunWebhookDelivery(ctx, sub, event)
+	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.CreateRunWebhookSubscription: GetLatestRunEventForTypes")
+	}
+
+	resp := runWebhookSubscriptionToResponse(sub)
+	resp.Secret = secret
+	return &resp, nil
+}
+
+// ListRunWebhookSubscriptions returns active/non-deleted run push callbacks.
+func (s *Service) ListRunWebhookSubscriptions(ctx context.Context, runID, userID uuid.UUID) ([]RunWebhookSubscriptionResponse, error) {
+	if err := s.ensureRunOwner(ctx, runID, userID); err != nil {
+		return nil, err
+	}
+	rows, err := s.queries.ListRunWebhookSubscriptionsByRun(ctx, db.ListRunWebhookSubscriptionsByRunParams{
+		RunID:       runID,
+		OwnerUserID: userID,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.ListRunWebhookSubscriptions")
+		return nil, httpx.Internal("查询 run webhook 失败")
+	}
+	items := make([]RunWebhookSubscriptionResponse, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, runWebhookSubscriptionToResponse(row))
+	}
+	return items, nil
+}
+
+// UpdateRunWebhookSubscriptionStatus pauses or resumes a run push callback.
+func (s *Service) UpdateRunWebhookSubscriptionStatus(ctx context.Context, runID, subscriptionID, userID uuid.UUID, status string) (*RunWebhookSubscriptionResponse, error) {
+	if status != "active" && status != "paused" {
+		return nil, httpx.BadRequest("status 只能是 active 或 paused")
+	}
+	if err := s.ensureRunOwner(ctx, runID, userID); err != nil {
+		return nil, err
+	}
+	sub, err := s.queries.UpdateRunWebhookSubscriptionStatusForOwner(ctx, db.UpdateRunWebhookSubscriptionStatusForOwnerParams{
+		ID:          subscriptionID,
+		RunID:       runID,
+		OwnerUserID: userID,
+		Status:      status,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("run webhook 不存在")
+		}
+		log.Error().Err(err).Str("run_id", runID.String()).Str("subscription_id", subscriptionID.String()).Str("status", status).
+			Msg("webhook.UpdateRunWebhookSubscriptionStatus")
+		return nil, httpx.Internal("更新 run webhook 状态失败")
+	}
+	resp := runWebhookSubscriptionToResponse(sub)
+	return &resp, nil
+}
+
+// DeleteRunWebhookSubscription soft-deletes a run push callback.
+func (s *Service) DeleteRunWebhookSubscription(ctx context.Context, runID, subscriptionID, userID uuid.UUID) error {
+	if err := s.ensureRunOwner(ctx, runID, userID); err != nil {
+		return err
+	}
+	affected, err := s.queries.DeleteRunWebhookSubscriptionForOwner(ctx, db.DeleteRunWebhookSubscriptionForOwnerParams{
+		ID:          subscriptionID,
+		RunID:       runID,
+		OwnerUserID: userID,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Str("subscription_id", subscriptionID.String()).Msg("webhook.DeleteRunWebhookSubscription")
+		return httpx.Internal("删除 run webhook 失败")
+	}
+	if affected == 0 {
+		return httpx.NotFound("run webhook 不存在")
+	}
+	return nil
+}
+
+// EnqueueRunEvent creates deliveries for all subscriptions interested in this run_event.
+func (s *Service) EnqueueRunEvent(ctx context.Context, event db.RunEvent) error {
+	subs, err := s.queries.ListActiveRunWebhookSubscriptionsForEvent(ctx, db.ListActiveRunWebhookSubscriptionsForEventParams{
+		RunID:     event.RunID,
+		EventType: event.EventType,
+	})
+	if err != nil {
+		return fmt.Errorf("list run webhook subscriptions: %w", err)
+	}
+	for _, sub := range subs {
+		if err := s.enqueueRunWebhookDelivery(ctx, sub, event); err != nil {
+			log.Error().Err(err).Str("subscription_id", sub.ID.String()).Str("event_id", event.ID.String()).
+				Msg("webhook.EnqueueRunEvent: enqueue delivery")
+		}
+	}
+	return nil
+}
+
+func (s *Service) enqueueRunWebhookDelivery(ctx context.Context, sub db.RunWebhookSubscription, event db.RunEvent) error {
+	payload := runWebhookPayload(sub, event)
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	delivery, err := s.queries.CreateRunWebhookDelivery(ctx, db.CreateRunWebhookDeliveryParams{
+		SubscriptionID: sub.ID,
+		RunEventID:     event.ID,
+		Payload:        payloadBytes,
+	})
+	if err != nil {
+		return err
+	}
+	go func(deliveryID uuid.UUID) {
+		bgCtx, cancel := context.WithTimeout(context.Background(), httpTimeout+5*time.Second)
+		defer cancel()
+		if err := s.AttemptRunWebhookDelivery(bgCtx, deliveryID); err != nil {
+			log.Error().Err(err).Str("delivery_id", deliveryID.String()).
+				Msg("webhook.enqueueRunWebhookDelivery: first attempt failed")
+		}
+	}(delivery.ID)
+	return nil
+}
+
+// AttemptRunWebhookDelivery performs one run webhook delivery attempt.
+func (s *Service) AttemptRunWebhookDelivery(ctx context.Context, deliveryID uuid.UUID) error {
+	row, err := s.queries.GetRunWebhookDeliveryByID(ctx, deliveryID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("get run webhook delivery: %w", err)
+	}
+	if row.Status != "pending" {
+		return nil
+	}
+
+	statusCode, respBody, attemptErr := s.doDeliverWithEvent(ctx, row.TargetURL, row.Secret, deliveryID, row.Payload, row.EventType)
+	if attemptErr == nil && statusCode >= 200 && statusCode < 300 {
+		statusPtr := int32(statusCode)
+		bodyPtr := truncate(respBody, responseBodyMaxLen)
+		if err := s.queries.MarkRunWebhookDeliverySuccess(ctx, db.MarkRunWebhookDeliverySuccessParams{
+			ID:             deliveryID,
+			ResponseStatus: &statusPtr,
+			ResponseBody:   &bodyPtr,
+		}); err != nil {
+			return err
+		}
+		return s.queries.ResetRunWebhookSubscriptionFailures(ctx, row.SubscriptionID)
+	}
+
+	var (
+		statusPtr *int32
+		bodyPtr   *string
+		errMsg    string
+	)
+	if statusCode > 0 {
+		v := int32(statusCode)
+		statusPtr = &v
+		b := truncate(respBody, responseBodyMaxLen)
+		bodyPtr = &b
+	}
+	if attemptErr != nil {
+		errMsg = truncate(attemptErr.Error(), errorMessageMaxLen)
+	} else {
+		errMsg = fmt.Sprintf("HTTP %d", statusCode)
+	}
+	errMsgPtr := errMsg
+	currAttempt := int(row.AttemptCount)
+	delay := nextRetryDelay(currAttempt)
+	if currAttempt+1 >= maxAttempts || delay == 0 {
+		if err := s.queries.MarkRunWebhookDeliveryFailedFinal(ctx, db.MarkRunWebhookDeliveryFailedFinalParams{
+			ID:             deliveryID,
+			ResponseStatus: statusPtr,
+			ResponseBody:   bodyPtr,
+			ErrorMessage:   &errMsgPtr,
+		}); err != nil {
+			return err
+		}
+		return s.queries.IncrementRunWebhookSubscriptionFailure(ctx, row.SubscriptionID)
+	}
+	nextAt := time.Now().Add(delay)
+	return s.queries.MarkRunWebhookDeliveryFailedRetry(ctx, db.MarkRunWebhookDeliveryFailedRetryParams{
+		ID:             deliveryID,
+		ResponseStatus: statusPtr,
+		ResponseBody:   bodyPtr,
+		ErrorMessage:   &errMsgPtr,
+		NextRetryAt:    nextAt,
+	})
+}
+
 // processPending worker 内部用：扫一批应重试的投递并逐个执行。
 func (s *Service) processPending(ctx context.Context) {
 	rows, err := s.queries.ListPendingDeliveries(ctx)
@@ -402,6 +639,22 @@ func (s *Service) processPending(ctx context.Context) {
 				Msg("webhook.processPending: AttemptDelivery")
 		}
 	}
+	runRows, err := s.queries.ListPendingRunWebhookDeliveries(ctx)
+	if err != nil {
+		log.Error().Err(err).Msg("webhook.processPending: ListPendingRunWebhookDeliveries")
+		return
+	}
+	for _, d := range runRows {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if err := s.AttemptRunWebhookDelivery(ctx, d.ID); err != nil {
+			log.Error().Err(err).Str("delivery_id", d.ID.String()).
+				Msg("webhook.processPending: AttemptRunWebhookDelivery")
+		}
+	}
 }
 
 // doDeliver 真正发起 HTTP POST。
@@ -409,6 +662,12 @@ func (s *Service) processPending(ctx context.Context) {
 // 返回：HTTP status code（0 表示连不上）、响应 body（截断前）、网络层错误。
 func (s *Service) doDeliver(
 	ctx context.Context, url, secret string, deliveryID uuid.UUID, payload []byte,
+) (int, string, error) {
+	return s.doDeliverWithEvent(ctx, url, secret, deliveryID, payload, eventRunCompleted)
+}
+
+func (s *Service) doDeliverWithEvent(
+	ctx context.Context, url, secret string, deliveryID uuid.UUID, payload []byte, eventType string,
 ) (int, string, error) {
 	signature := signPayload(payload, secret)
 
@@ -420,7 +679,7 @@ func (s *Service) doDeliver(
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("X-OpenLinker-Signature", "sha256="+signature)
-	req.Header.Set("X-OpenLinker-Event", eventRunCompleted)
+	req.Header.Set("X-OpenLinker-Event", eventType)
 	req.Header.Set("X-OpenLinker-Delivery", deliveryID.String())
 	req.Header.Set("X-OpenLinker-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
 
@@ -433,6 +692,21 @@ func (s *Service) doDeliver(
 	// 限制读取量，防止巨大 body
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(responseBodyMaxLen)*4))
 	return resp.StatusCode, string(body), nil
+}
+
+func (s *Service) ensureRunOwner(ctx context.Context, runID, userID uuid.UUID) error {
+	run, err := s.queries.GetRunByID(ctx, runID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return httpx.NotFound("调用记录不存在")
+		}
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.ensureRunOwner: GetRunByID")
+		return httpx.Internal("查询调用记录失败")
+	}
+	if run.UserID != userID {
+		return httpx.NotFound("调用记录不存在")
+	}
+	return nil
 }
 
 // generateSecret 生成 32 字节随机数 → 64 hex 字符。
@@ -503,6 +777,71 @@ func buildPayload(run *db.Run, agentSlug string, output map[string]interface{}) 
 		p.ErrorMessage = *run.ErrorMessage
 	}
 	return p
+}
+
+func normalizeRunWebhookEventTypes(raw []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		item = strings.TrimSpace(item)
+		switch item {
+		case "run.created",
+			"run.started",
+			"run.dispatch.pending",
+			"run.dispatch.claimed",
+			"run.requirements.snapshotted",
+			"run.message.delta",
+			"run.artifact.delta",
+			"run.status.changed",
+			"run.child.created",
+			"run.child.completed",
+			"run.completed",
+			"run.failed":
+			if _, ok := seen[item]; !ok {
+				seen[item] = struct{}{}
+				out = append(out, item)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return []string{"run.completed", "run.failed"}
+	}
+	return out
+}
+
+func runWebhookPayload(sub db.RunWebhookSubscription, event db.RunEvent) RunWebhookPayload {
+	payload := map[string]interface{}{}
+	if len(event.Payload) > 0 {
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			payload = map[string]interface{}{"raw": string(event.Payload)}
+		}
+	}
+	out := RunWebhookPayload{
+		EventID:        event.ID.String(),
+		RunID:          event.RunID.String(),
+		EventType:      event.EventType,
+		Sequence:       event.Sequence,
+		Payload:        payload,
+		SubscriptionID: sub.ID.String(),
+		CreatedAt:      event.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if event.ParentRunID != nil {
+		out.ParentRunID = event.ParentRunID.String()
+	}
+	return out
+}
+
+func runWebhookSubscriptionToResponse(sub db.RunWebhookSubscription) RunWebhookSubscriptionResponse {
+	return RunWebhookSubscriptionResponse{
+		ID:                  sub.ID.String(),
+		RunID:               sub.RunID.String(),
+		TargetURL:           sub.TargetURL,
+		EventTypes:          append([]string{}, sub.EventTypes...),
+		Status:              sub.Status,
+		ConsecutiveFailures: sub.ConsecutiveFailures,
+		CreatedAt:           sub.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:           sub.UpdatedAt.UTC().Format(time.RFC3339),
+	}
 }
 
 // toDeliveryListItem db.WebhookDelivery → API DTO。

@@ -15,6 +15,7 @@ import (
 
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/kinzhi/openlinker-core/pkg/runtime"
 	"github.com/kinzhi/openlinker-core/pkg/task"
 )
 
@@ -24,6 +25,21 @@ type fakeSkillRecommender struct {
 	skills      []db.Skill
 	matches     []task.AgentMatch
 	gotSkillIDs []string
+}
+
+type fakeRuntimeStarter struct {
+	gotUserID uuid.UUID
+	gotReq    *runtime.RunRequest
+	resp      *runtime.RunResponse
+}
+
+func (f *fakeRuntimeStarter) StartRun(_ context.Context, userID uuid.UUID, req *runtime.RunRequest, source string) (*runtime.RunResponse, error) {
+	f.gotUserID = userID
+	f.gotReq = req
+	if f.resp != nil {
+		return f.resp, nil
+	}
+	return &runtime.RunResponse{RunID: uuid.NewString(), Status: "running", Source: source}, nil
 }
 
 func (f *fakeSkillRecommender) ListAll(context.Context) ([]db.Skill, error) {
@@ -142,6 +158,23 @@ func insertTaskAgentSkills(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, 
 	}
 }
 
+func insertSuccessfulTaskRun(t *testing.T, pool *pgxpool.Pool, userID, agentID uuid.UUID, summary string) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO runs (
+			id, user_id, agent_id, input, output, status,
+			cost_cents, platform_fee_cents, creator_revenue_cents,
+			duration_ms, source, finished_at
+		) VALUES (
+			$1, $2, $3, '{"text":"task"}'::jsonb, $4::jsonb, 'success',
+			0, 0, 0, 12, 'web', NOW()
+		)`,
+		id, userID, agentID, `{"summary": "`+summary+`"}`)
+	require.NoError(t, err)
+	return id
+}
+
 func assertTaskHTTPStatus(t *testing.T, err error, want int) {
 	t.Helper()
 	require.Error(t, err)
@@ -228,7 +261,140 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	require.Len(t, history, 1)
 	require.NotNil(t, history[0].ChosenAgentID)
 	assert.Equal(t, secondAgent.String(), *history[0].ChosenAgentID)
+	assert.Equal(t, "matched", history[0].Status)
 	assert.Equal(t, []string{"create_task", "run_agent"}, history[0].MCPTools)
+}
+
+func TestTaskBoardClaimAndCompleteRoundTrip(t *testing.T) {
+	pool := setupTaskTestDB(t)
+	ownerID := insertTaskUser(t, pool)
+	creatorID := insertTaskCreator(t, pool)
+	agentID := insertTaskAgent(t, pool, creatorID, "task-worker-"+uuid.NewString()[:8], "approved")
+	insertTaskAgentSkills(t, pool, agentID, "data/sql-query")
+
+	var taskID uuid.UUID
+	err := pool.QueryRow(context.Background(),
+		`INSERT INTO task_queries (user_id, query, parsed_skills, recommended_agent_ids)
+		 VALUES ($1, '帮我做 SQL 统计分析', '{data/sql-query}', '{}')
+		 RETURNING id`,
+		ownerID).Scan(&taskID)
+	require.NoError(t, err)
+
+	svc := task.NewService(pool, nil, &fakeSkillRecommender{skills: testSkills()})
+	claimed, err := svc.Claim(context.Background(), taskID, creatorID, agentID)
+	require.NoError(t, err)
+	assert.Equal(t, taskID.String(), claimed.TaskID)
+	assert.Equal(t, "in_progress", claimed.Status)
+	require.NotNil(t, claimed.ClaimedAt)
+
+	board, err := svc.ListBoard(context.Background(), 20)
+	require.NoError(t, err)
+	require.Len(t, board, 1)
+	assert.Equal(t, "in_progress", board[0].Status)
+	require.NotNil(t, board[0].ClaimedAgentID)
+	assert.Equal(t, agentID.String(), *board[0].ClaimedAgentID)
+
+	runID := insertSuccessfulTaskRun(t, pool, creatorID, agentID, "分析完成")
+	completed, err := svc.Complete(context.Background(), taskID, creatorID, &task.CompleteRequest{
+		AgentID:       agentID,
+		RunID:         runID,
+		ResultSummary: "分析完成",
+		ResultArtifact: map[string]interface{}{
+			"summary": "分析完成",
+			"rows":    3,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "completed", completed.Status)
+	assert.Equal(t, "submitted", completed.DeliveryStatus)
+	assert.Equal(t, "private", completed.DeliveryVisibility)
+	require.NotNil(t, completed.CompletionRunID)
+	assert.Equal(t, runID.String(), *completed.CompletionRunID)
+
+	detail, err := svc.GetByID(context.Background(), taskID, ownerID)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", detail.Status)
+	assert.Equal(t, "submitted", detail.DeliveryStatus)
+	assert.Equal(t, "private", detail.DeliveryVisibility)
+	require.NotNil(t, detail.CompletionSummary)
+	assert.Equal(t, "分析完成", *detail.CompletionSummary)
+	require.NotNil(t, detail.DeliveryArtifact)
+	assert.Equal(t, "分析完成", detail.DeliveryArtifact["summary"])
+
+	_, err = svc.Claim(context.Background(), taskID, creatorID, agentID)
+	assertTaskHTTPStatus(t, err, http.StatusConflict)
+
+	revision, err := svc.RequestRevision(context.Background(), taskID, ownerID, &task.RevisionRequest{
+		Note: "请补充样本量和 SQL 口径",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "revision_requested", revision.Status)
+	assert.Equal(t, "revision_requested", revision.DeliveryStatus)
+	require.NotNil(t, revision.RevisionNote)
+	assert.Equal(t, "请补充样本量和 SQL 口径", *revision.RevisionNote)
+
+	runner := &fakeRuntimeStarter{}
+	svc.SetRunStarter(runner)
+	revisionRun, err := svc.RunTask(context.Background(), taskID, creatorID, &task.RunTaskRequest{
+		AgentID: agentID,
+		Input: map[string]interface{}{
+			"text": "按返修要求补充样本量和 SQL 口径",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "revision_requested", revisionRun.Status)
+	require.NotNil(t, runner.gotReq)
+	assert.Equal(t, taskID.String(), runner.gotReq.Metadata["task_id"])
+	assert.Equal(t, "按返修要求补充样本量和 SQL 口径", runner.gotReq.Input["text"])
+
+	secondRunID := insertSuccessfulTaskRun(t, pool, creatorID, agentID, "补充完成")
+	resubmitted, err := svc.Complete(context.Background(), taskID, creatorID, &task.CompleteRequest{
+		AgentID:       agentID,
+		RunID:         secondRunID,
+		ResultSummary: "补充完成",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "completed", resubmitted.Status)
+	assert.Equal(t, "submitted", resubmitted.DeliveryStatus)
+	assert.Nil(t, resubmitted.RevisionNote)
+
+	accepted, err := svc.AcceptDelivery(context.Background(), taskID, ownerID)
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", accepted.Status)
+	assert.Equal(t, "accepted", accepted.DeliveryStatus)
+	require.NotNil(t, accepted.AcceptedAt)
+}
+
+func TestRunTaskUsesSelectedAgentAndTaskInput(t *testing.T) {
+	pool := setupTaskTestDB(t)
+	userID := insertTaskUser(t, pool)
+	creatorID := insertTaskCreator(t, pool)
+	agentID := insertTaskAgent(t, pool, creatorID, "task-run-"+uuid.NewString()[:8], "approved")
+
+	var taskID uuid.UUID
+	err := pool.QueryRow(context.Background(),
+		`INSERT INTO task_queries (
+			user_id, query, parsed_skills, recommended_agent_ids, chosen_agent_id, chosen_at
+		) VALUES (
+			$1, '做 SQL 查询', '{data/sql-query}', $2, $3, NOW()
+		) RETURNING id`,
+		userID, []uuid.UUID{agentID}, agentID).Scan(&taskID)
+	require.NoError(t, err)
+
+	runner := &fakeRuntimeStarter{}
+	svc := task.NewService(pool, nil, &fakeSkillRecommender{skills: testSkills()})
+	svc.SetRunStarter(runner)
+	resp, err := svc.RunTask(context.Background(), taskID, userID, &task.RunTaskRequest{
+		AgentID: agentID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, taskID.String(), resp.TaskID)
+	assert.Equal(t, "matched", resp.Status)
+	require.NotNil(t, runner.gotReq)
+	assert.Equal(t, agentID.String(), runner.gotReq.AgentID)
+	assert.Equal(t, "做 SQL 查询", runner.gotReq.Input["text"])
+	assert.Equal(t, taskID.String(), runner.gotReq.Metadata["task_id"])
+	assert.Equal(t, userID, runner.gotUserID)
 }
 
 func TestRecommendRejectsUnknownAssociations(t *testing.T) {
