@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -58,6 +59,15 @@ func (h *Handler) RegisterProtected(api *echo.Group, runMw, queryMw echo.Middlew
 	api.GET("/runs/:id/events", h.GetRunEvents, queryMw)
 	api.GET("/runs/:id/stream", h.StreamRunEvents, queryMw)
 	api.POST("/runs/:id/events", h.PostRunEvent)
+}
+
+// RegisterAgentRuntime mounts Runtime Token based endpoints used by runtime_pull Agents.
+//
+//	GET  /agent-runtime/runs/claim       Agent 拉取一个 pending run
+//	POST /agent-runtime/runs/:id/result  Agent 回传终态结果
+func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
+	api.GET("/agent-runtime/runs/claim", h.ClaimRuntimePullRun)
+	api.POST("/agent-runtime/runs/:id/result", h.PostRuntimePullResult)
 }
 
 // PostRun 调用 Agent。
@@ -260,6 +270,44 @@ func (h *Handler) PostRunEvent(c echo.Context) error {
 	return c.JSON(http.StatusCreated, event)
 }
 
+func (h *Handler) ClaimRuntimePullRun(c echo.Context) error {
+	token, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.ClaimRuntimePullRun(c.Request().Context(), token)
+	if err != nil {
+		return err
+	}
+	if resp == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) PostRuntimePullResult(c echo.Context) error {
+	token, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
+	if err != nil {
+		return err
+	}
+	runID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	var req RuntimePullResultRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.CompleteRuntimePullRun(c.Request().Context(), token, runID, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
 // userIDFromCtx 从 echo.Context 取出当前登录用户 uuid。
 // JWT 中间件已写入 c.Get(httpx.CtxKeyUserID)。
 func userIDFromCtx(c echo.Context) (uuid.UUID, error) {
@@ -293,6 +341,14 @@ func requireAPIKeyScope(c echo.Context, scope string) error {
 		return httpx.Forbidden("API Key 缺少 scope: " + scope)
 	}
 	return nil
+}
+
+func runtimeBearerToken(header string) (string, error) {
+	parts := strings.SplitN(strings.TrimSpace(header), " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.TrimSpace(parts[1]) == "" {
+		return "", httpx.Unauthorized("缺少 Runtime Token")
+	}
+	return strings.TrimSpace(parts[1]), nil
 }
 
 func parseOptionalInt32(raw string) (int32, error) {

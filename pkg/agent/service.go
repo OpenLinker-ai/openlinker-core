@@ -15,7 +15,6 @@ import (
 
 	"github.com/kinzhi/openlinker-core/pkg/config"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
-	"github.com/kinzhi/openlinker-core/pkg/endpointurl"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
@@ -86,8 +85,15 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 	if !isValidSlug(slug) {
 		return nil, httpx.Unprocessable("slug 格式不合法：仅允许小写字母 / 数字 / 连字符，3..80 字符，且不能以连字符开头或结尾")
 	}
-	if err := endpointurl.Validate(req.EndpointURL, s.cfg.AllowLocalHTTPEndpoints); err != nil {
-		return nil, httpx.Unprocessable(err.Error())
+	connection, err := normalizeConnectionSettings(
+		slug,
+		req.EndpointURL,
+		req.ConnectionMode,
+		req.MCPToolName,
+		s.cfg.AllowLocalHTTPEndpoints,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	avail, err := s.queries.CheckSlugAvailable(ctx, slug)
@@ -109,11 +115,13 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 		Slug:               slug,
 		Name:               strings.TrimSpace(req.Name),
 		Description:        strings.TrimSpace(req.Description),
-		EndpointURL:        strings.TrimSpace(req.EndpointURL),
+		EndpointURL:        connection.EndpointURL,
 		EndpointAuthHeader: authHeader,
 		PricePerCallCents:  req.PricePerCallCents,
 		Tags:               normalizeTagsForInsert(req.Tags),
 		Visibility:         visibility,
+		ConnectionMode:     connection.Mode,
+		MCPToolName:        connection.MCPToolName,
 	})
 	if err != nil {
 		// UNIQUE violation 兜底（并发场景）
@@ -142,35 +150,60 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 //
 // Visibility 空串视为不改（默认沿用旧值）；显式传值则按 public/unlisted/private 校验。
 func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID, req *UpdateAgentRequest) (*AgentResponse, error) {
-	if err := endpointurl.Validate(req.EndpointURL, s.cfg.AllowLocalHTTPEndpoints); err != nil {
-		return nil, httpx.Unprocessable(err.Error())
+	existing, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
+		ID:        agentID,
+		CreatorID: creatorID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("Agent 不存在")
+		}
+		log.Error().Err(err).Msg("agent.UpdateAgent: GetAgentByIDForOwner")
+		return nil, httpx.Internal("查询 Agent 失败")
+	}
+	if existing.LifecycleStatus == "disabled" {
+		return nil, httpx.Forbidden("已下架的 Agent 不可编辑")
+	}
+
+	connectionMode := req.ConnectionMode
+	if connectionMode == "" {
+		connectionMode = existing.ConnectionMode
+	}
+	endpointURL := req.EndpointURL
+	if endpointURL == "" {
+		endpointURL = existing.EndpointURL
+	}
+	mcpToolName := req.MCPToolName
+	if mcpToolName == "" && existing.MCPToolName != nil && connectionMode == existing.ConnectionMode {
+		mcpToolName = *existing.MCPToolName
+	}
+	connection, err := normalizeConnectionSettings(
+		existing.Slug,
+		endpointURL,
+		connectionMode,
+		mcpToolName,
+		s.cfg.AllowLocalHTTPEndpoints,
+	)
+	if err != nil {
+		return nil, err
 	}
 	authHeader := normalizeAuthHeader(req.EndpointAuthHeader)
 	visibility := strings.TrimSpace(req.Visibility)
 	if visibility == "" {
-		existing, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
-			ID:        agentID,
-			CreatorID: creatorID,
-		})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, httpx.NotFound("Agent 不存在")
-			}
-			log.Error().Err(err).Msg("agent.UpdateAgent: GetAgentByIDForOwner (visibility lookup)")
-			return nil, httpx.Internal("查询 Agent 失败")
-		}
 		visibility = existing.Visibility
 	}
 	updated, err := s.queries.UpdateAgentDraft(ctx, db.UpdateAgentDraftParams{
 		ID:                 agentID,
 		Name:               strings.TrimSpace(req.Name),
 		Description:        strings.TrimSpace(req.Description),
-		EndpointURL:        strings.TrimSpace(req.EndpointURL),
+		EndpointURL:        connection.EndpointURL,
 		EndpointAuthHeader: authHeader,
 		PricePerCallCents:  req.PricePerCallCents,
 		Tags:               normalizeTagsForInsert(req.Tags),
 		CreatorID:          creatorID,
 		Visibility:         visibility,
+		ConnectionMode:     connection.Mode,
+		MCPToolName:        connection.MCPToolName,
 	})
 	if err == nil {
 		resp := toAgentResponse(&updated)
@@ -185,7 +218,7 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 	}
 
 	// RETURNING 0 行：可能不存在 / 不属于该 creator / 状态不允许编辑
-	existing, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
+	existing, err = s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
 		ID:        agentID,
 		CreatorID: creatorID,
 	})
@@ -776,6 +809,8 @@ func toAgentResponse(a *db.Agent) AgentResponse {
 		TotalCalls:          a.TotalCalls,
 		TotalRevenueCents:   a.TotalRevenueCents,
 		WebhookURL:          a.WebhookURL,
+		ConnectionMode:      a.ConnectionMode,
+		MCPToolName:         a.MCPToolName,
 		CreatedAt:           a.CreatedAt.UTC().Format(time.RFC3339),
 	}
 	if a.CertifiedAt != nil {

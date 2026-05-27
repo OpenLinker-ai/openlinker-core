@@ -89,6 +89,8 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 			Tags:              normalizeTags(r.Tags),
 			TotalCalls:        r.TotalCalls,
 			Creator:           CreatorMini{DisplayName: r.CreatorName},
+			ConnectionMode:    r.ConnectionMode,
+			MCPToolName:       r.MCPToolName,
 		})
 	}
 
@@ -130,6 +132,8 @@ func (s *MarketService) GetBySlug(ctx context.Context, slug string) (*AgentDetai
 		Creator:           CreatorMini{DisplayName: r.CreatorName},
 		CreatedAt:         r.CreatedAt.UTC().Format(time.RFC3339),
 		Skills:            []SkillMini{},
+		ConnectionMode:    r.ConnectionMode,
+		MCPToolName:       r.MCPToolName,
 	}
 	if r.CertifiedAt != nil {
 		s := r.CertifiedAt.UTC().Format(time.RFC3339)

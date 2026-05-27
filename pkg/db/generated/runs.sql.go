@@ -9,6 +9,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -133,5 +134,73 @@ func (q *Queries) GetRunByID(ctx context.Context, id uuid.UUID) (Run, error) {
 	row := q.db.QueryRow(ctx, getRunByID, id)
 	var r Run
 	err := scanRun(row, &r)
+	return r, err
+}
+
+const claimRuntimePullRun = `-- name: ClaimRuntimePullRun :one
+WITH candidate AS (
+    SELECT r.id
+    FROM runs r
+    JOIN agents a ON a.id = r.agent_id
+    WHERE r.agent_id = $1
+      AND r.status = 'running'
+      AND a.connection_mode = 'runtime_pull'
+      AND (r.claimed_at IS NULL OR r.claimed_at < NOW() - INTERVAL '5 minutes')
+    ORDER BY r.started_at ASC
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE runs r
+SET claimed_by_runtime_token_id = $2,
+    claimed_at = NOW()
+FROM candidate
+WHERE r.id = candidate.id
+RETURNING r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code, r.error_message,
+          r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
+          r.started_at, r.finished_at, r.source`
+
+type ClaimRuntimePullRunParams struct {
+	AgentID        uuid.UUID `db:"agent_id" json:"agent_id"`
+	RuntimeTokenID uuid.UUID `db:"runtime_token_id" json:"runtime_token_id"`
+}
+
+// ClaimRuntimePullRun atomically assigns the oldest pending runtime_pull run to a Runtime Token.
+func (q *Queries) ClaimRuntimePullRun(ctx context.Context, arg ClaimRuntimePullRunParams) (Run, error) {
+	row := q.db.QueryRow(ctx, claimRuntimePullRun, arg.AgentID, arg.RuntimeTokenID)
+	var r Run
+	err := scanRun(row, &r)
+	return r, err
+}
+
+const getRuntimePullRunState = `-- name: GetRuntimePullRunState :one
+SELECT id, user_id, agent_id, status, cost_cents, creator_revenue_cents,
+       started_at, claimed_by_runtime_token_id
+FROM runs
+WHERE id = $1`
+
+type RuntimePullRunState struct {
+	ID                      uuid.UUID  `db:"id" json:"id"`
+	UserID                  uuid.UUID  `db:"user_id" json:"user_id"`
+	AgentID                 uuid.UUID  `db:"agent_id" json:"agent_id"`
+	Status                  string     `db:"status" json:"status"`
+	CostCents               int32      `db:"cost_cents" json:"cost_cents"`
+	CreatorRevenueCents     int32      `db:"creator_revenue_cents" json:"creator_revenue_cents"`
+	StartedAt               time.Time  `db:"started_at" json:"started_at"`
+	ClaimedByRuntimeTokenID *uuid.UUID `db:"claimed_by_runtime_token_id" json:"claimed_by_runtime_token_id"`
+}
+
+func (q *Queries) GetRuntimePullRunState(ctx context.Context, id uuid.UUID) (RuntimePullRunState, error) {
+	row := q.db.QueryRow(ctx, getRuntimePullRunState, id)
+	var r RuntimePullRunState
+	err := row.Scan(
+		&r.ID,
+		&r.UserID,
+		&r.AgentID,
+		&r.Status,
+		&r.CostCents,
+		&r.CreatorRevenueCents,
+		&r.StartedAt,
+		&r.ClaimedByRuntimeTokenID,
+	)
 	return r, err
 }

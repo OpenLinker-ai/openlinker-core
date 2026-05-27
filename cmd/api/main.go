@@ -149,6 +149,7 @@ func main() {
 	runtimeSvc := runtime.NewService(pool, cfg)
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
+	runtimeHandler.RegisterAgentRuntime(api)
 	agentSvc.SetDryRunner(runtimeSvc)
 
 	a2aSvc := a2a.NewService(pool, runtimeSvc)

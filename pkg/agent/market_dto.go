@@ -17,6 +17,8 @@ type MarketListItem struct {
 	Tags              []string    `json:"tags"`
 	TotalCalls        int32       `json:"total_calls"`
 	Creator           CreatorMini `json:"creator"`
+	ConnectionMode    string      `json:"connection_mode"`
+	MCPToolName       *string     `json:"mcp_tool_name,omitempty"`
 }
 
 // CreatorMini 列表 / 详情里嵌入的创作者轻量信息。
@@ -63,6 +65,8 @@ type AgentDetailResponse struct {
 	LifecycleStatus     string              `json:"lifecycle_status"`
 	Visibility          string              `json:"visibility"`
 	CertificationStatus string              `json:"certification_status"`
+	ConnectionMode      string              `json:"connection_mode"`
+	MCPToolName         *string             `json:"mcp_tool_name,omitempty"`
 	VerifiedSkillCount  int32               `json:"verified_skill_count"`
 	LatestBenchmarkID   *string             `json:"latest_benchmark_batch_id,omitempty"`
 	Skills              []SkillMini         `json:"skills"`

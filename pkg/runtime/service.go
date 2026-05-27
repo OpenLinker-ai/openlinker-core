@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/kinzhi/openlinker-core/pkg/config"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
@@ -32,6 +33,17 @@ const errMsgMaxLen = 500
 const defaultRunEventsLimit int32 = 100
 const maxRunEventsLimit int32 = 500
 const maxAgentResponseEvents = 50
+const runtimePullClaimTTL = 5 * time.Minute
+
+const (
+	connectionModeDirectHTTP  = "direct_http"
+	connectionModeMCPServer   = "mcp_server"
+	connectionModeRuntimePull = "runtime_pull"
+
+	runtimeTokenPrefix     = "rt_live_"
+	runtimeTokenPrefixLen  = 12
+	runtimeTokenRandomSize = 32
+)
 
 var allowedAgentResponseEventTypes = map[string]struct{}{
 	"run.message.delta":  {},
@@ -135,9 +147,16 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 // source 标记调用来源：'web' / 'mcp' / 'api'，写入 runs.source 以便 /usage 分类显示。
 // 传空字符串时默认 'web'，便于旧调用方零修改。
 func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
-	invocation, _, err := s.createRunningRun(ctx, userID, req, source, nil, s.walletCharger != nil)
+	invocation, resp, err := s.createRunningRun(ctx, userID, req, source, nil, s.walletCharger != nil)
 	if err != nil {
 		return nil, err
+	}
+	if s.isRuntimePull(invocation) {
+		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
+			"connection_mode": connectionModeRuntimePull,
+			"agent_id":        invocation.agent.ID.String(),
+		})
+		return resp, nil
 	}
 	return s.executeRun(ctx, invocation), nil
 }
@@ -148,6 +167,13 @@ func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunReques
 	if err != nil {
 		return nil, err
 	}
+	if s.isRuntimePull(invocation) {
+		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
+			"connection_mode": connectionModeRuntimePull,
+			"agent_id":        invocation.agent.ID.String(),
+		})
+		return resp, nil
+	}
 	s.executeRunAsync(invocation)
 	return resp, nil
 }
@@ -155,11 +181,22 @@ func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunReques
 // RunDelegated lets an authenticated Agent call another Agent through the platform.
 // Delegated runs are free until explicit user-approved billing exists.
 func (s *Service) RunDelegated(ctx context.Context, userID uuid.UUID, delegation Delegation, req *RunRequest) (*RunResponse, error) {
-	invocation, _, err := s.createRunningRun(ctx, userID, req, "api", &delegation, false)
+	invocation, resp, err := s.createRunningRun(ctx, userID, req, "api", &delegation, false)
 	if err != nil {
 		return nil, err
 	}
+	if s.isRuntimePull(invocation) {
+		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
+			"connection_mode": connectionModeRuntimePull,
+			"agent_id":        invocation.agent.ID.String(),
+		})
+		return resp, nil
+	}
 	return s.executeRun(ctx, invocation), nil
+}
+
+func (s *Service) isRuntimePull(invocation *runInvocation) bool {
+	return invocation != nil && invocation.agent.ConnectionMode == connectionModeRuntimePull
 }
 
 func (s *Service) createRunningRun(
@@ -196,9 +233,18 @@ func (s *Service) createRunningRun(
 	if agent.LifecycleStatus != "active" || agent.Visibility == "private" {
 		return nil, nil, httpx.Forbidden("Agent 未公开或已下架")
 	}
-	if err := endpointurl.Validate(agent.EndpointURL, s.cfg.AllowLocalHTTPEndpoints); err != nil {
-		log.Warn().Err(err).Str("agent_id", agent.ID.String()).Msg("runtime.Run: endpoint policy rejected")
-		return nil, nil, httpx.Forbidden("Agent endpoint 当前不可调用")
+	if agent.ConnectionMode == "" {
+		agent.ConnectionMode = connectionModeDirectHTTP
+	}
+	if agent.ConnectionMode != connectionModeRuntimePull {
+		if err := endpointurl.Validate(agent.EndpointURL, s.cfg.AllowLocalHTTPEndpoints); err != nil {
+			log.Warn().Err(err).Str("agent_id", agent.ID.String()).Msg("runtime.Run: endpoint policy rejected")
+			return nil, nil, httpx.Forbidden("Agent endpoint 当前不可调用")
+		}
+	}
+	if agent.ConnectionMode == connectionModeMCPServer && (agent.MCPToolName == nil || strings.TrimSpace(*agent.MCPToolName) == "") {
+		log.Warn().Str("agent_id", agent.ID.String()).Msg("runtime.Run: missing mcp tool")
+		return nil, nil, httpx.Forbidden("Agent MCP tool 未配置")
 	}
 
 	// 2. 计算费用：抽成 = floor(cost × rate)，creator_revenue = cost - fee
@@ -346,7 +392,7 @@ func (s *Service) asyncRunTimeout() time.Duration {
 func (s *Service) executeRun(ctx context.Context, invocation *runInvocation) *RunResponse {
 	// HTTP 调用（事务外，最长 cfg.RunTimeoutSeconds）
 	started := time.Now()
-	output, agentEvents, agentErr, callErr := s.callAgentEndpoint(
+	output, agentEvents, agentErr, callErr := s.callAgent(
 		ctx,
 		&invocation.agent,
 		invocation.runID,
@@ -386,6 +432,21 @@ func (s *Service) executeRun(ctx context.Context, invocation *runInvocation) *Ru
 		})
 	}
 	return resp
+}
+
+func (s *Service) callAgent(
+	ctx context.Context, agent *db.Agent, runID, userID uuid.UUID, req *RunRequest, delegation *Delegation,
+) (map[string]interface{}, []AgentEvent, *AgentError, error) {
+	switch agent.ConnectionMode {
+	case "", connectionModeDirectHTTP:
+		return s.callAgentEndpoint(ctx, agent, runID, userID, req, delegation)
+	case connectionModeMCPServer:
+		return s.callMCPServer(ctx, agent, runID, userID, req, delegation)
+	case connectionModeRuntimePull:
+		return nil, nil, nil, errors.New("runtime_pull run must be claimed by agent runtime")
+	default:
+		return nil, nil, &AgentError{Code: "UNSUPPORTED_CONNECTION_MODE", Message: "Agent connection_mode 不支持"}, nil
+	}
 }
 
 // GetRun 查单条调用详情；仅 owner 可看。
@@ -518,6 +579,157 @@ func (s *Service) ReportRunEvent(ctx context.Context, runID uuid.UUID, token str
 	return &resp, nil
 }
 
+// ClaimRuntimePullRun lets a private / IPv4 Agent actively pull the next pending run.
+func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string) (*RuntimePullRunResponse, error) {
+	token, err := s.verifyRuntimeToken(ctx, plaintextToken)
+	if err != nil {
+		return nil, err
+	}
+	agent, err := s.queries.GetAgentByID(ctx, token.AgentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("Agent 不存在")
+	}
+	if err != nil {
+		return nil, httpx.Internal("查询 Agent 失败")
+	}
+	if agent.ConnectionMode != connectionModeRuntimePull {
+		return nil, httpx.Conflict("Agent 不是 runtime_pull 接入模式")
+	}
+	run, err := s.queries.ClaimRuntimePullRun(ctx, db.ClaimRuntimePullRunParams{
+		AgentID:        token.AgentID,
+		RuntimeTokenID: token.ID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		_ = s.queries.TouchAgentRuntimeToken(ctx, token.ID)
+		return nil, nil
+	}
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", token.AgentID.String()).Msg("runtime.ClaimRuntimePullRun")
+		return nil, httpx.Internal("领取任务失败")
+	}
+	_ = s.queries.TouchAgentRuntimeToken(ctx, token.ID)
+	s.recordRunEventBestEffort(ctx, run.ID, "run.dispatch.claimed", map[string]interface{}{
+		"agent_id":         token.AgentID.String(),
+		"runtime_token_id": token.ID.String(),
+	})
+
+	input := map[string]interface{}{}
+	if len(run.Input) > 0 {
+		_ = json.Unmarshal(run.Input, &input)
+	}
+	return &RuntimePullRunResponse{
+		RunID:    run.ID.String(),
+		AgentID:  run.AgentID.String(),
+		Input:    input,
+		Metadata: map[string]interface{}{"claim_ttl_seconds": int(runtimePullClaimTTL.Seconds())},
+		Source:   run.Source,
+	}, nil
+}
+
+// CompleteRuntimePullRun accepts the result of a run previously claimed by the same Runtime Token.
+func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken string, runID uuid.UUID, req *RuntimePullResultRequest) (*RunResponse, error) {
+	token, err := s.verifyRuntimeToken(ctx, plaintextToken)
+	if err != nil {
+		return nil, err
+	}
+	state, err := s.queries.GetRuntimePullRunState(ctx, runID)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && state.AgentID != token.AgentID) {
+		return nil, httpx.NotFound("调用记录不存在")
+	}
+	if err != nil {
+		return nil, httpx.Internal("查询调用记录失败")
+	}
+	if state.Status != "running" {
+		return nil, httpx.Conflict("run 已结束，不能重复回传")
+	}
+	if state.ClaimedByRuntimeTokenID == nil || *state.ClaimedByRuntimeTokenID != token.ID {
+		return nil, httpx.Conflict("run 未被当前 Runtime Token 领取")
+	}
+	agent, err := s.queries.GetAgentByID(ctx, token.AgentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("Agent 不存在")
+	}
+	if err != nil {
+		return nil, httpx.Internal("查询 Agent 失败")
+	}
+	if agent.ConnectionMode != connectionModeRuntimePull {
+		return nil, httpx.Conflict("Agent 不是 runtime_pull 接入模式")
+	}
+
+	duration := req.DurationMs
+	if duration <= 0 {
+		duration = int32(time.Since(state.StartedAt).Milliseconds())
+	}
+	var resp *RunResponse
+	switch req.Status {
+	case "success":
+		output := req.Output
+		if output == nil {
+			output = map[string]interface{}{}
+		}
+		resp = s.handleSuccess(ctx, runID, token.AgentID, agent.CreatorID, state.CostCents, state.CreatorRevenueCents, output, req.Events, duration, false)
+	case "failed", "timeout":
+		agentErr := req.Error
+		if agentErr == nil {
+			agentErr = &AgentError{Code: "AGENT_REPORTED_FAILURE", Message: "Agent runtime reported " + req.Status}
+		}
+		resp = s.handleFailure(ctx, runID, state.UserID, state.CostCents, duration, nil, agentErr, false)
+	default:
+		return nil, httpx.BadRequest("status 取值非法")
+	}
+	_ = s.queries.TouchAgentRuntimeToken(ctx, token.ID)
+	s.decorateDelegationCompletion(ctx, runID, token.AgentID, resp)
+	return resp, nil
+}
+
+func (s *Service) decorateDelegationCompletion(ctx context.Context, runID, targetAgentID uuid.UUID, resp *RunResponse) {
+	delegation, err := s.queries.GetRunDelegationByChild(ctx, runID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return
+	}
+	if err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.decorateDelegationCompletion")
+		return
+	}
+	resp.ParentRunID = delegation.ParentRunID.String()
+	resp.CallerAgentID = delegation.CallerAgentID.String()
+	resp.BillingMode = "free_delegation"
+	s.recordRunEventBestEffort(ctx, delegation.ParentRunID, "run.child.completed", map[string]interface{}{
+		"child_run_id":    runID.String(),
+		"caller_agent_id": delegation.CallerAgentID.String(),
+		"target_agent_id": targetAgentID.String(),
+		"status":          resp.Status,
+	})
+}
+
+func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext string) (db.AgentRuntimeToken, error) {
+	plaintext = strings.TrimSpace(plaintext)
+	if !strings.HasPrefix(plaintext, runtimeTokenPrefix) ||
+		len(plaintext) != len(runtimeTokenPrefix)+runtimeTokenRandomSize*2 {
+		return db.AgentRuntimeToken{}, httpx.Unauthorized("Runtime Token 无效或已撤销")
+	}
+	tokens, err := s.queries.ListActiveAgentRuntimeTokensByPrefix(ctx, plaintext[:runtimeTokenPrefixLen])
+	if err != nil {
+		return db.AgentRuntimeToken{}, httpx.Unauthorized("Runtime Token 无效或已撤销")
+	}
+	for _, token := range tokens {
+		if bcrypt.CompareHashAndPassword([]byte(token.TokenHash), []byte(plaintext)) == nil &&
+			(hasRuntimeScope(token.Scopes, "agent:pull") || hasRuntimeScope(token.Scopes, "agent:call")) {
+			return token, nil
+		}
+	}
+	return db.AgentRuntimeToken{}, httpx.Unauthorized("Runtime Token 无效或已撤销")
+}
+
+func hasRuntimeScope(scopes []string, expected string) bool {
+	for _, scope := range scopes {
+		if scope == expected {
+			return true
+		}
+	}
+	return false
+}
+
 // callAgentEndpoint 平台代理 HTTP 调用。
 //
 // 返回四元组：
@@ -596,6 +808,130 @@ func (s *Service) callAgentEndpoint(
 	return ar.Output, ar.Events, nil, nil
 }
 
+type mcpToolCallRequest struct {
+	JSONRPC string            `json:"jsonrpc"`
+	ID      string            `json:"id"`
+	Method  string            `json:"method"`
+	Params  mcpToolCallParams `json:"params"`
+}
+
+type mcpToolCallParams struct {
+	Name      string                 `json:"name"`
+	Arguments map[string]interface{} `json:"arguments"`
+	Metadata  map[string]interface{} `json:"_meta,omitempty"`
+}
+
+type mcpToolCallResponse struct {
+	Result map[string]interface{} `json:"result"`
+	Error  *mcpToolCallError      `json:"error,omitempty"`
+}
+
+type mcpToolCallError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func (s *Service) callMCPServer(
+	ctx context.Context, agent *db.Agent, runID, userID uuid.UUID, req *RunRequest, delegation *Delegation,
+) (map[string]interface{}, []AgentEvent, *AgentError, error) {
+	toolName := strings.TrimSpace("")
+	if agent.MCPToolName != nil {
+		toolName = strings.TrimSpace(*agent.MCPToolName)
+	}
+	if toolName == "" {
+		return nil, nil, &AgentError{Code: "MCP_TOOL_MISSING", Message: "Agent 未配置 MCP tool"}, nil
+	}
+
+	metadata := map[string]interface{}{
+		"run_id":   runID.String(),
+		"user_id":  userID.String(),
+		"platform": "openlinker",
+	}
+	for k, v := range req.Metadata {
+		metadata[k] = v
+	}
+	if delegation != nil {
+		metadata["parent_run_id"] = delegation.ParentRunID.String()
+		metadata["caller_agent_id"] = delegation.CallerAgentID.String()
+	}
+	payload, err := json.Marshal(mcpToolCallRequest{
+		JSONRPC: "2.0",
+		ID:      runID.String(),
+		Method:  "tools/call",
+		Params: mcpToolCallParams{
+			Name:      toolName,
+			Arguments: req.Input,
+			Metadata:  metadata,
+		},
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("marshal mcp request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, agent.EndpointURL, bytes.NewReader(payload))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("build mcp request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "OpenLinker/1.0")
+	httpReq.Header.Set("X-OpenLinker-Run-Id", runID.String())
+	httpReq.Header.Set("X-OpenLinker-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
+	if agent.EndpointAuthHeader != nil && *agent.EndpointAuthHeader != "" {
+		auth := strings.TrimSpace(*agent.EndpointAuthHeader)
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			httpReq.Header.Set("Authorization", auth)
+		} else {
+			httpReq.Header.Set("X-OpenLinker-Token", auth)
+		}
+	}
+
+	resp, err := s.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("read mcp body: %w", err)
+	}
+
+	var mr mcpToolCallResponse
+	if uerr := json.Unmarshal(body, &mr); uerr != nil {
+		return nil, nil, &AgentError{
+			Code:    "INVALID_MCP_RESPONSE",
+			Message: "MCP endpoint 返回非 JSON-RPC: " + truncate(string(body), errMsgMaxLen),
+		}, nil
+	}
+	if resp.StatusCode >= 400 || mr.Error != nil {
+		if mr.Error == nil {
+			return nil, nil, &AgentError{
+				Code:    fmt.Sprintf("HTTP_%d", resp.StatusCode),
+				Message: truncate(string(body), errMsgMaxLen),
+			}, nil
+		}
+		return nil, nil, &AgentError{
+			Code:    fmt.Sprintf("MCP_%d", mr.Error.Code),
+			Message: truncate(mr.Error.Message, errMsgMaxLen),
+		}, nil
+	}
+	return normalizeMCPResult(mr.Result), nil, nil, nil
+}
+
+func normalizeMCPResult(result map[string]interface{}) map[string]interface{} {
+	if result == nil {
+		return map[string]interface{}{}
+	}
+	if output, ok := result["output"].(map[string]interface{}); ok {
+		return output
+	}
+	if structured, ok := result["structuredContent"].(map[string]interface{}); ok {
+		return structured
+	}
+	return map[string]interface{}{"mcp_result": result}
+}
+
 // DryRun 让创作者侧 endpoint 跑一次「不计费、不写 runs」的探活调用。
 //
 // 用于 Agent 接入流程的 dry-run 步骤：使用给定输入直接命中 endpoint，
@@ -610,7 +946,7 @@ func (s *Service) DryRun(
 ) (map[string]interface{}, string) {
 	runID := uuid.New()
 	userID := uuid.New()
-	output, _, agentErr, callErr := s.callAgentEndpoint(ctx, agent, runID, userID, &RunRequest{
+	output, _, agentErr, callErr := s.callAgent(ctx, agent, runID, userID, &RunRequest{
 		Input: input,
 	}, nil)
 	if callErr != nil {

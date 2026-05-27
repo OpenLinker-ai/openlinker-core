@@ -50,6 +50,36 @@ SELECT id, user_id, agent_id, input, output, status, error_code, error_message,
 FROM runs
 WHERE id = $1;
 
+-- name: ClaimRuntimePullRun :one
+-- Agent 通过 Runtime Token 主动拉取自己名下 runtime_pull 模式的 pending run。
+-- claimed_at 超过 5 分钟视为可重领，避免 Agent 崩溃后任务永久卡住。
+WITH candidate AS (
+    SELECT r.id
+    FROM runs r
+    JOIN agents a ON a.id = r.agent_id
+    WHERE r.agent_id = $1
+      AND r.status = 'running'
+      AND a.connection_mode = 'runtime_pull'
+      AND (r.claimed_at IS NULL OR r.claimed_at < NOW() - INTERVAL '5 minutes')
+    ORDER BY r.started_at ASC
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE runs r
+SET claimed_by_runtime_token_id = $2,
+    claimed_at = NOW()
+FROM candidate
+WHERE r.id = candidate.id
+RETURNING r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code, r.error_message,
+          r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
+          r.started_at, r.finished_at, r.source;
+
+-- name: GetRuntimePullRunState :one
+SELECT id, user_id, agent_id, status, cost_cents, creator_revenue_cents,
+       started_at, claimed_by_runtime_token_id
+FROM runs
+WHERE id = $1;
+
 -- name: CreateRunEvent :one
 -- 追加 run event；锁 run 行来保证同一个 run 内 sequence 单调递增。
 WITH locked_run AS (

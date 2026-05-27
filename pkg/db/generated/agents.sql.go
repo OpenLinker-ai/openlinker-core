@@ -33,7 +33,7 @@ func (q *Queries) AgentsCount(ctx context.Context) (int32, error) {
 //	lifecycle_status, visibility, certification_status,
 //	rejection_reason, certified_at,
 //	total_calls, total_revenue_cents,
-//	webhook_url, created_at, updated_at
+//	webhook_url, connection_mode, mcp_tool_name, created_at, updated_at
 func scanAgent(row interface {
 	Scan(dest ...any) error
 }, a *Agent) error {
@@ -55,6 +55,8 @@ func scanAgent(row interface {
 		&a.TotalCalls,
 		&a.TotalRevenueCents,
 		&a.WebhookURL,
+		&a.ConnectionMode,
+		&a.MCPToolName,
 		&a.CreatedAt,
 		&a.UpdatedAt,
 	)
@@ -63,16 +65,17 @@ func scanAgent(row interface {
 const createAgent = `-- name: CreateAgent :one
 INSERT INTO agents (
     creator_id, slug, name, description, endpoint_url,
-    endpoint_auth_header, price_per_call_cents, tags, visibility
+    endpoint_auth_header, price_per_call_cents, tags, visibility,
+    connection_mode, mcp_tool_name
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 )
 RETURNING id, creator_id, slug, name, description, endpoint_url,
           endpoint_auth_header, price_per_call_cents, tags,
           lifecycle_status, visibility, certification_status,
           rejection_reason, certified_at,
           total_calls, total_revenue_cents,
-          webhook_url, created_at, updated_at`
+          webhook_url, connection_mode, mcp_tool_name, created_at, updated_at`
 
 // CreateAgentParams 入参。
 type CreateAgentParams struct {
@@ -85,6 +88,8 @@ type CreateAgentParams struct {
 	PricePerCallCents  int32     `db:"price_per_call_cents" json:"price_per_call_cents"`
 	Tags               []string  `db:"tags" json:"tags"`
 	Visibility         string    `db:"visibility" json:"visibility"`
+	ConnectionMode     string    `db:"connection_mode" json:"connection_mode"`
+	MCPToolName        *string   `db:"mcp_tool_name" json:"mcp_tool_name"`
 }
 
 // CreateAgent 创作者新建 Agent。默认 lifecycle=active, visibility=public, certification=unreviewed。
@@ -99,6 +104,8 @@ func (q *Queries) CreateAgent(ctx context.Context, arg CreateAgentParams) (Agent
 		arg.PricePerCallCents,
 		arg.Tags,
 		arg.Visibility,
+		arg.ConnectionMode,
+		arg.MCPToolName,
 	)
 	var a Agent
 	err := scanAgent(row, &a)
@@ -114,6 +121,8 @@ SET name = $2,
     price_per_call_cents = $6,
     tags = $7,
     visibility = $9,
+    connection_mode = $10,
+    mcp_tool_name = $11,
     updated_at = NOW()
 WHERE id = $1 AND creator_id = $8 AND lifecycle_status = 'active'
 RETURNING id, creator_id, slug, name, description, endpoint_url,
@@ -121,7 +130,7 @@ RETURNING id, creator_id, slug, name, description, endpoint_url,
           lifecycle_status, visibility, certification_status,
           rejection_reason, certified_at,
           total_calls, total_revenue_cents,
-          webhook_url, created_at, updated_at`
+          webhook_url, connection_mode, mcp_tool_name, created_at, updated_at`
 
 // UpdateAgentDraftParams 入参。Visibility 可由创作者直接改 (public/unlisted/private)。
 type UpdateAgentDraftParams struct {
@@ -134,6 +143,8 @@ type UpdateAgentDraftParams struct {
 	Tags               []string  `db:"tags" json:"tags"`
 	CreatorID          uuid.UUID `db:"creator_id" json:"creator_id"`
 	Visibility         string    `db:"visibility" json:"visibility"`
+	ConnectionMode     string    `db:"connection_mode" json:"connection_mode"`
+	MCPToolName        *string   `db:"mcp_tool_name" json:"mcp_tool_name"`
 }
 
 // UpdateAgentDraft 创作者编辑；命中 0 行表示 Agent 不存在 / 不属于该 creator / 已下架。
@@ -148,6 +159,8 @@ func (q *Queries) UpdateAgentDraft(ctx context.Context, arg UpdateAgentDraftPara
 		arg.Tags,
 		arg.CreatorID,
 		arg.Visibility,
+		arg.ConnectionMode,
+		arg.MCPToolName,
 	)
 	var a Agent
 	err := scanAgent(row, &a)
@@ -178,7 +191,7 @@ SELECT id, creator_id, slug, name, description, endpoint_url,
        lifecycle_status, visibility, certification_status,
        rejection_reason, certified_at,
        total_calls, total_revenue_cents,
-       webhook_url, created_at, updated_at
+       webhook_url, connection_mode, mcp_tool_name, created_at, updated_at
 FROM agents
 WHERE id = $1 AND creator_id = $2`
 
@@ -200,7 +213,7 @@ SELECT id, creator_id, slug, name, description, endpoint_url,
        lifecycle_status, visibility, certification_status,
        rejection_reason, certified_at,
        total_calls, total_revenue_cents,
-       webhook_url, created_at, updated_at
+       webhook_url, connection_mode, mcp_tool_name, created_at, updated_at
 FROM agents
 WHERE id = $1`
 
@@ -217,7 +230,7 @@ SELECT id, creator_id, slug, name, description, endpoint_url,
        lifecycle_status, visibility, certification_status,
        rejection_reason, certified_at,
        total_calls, total_revenue_cents,
-       webhook_url, created_at, updated_at
+       webhook_url, connection_mode, mcp_tool_name, created_at, updated_at
 FROM agents
 WHERE creator_id = $1
 ORDER BY created_at DESC`
@@ -342,7 +355,7 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        a.lifecycle_status, a.visibility, a.certification_status,
        a.rejection_reason, a.certified_at,
        a.total_calls, a.total_revenue_cents,
-       a.webhook_url, a.created_at, a.updated_at,
+       a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
        u.email AS creator_email,
        u.display_name AS creator_name
 FROM agents a
@@ -386,6 +399,8 @@ func (q *Queries) ListPendingAgents(ctx context.Context) ([]ListPendingAgentsRow
 			&r.TotalCalls,
 			&r.TotalRevenueCents,
 			&r.WebhookURL,
+			&r.ConnectionMode,
+			&r.MCPToolName,
 			&r.CreatedAt,
 			&r.UpdatedAt,
 			&r.CreatorEmail,

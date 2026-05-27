@@ -87,3 +87,23 @@ type AgentError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 }
+
+// RuntimePullRunResponse 是内网 / IPv4 / NAT Agent 主动拉任务时拿到的 payload。
+type RuntimePullRunResponse struct {
+	RunID    string                 `json:"run_id"`
+	AgentID  string                 `json:"agent_id"`
+	Input    map[string]interface{} `json:"input"`
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
+	Source   string                 `json:"source"`
+}
+
+// RuntimePullResultRequest 是 runtime_pull Agent 执行完任务后回传的结果。
+//
+// Status 支持 success / failed / timeout；success 必须带 output，失败建议带 error。
+type RuntimePullResultRequest struct {
+	Status     string                 `json:"status" validate:"required,oneof=success failed timeout"`
+	Output     map[string]interface{} `json:"output,omitempty"`
+	Events     []AgentEvent           `json:"events,omitempty"`
+	Error      *AgentError            `json:"error,omitempty"`
+	DurationMs int32                  `json:"duration_ms,omitempty"`
+}

@@ -87,6 +87,107 @@ func TestRegistrationService_RegisterAgentViaBootstrap_HappyPath(t *testing.T) {
 	require.Equal(t, []string{"ai/agent-orchestration", "content/translation"}, declared)
 }
 
+func TestRegistrationService_RegisterAgentViaBootstrap_RuntimePull(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "Runtime Pull Creator")
+	ctx := context.Background()
+
+	svc := agent.NewRegistrationService(pool)
+	minted, err := svc.MintBootstrapToken(ctx, creatorID, &agent.CreateBootstrapTokenRequest{
+		Label: "runtime pull token",
+	})
+	require.NoError(t, err)
+
+	resp, err := svc.RegisterAgentViaBootstrap(ctx, &agent.RegisterAgentViaBootstrapRequest{
+		BootstrapToken:    minted.PlaintextToken,
+		Name:              "Local Runtime Pull Agent",
+		Description:       "本地内网 Agent 主动领取任务",
+		ConnectionMode:    "runtime_pull",
+		PricePerCallCents: 0,
+		Tags:              []string{"data"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "runtime_pull", resp.Agent.ConnectionMode)
+	require.Contains(t, resp.Agent.EndpointURL, "openlinker-runtime-pull://")
+	require.NotEmpty(t, resp.RuntimeToken.PlaintextToken)
+
+	var connectionMode string
+	var endpointURL string
+	var scopes []string
+	err = pool.QueryRow(ctx,
+		`SELECT a.connection_mode, a.endpoint_url, t.scopes
+		 FROM agents a
+		 JOIN agent_runtime_tokens t ON t.agent_id = a.id
+		 WHERE a.id = $1`,
+		uuid.MustParse(resp.Agent.ID),
+	).Scan(&connectionMode, &endpointURL, &scopes)
+	require.NoError(t, err)
+	require.Equal(t, "runtime_pull", connectionMode)
+	require.Contains(t, endpointURL, "openlinker-runtime-pull://")
+	require.Contains(t, scopes, "agent:call")
+	require.Contains(t, scopes, "agent:pull")
+}
+
+func TestRegistrationService_RegisterAgentViaBootstrap_MCPServer(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "MCP Creator")
+	ctx := context.Background()
+
+	svc := agent.NewRegistrationService(pool)
+	minted, err := svc.MintBootstrapToken(ctx, creatorID, &agent.CreateBootstrapTokenRequest{
+		Label: "mcp server token",
+	})
+	require.NoError(t, err)
+
+	resp, err := svc.RegisterAgentViaBootstrap(ctx, &agent.RegisterAgentViaBootstrapRequest{
+		BootstrapToken:    minted.PlaintextToken,
+		Name:              "MCP Tool Agent",
+		Description:       "把远程 MCP tool 发布为 Agent",
+		ConnectionMode:    "mcp_server",
+		EndpointURL:       "https://mcp.example.com/rpc",
+		MCPToolName:       "analyze_contract",
+		PricePerCallCents: 0,
+		Tags:              []string{"mcp"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "mcp_server", resp.Agent.ConnectionMode)
+	require.NotNil(t, resp.Agent.MCPToolName)
+	require.Equal(t, "analyze_contract", *resp.Agent.MCPToolName)
+
+	var connectionMode string
+	var mcpToolName string
+	err = pool.QueryRow(ctx,
+		`SELECT connection_mode, mcp_tool_name FROM agents WHERE id = $1`,
+		uuid.MustParse(resp.Agent.ID),
+	).Scan(&connectionMode, &mcpToolName)
+	require.NoError(t, err)
+	require.Equal(t, "mcp_server", connectionMode)
+	require.Equal(t, "analyze_contract", mcpToolName)
+}
+
+func TestRegistrationService_RegisterAgentViaBootstrap_MCPServerMissingTool(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "MCP Creator")
+	ctx := context.Background()
+
+	svc := agent.NewRegistrationService(pool)
+	minted, err := svc.MintBootstrapToken(ctx, creatorID, &agent.CreateBootstrapTokenRequest{
+		Label: "mcp server token",
+	})
+	require.NoError(t, err)
+
+	_, err = svc.RegisterAgentViaBootstrap(ctx, &agent.RegisterAgentViaBootstrapRequest{
+		BootstrapToken:    minted.PlaintextToken,
+		Name:              "Broken MCP Tool Agent",
+		Description:       "缺少 tool name 时不能注册成 MCP Agent",
+		ConnectionMode:    "mcp_server",
+		EndpointURL:       "https://mcp.example.com/rpc",
+		PricePerCallCents: 0,
+		Tags:              []string{"mcp"},
+	})
+	assertHTTPStatus(t, err, 422)
+}
+
 func TestRegistrationService_RegisterAgentViaBootstrap_ExhaustedToken(t *testing.T) {
 	pool := setupTestDB(t)
 	creatorID := insertCreatorUser(t, pool, "Bootstrap Creator")

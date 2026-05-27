@@ -17,7 +17,6 @@ import (
 
 	"github.com/kinzhi/openlinker-core/pkg/config"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
-	"github.com/kinzhi/openlinker-core/pkg/endpointurl"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
@@ -158,8 +157,15 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 	if !isValidSlug(slug) {
 		return nil, httpx.Unprocessable("slug 格式不合法：仅允许小写字母 / 数字 / 连字符，3..80 字符，且不能以连字符开头或结尾")
 	}
-	if err := endpointurl.Validate(req.EndpointURL, s.allowLocalHTTPEndpoints); err != nil {
-		return nil, httpx.Unprocessable(err.Error())
+	connection, err := normalizeConnectionSettings(
+		slug,
+		req.EndpointURL,
+		req.ConnectionMode,
+		req.MCPToolName,
+		s.allowLocalHTTPEndpoints,
+	)
+	if err != nil {
+		return nil, err
 	}
 	skillIDs, err := s.normalizeRegistrationSkillIDs(ctx, req.SkillIDs)
 	if err != nil {
@@ -193,11 +199,13 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 		Slug:               slug,
 		Name:               strings.TrimSpace(req.Name),
 		Description:        strings.TrimSpace(req.Description),
-		EndpointURL:        strings.TrimSpace(req.EndpointURL),
+		EndpointURL:        connection.EndpointURL,
 		EndpointAuthHeader: authHeader,
 		PricePerCallCents:  req.PricePerCallCents,
 		Tags:               normalizeTagsForInsert(req.Tags),
 		Visibility:         visibility,
+		ConnectionMode:     connection.Mode,
+		MCPToolName:        connection.MCPToolName,
 	})
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -234,7 +242,7 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 		Name:            tokenName,
 		Prefix:          rtPrefix,
 		TokenHash:       string(rtHash),
-		Scopes:          []string{"agent:call"},
+		Scopes:          []string{"agent:call", "agent:pull"},
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("registration.RegisterAgentViaBootstrap: insert runtime token")

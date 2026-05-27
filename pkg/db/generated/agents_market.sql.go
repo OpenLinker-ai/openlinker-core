@@ -16,7 +16,8 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        a.endpoint_auth_header, a.price_per_call_cents, a.tags,
        a.lifecycle_status, a.visibility, a.certification_status,
        a.rejection_reason, a.certified_at, a.total_calls, a.total_revenue_cents,
-       a.webhook_url, a.created_at, a.updated_at, u.display_name AS creator_name
+       a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
+       u.display_name AS creator_name
 FROM agents a
 JOIN users u ON u.id = a.creator_id
 WHERE a.visibility = 'public'
@@ -71,6 +72,8 @@ func (q *Queries) ListPublicAgents(ctx context.Context, arg ListPublicAgentsPara
 			&r.TotalCalls,
 			&r.TotalRevenueCents,
 			&r.WebhookURL,
+			&r.ConnectionMode,
+			&r.MCPToolName,
 			&r.CreatedAt,
 			&r.UpdatedAt,
 			&r.CreatorName,
@@ -110,7 +113,8 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        a.endpoint_auth_header, a.price_per_call_cents, a.tags,
        a.lifecycle_status, a.visibility, a.certification_status,
        a.rejection_reason, a.certified_at, a.total_calls, a.total_revenue_cents,
-       a.webhook_url, a.created_at, a.updated_at, u.display_name AS creator_name
+       a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
+       u.display_name AS creator_name
 FROM agents a
 JOIN users u ON u.id = a.creator_id
 WHERE a.slug = $1
@@ -144,6 +148,8 @@ func (q *Queries) GetAgentBySlug(ctx context.Context, slug string) (GetAgentBySl
 		&r.TotalCalls,
 		&r.TotalRevenueCents,
 		&r.WebhookURL,
+		&r.ConnectionMode,
+		&r.MCPToolName,
 		&r.CreatedAt,
 		&r.UpdatedAt,
 		&r.CreatorName,

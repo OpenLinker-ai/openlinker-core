@@ -91,6 +91,8 @@ type Agent struct {
 	TotalRevenueCents   int64      `db:"total_revenue_cents" json:"total_revenue_cents"`
 	WebhookURL          *string    `db:"webhook_url" json:"webhook_url"`
 	WebhookSecret       *string    `db:"webhook_secret" json:"-"` // 不暴露给前端
+	ConnectionMode      string     `db:"connection_mode" json:"connection_mode"`
+	MCPToolName         *string    `db:"mcp_tool_name" json:"mcp_tool_name"`
 	CreatedAt           time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt           time.Time  `db:"updated_at" json:"updated_at"`
 }
@@ -101,21 +103,23 @@ type Agent struct {
 // 金额单位 cents（int32）：cost_cents = platform_fee_cents + creator_revenue_cents
 // input/output 是 JSONB（[]byte，原样透传）
 type Run struct {
-	ID                  uuid.UUID  `db:"id" json:"id"`
-	UserID              uuid.UUID  `db:"user_id" json:"user_id"`
-	AgentID             uuid.UUID  `db:"agent_id" json:"agent_id"`
-	Input               []byte     `db:"input" json:"input"`
-	Output              []byte     `db:"output" json:"output"`
-	Status              string     `db:"status" json:"status"`
-	ErrorCode           *string    `db:"error_code" json:"error_code"`
-	ErrorMessage        *string    `db:"error_message" json:"error_message"`
-	CostCents           int32      `db:"cost_cents" json:"cost_cents"`
-	PlatformFeeCents    int32      `db:"platform_fee_cents" json:"platform_fee_cents"`
-	CreatorRevenueCents int32      `db:"creator_revenue_cents" json:"creator_revenue_cents"`
-	DurationMs          *int32     `db:"duration_ms" json:"duration_ms"`
-	StartedAt           time.Time  `db:"started_at" json:"started_at"`
-	FinishedAt          *time.Time `db:"finished_at" json:"finished_at"`
-	Source              string     `db:"source" json:"source"`
+	ID                      uuid.UUID  `db:"id" json:"id"`
+	UserID                  uuid.UUID  `db:"user_id" json:"user_id"`
+	AgentID                 uuid.UUID  `db:"agent_id" json:"agent_id"`
+	Input                   []byte     `db:"input" json:"input"`
+	Output                  []byte     `db:"output" json:"output"`
+	Status                  string     `db:"status" json:"status"`
+	ErrorCode               *string    `db:"error_code" json:"error_code"`
+	ErrorMessage            *string    `db:"error_message" json:"error_message"`
+	CostCents               int32      `db:"cost_cents" json:"cost_cents"`
+	PlatformFeeCents        int32      `db:"platform_fee_cents" json:"platform_fee_cents"`
+	CreatorRevenueCents     int32      `db:"creator_revenue_cents" json:"creator_revenue_cents"`
+	DurationMs              *int32     `db:"duration_ms" json:"duration_ms"`
+	StartedAt               time.Time  `db:"started_at" json:"started_at"`
+	FinishedAt              *time.Time `db:"finished_at" json:"finished_at"`
+	Source                  string     `db:"source" json:"source"`
+	ClaimedByRuntimeTokenID *uuid.UUID `db:"claimed_by_runtime_token_id" json:"claimed_by_runtime_token_id"`
+	ClaimedAt               *time.Time `db:"claimed_at" json:"claimed_at"`
 }
 
 // RunEvent 对应 run_events 表。
