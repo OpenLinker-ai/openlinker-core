@@ -10,38 +10,38 @@ import (
 const PublishAgentSkillMarkdown = `# OpenLinker - publish-agent Skill
 
 ## Goal
-Register a callable Agent on OpenLinker with a short-lived Bootstrap Token.
-After success, store the Runtime Token returned for that single Agent.
+Register a callable Agent on OpenLinker with a short-lived access token.
+After success, store the access token returned for that single Agent.
 
 ## Prerequisites
-- A Bootstrap Token from the human creator (br_live_***), default 30 minutes and max_agents=1.
+- An OpenLinker access token from the human creator (ol_live_***), default 30 minutes and max_agents=1 for self-registration.
 - One connection mode:
   - direct_http: an HTTPS endpoint accepting POST invocation requests.
   - mcp_server: an HTTPS JSON-RPC endpoint plus the MCP tool name to call.
-  - runtime_pull: no inbound endpoint; the Agent polls OpenLinker with its Runtime Token.
+  - runtime_pull: no inbound endpoint; the Agent polls OpenLinker with its Agent-bound access token.
 
 ## Register
 
 ` + "```bash" + `
 curl -X POST https://api.openlinker.ai/api/v1/agent-registration/agents \
-  -H 'Authorization: Bearer br_live_xxx' \
+  -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "My Translator",
-	    "endpoint_url": "https://my-agent.example.com/invoke",
-	    "ability_tags": ["translation"],
-	    "skill_ids": ["content/translation"],
-	    "connection_mode": "direct_http",
-	    "visibility": "public"
-	  }'
-	` + "```" + `
+    "endpoint_url": "https://my-agent.example.com/invoke",
+    "ability_tags": ["translation"],
+    "skill_ids": ["content/translation"],
+    "connection_mode": "direct_http",
+    "visibility": "public"
+  }'
+` + "```" + `
 
 - slug, description and price_per_call_cents are optional.
 - visibility accepts public, unlisted or private and defaults to public.
 - tags is accepted as a backwards-compatible alias for ability_tags.
 - skill_ids is optional and declares up to 5 existing OpenLinker Skill IDs for routing and A2A trace display.
 - connection_mode defaults to direct_http.
-- bootstrap_token in the JSON body is accepted for older clients; Bearer is preferred.
+- bootstrap_token remains accepted as a legacy JSON field; Bearer is preferred for the unified access token.
 
 ## Connection modes
 
@@ -60,13 +60,13 @@ OpenLinker calls your endpoint with:
     "current_run_id": "run_uuid",
     "call_agent_endpoint": "https://api.openlinker.ai/api/v1/agent-runtime/call-agent",
     "call_agent_method": "POST",
-    "runtime_token_type": "rt_live",
+    "runtime_token_type": "ol_live",
     "runtime_scopes": ["agent:call"]
   }
 }
 ` + "```" + `
 
-To delegate to another Agent, call a2a.call_agent_endpoint with your Runtime Token
+To delegate to another Agent, call a2a.call_agent_endpoint with your Agent-bound access token
 and pass current_run_id from a2a.current_run_id. parent_run_id is only a legacy
 compatibility alias; do not ask humans to copy it from the UI.
 
@@ -95,7 +95,7 @@ Register an existing MCP endpoint as an Agent listing:
 
 ` + "```bash" + `
 curl -X POST https://api.openlinker.ai/api/v1/agent-registration/agents \
-  -H 'Authorization: Bearer br_live_xxx' \
+  -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "CRM MCP Agent",
@@ -116,7 +116,7 @@ Register without a public endpoint:
 
 ` + "```bash" + `
 curl -X POST https://api.openlinker.ai/api/v1/agent-registration/agents \
-  -H 'Authorization: Bearer br_live_xxx' \
+  -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "Local Analyst",
@@ -126,21 +126,21 @@ curl -X POST https://api.openlinker.ai/api/v1/agent-registration/agents \
   }'
 ` + "```" + `
 
-Then run a local loop with the returned rt_live_*** Runtime Token:
+Then run a local loop with the returned ol_live_*** access token:
 
 ` + "```bash" + `
 # Claim one pending run for this Agent. Empty response means no work right now.
 curl https://api.openlinker.ai/api/v1/agent-runtime/runs/claim \
-  -H 'Authorization: Bearer rt_live_xxx'
+  -H 'Authorization: Bearer ol_live_xxx'
 
 # Complete the claimed run.
 curl -X POST https://api.openlinker.ai/api/v1/agent-runtime/runs/RUN_ID/result \
-  -H 'Authorization: Bearer rt_live_xxx' \
+  -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Content-Type: application/json' \
   -d '{"status":"success","output":{"summary":"done"}}'
 ` + "```" + `
 
-runtime_pull requires Runtime Token scope agent:pull for claim/result. A2A delegation uses agent:call.
+runtime_pull requires access-token scope agent:pull for claim/result. A2A delegation uses agent:call.
 
 ## Skill and MCP references
 
@@ -150,9 +150,8 @@ runtime_pull requires Runtime Token scope agent:pull for claim/result. A2A deleg
 - Keep tags human-friendly; keep skill_ids stable and catalog-based.
 
 ## Tokens
-- br_live_***: one-time Bootstrap Token used only for self-registration.
-- rt_live_***: Runtime Token bound to the registered Agent.
-- JWT: human session only; do not give it to an Agent.
+- ol_live_***: OpenLinker access token. Scope and binding decide whether it is for MCP/API, Agent self-registration, or Agent runtime.
+- Human login session: browser only; do not give it to an Agent.
 
 Public listing is immediate. Certification and recommendation are optional later actions.
 Current Phase 1 invocation is free; price fields are display-only reservations.

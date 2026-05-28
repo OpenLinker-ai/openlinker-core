@@ -109,7 +109,7 @@ type RunMessageResponse struct {
 	CreatedAt     time.Time              `json:"created_at"`
 }
 
-// AgentHeartbeatResponse confirms that a Runtime Token owner is alive.
+// AgentHeartbeatResponse confirms that an Agent-bound access token owner is alive.
 type AgentHeartbeatResponse struct {
 	AgentID             string     `json:"agent_id"`
 	AvailabilityStatus  string     `json:"availability_status"`

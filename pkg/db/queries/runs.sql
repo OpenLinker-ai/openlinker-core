@@ -64,7 +64,7 @@ FROM runs
 WHERE id = $1;
 
 -- name: ClaimRuntimePullRun :one
--- Agent 通过 Runtime Token 主动拉取自己名下 runtime_pull 模式的 pending run。
+-- Agent 通过绑定自身的访问令牌主动拉取自己名下 runtime_pull 模式的 pending run。
 -- claimed_at 超过 5 分钟视为可重领，避免 Agent 崩溃后任务永久卡住。
 WITH candidate AS (
     SELECT r.id

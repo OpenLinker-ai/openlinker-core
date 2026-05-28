@@ -1,18 +1,18 @@
 -- name: CreateApiKey :one
--- 创建 API Key 行。key_hash 是 bcrypt(完整明文)。
+-- 创建访问令牌行。key_hash 是 bcrypt(完整明文)。
 INSERT INTO api_keys (user_id, name, prefix, key_hash, scopes)
 VALUES ($1, $2, $3, $4, $5)
 RETURNING id, user_id, name, prefix, key_hash, scopes, last_used_at, revoked_at, created_at;
 
 -- name: ListApiKeysByUser :many
--- 列出用户全部 API Key（含已撤销），按创建时间倒序。
+-- 列出用户全部访问令牌（含已撤销），按创建时间倒序。
 SELECT id, user_id, name, prefix, key_hash, scopes, last_used_at, revoked_at, created_at
 FROM api_keys
 WHERE user_id = $1
 ORDER BY created_at DESC;
 
 -- name: CountActiveApiKeysByUser :one
--- 统计用户当前有效（未撤销）API Key 数量，用于上限校验。
+-- 统计用户当前有效（未撤销）访问令牌数量，用于上限校验。
 SELECT COUNT(*)::int AS total
 FROM api_keys
 WHERE user_id = $1 AND revoked_at IS NULL;

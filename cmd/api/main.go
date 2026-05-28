@@ -144,8 +144,8 @@ func main() {
 	skillHandler.Register(api)
 	skillHandler.RegisterProtected(api, jwtMiddleware)
 
-	// core 单独部署:HybridAuthMiddleware 传 nil verifier,API Key 直接 401。
-	// 只接受 JWT(浏览器登录),所有 sk_live_xxx 请求被拒。
+	// core 单独部署:HybridAuthMiddleware 传 nil verifier,访问令牌直接 401。
+	// 只接受 JWT(浏览器登录),所有访问令牌请求被拒。
 	hybridMw := auth.HybridAuthMiddleware(cfg.JWTSecret, nil)
 
 	// core 部署:不注入 WalletCharger,扣费跳过(余额无限),

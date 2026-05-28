@@ -886,7 +886,7 @@ func repairHintsForDryRun(agent *db.Agent, errMsg string) []string {
 	switch agent.ConnectionMode {
 	case "runtime_pull":
 		hints = append(hints,
-			"确认本地 Agent 进程正在运行，并使用含 agent:pull scope 的 Runtime Token 轮询任务。",
+			"确认本地 Agent 进程正在运行，并使用含 agent:pull scope、绑定当前 Agent 的访问令牌轮询任务。",
 			"如果刚重启过 Agent，先调用 /api/v1/agent-runtime/heartbeat 刷新可用性。",
 		)
 	case "mcp_server":

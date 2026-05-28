@@ -1,5 +1,5 @@
 -- agent_registration.sql
--- Phase 2 缺口 1：Agent 自注册 Bootstrap Token 查询。
+-- Phase 2 缺口 1：Agent 自注册访问令牌查询。
 -- docs/29 §2。
 
 -- name: CreateAgentRegistrationToken :one

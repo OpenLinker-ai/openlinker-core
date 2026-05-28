@@ -1,6 +1,6 @@
 package agent
 
-// CreateBootstrapTokenRequest 创作者侧铸造 Bootstrap Token 请求体。
+// CreateBootstrapTokenRequest 创作者侧铸造注册用途访问令牌请求体。
 //
 // expires_in_minutes 默认 30；max_agents 默认 1。label 用于人类侧识别用途。
 type CreateBootstrapTokenRequest struct {
@@ -54,7 +54,7 @@ type RegisterAgentViaBootstrapResponse struct {
 	MaxAgents    int32                 `json:"bootstrap_max_agents"`
 }
 
-// BootstrapRuntimeToken Runtime Token 一次性明文返回（仅在自注册响应内）。
+// BootstrapRuntimeToken Agent 绑定用途访问令牌一次性明文返回（仅在自注册响应内）。
 type BootstrapRuntimeToken struct {
 	ID             string `json:"id"`
 	Prefix         string `json:"prefix"`

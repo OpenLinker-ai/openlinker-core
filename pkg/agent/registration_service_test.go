@@ -11,7 +11,7 @@ import (
 	"github.com/kinzhi/openlinker-core/pkg/agent"
 )
 
-// 覆盖 Phase 2 缺口 1：Bootstrap Token → Agent 自注册流程。
+// 覆盖 Phase 2 缺口 1：注册用途访问令牌 → Agent 自注册流程。
 // 复用 testhelpers_test.go / market_service_test.go 已有的 helpers：
 //   setupTestDB / insertCreatorUser / insertNonCreatorUser / assertHTTPStatus。
 
@@ -25,7 +25,7 @@ func TestRegistrationService_MintBootstrapToken_Defaults(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, resp.PlaintextToken)
-	require.True(t, strings.HasPrefix(resp.PlaintextToken, "br_live_"), "明文 token 必须以 br_live_ 开头")
+	require.True(t, strings.HasPrefix(resp.PlaintextToken, "ol_live_"), "明文 token 必须以 ol_live_ 开头")
 	require.Equal(t, int32(1), resp.MaxAgents, "缺省 max_agents=1")
 	require.Equal(t, int32(0), resp.UsedCount)
 	require.NotEmpty(t, resp.Prefix)
@@ -70,7 +70,7 @@ func TestRegistrationService_RegisterAgentViaBootstrap_HappyPath(t *testing.T) {
 		"slug 应从 name 派生，得到 %q", resp.Agent.Slug)
 	require.Equal(t, "approved", resp.Agent.Status, "Bootstrap 注册的 Agent 默认公开")
 	require.NotEmpty(t, resp.RuntimeToken.PlaintextToken)
-	require.True(t, strings.HasPrefix(resp.RuntimeToken.PlaintextToken, "rt_live_"))
+	require.True(t, strings.HasPrefix(resp.RuntimeToken.PlaintextToken, "ol_live_"))
 	require.Equal(t, int32(1), resp.UsedCount)
 	require.Equal(t, int32(1), resp.MaxAgents)
 
@@ -279,8 +279,8 @@ func TestRegistrationService_RegisterAgentViaBootstrap_BadToken(t *testing.T) {
 	pool := setupTestDB(t)
 	insertCreatorUser(t, pool, "Bootstrap Creator")
 
-	// 64 个 hex 字符 + br_live_ 前缀 = 与真实 token 长度一致，但内容是假的 → 401。
-	bogus := "br_live_" + strings.Repeat("0", 64)
+	// 64 个 hex 字符 + ol_live_ 前缀 = 与真实 token 长度一致，但内容是假的 → 401。
+	bogus := "ol_live_" + strings.Repeat("0", 64)
 
 	svc := agent.NewRegistrationService(pool)
 	_, err := svc.RegisterAgentViaBootstrap(context.Background(), &agent.RegisterAgentViaBootstrapRequest{

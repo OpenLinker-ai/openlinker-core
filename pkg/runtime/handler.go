@@ -42,8 +42,8 @@ func NewHandler(svc *Service, cfg ...*config.Config) *Handler {
 
 // RegisterProtected 注册需要鉴权的端点，分别接收 /run 与 /runs/:id 的 middleware。
 //
-//	POST /run            同步调用 Agent   —— runMw（JWT + API Key 混合）
-//	POST /runs           异步启动调用     —— runMw（JWT + API Key 混合）
+//	POST /run            同步调用 Agent   —— runMw（JWT + 访问令牌混合）
+//	POST /runs           异步启动调用     —— runMw（JWT + 访问令牌混合）
 //	GET  /runs/:id       单条调用详情     —— queryMw（可按部署选择 JWT-only 或 hybrid）
 //	GET  /runs/:id/events 调用事件流      —— queryMw（轮询）
 //	GET  /runs/:id/artifacts 运行产物      —— queryMw
@@ -65,7 +65,7 @@ func (h *Handler) RegisterProtected(api *echo.Group, runMw, queryMw echo.Middlew
 	api.POST("/runs/:id/events", h.PostRunEvent)
 }
 
-// RegisterAgentRuntime mounts Runtime Token based endpoints used by runtime_pull Agents.
+// RegisterAgentRuntime mounts Agent-bound access-token endpoints used by runtime_pull Agents.
 //
 //	POST /agent-runtime/heartbeat        Agent 主动上报存活
 //	GET  /agent-runtime/runs/claim       Agent 拉取一个 pending run
@@ -381,7 +381,7 @@ func userIDFromCtx(c echo.Context) (uuid.UUID, error) {
 }
 
 // sourceFromCtx 把鉴权方式映射到 runs.source。
-// jwt → 'web'（浏览器 / 仪表盘）；apikey → 'api'（cURL / SDK）；
+// jwt → 'web'（浏览器 / 仪表盘）；apikey → 'api'（访问令牌 / SDK）；
 // MCP 路径的 handler 会显式传 "mcp"，绕过本函数。
 func sourceFromCtx(c echo.Context) string {
 	switch httpx.AuthMethodFrom(c) {
@@ -396,7 +396,7 @@ func sourceFromCtx(c echo.Context) string {
 
 func requireAPIKeyScope(c echo.Context, scope string) error {
 	if httpx.AuthMethodFrom(c) == "apikey" && !httpx.HasScope(c, scope) {
-		return httpx.Forbidden("API Key 缺少 scope: " + scope)
+		return httpx.Forbidden("访问令牌缺少 scope: " + scope)
 	}
 	return nil
 }
@@ -404,7 +404,7 @@ func requireAPIKeyScope(c echo.Context, scope string) error {
 func runtimeBearerToken(header string) (string, error) {
 	parts := strings.SplitN(strings.TrimSpace(header), " ", 2)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.TrimSpace(parts[1]) == "" {
-		return "", httpx.Unauthorized("缺少 Runtime Token")
+		return "", httpx.Unauthorized("缺少访问令牌")
 	}
 	return strings.TrimSpace(parts[1]), nil
 }

@@ -2,8 +2,6 @@ package a2a
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
@@ -14,19 +12,18 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/kinzhi/openlinker-core/pkg/credential"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 	"github.com/kinzhi/openlinker-core/pkg/runtime"
 )
 
 const (
-	runtimeTokenPrefix     = "rt_live_"
-	runtimeTokenPrefixLen  = 12
-	runtimeTokenRandomSize = 32
-	maxRuntimeTokens       = 10
-	defaultParentPage      = 1
-	defaultParentPageSize  = 10
-	maxParentPageSize      = 50
+	runtimeTokenPrefixLen = credential.PrefixLen
+	maxRuntimeTokens      = 10
+	defaultParentPage     = 1
+	defaultParentPageSize = 10
+	maxParentPageSize     = 50
 )
 
 type Service struct {
@@ -46,19 +43,19 @@ func (s *Service) CreateRuntimeToken(ctx context.Context, userID, agentID uuid.U
 	count, err := s.queries.CountActiveAgentRuntimeTokens(ctx, agentID)
 	if err != nil {
 		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("a2a.CreateRuntimeToken: count")
-		return nil, httpx.Internal("查询 Runtime Token 失败")
+		return nil, httpx.Internal("查询访问令牌失败")
 	}
 	if count >= maxRuntimeTokens {
-		return nil, httpx.BadRequest("Runtime Token 数量已达上限（10 个），请先撤销旧 token")
+		return nil, httpx.BadRequest("访问令牌数量已达上限（10 个），请先撤销旧令牌")
 	}
 
-	plaintext, prefix, err := generateRuntimeToken()
+	plaintext, prefix, err := credential.GenerateAccessToken()
 	if err != nil {
-		return nil, httpx.Internal("生成 Runtime Token 失败")
+		return nil, httpx.Internal("生成访问令牌失败")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
 	if err != nil {
-		return nil, httpx.Internal("加密 Runtime Token 失败")
+		return nil, httpx.Internal("加密访问令牌失败")
 	}
 	token, err := s.queries.CreateAgentRuntimeToken(ctx, db.CreateAgentRuntimeTokenParams{
 		AgentID:         agentID,
@@ -70,7 +67,7 @@ func (s *Service) CreateRuntimeToken(ctx context.Context, userID, agentID uuid.U
 	})
 	if err != nil {
 		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("a2a.CreateRuntimeToken: insert")
-		return nil, httpx.Internal("创建 Runtime Token 失败")
+		return nil, httpx.Internal("创建访问令牌失败")
 	}
 	resp := tokenResponse(token)
 	resp.PlaintextToken = plaintext
@@ -86,7 +83,7 @@ func (s *Service) ListRuntimeTokens(ctx context.Context, userID, agentID uuid.UU
 		UserID:  userID,
 	})
 	if err != nil {
-		return nil, httpx.Internal("查询 Runtime Token 失败")
+		return nil, httpx.Internal("查询访问令牌失败")
 	}
 	items := make([]RuntimeTokenResponse, 0, len(tokens))
 	for _, token := range tokens {
@@ -100,10 +97,10 @@ func (s *Service) RevokeRuntimeToken(ctx context.Context, userID, tokenID uuid.U
 		ID: tokenID, UserID: userID,
 	})
 	if err != nil {
-		return httpx.Internal("撤销 Runtime Token 失败")
+		return httpx.Internal("撤销访问令牌失败")
 	}
 	if affected == 0 {
-		return httpx.NotFound("Runtime Token 不存在或已撤销")
+		return httpx.NotFound("访问令牌不存在或已撤销")
 	}
 	return nil
 }
@@ -319,13 +316,13 @@ func (s *Service) ownerAgent(ctx context.Context, userID, agentID uuid.UUID) (db
 
 func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext string) (db.AgentRuntimeToken, error) {
 	plaintext = strings.TrimSpace(plaintext)
-	if !strings.HasPrefix(plaintext, runtimeTokenPrefix) ||
-		len(plaintext) != len(runtimeTokenPrefix)+runtimeTokenRandomSize*2 {
-		return db.AgentRuntimeToken{}, httpx.Unauthorized("Runtime Token 无效或已撤销")
+	if !credential.HasAnyPrefix(plaintext, credential.AccessTokenPrefix, credential.LegacyAgentPrefix) ||
+		!credential.ValidLength(plaintext) {
+		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
 	}
 	tokens, err := s.queries.ListActiveAgentRuntimeTokensByPrefix(ctx, plaintext[:runtimeTokenPrefixLen])
 	if err != nil {
-		return db.AgentRuntimeToken{}, httpx.Unauthorized("Runtime Token 无效或已撤销")
+		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
 	}
 	for _, token := range tokens {
 		if bcrypt.CompareHashAndPassword([]byte(token.TokenHash), []byte(plaintext)) == nil &&
@@ -333,16 +330,7 @@ func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext string) (db.
 			return token, nil
 		}
 	}
-	return db.AgentRuntimeToken{}, httpx.Unauthorized("Runtime Token 无效或已撤销")
-}
-
-func generateRuntimeToken() (string, string, error) {
-	raw := make([]byte, runtimeTokenRandomSize)
-	if _, err := rand.Read(raw); err != nil {
-		return "", "", err
-	}
-	plaintext := runtimeTokenPrefix + hex.EncodeToString(raw)
-	return plaintext, plaintext[:runtimeTokenPrefixLen], nil
+	return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
 }
 
 func hasScope(scopes []string, expected string) bool {

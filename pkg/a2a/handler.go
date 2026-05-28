@@ -217,7 +217,7 @@ func parseInt32Query(raw string, fallback int32) int32 {
 func bearerToken(header string) (string, error) {
 	parts := strings.SplitN(strings.TrimSpace(header), " ", 2)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
-		return "", httpx.Unauthorized("缺少 Runtime Token")
+		return "", httpx.Unauthorized("缺少访问令牌")
 	}
 	return parts[1], nil
 }

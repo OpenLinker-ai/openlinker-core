@@ -1,7 +1,7 @@
 package mcp
 
 // 模块 C（MCP 外部入口）：把 OpenLinker 当 Claude / Cursor / Codex 的外部工具暴露。
-// 路径：/api/v1/mcp/*；鉴权：仅 API Key（sk_live_xxx）。
+// 路径：/api/v1/mcp/*；鉴权：仅访问令牌（ol_live_xxx；兼容历史 sk_live_xxx）。
 //
 // 不引入 mark3labs/mcp-go SDK —— 5 个 JSON 风格 POST 由 Echo 直接处理，
 // 鉴权直接复用 HybridAuthMiddleware + apikey.Service。

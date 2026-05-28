@@ -1,10 +1,11 @@
 -- 011_agent_registration_tokens.up.sql
--- Phase 2 缺口 1：Agent 自注册 Bootstrap Token。
+-- Phase 2 缺口 1：Agent 自注册访问令牌。
 -- docs/29 §2，docs/22 §2.1。
 --
--- Bootstrap Token 与 Runtime Token 解耦：
---   bootstrap (br_live_xxx) 短期、与创作者绑定，只能换 (1..max_agents) 次注册；
---   runtime   (rt_live_xxx) 长期、与单个 Agent 绑定，由 a2a / runtime 调用流复用。
+-- 注册用途访问令牌与 Agent 绑定用途访问令牌解耦：
+--   registration 短期、与创作者绑定，只能换 (1..max_agents) 次注册；
+--   agent-bound 长期、与单个 Agent 绑定，由 a2a / runtime 调用流复用。
+-- 新签发令牌统一为 ol_live_xxx；br_live_xxx / rt_live_xxx 仅为历史兼容前缀。
 --
 -- 用尽 (used_count >= max_agents) 或过期 (expires_at <= NOW()) 或撤销 (revoked_at IS NOT NULL)
 -- 任一条件成立即视为失效。

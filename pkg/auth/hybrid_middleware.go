@@ -7,10 +7,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	"github.com/kinzhi/openlinker-core/pkg/credential"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
-// ApiKeyVerifier 抽象 API Key 鉴权能力，避免 internal/auth import internal/apikey 形成循环。
+// ApiKeyVerifier 抽象访问令牌鉴权能力，避免 internal/auth import internal/apikey 形成循环。
 //
 // 实现方（internal/apikey.Service）应在命中后异步刷新 last_used_at，
 // 失败时返回固定错误（不暴露内部细节）。
@@ -18,14 +19,10 @@ type ApiKeyVerifier interface {
 	Verify(ctx context.Context, plaintextKey string) (uuid.UUID, []string, error)
 }
 
-// 与 apikey 包同步：明文 API Key 都以此前缀开头。
-// 抽出常量是为了让本包不依赖 apikey 包。
-const apiKeyPlaintextPrefix = "sk_live_"
-
-// HybridAuthMiddleware 同时接受 JWT 与 API Key。
+// HybridAuthMiddleware 同时接受网页登录会话与访问令牌。
 //
 // 判定规则：
-//   - Authorization: Bearer sk_live_xxx → 走 ApiKeyVerifier
+//   - Authorization: Bearer ol_live_xxx / sk_live_xxx → 走 ApiKeyVerifier
 //   - Authorization: Bearer eyJ... 或其他 → 走 JWT
 //
 // 命中后写入 c.Set(httpx.CtxKeyUserID, userID)，与 JWTMiddleware 行为一致；
@@ -45,14 +42,14 @@ func HybridAuthMiddleware(jwtSecret string, verifier ApiKeyVerifier) echo.Middle
 
 			var userID string
 			var authMethod string
-			if strings.HasPrefix(token, apiKeyPlaintextPrefix) {
+			if credential.HasAnyPrefix(token, credential.AccessTokenPrefix, credential.LegacyAPIKeyPrefix) {
 				if verifier == nil {
-					// 配置错误：API Key 验证器未注入
-					return httpx.Unauthorized("API Key 鉴权未启用")
+					// 配置错误：访问令牌验证器未注入
+					return httpx.Unauthorized("访问令牌鉴权未启用")
 				}
 				uid, scopes, err := verifier.Verify(c.Request().Context(), token)
 				if err != nil {
-					return httpx.Unauthorized("API Key 无效或已撤销")
+					return httpx.Unauthorized("访问令牌无效或已撤销")
 				}
 				userID = uid.String()
 				authMethod = "apikey"

@@ -12,7 +12,7 @@ import (
 
 // Handler /api/v1/mcp/* 路由。
 //
-// 路由组应挂 HybridAuthMiddleware：JWT 与 API Key 都能进，
+// 路由组应挂 HybridAuthMiddleware：JWT 与访问令牌都能进，
 // 但 handler 内强制只接受 apikey（assertAPIKeyAuth），避免浏览器 cookie 误调。
 type Handler struct {
 	svc       *Service
@@ -161,10 +161,10 @@ func (h *Handler) PostCreateTask(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
-// assertAPIKeyAuth MCP 端点不接受浏览器 JWT；JWT 用户走 /run 即可。
+// assertAPIKeyAuth MCP 端点不接受网页登录会话；网页用户走 /run 即可。
 func assertAPIKeyAuth(c echo.Context) error {
 	if httpx.AuthMethodFrom(c) != "apikey" {
-		return httpx.Forbidden("MCP 端点仅接受 API Key（sk_live_...）")
+		return httpx.Forbidden("MCP 端点仅接受访问令牌（ol_live_...）")
 	}
 	return nil
 }
@@ -174,7 +174,7 @@ func requireAPIKeyScope(c echo.Context, scope string) error {
 		return err
 	}
 	if !httpx.HasScope(c, scope) {
-		return httpx.Forbidden("API Key 缺少 scope: " + scope)
+		return httpx.Forbidden("访问令牌缺少 scope: " + scope)
 	}
 	return nil
 }

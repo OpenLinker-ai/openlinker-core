@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/kinzhi/openlinker-core/pkg/config"
+	"github.com/kinzhi/openlinker-core/pkg/credential"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/endpointurl"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
@@ -43,9 +44,7 @@ const (
 	connectionModeMCPServer   = "mcp_server"
 	connectionModeRuntimePull = "runtime_pull"
 
-	runtimeTokenPrefix     = "rt_live_"
-	runtimeTokenPrefixLen  = 12
-	runtimeTokenRandomSize = 32
+	runtimeTokenPrefixLen = credential.PrefixLen
 )
 
 var allowedAgentResponseEventTypes = map[string]struct{}{
@@ -159,7 +158,7 @@ func (s *Service) agentA2AContext(runID uuid.UUID, delegation *Delegation) *Agen
 		CurrentRunID:      runID.String(),
 		CallAgentEndpoint: s.callAgentEndpointURL(),
 		CallAgentMethod:   "POST",
-		RuntimeTokenType:  "rt_live",
+		RuntimeTokenType:  "ol_live",
 		RuntimeScopes:     []string{"agent:call"},
 	}
 	if delegation != nil {
@@ -844,7 +843,7 @@ func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string
 	}, nil
 }
 
-// CompleteRuntimePullRun accepts the result of a run previously claimed by the same Runtime Token.
+// CompleteRuntimePullRun accepts the result of a run previously claimed by the same access token.
 func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken string, runID uuid.UUID, req *RuntimePullResultRequest) (*RunResponse, error) {
 	token, err := s.verifyRuntimeToken(ctx, plaintextToken, "agent:pull")
 	if err != nil {
@@ -861,7 +860,7 @@ func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken str
 		return nil, httpx.Conflict("run 已结束，不能重复回传")
 	}
 	if state.ClaimedByRuntimeTokenID == nil || *state.ClaimedByRuntimeTokenID != token.ID {
-		return nil, httpx.Conflict("run 未被当前 Runtime Token 领取")
+		return nil, httpx.Conflict("run 未被当前访问令牌领取")
 	}
 	agent, err := s.queries.GetAgentByID(ctx, token.AgentID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -902,7 +901,7 @@ func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken str
 	return resp, nil
 }
 
-// HeartbeatAgent lets an Agent proactively mark its Runtime Token owner alive.
+// HeartbeatAgent lets an Agent proactively mark its bound access-token owner alive.
 func (s *Service) HeartbeatAgent(ctx context.Context, plaintextToken string) (*AgentHeartbeatResponse, error) {
 	token, err := s.verifyRuntimeTokenAny(ctx, plaintextToken, "agent:pull", "agent:call")
 	if err != nil {
@@ -960,13 +959,13 @@ func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext, requiredSco
 
 func (s *Service) verifyRuntimeTokenAny(ctx context.Context, plaintext string, acceptedScopes ...string) (db.AgentRuntimeToken, error) {
 	plaintext = strings.TrimSpace(plaintext)
-	if !strings.HasPrefix(plaintext, runtimeTokenPrefix) ||
-		len(plaintext) != len(runtimeTokenPrefix)+runtimeTokenRandomSize*2 {
-		return db.AgentRuntimeToken{}, httpx.Unauthorized("Runtime Token 无效或已撤销")
+	if !credential.HasAnyPrefix(plaintext, credential.AccessTokenPrefix, credential.LegacyAgentPrefix) ||
+		!credential.ValidLength(plaintext) {
+		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
 	}
 	tokens, err := s.queries.ListActiveAgentRuntimeTokensByPrefix(ctx, plaintext[:runtimeTokenPrefixLen])
 	if err != nil {
-		return db.AgentRuntimeToken{}, httpx.Unauthorized("Runtime Token 无效或已撤销")
+		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
 	}
 	for _, token := range tokens {
 		if bcrypt.CompareHashAndPassword([]byte(token.TokenHash), []byte(plaintext)) == nil &&
@@ -974,7 +973,7 @@ func (s *Service) verifyRuntimeTokenAny(ctx context.Context, plaintext string, a
 			return token, nil
 		}
 	}
-	return db.AgentRuntimeToken{}, httpx.Unauthorized("Runtime Token 无效或已撤销")
+	return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
 }
 
 func hasAnyRuntimeScope(scopes []string, accepted ...string) bool {

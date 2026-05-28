@@ -1,7 +1,7 @@
 // Command a2a-demo verifies a real local Agent-to-Agent completion path through a running API.
 //
 // Start the API with ALLOW_LOCAL_HTTP_ENDPOINTS=true before running this command. It creates a
-// throwaway user, self-registers three loopback demo Agents with a Bootstrap Token, publishes
+// throwaway user, self-registers three loopback demo Agents with a registration-purpose access token, publishes
 // a task recommendation, invokes the parent Agent, and fails unless both delegated child runs
 // reach success.
 package main

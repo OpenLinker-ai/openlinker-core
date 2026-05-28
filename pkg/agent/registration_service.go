@@ -16,33 +16,29 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/kinzhi/openlinker-core/pkg/config"
+	"github.com/kinzhi/openlinker-core/pkg/credential"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
 const (
-	bootstrapTokenPrefix    = "br_live_"
-	bootstrapTokenPrefixLen = 12
-	bootstrapRandomBytes    = 32
+	bootstrapTokenPrefixLen = credential.PrefixLen
 
 	bootstrapDefaultMinutes   = 30
 	bootstrapDefaultMaxAgents = 1
 	maxRegistrationSkills     = 5
 
-	runtimeTokenPrefix      = "rt_live_"
-	runtimeTokenPrefixLen   = 12
-	runtimeRandomBytes      = 32
 	runtimeDefaultTokenName = "bootstrap-issued"
 )
 
 // 非字母数字字符在 slug 派生时统一替换成 '-'。
 var slugDeriveSanitize = regexp.MustCompile(`[^a-z0-9]+`)
 
-// RegistrationService 处理 Agent 自注册 Bootstrap Token 全流程。
+// RegistrationService 处理 Agent 自注册访问令牌全流程。
 //
 // 与 agent.Service 拆开是因为：
 //   - Bootstrap 验证不走 JWT，不复用 ownerAgent 等创作者侧检查
-//   - 消费 token + 建 Agent + 发 Runtime Token 必须在同一个事务
+//   - 消费注册用途 token + 建 Agent + 发 Agent 绑定访问令牌必须在同一个事务
 type RegistrationService struct {
 	queries                 *db.Queries
 	pool                    *pgxpool.Pool
@@ -61,7 +57,7 @@ func NewRegistrationService(pool *pgxpool.Pool, cfg ...*config.Config) *Registra
 	}
 }
 
-// MintBootstrapToken 创作者侧铸新 Bootstrap Token。明文 token 仅本次返回。
+// MintBootstrapToken 创作者侧铸新注册用途访问令牌。明文 token 仅本次返回。
 func (s *RegistrationService) MintBootstrapToken(ctx context.Context, creatorID uuid.UUID, req *CreateBootstrapTokenRequest) (*BootstrapTokenResponse, error) {
 	user, err := s.queries.GetUserByID(ctx, creatorID)
 	if err != nil {
@@ -72,7 +68,7 @@ func (s *RegistrationService) MintBootstrapToken(ctx context.Context, creatorID 
 		return nil, httpx.Internal("查询用户失败")
 	}
 	if !user.IsCreator {
-		return nil, httpx.Forbidden("仅创作者可铸 Bootstrap Token")
+		return nil, httpx.Forbidden("仅创作者可生成访问令牌")
 	}
 
 	minutes := req.ExpiresInMinutes
@@ -83,13 +79,13 @@ func (s *RegistrationService) MintBootstrapToken(ctx context.Context, creatorID 
 	if maxAgents == 0 {
 		maxAgents = bootstrapDefaultMaxAgents
 	}
-	plaintext, prefix, err := generateBootstrapToken()
+	plaintext, prefix, err := credential.GenerateAccessToken()
 	if err != nil {
-		return nil, httpx.Internal("生成 Bootstrap Token 失败")
+		return nil, httpx.Internal("生成访问令牌失败")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
 	if err != nil {
-		return nil, httpx.Internal("加密 Bootstrap Token 失败")
+		return nil, httpx.Internal("加密访问令牌失败")
 	}
 	token, err := s.queries.CreateAgentRegistrationToken(ctx, db.CreateAgentRegistrationTokenParams{
 		CreatorUserID: creatorID,
@@ -101,18 +97,18 @@ func (s *RegistrationService) MintBootstrapToken(ctx context.Context, creatorID 
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("registration.MintBootstrapToken: insert")
-		return nil, httpx.Internal("创建 Bootstrap Token 失败")
+		return nil, httpx.Internal("创建访问令牌失败")
 	}
 	resp := bootstrapTokenResponse(token)
 	resp.PlaintextToken = plaintext
 	return &resp, nil
 }
 
-// ListBootstrapTokens 列出创作者可见的所有 Bootstrap Token（不含明文）。
+// ListBootstrapTokens 列出创作者可见的所有注册用途访问令牌（不含明文）。
 func (s *RegistrationService) ListBootstrapTokens(ctx context.Context, creatorID uuid.UUID) ([]BootstrapTokenResponse, error) {
 	tokens, err := s.queries.ListAgentRegistrationTokensByCreator(ctx, creatorID)
 	if err != nil {
-		return nil, httpx.Internal("查询 Bootstrap Token 失败")
+		return nil, httpx.Internal("查询访问令牌失败")
 	}
 	items := make([]BootstrapTokenResponse, 0, len(tokens))
 	for _, t := range tokens {
@@ -128,15 +124,15 @@ func (s *RegistrationService) RevokeBootstrapToken(ctx context.Context, creatorI
 		CreatorUserID: creatorID,
 	})
 	if err != nil {
-		return httpx.Internal("撤销 Bootstrap Token 失败")
+		return httpx.Internal("撤销访问令牌失败")
 	}
 	if affected == 0 {
-		return httpx.NotFound("Bootstrap Token 不存在或已撤销")
+		return httpx.NotFound("访问令牌不存在或已撤销")
 	}
 	return nil
 }
 
-// RegisterAgentViaBootstrap 用 Bootstrap Token 一次性完成 Agent 注册 + Runtime Token 颁发。
+// RegisterAgentViaBootstrap 用注册用途访问令牌一次性完成 Agent 注册 + Agent 绑定访问令牌颁发。
 //
 // 事务内原子完成：
 //  1. ConsumeAgentRegistrationToken 在 used_count < max_agents 时 +1，否则 0 行
@@ -182,11 +178,11 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 
 	consumed, err := q.ConsumeAgentRegistrationToken(ctx, matched.ID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.Unauthorized("Bootstrap Token 已用尽 / 过期 / 撤销")
+		return nil, httpx.Unauthorized("访问令牌已用尽 / 过期 / 撤销")
 	}
 	if err != nil {
 		log.Error().Err(err).Str("token_id", matched.ID.String()).Msg("registration.RegisterAgentViaBootstrap: consume")
-		return nil, httpx.Internal("消费 Bootstrap Token 失败")
+		return nil, httpx.Internal("消费访问令牌失败")
 	}
 
 	authHeader := normalizeAuthHeader(req.EndpointAuthHeader)
@@ -228,13 +224,13 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 	if tokenName == "" {
 		tokenName = runtimeDefaultTokenName
 	}
-	rtPlain, rtPrefix, err := generateRuntimeTokenForBootstrap()
+	rtPlain, rtPrefix, err := credential.GenerateAccessToken()
 	if err != nil {
-		return nil, httpx.Internal("生成 Runtime Token 失败")
+		return nil, httpx.Internal("生成访问令牌失败")
 	}
 	rtHash, err := bcrypt.GenerateFromPassword([]byte(rtPlain), bcrypt.DefaultCost)
 	if err != nil {
-		return nil, httpx.Internal("加密 Runtime Token 失败")
+		return nil, httpx.Internal("加密访问令牌失败")
 	}
 	rtToken, err := q.CreateAgentRuntimeToken(ctx, db.CreateAgentRuntimeTokenParams{
 		AgentID:         created.ID,
@@ -246,7 +242,7 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("registration.RegisterAgentViaBootstrap: insert runtime token")
-		return nil, httpx.Internal("创建 Runtime Token 失败")
+		return nil, httpx.Internal("创建访问令牌失败")
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -271,13 +267,13 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 // 不增加 used_count；调用方在事务里走 ConsumeAgentRegistrationToken 原子消费。
 func (s *RegistrationService) verifyBootstrapToken(ctx context.Context, plaintext string) (db.AgentRegistrationToken, error) {
 	plaintext = strings.TrimSpace(plaintext)
-	if !strings.HasPrefix(plaintext, bootstrapTokenPrefix) ||
-		len(plaintext) != len(bootstrapTokenPrefix)+bootstrapRandomBytes*2 {
-		return db.AgentRegistrationToken{}, httpx.Unauthorized("Bootstrap Token 无效")
+	if !credential.HasAnyPrefix(plaintext, credential.AccessTokenPrefix, credential.LegacyRegistrationPrefix) ||
+		!credential.ValidLength(plaintext) {
+		return db.AgentRegistrationToken{}, httpx.Unauthorized("访问令牌无效")
 	}
 	tokens, err := s.queries.ListActiveAgentRegistrationTokensByPrefix(ctx, plaintext[:bootstrapTokenPrefixLen])
 	if err != nil {
-		return db.AgentRegistrationToken{}, httpx.Unauthorized("Bootstrap Token 无效")
+		return db.AgentRegistrationToken{}, httpx.Unauthorized("访问令牌无效")
 	}
 	now := time.Now()
 	for _, t := range tokens {
@@ -291,7 +287,7 @@ func (s *RegistrationService) verifyBootstrapToken(ctx context.Context, plaintex
 			return t, nil
 		}
 	}
-	return db.AgentRegistrationToken{}, httpx.Unauthorized("Bootstrap Token 无效或已失效")
+	return db.AgentRegistrationToken{}, httpx.Unauthorized("访问令牌无效或已失效")
 }
 
 func (s *RegistrationService) normalizeRegistrationSkillIDs(ctx context.Context, in []string) ([]string, error) {
@@ -324,26 +320,6 @@ func (s *RegistrationService) normalizeRegistrationSkillIDs(ctx context.Context,
 		}
 	}
 	return out, nil
-}
-
-func generateBootstrapToken() (string, string, error) {
-	raw := make([]byte, bootstrapRandomBytes)
-	if _, err := rand.Read(raw); err != nil {
-		return "", "", err
-	}
-	plaintext := bootstrapTokenPrefix + hex.EncodeToString(raw)
-	return plaintext, plaintext[:bootstrapTokenPrefixLen], nil
-}
-
-// generateRuntimeTokenForBootstrap 与 a2a 包内的 generateRuntimeToken 等价：
-// 单独复制是为了避免 agent → a2a 反向依赖（a2a 已 import agent 间接组件）。
-func generateRuntimeTokenForBootstrap() (string, string, error) {
-	raw := make([]byte, runtimeRandomBytes)
-	if _, err := rand.Read(raw); err != nil {
-		return "", "", err
-	}
-	plaintext := runtimeTokenPrefix + hex.EncodeToString(raw)
-	return plaintext, plaintext[:runtimeTokenPrefixLen], nil
 }
 
 // deriveSlug 把 name 转成合法 slug，并尾巴拼 6 hex 字符避免与已有 slug 撞车。

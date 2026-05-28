@@ -10,7 +10,7 @@ import (
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
-// RegistrationHandler Agent 自注册 Bootstrap Token HTTP 入口。
+// RegistrationHandler Agent 自注册访问令牌 HTTP 入口。
 type RegistrationHandler struct {
 	svc       *RegistrationService
 	validator *validator.Validate

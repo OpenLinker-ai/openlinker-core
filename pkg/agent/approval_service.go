@@ -27,7 +27,7 @@ const (
 // ApprovalService 高风险动作审批 CRUD（docs/29 §3.4）。
 //
 // 与 agent.Service 拆开是因为：
-//   - 主要消费方是 Agent Runtime Token 自动写入（后置），与创作者注册路径解耦
+//   - 主要消费方是 Agent 绑定访问令牌自动写入（后置），与创作者注册路径解耦
 //   - 当前阶段只暴露 JWT 路径上的 list / get / confirm / reject + 手动 create
 type ApprovalService struct {
 	queries *db.Queries
@@ -40,7 +40,7 @@ func NewApprovalService(pool *pgxpool.Pool, cfg *config.Config) *ApprovalService
 }
 
 // CreateApproval 手动写一条审批请求（创作者 / 运营 UI 触发）。
-// Agent Runtime Token 自动触发的入口后置在 runtime 层，本方法不处理 token id。
+// Agent 绑定访问令牌自动触发的入口后置在 runtime 层，本方法不处理 token id。
 func (s *ApprovalService) CreateApproval(ctx context.Context, creatorID uuid.UUID, req *CreateApprovalRequest) (*ApprovalResponse, error) {
 	agentID, err := uuid.Parse(req.AgentID)
 	if err != nil {

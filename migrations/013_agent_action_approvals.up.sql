@@ -2,7 +2,7 @@
 -- Phase 2 缺口 2：高风险动作审批通道（docs/29 §3.4）。
 --
 -- 当前阶段只落数据模型 + JWT 路径上的 CRUD；
--- Agent Runtime Token 自动写 approval 的"202 + url"路径需要 scope 系统，后置。
+-- Agent 绑定访问令牌自动写 approval 的"202 + url"路径需要 scope 系统，后置。
 --
 -- requested_by_token_id 允许 NULL：人类（创作者本人或运营）从 /hub 发起的也走这条记录。
 

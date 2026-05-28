@@ -46,11 +46,11 @@ type ManifestTools struct {
 }
 
 type ManifestAuth struct {
-	APIKeyHeader       string   `json:"api_key_header"`
-	BootstrapTokenType string   `json:"bootstrap_token_type"`
-	RuntimeTokenType   string   `json:"runtime_token_type"`
-	APIScopes          []string `json:"api_scopes"`
-	RuntimeScopes      []string `json:"runtime_scopes"`
+	AccessTokenHeader   string   `json:"access_token_header"`
+	AccessTokenType     string   `json:"access_token_type"`
+	AccessTokenPurposes []string `json:"access_token_purposes"`
+	APIScopes           []string `json:"api_scopes"`
+	RuntimeScopes       []string `json:"runtime_scopes"`
 }
 
 type ManifestWorkflowStatus struct {
@@ -98,11 +98,11 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			},
 		},
 		Auth: ManifestAuth{
-			APIKeyHeader:       "Authorization: Bearer sk_live_...",
-			BootstrapTokenType: "br_live_...",
-			RuntimeTokenType:   "rt_live_...",
-			APIScopes:          []string{"agents:read", "agents:run", "runs:read", "tasks:write"},
-			RuntimeScopes:      []string{"agent:call", "agent:pull"},
+			AccessTokenHeader:   "Authorization: Bearer ol_live_...",
+			AccessTokenType:     "ol_live_...",
+			AccessTokenPurposes: []string{"api_mcp", "agent_registration", "agent_runtime_a2a"},
+			APIScopes:           []string{"agents:read", "agents:run", "runs:read", "tasks:write"},
+			RuntimeScopes:       []string{"agent:call", "agent:pull"},
 		},
 		Policies: map[string]string{
 			"public_listing": "no_pre_review",
@@ -110,7 +110,7 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			"benchmark":      "creator_triggered_public_read",
 			"payments":       "not_enabled",
 			"human_session":  "jwt_only",
-			"agent_tokens":   "bootstrap_for_registration_runtime_for_invocation",
+			"agent_tokens":   "single_ol_live_token_scoped_by_purpose_binding_and_expiry",
 		},
 		Workflows: ManifestWorkflowStatus{
 			ProductionA2A: "platform_parent_child_runs",

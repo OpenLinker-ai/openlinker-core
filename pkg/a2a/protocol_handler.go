@@ -508,7 +508,7 @@ func normalizeJSONRPCID(id json.RawMessage) json.RawMessage {
 
 func requireScope(c echo.Context, scope string) error {
 	if httpx.AuthMethodFrom(c) == "apikey" && !httpx.HasScope(c, scope) {
-		return httpx.Forbidden("API Key 缺少 scope: " + scope)
+		return httpx.Forbidden("访问令牌缺少 scope: " + scope)
 	}
 	return nil
 }

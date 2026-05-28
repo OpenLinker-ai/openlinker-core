@@ -2,7 +2,7 @@ package agent
 
 // CreateApprovalRequest 创作者侧手动发起一条审批记录（用于 UI 模拟 / 测试）。
 //
-// 后续 Agent Runtime Token 触发高风险动作时，由 runtime 自动写入，
+// 后续 Agent 绑定访问令牌触发高风险动作时，由 runtime 自动写入，
 // 这里的接口仅保留给前端 / E2E 触发样例使用。
 type CreateApprovalRequest struct {
 	AgentID          string                 `json:"agent_id" validate:"required,uuid"`
