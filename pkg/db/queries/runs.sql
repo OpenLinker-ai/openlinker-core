@@ -143,8 +143,27 @@ WHERE r.user_id = $1
 ORDER BY r.started_at DESC
 LIMIT $2 OFFSET $3;
 
+-- name: ListRunsByCreatorAgentWithAgent :many
+-- 创作者查看某个自己 Agent 的被调用历史。
+SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
+       r.error_code, r.error_message, r.cost_cents, r.platform_fee_cents,
+       r.creator_revenue_cents, r.duration_ms, r.started_at, r.finished_at,
+       r.source,
+       a.slug AS agent_slug, a.name AS agent_name
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+WHERE a.creator_id = $1 AND r.agent_id = $2
+ORDER BY r.started_at DESC
+LIMIT $3 OFFSET $4;
+
 -- name: CountRunsByUser :one
 SELECT COUNT(*)::int AS total FROM runs WHERE user_id = $1;
+
+-- name: CountRunsByCreatorAgent :one
+SELECT COUNT(*)::int AS total
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+WHERE a.creator_id = $1 AND r.agent_id = $2;
 
 -- name: CountRunsByUserThisMonth :one
 SELECT COUNT(*)::int AS total

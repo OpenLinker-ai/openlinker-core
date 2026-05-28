@@ -143,6 +143,72 @@ func (q *Queries) ListRunsByUserWithAgent(ctx context.Context, arg ListRunsByUse
 	return items, nil
 }
 
+const listRunsByCreatorAgentWithAgent = `-- name: ListRunsByCreatorAgentWithAgent :many
+SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
+       r.error_code, r.error_message, r.cost_cents, r.platform_fee_cents,
+       r.creator_revenue_cents, r.duration_ms, r.started_at, r.finished_at,
+       r.source,
+       a.slug AS agent_slug, a.name AS agent_name
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+WHERE a.creator_id = $1 AND r.agent_id = $2
+ORDER BY r.started_at DESC
+LIMIT $3 OFFSET $4`
+
+// ListRunsByCreatorAgentWithAgentParams 入参。
+type ListRunsByCreatorAgentWithAgentParams struct {
+	CreatorID uuid.UUID `db:"creator_id" json:"creator_id"`
+	AgentID   uuid.UUID `db:"agent_id" json:"agent_id"`
+	Limit     int32     `db:"limit" json:"limit"`
+	Offset    int32     `db:"offset" json:"offset"`
+}
+
+// ListRunsByCreatorAgentWithAgentRow 返回行：嵌入 Run + agent 展示字段。
+type ListRunsByCreatorAgentWithAgentRow struct {
+	Run
+	AgentSlug string `db:"agent_slug" json:"agent_slug"`
+	AgentName string `db:"agent_name" json:"agent_name"`
+}
+
+// ListRunsByCreatorAgentWithAgent 创作者查看某个自己 Agent 的被调用历史。
+func (q *Queries) ListRunsByCreatorAgentWithAgent(ctx context.Context, arg ListRunsByCreatorAgentWithAgentParams) ([]ListRunsByCreatorAgentWithAgentRow, error) {
+	rows, err := q.db.Query(ctx, listRunsByCreatorAgentWithAgent, arg.CreatorID, arg.AgentID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRunsByCreatorAgentWithAgentRow
+	for rows.Next() {
+		var r ListRunsByCreatorAgentWithAgentRow
+		if err := rows.Scan(
+			&r.ID,
+			&r.UserID,
+			&r.AgentID,
+			&r.Input,
+			&r.Output,
+			&r.Status,
+			&r.ErrorCode,
+			&r.ErrorMessage,
+			&r.CostCents,
+			&r.PlatformFeeCents,
+			&r.CreatorRevenueCents,
+			&r.DurationMs,
+			&r.StartedAt,
+			&r.FinishedAt,
+			&r.Source,
+			&r.AgentSlug,
+			&r.AgentName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countRunsByUser = `-- name: CountRunsByUser :one
 SELECT COUNT(*)::int AS total FROM runs WHERE user_id = $1`
 
@@ -152,6 +218,26 @@ func (q *Queries) CountRunsByUser(ctx context.Context, userID uuid.UUID) (int32,
 	var total int32
 	err := row.Scan(&total)
 	return total, err
+}
+
+const countRunsByCreatorAgent = `-- name: CountRunsByCreatorAgent :one
+SELECT COUNT(*)::int AS total
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+WHERE a.creator_id = $1 AND r.agent_id = $2`
+
+// CountRunsByCreatorAgent 创作者某个 Agent 的全部被调用次数。
+func (q *Queries) CountRunsByCreatorAgent(ctx context.Context, arg CountRunsByCreatorAgentParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countRunsByCreatorAgent, arg.CreatorID, arg.AgentID)
+	var total int32
+	err := row.Scan(&total)
+	return total, err
+}
+
+// CountRunsByCreatorAgentParams 入参。
+type CountRunsByCreatorAgentParams struct {
+	CreatorID uuid.UUID `db:"creator_id" json:"creator_id"`
+	AgentID   uuid.UUID `db:"agent_id" json:"agent_id"`
 }
 
 const countRunsByUserThisMonth = `-- name: CountRunsByUserThisMonth :one
