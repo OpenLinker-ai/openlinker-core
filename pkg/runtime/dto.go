@@ -90,6 +90,11 @@ type RunArtifactResponse struct {
 	Content          map[string]interface{} `json:"content"`
 	Visibility       string                 `json:"visibility"`
 	SourceArtifactID string                 `json:"source_artifact_id,omitempty"`
+	MimeType         string                 `json:"mime_type,omitempty"`
+	FileURI          string                 `json:"file_uri,omitempty"`
+	FileName         string                 `json:"file_name,omitempty"`
+	FileSHA256       string                 `json:"file_sha256,omitempty"`
+	FileSizeBytes    *int64                 `json:"file_size_bytes,omitempty"`
 	CreatedAt        time.Time              `json:"created_at"`
 }
 
@@ -121,6 +126,19 @@ type AgentRequest struct {
 	RunID         string                 `json:"run_id"`
 	ParentRunID   string                 `json:"parent_run_id,omitempty"`
 	CallerAgentID string                 `json:"caller_agent_id,omitempty"`
+	A2A           *AgentA2AContext       `json:"a2a,omitempty"`
+}
+
+// AgentA2AContext tells an Agent how to delegate from its current run without
+// making a human copy/paste a parent run id from the UI.
+type AgentA2AContext struct {
+	CurrentRunID      string   `json:"current_run_id"`
+	ParentRunID       string   `json:"parent_run_id,omitempty"`
+	CallerAgentID     string   `json:"caller_agent_id,omitempty"`
+	CallAgentEndpoint string   `json:"call_agent_endpoint"`
+	CallAgentMethod   string   `json:"call_agent_method"`
+	RuntimeTokenType  string   `json:"runtime_token_type"`
+	RuntimeScopes     []string `json:"runtime_scopes"`
 }
 
 // AgentResponse 创作者 endpoint → 平台的响应体。
@@ -162,6 +180,7 @@ type RuntimePullRunResponse struct {
 	Input    map[string]interface{} `json:"input"`
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 	Source   string                 `json:"source"`
+	A2A      *AgentA2AContext       `json:"a2a,omitempty"`
 }
 
 // RuntimePullResultRequest 是 runtime_pull Agent 执行完任务后回传的结果。

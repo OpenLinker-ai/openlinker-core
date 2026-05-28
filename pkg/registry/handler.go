@@ -30,16 +30,20 @@ func NewHandler(svc *Service) *Handler {
 //	POST /registry-node/nodes/:id/revoke
 //	POST /registry-node/nodes/:id/rotate-secret
 //	POST /registry-node/heartbeat  node secret heartbeat
+//	POST /registry-node/metadata-sync node secret metadata sync
 //	POST /cloud/listings           explicitly expose an Agent through a node
 //	GET  /cloud/listings           list current user's explicit listing links
 //	PATCH /cloud/listings/:id/status
+//	POST /cloud/listings/:id/sync
 //	POST /proxy/runs               create a pending run for a Cloud Listing
 //	GET  /proxy/runs/:id           inspect a requester-owned Proxy Run
+//	GET  /proxy/runs/:id/artifacts inspect requester-owned Proxy Run artifacts
 //	GET  /proxy/runs/claim         node secret claim next pending run
 //	POST /proxy/runs/:id/result    node secret complete a claimed run
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
 	node := api.Group("/registry-node")
 	node.POST("/heartbeat", h.Heartbeat)
+	node.POST("/metadata-sync", h.SyncNodeMetadata)
 
 	protectedNode := api.Group("/registry-node", jwtMiddleware)
 	protectedNode.POST("/link", h.CreateNode)
@@ -51,6 +55,7 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	cloud.POST("/listings", h.CreateCloudListing)
 	cloud.GET("/listings", h.ListCloudListings)
 	cloud.PATCH("/listings/:id/status", h.UpdateCloudListingStatus)
+	cloud.POST("/listings/:id/sync", h.SyncCloudListingMetadata)
 
 	proxy := api.Group("/proxy")
 	proxy.GET("/runs/claim", h.ClaimProxyRun)
@@ -59,6 +64,7 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	protectedProxy := api.Group("/proxy", jwtMiddleware)
 	protectedProxy.POST("/runs", h.CreateProxyRun)
 	protectedProxy.GET("/runs/:id", h.GetProxyRun)
+	protectedProxy.GET("/runs/:id/artifacts", h.ListProxyRunArtifacts)
 }
 
 func (h *Handler) CreateNode(c echo.Context) error {
@@ -136,6 +142,18 @@ func (h *Handler) Heartbeat(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
+func (h *Handler) SyncNodeMetadata(c echo.Context) error {
+	secret, err := bearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.SyncNodeMetadata(c.Request().Context(), secret)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
 func (h *Handler) CreateCloudListing(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
@@ -190,6 +208,22 @@ func (h *Handler) UpdateCloudListingStatus(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
+func (h *Handler) SyncCloudListingMetadata(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	cloudListingID, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	resp, err := h.svc.SyncCloudListingMetadata(c.Request().Context(), uid, cloudListingID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
 func (h *Handler) CreateProxyRun(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
@@ -223,6 +257,25 @@ func (h *Handler) GetProxyRun(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) ListProxyRunArtifacts(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	runID, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	items, err := h.svc.ListProxyRunArtifacts(c.Request().Context(), uid, runID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, ProxyRunArtifactListResponse{
+		ProxyRunID: runID.String(),
+		Items:      items,
+	})
 }
 
 func (h *Handler) ClaimProxyRun(c echo.Context) error {

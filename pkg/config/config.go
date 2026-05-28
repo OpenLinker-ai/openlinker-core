@@ -63,6 +63,12 @@ type Config struct {
 	RegistryProxyRunWorkerEnabled         bool `envconfig:"REGISTRY_PROXY_RUN_WORKER_ENABLED" default:"true"`
 	RegistryProxyRunWorkerIntervalSeconds int  `envconfig:"REGISTRY_PROXY_RUN_WORKER_INTERVAL_SECONDS" default:"30"`
 	RegistryProxyRunTimeoutSeconds        int  `envconfig:"REGISTRY_PROXY_RUN_TIMEOUT_SECONDS" default:"900"`
+
+	// Workflow async run worker.
+	WorkflowRunWorkerEnabled         bool `envconfig:"WORKFLOW_RUN_WORKER_ENABLED" default:"true"`
+	WorkflowRunWorkerIntervalSeconds int  `envconfig:"WORKFLOW_RUN_WORKER_INTERVAL_SECONDS" default:"10"`
+	WorkflowRunStaleSeconds          int  `envconfig:"WORKFLOW_RUN_STALE_SECONDS" default:"1800"`
+	WorkflowRunClaimBurst            int  `envconfig:"WORKFLOW_RUN_CLAIM_BURST" default:"5"`
 }
 
 // Load 从环境变量加载配置。

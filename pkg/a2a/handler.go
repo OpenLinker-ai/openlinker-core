@@ -32,6 +32,22 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.
 	api.DELETE("/creator/runtime-tokens/:tokenID", h.RevokeRuntimeToken, jwtMiddleware)
 	api.POST("/agent-runtime/call-agent", h.CallAgent)
 	api.GET("/a2a/parents", h.ListParentRuns, queryMiddleware)
+	protocol := api.Group("/a2a/agents/:slug", queryMiddleware)
+	protocol.POST("", h.JSONRPC)
+	protocol.POST("/message:action", h.MessageHTTP)
+	protocol.GET("/tasks/:taskID", h.GetTaskHTTP)
+	protocol.POST("/tasks/:taskID/pushNotificationConfig", h.SetTaskPushNotificationHTTP)
+	protocol.GET("/tasks/:taskID/pushNotificationConfig", h.ListTaskPushNotificationsHTTP)
+	protocol.GET("/tasks/:taskID/pushNotificationConfig/:configID", h.GetTaskPushNotificationHTTP)
+	protocol.DELETE("/tasks/:taskID/pushNotificationConfig/:configID", h.DeleteTaskPushNotificationHTTP)
+	protocol.POST("/tasks/:taskID/pushNotificationConfigs", h.SetTaskPushNotificationHTTP)
+	protocol.GET("/tasks/:taskID/pushNotificationConfigs", h.ListTaskPushNotificationsHTTP)
+	protocol.GET("/tasks/:taskID/pushNotificationConfigs/:configID", h.GetTaskPushNotificationHTTP)
+	protocol.DELETE("/tasks/:taskID/pushNotificationConfigs/:configID", h.DeleteTaskPushNotificationHTTP)
+	protocol.GET("/tasks/:taskID/subscribe", h.SubscribeTaskHTTP)
+	protocol.POST("/tasks/:taskID/subscribe", h.SubscribeTaskHTTP)
+	protocol.GET("/tasks/*", h.SubscribeTaskHTTP)
+	protocol.POST("/tasks/*", h.SubscribeTaskHTTP)
 	api.GET("/runs/:id/children", h.ListChildren, queryMiddleware)
 }
 
@@ -137,8 +153,14 @@ func (h *Handler) CallAgent(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return httpx.BadRequest("请求体格式错误")
 	}
+	if req.ParentRunID == "" && req.CurrentRunID == "" {
+		req.CurrentRunID = strings.TrimSpace(c.Request().Header.Get("X-OpenLinker-Run-Id"))
+	}
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
+	}
+	if req.ParentRunID == "" && req.CurrentRunID == "" {
+		return httpx.Unprocessable("current_run_id 或 parent_run_id 必填")
 	}
 	resp, err := h.svc.CallAgent(c.Request().Context(), token, &req)
 	if err != nil {

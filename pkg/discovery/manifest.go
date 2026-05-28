@@ -114,7 +114,7 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 		},
 		Workflows: ManifestWorkflowStatus{
 			ProductionA2A: "platform_parent_child_runs",
-			Builder:       "sequential_agent_workflow_api",
+			Builder:       "dag_async_agent_workflow_api",
 		},
 	}
 }

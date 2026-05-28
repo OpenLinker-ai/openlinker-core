@@ -25,6 +25,8 @@ import (
 // 这里只列 core 自带的表，避免运行 core 测试时强制依赖 cloud schema。
 const truncateAll = "TRUNCATE runs, agents, users RESTART IDENTITY CASCADE"
 
+const testDBOpTimeout = 30 * time.Second
+
 // skipIfNoDB 检查 TEST_DATABASE_URL 环境变量；未设置则 skip 当前 test。
 // 返回 dsn 字符串，调用方可以用它再连一次（少见）。
 func skipIfNoDB(t *testing.T) string {
@@ -41,18 +43,20 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := skipIfNoDB(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testDBOpTimeout)
 	defer cancel()
 
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err, "connect test db")
 	require.NoError(t, pool.Ping(ctx), "ping test db")
 
-	_, err = pool.Exec(ctx, truncateAll)
+	truncateCtx, truncateCancel := context.WithTimeout(context.Background(), testDBOpTimeout)
+	defer truncateCancel()
+	_, err = pool.Exec(truncateCtx, truncateAll)
 	require.NoError(t, err, "truncate test tables")
 
 	t.Cleanup(func() {
-		clean, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		clean, cancel := context.WithTimeout(context.Background(), testDBOpTimeout)
 		defer cancel()
 		_, _ = pool.Exec(clean, truncateAll)
 		pool.Close()

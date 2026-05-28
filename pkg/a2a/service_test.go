@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,9 +20,10 @@ import (
 	"github.com/kinzhi/openlinker-core/pkg/config"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 	"github.com/kinzhi/openlinker-core/pkg/runtime"
+	"github.com/kinzhi/openlinker-core/pkg/webhook"
 )
 
-const truncateA2ATables = "TRUNCATE run_delegations, agent_runtime_tokens, agent_call_policies, run_events, runs, agents, users RESTART IDENTITY CASCADE"
+const truncateA2ATables = "TRUNCATE run_webhook_deliveries, run_webhook_subscriptions, run_artifact_chunks, run_artifacts, run_messages, run_delegations, agent_runtime_tokens, agent_call_policies, run_events, runs, agents, users RESTART IDENTITY CASCADE"
 
 func setupService(t *testing.T) (*pgxpool.Pool, *a2a.Service, *runtime.Service) {
 	t.Helper()
@@ -38,7 +40,11 @@ func setupService(t *testing.T) (*pgxpool.Pool, *a2a.Service, *runtime.Service) 
 		_, _ = pool.Exec(context.Background(), truncateA2ATables)
 		pool.Close()
 	})
-	runtimeSvc := runtime.NewService(pool, &config.Config{PlatformFeeRate: 0.25, RunTimeoutSeconds: 2})
+	runtimeSvc := runtime.NewService(pool, &config.Config{
+		PlatformFeeRate:         0.25,
+		RunTimeoutSeconds:       2,
+		AllowLocalHTTPEndpoints: true,
+	})
 	return pool, a2a.NewService(pool, runtimeSvc), runtimeSvc
 }
 
@@ -107,12 +113,21 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 
 	var receivedHeader string
 	var receivedParent string
+	var receivedA2A struct {
+		CurrentRunID      string   `json:"current_run_id"`
+		ParentRunID       string   `json:"parent_run_id"`
+		CallerAgentID     string   `json:"caller_agent_id"`
+		CallAgentEndpoint string   `json:"call_agent_endpoint"`
+		RuntimeScopes     []string `json:"runtime_scopes"`
+	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedHeader = r.Header.Get("X-OpenLinker-User-Id")
 		raw, _ := io.ReadAll(r.Body)
 		var body map[string]any
 		_ = json.Unmarshal(raw, &body)
 		receivedParent, _ = body["parent_run_id"].(string)
+		a2aRaw, _ := json.Marshal(body["a2a"])
+		_ = json.Unmarshal(a2aRaw, &receivedA2A)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"output":{"text":"child ok"}}`))
 	}))
@@ -140,6 +155,11 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	assert.Equal(t, parentRunID.String(), child.ParentRunID)
 	assert.Empty(t, receivedHeader)
 	assert.Equal(t, parentRunID.String(), receivedParent)
+	assert.Equal(t, child.RunID, receivedA2A.CurrentRunID)
+	assert.Equal(t, parentRunID.String(), receivedA2A.ParentRunID)
+	assert.Equal(t, callerID.String(), receivedA2A.CallerAgentID)
+	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", receivedA2A.CallAgentEndpoint)
+	assert.Contains(t, receivedA2A.RuntimeScopes, "agent:call")
 
 	reloaded, err := runtimeSvc.GetRun(context.Background(), callerOwner, uuid.MustParse(child.RunID))
 	require.NoError(t, err)
@@ -173,6 +193,10 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 		var request struct {
 			Input map[string]any `json:"input"`
 			RunID string         `json:"run_id"`
+			A2A   struct {
+				CurrentRunID      string `json:"current_run_id"`
+				CallAgentEndpoint string `json:"call_agent_endpoint"`
+			} `json:"a2a"`
 		}
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 		w.Header().Set("Content-Type", "application/json")
@@ -183,12 +207,14 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 		}
 
 		child, err := svc.CallAgent(r.Context(), runtimeToken, &a2a.CallAgentRequest{
-			ParentRunID:   request.RunID,
+			CurrentRunID:  request.A2A.CurrentRunID,
 			TargetAgentID: targetID.String(),
 			Reason:        "delegate a verifiable subtask",
 			Input:         map[string]any{"question": "finish child"},
 		})
 		require.NoError(t, err)
+		require.Equal(t, request.RunID, request.A2A.CurrentRunID)
+		require.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", request.A2A.CallAgentEndpoint)
 		require.Equal(t, "success", child.Status)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"output": map[string]any{
@@ -256,6 +282,308 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 	assert.Contains(t, eventTypes, "run.child.created")
 	assert.Contains(t, eventTypes, "run.child.completed")
 	assert.Contains(t, eventTypes, "run.completed")
+}
+
+func TestProtocolMessageSendAndGetTask(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+
+	var receivedInput map[string]any
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Input map[string]any `json:"input"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		receivedInput = request.Input
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"output": map[string]any{
+				"summary": "A2A protocol adapter completed",
+				"answer":  "done",
+				"artifacts": []map[string]any{{
+					"title":           "Result CSV",
+					"artifact_type":   "file",
+					"file_uri":        "https://files.example/a2a-result.csv",
+					"file_name":       "a2a-result.csv",
+					"mime_type":       "text/csv",
+					"file_sha256":     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+					"file_size_bytes": 256,
+					"content":         map[string]any{"rows": 2},
+				}},
+			},
+			"events": []map[string]any{{
+				"event_type": "run.message.delta",
+				"payload": map[string]any{
+					"text": "adapter evidence message",
+				},
+			}},
+		})
+	}))
+	defer server.Close()
+	defaultTransport := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
+
+	agentID := insertAgent(t, pool, owner, server.URL)
+	slug := "a2a-" + agentID.String()[:8]
+
+	task, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			Kind:      "message",
+			MessageID: "msg-1",
+			ContextID: "ctx-1",
+			Role:      "user",
+			Parts: []map[string]any{{
+				"kind": "text",
+				"text": "请完成一次标准 A2A 调用",
+			}},
+		},
+		Metadata: map[string]any{"trace_id": "a2a-protocol-test"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "task", task.Kind)
+	assert.Equal(t, "completed", task.Status.State)
+	assert.Equal(t, "ctx-1", task.ContextID)
+	require.NotNil(t, task.Status.Message)
+	require.NotEmpty(t, task.Artifacts)
+	assert.Equal(t, "请完成一次标准 A2A 调用", receivedInput["message"])
+
+	historyLength := 10
+	reloaded, err := svc.GetProtocolTask(context.Background(), owner, slug, task.ID, &historyLength)
+	require.NoError(t, err)
+	assert.Equal(t, task.ID, reloaded.ID)
+	assert.Equal(t, "completed", reloaded.Status.State)
+	require.NotEmpty(t, reloaded.History)
+	require.NotEmpty(t, reloaded.Artifacts)
+	var fileArtifact *a2a.A2AArtifact
+	for i := range reloaded.Artifacts {
+		if reloaded.Artifacts[i].Name == "Result CSV" {
+			fileArtifact = &reloaded.Artifacts[i]
+			break
+		}
+	}
+	require.NotNil(t, fileArtifact)
+	require.Len(t, fileArtifact.Parts, 1)
+	assert.Equal(t, "file", fileArtifact.Parts[0]["kind"])
+	filePart, ok := fileArtifact.Parts[0]["file"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "https://files.example/a2a-result.csv", filePart["uri"])
+	assert.Equal(t, "text/csv", filePart["mimeType"])
+}
+
+func TestProtocolMessageAcceptsCurrentPartShapes(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+
+	var receivedInput map[string]any
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Input map[string]any `json:"input"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		receivedInput = request.Input
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"summary":"current parts ok"}}`))
+	}))
+	defer server.Close()
+	defaultTransport := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
+
+	agentID := insertAgent(t, pool, owner, server.URL)
+	slug := "a2a-" + agentID.String()[:8]
+
+	task, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			MessageID: "msg-current",
+			ContextID: "ctx-current",
+			Role:      "user",
+			Parts: []map[string]any{
+				{"text": "请读取附件并输出摘要"},
+				{"data": map[string]any{"rows": 3}, "mediaType": "application/json"},
+				{
+					"url":       "https://files.example/input.csv",
+					"filename":  "input.csv",
+					"mediaType": "text/csv",
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "completed", task.Status.State)
+	assert.Equal(t, "请读取附件并输出摘要", receivedInput["message"])
+	dataParts, ok := receivedInput["data_parts"].([]any)
+	require.True(t, ok)
+	require.Len(t, dataParts, 1)
+	assert.Equal(t, map[string]any{"rows": float64(3)}, dataParts[0])
+	files, ok := receivedInput["files"].([]any)
+	require.True(t, ok)
+	require.Len(t, files, 1)
+	file, ok := files[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "https://files.example/input.csv", file["uri"])
+	assert.Equal(t, "input.csv", file["name"])
+	assert.Equal(t, "text/csv", file["mimeType"])
+}
+
+func TestProtocolStreamEventsExposeStatusAndArtifactUpdates(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+
+	release := make(chan struct{})
+	called := make(chan struct{}, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case called <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"output": map[string]any{"summary": "stream completed"},
+			"events": []map[string]any{
+				{"event_type": "run.message.delta", "payload": map[string]any{"text": "working"}},
+				{"event_type": "run.artifact.delta", "payload": map[string]any{
+					"artifact_id": "stream-report",
+					"title":       "Stream Report",
+					"data":        map[string]any{"ok": true},
+					"last_chunk":  true,
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	defaultTransport := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
+
+	agentID := insertAgent(t, pool, owner, server.URL)
+	slug := "a2a-" + agentID.String()[:8]
+
+	task, err := svc.StartProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			Kind:      "message",
+			MessageID: "msg-stream",
+			ContextID: "ctx-stream",
+			Role:      "user",
+			Parts:     []map[string]any{{"kind": "text", "text": "stream it"}},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "working", task.Status.State)
+
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("async endpoint was not called")
+	}
+
+	items, terminal, nextSequence, err := svc.ListProtocolTaskEvents(context.Background(), owner, slug, task.ID, 0)
+	require.NoError(t, err)
+	assert.False(t, terminal)
+	assert.GreaterOrEqual(t, len(items), 2)
+	assert.Greater(t, nextSequence, int32(0))
+
+	close(release)
+	var finalItems []interface{}
+	require.Eventually(t, func() bool {
+		var err error
+		finalItems, terminal, _, err = svc.ListProtocolTaskEvents(context.Background(), owner, slug, task.ID, 0)
+		return err == nil && terminal
+	}, time.Second, 20*time.Millisecond)
+
+	var sawFinal bool
+	var sawArtifact bool
+	for _, item := range finalItems {
+		switch event := item.(type) {
+		case *a2a.A2ATaskStatusUpdateEvent:
+			if event.Final && event.Status.State == "completed" {
+				sawFinal = true
+			}
+		case *a2a.A2ATaskArtifactUpdateEvent:
+			if event.Artifact.ArtifactID == "stream-report" {
+				sawArtifact = true
+			}
+		}
+	}
+	assert.True(t, sawFinal, "expected final completed status-update")
+	assert.True(t, sawArtifact, "expected artifact-update from run.artifact.delta")
+}
+
+func TestPushNotificationConfigMapsToRunWebhook(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+	pushSvc := webhook.NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true})
+	svc.SetRunPushManager(pushSvc)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"summary":"push config task done"}}`))
+	}))
+	defer server.Close()
+	defaultTransport := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
+
+	agentID := insertAgent(t, pool, owner, server.URL)
+	slug := "a2a-" + agentID.String()[:8]
+	task, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			Kind:  "message",
+			Role:  "user",
+			Parts: []map[string]any{{"kind": "text", "text": "configure push"}},
+		},
+	})
+	require.NoError(t, err)
+
+	cfg, err := svc.SetPushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{
+		ID: task.ID,
+		PushNotificationConfig: a2a.A2APushNotificationConfig{
+			URL:   server.URL + "/push",
+			Token: "test-token",
+			Metadata: map[string]any{
+				"client": "a2a-test",
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, cfg.PushNotificationConfig.ID)
+	assert.Equal(t, task.ID, cfg.TaskID)
+	assert.Equal(t, "Bearer", cfg.PushNotificationConfig.Authentication.Scheme)
+
+	list, err := svc.ListPushNotificationConfigs(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{ID: task.ID})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, cfg.PushNotificationConfig.ID, list.Items[0].PushNotificationConfig.ID)
+	assert.Equal(t, "Bearer", list.Items[0].PushNotificationConfig.Authentication.Scheme)
+	assert.Equal(t, "a2a-test", list.Items[0].PushNotificationConfig.Metadata["client"])
+
+	got, err := svc.GetPushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{
+		ID:                       task.ID,
+		PushNotificationConfigID: cfg.PushNotificationConfig.ID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, cfg.PushNotificationConfig.ID, got.PushNotificationConfig.ID)
+
+	err = svc.DeletePushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{
+		ID:                       task.ID,
+		PushNotificationConfigID: cfg.PushNotificationConfig.ID,
+	})
+	require.NoError(t, err)
+	list, err = svc.ListPushNotificationConfigs(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{ID: task.ID})
+	require.NoError(t, err)
+	assert.Empty(t, list.Items)
 }
 
 func TestCallAgent_RespectsPrivateTargetPolicy(t *testing.T) {

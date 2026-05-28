@@ -164,13 +164,28 @@ func main() {
 		})
 	}
 
+	webhookSvc := webhook.NewService(pool, cfg)
+	webhookHandler := webhook.NewHandler(webhookSvc, cfg)
+	webhookHandler.RegisterProtected(api, jwtMiddleware)
+	runtimeSvc.SetWebhookEnqueuer(webhookSvc)
+	runtimeSvc.SetRunWebhookEnqueuer(webhookSvc)
+	go webhook.StartWorker(rootCtx, webhookSvc)
+
 	a2aSvc := a2a.NewService(pool, runtimeSvc)
+	a2aSvc.SetRunPushManager(webhookSvc)
 	a2aHandler := a2a.NewHandler(a2aSvc)
 	a2aHandler.Register(api, jwtMiddleware, hybridMw)
 
 	workflowSvc := workflow.NewService(pool, runtimeSvc)
 	workflowHandler := workflow.NewHandler(workflowSvc)
 	workflowHandler.RegisterProtected(api, jwtMiddleware)
+	if cfg.WorkflowRunWorkerEnabled {
+		go workflow.StartRunWorker(rootCtx, workflowSvc, workflow.RunWorkerConfig{
+			Interval:   time.Duration(cfg.WorkflowRunWorkerIntervalSeconds) * time.Second,
+			StaleAfter: time.Duration(cfg.WorkflowRunStaleSeconds) * time.Second,
+			ClaimBurst: cfg.WorkflowRunClaimBurst,
+		})
+	}
 
 	registrySvc := registry.NewService(pool)
 	registryHandler := registry.NewHandler(registrySvc)
@@ -181,13 +196,6 @@ func main() {
 			Timeout:  time.Duration(cfg.RegistryProxyRunTimeoutSeconds) * time.Second,
 		})
 	}
-
-	webhookSvc := webhook.NewService(pool, cfg)
-	webhookHandler := webhook.NewHandler(webhookSvc, cfg)
-	webhookHandler.RegisterProtected(api, jwtMiddleware)
-	runtimeSvc.SetWebhookEnqueuer(webhookSvc)
-	runtimeSvc.SetRunWebhookEnqueuer(webhookSvc)
-	go webhook.StartWorker(rootCtx, webhookSvc)
 
 	// core 部署:LLM client 注入 nil,task / benchmark 自动 fallback 到规则匹配 / 503。
 	var llmClient corellm.Client

@@ -170,7 +170,7 @@ var mcpTools = []ToolDescriptor{
 									"description":          map[string]interface{}{"type": "string"},
 									"price_per_call_cents": map[string]interface{}{"type": "integer"},
 									"total_calls":          map[string]interface{}{"type": "integer"},
-									"avg_rating":           map[string]interface{}{"type": "number"},
+									"avg_rating":           map[string]interface{}{"type": "number", "description": "可选。评分系统上线后返回；未上线时不杜撰评分。"},
 									"creator_name":         map[string]interface{}{"type": "string"},
 									"tags":                 map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 								},

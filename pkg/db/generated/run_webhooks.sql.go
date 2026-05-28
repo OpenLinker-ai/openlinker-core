@@ -21,6 +21,9 @@ func scanRunWebhookSubscription(row interface {
 		&s.TargetURL,
 		&s.Secret,
 		&s.EventTypes,
+		&s.PushAuthScheme,
+		&s.PushAuthCredentials,
+		&s.PushMetadata,
 		&s.Status,
 		&s.ConsecutiveFailures,
 		&s.CreatedAt,
@@ -31,20 +34,25 @@ func scanRunWebhookSubscription(row interface {
 
 const createRunWebhookSubscription = `-- name: CreateRunWebhookSubscription :one
 INSERT INTO run_webhook_subscriptions (
-    run_id, owner_user_id, caller_agent_id, target_url, secret, event_types
+    run_id, owner_user_id, caller_agent_id, target_url, secret, event_types,
+    push_auth_scheme, push_auth_credentials, push_metadata
 ) VALUES (
-    $1, $2, $3, $4, $5, $6
+    $1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, '{}'::jsonb)
 )
 RETURNING id, run_id, owner_user_id, caller_agent_id, target_url, secret,
-          event_types, status, consecutive_failures, created_at, updated_at, deleted_at`
+          event_types, push_auth_scheme, push_auth_credentials, push_metadata,
+          status, consecutive_failures, created_at, updated_at, deleted_at`
 
 type CreateRunWebhookSubscriptionParams struct {
-	RunID         uuid.UUID  `db:"run_id" json:"run_id"`
-	OwnerUserID   uuid.UUID  `db:"owner_user_id" json:"owner_user_id"`
-	CallerAgentID *uuid.UUID `db:"caller_agent_id" json:"caller_agent_id"`
-	TargetURL     string     `db:"target_url" json:"target_url"`
-	Secret        string     `db:"secret" json:"secret"`
-	EventTypes    []string   `db:"event_types" json:"event_types"`
+	RunID               uuid.UUID  `db:"run_id" json:"run_id"`
+	OwnerUserID         uuid.UUID  `db:"owner_user_id" json:"owner_user_id"`
+	CallerAgentID       *uuid.UUID `db:"caller_agent_id" json:"caller_agent_id"`
+	TargetURL           string     `db:"target_url" json:"target_url"`
+	Secret              string     `db:"secret" json:"secret"`
+	EventTypes          []string   `db:"event_types" json:"event_types"`
+	PushAuthScheme      *string    `db:"push_auth_scheme" json:"push_auth_scheme"`
+	PushAuthCredentials *string    `db:"push_auth_credentials" json:"push_auth_credentials"`
+	PushMetadata        []byte     `db:"push_metadata" json:"push_metadata"`
 }
 
 func (q *Queries) CreateRunWebhookSubscription(ctx context.Context, arg CreateRunWebhookSubscriptionParams) (RunWebhookSubscription, error) {
@@ -55,6 +63,9 @@ func (q *Queries) CreateRunWebhookSubscription(ctx context.Context, arg CreateRu
 		arg.TargetURL,
 		arg.Secret,
 		arg.EventTypes,
+		arg.PushAuthScheme,
+		arg.PushAuthCredentials,
+		arg.PushMetadata,
 	)
 	var s RunWebhookSubscription
 	err := scanRunWebhookSubscription(row, &s)
@@ -63,7 +74,8 @@ func (q *Queries) CreateRunWebhookSubscription(ctx context.Context, arg CreateRu
 
 const listRunWebhookSubscriptionsByRun = `-- name: ListRunWebhookSubscriptionsByRun :many
 SELECT id, run_id, owner_user_id, caller_agent_id, target_url, secret,
-       event_types, status, consecutive_failures, created_at, updated_at, deleted_at
+       event_types, push_auth_scheme, push_auth_credentials, push_metadata,
+       status, consecutive_failures, created_at, updated_at, deleted_at
 FROM run_webhook_subscriptions
 WHERE run_id = $1
   AND owner_user_id = $2
@@ -122,7 +134,8 @@ WHERE id = $1
   AND owner_user_id = $3
   AND status <> 'deleted'
 RETURNING id, run_id, owner_user_id, caller_agent_id, target_url, secret,
-          event_types, status, consecutive_failures, created_at, updated_at, deleted_at`
+          event_types, push_auth_scheme, push_auth_credentials, push_metadata,
+          status, consecutive_failures, created_at, updated_at, deleted_at`
 
 type UpdateRunWebhookSubscriptionStatusForOwnerParams struct {
 	ID          uuid.UUID `db:"id" json:"id"`
@@ -140,7 +153,8 @@ func (q *Queries) UpdateRunWebhookSubscriptionStatusForOwner(ctx context.Context
 
 const listActiveRunWebhookSubscriptionsForEvent = `-- name: ListActiveRunWebhookSubscriptionsForEvent :many
 SELECT id, run_id, owner_user_id, caller_agent_id, target_url, secret,
-       event_types, status, consecutive_failures, created_at, updated_at, deleted_at
+       event_types, push_auth_scheme, push_auth_credentials, push_metadata,
+       status, consecutive_failures, created_at, updated_at, deleted_at
 FROM run_webhook_subscriptions
 WHERE run_id = $1
   AND status = 'active'
@@ -218,7 +232,7 @@ const getRunWebhookDeliveryByID = `-- name: GetRunWebhookDeliveryByID :one
 SELECT d.id, d.subscription_id, d.run_event_id, d.payload, d.status,
        d.response_status, d.response_body, d.error_message,
        d.attempt_count, d.next_retry_at, d.delivered_at, d.created_at, d.updated_at,
-       s.target_url, s.secret, e.event_type
+       s.target_url, s.secret, s.push_auth_scheme, s.push_auth_credentials, e.event_type
 FROM run_webhook_deliveries d
 JOIN run_webhook_subscriptions s ON s.id = d.subscription_id
 JOIN run_events e ON e.id = d.run_event_id
@@ -226,9 +240,11 @@ WHERE d.id = $1`
 
 type GetRunWebhookDeliveryByIDRow struct {
 	RunWebhookDelivery
-	TargetURL string `db:"target_url" json:"target_url"`
-	Secret    string `db:"secret" json:"-"`
-	EventType string `db:"event_type" json:"event_type"`
+	TargetURL           string  `db:"target_url" json:"target_url"`
+	Secret              string  `db:"secret" json:"-"`
+	PushAuthScheme      *string `db:"push_auth_scheme" json:"push_auth_scheme,omitempty"`
+	PushAuthCredentials *string `db:"push_auth_credentials" json:"-"`
+	EventType           string  `db:"event_type" json:"event_type"`
 }
 
 func (q *Queries) GetRunWebhookDeliveryByID(ctx context.Context, id uuid.UUID) (GetRunWebhookDeliveryByIDRow, error) {
@@ -250,6 +266,8 @@ func (q *Queries) GetRunWebhookDeliveryByID(ctx context.Context, id uuid.UUID) (
 		&r.UpdatedAt,
 		&r.TargetURL,
 		&r.Secret,
+		&r.PushAuthScheme,
+		&r.PushAuthCredentials,
 		&r.EventType,
 	)
 	return r, err

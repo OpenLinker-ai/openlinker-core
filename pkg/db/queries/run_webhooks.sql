@@ -3,16 +3,19 @@
 
 -- name: CreateRunWebhookSubscription :one
 INSERT INTO run_webhook_subscriptions (
-    run_id, owner_user_id, caller_agent_id, target_url, secret, event_types
+    run_id, owner_user_id, caller_agent_id, target_url, secret, event_types,
+    push_auth_scheme, push_auth_credentials, push_metadata
 ) VALUES (
-    $1, $2, $3, $4, $5, $6
+    $1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, '{}'::jsonb)
 )
 RETURNING id, run_id, owner_user_id, caller_agent_id, target_url, secret,
-          event_types, status, consecutive_failures, created_at, updated_at, deleted_at;
+          event_types, push_auth_scheme, push_auth_credentials, push_metadata,
+          status, consecutive_failures, created_at, updated_at, deleted_at;
 
 -- name: ListRunWebhookSubscriptionsByRun :many
 SELECT id, run_id, owner_user_id, caller_agent_id, target_url, secret,
-       event_types, status, consecutive_failures, created_at, updated_at, deleted_at
+       event_types, push_auth_scheme, push_auth_credentials, push_metadata,
+       status, consecutive_failures, created_at, updated_at, deleted_at
 FROM run_webhook_subscriptions
 WHERE run_id = $1
   AND owner_user_id = $2
@@ -38,11 +41,13 @@ WHERE id = $1
   AND owner_user_id = $3
   AND status <> 'deleted'
 RETURNING id, run_id, owner_user_id, caller_agent_id, target_url, secret,
-          event_types, status, consecutive_failures, created_at, updated_at, deleted_at;
+          event_types, push_auth_scheme, push_auth_credentials, push_metadata,
+          status, consecutive_failures, created_at, updated_at, deleted_at;
 
 -- name: ListActiveRunWebhookSubscriptionsForEvent :many
 SELECT id, run_id, owner_user_id, caller_agent_id, target_url, secret,
-       event_types, status, consecutive_failures, created_at, updated_at, deleted_at
+       event_types, push_auth_scheme, push_auth_credentials, push_metadata,
+       status, consecutive_failures, created_at, updated_at, deleted_at
 FROM run_webhook_subscriptions
 WHERE run_id = $1
   AND status = 'active'
@@ -65,7 +70,7 @@ RETURNING id, subscription_id, run_event_id, payload, status,
 SELECT d.id, d.subscription_id, d.run_event_id, d.payload, d.status,
        d.response_status, d.response_body, d.error_message,
        d.attempt_count, d.next_retry_at, d.delivered_at, d.created_at, d.updated_at,
-       s.target_url, s.secret, e.event_type
+       s.target_url, s.secret, s.push_auth_scheme, s.push_auth_credentials, e.event_type
 FROM run_webhook_deliveries d
 JOIN run_webhook_subscriptions s ON s.id = d.subscription_id
 JOIN run_events e ON e.id = d.run_event_id

@@ -18,7 +18,8 @@ type WorkflowNodeRequest struct {
 }
 
 type RunWorkflowRequest struct {
-	Input map[string]interface{} `json:"input,omitempty"`
+	Input       map[string]interface{} `json:"input,omitempty"`
+	MaxAttempts int32                  `json:"max_attempts,omitempty" validate:"omitempty,min=1,max=10"`
 }
 
 type WorkflowResponse struct {
@@ -48,17 +49,27 @@ type WorkflowNodeResponse struct {
 }
 
 type WorkflowRunResponse struct {
-	ID         string                    `json:"id"`
-	WorkflowID string                    `json:"workflow_id"`
-	Status     string                    `json:"status"`
-	Input      map[string]interface{}    `json:"input"`
-	Output     map[string]interface{}    `json:"output,omitempty"`
-	Error      string                    `json:"error_message,omitempty"`
-	Steps      []WorkflowRunStepResponse `json:"steps"`
-	StartedAt  string                    `json:"started_at"`
-	FinishedAt string                    `json:"finished_at,omitempty"`
-	CreatedAt  string                    `json:"created_at"`
-	UpdatedAt  string                    `json:"updated_at"`
+	ID              string                    `json:"id"`
+	WorkflowID      string                    `json:"workflow_id"`
+	Status          string                    `json:"status"`
+	Input           map[string]interface{}    `json:"input"`
+	Output          map[string]interface{}    `json:"output,omitempty"`
+	Error           string                    `json:"error_message,omitempty"`
+	Steps           []WorkflowRunStepResponse `json:"steps"`
+	AttemptCount    int32                     `json:"attempt_count"`
+	MaxAttempts     int32                     `json:"max_attempts"`
+	NextRetryAt     string                    `json:"next_retry_at,omitempty"`
+	ClaimedAt       string                    `json:"claimed_at,omitempty"`
+	LastWorkerError string                    `json:"last_worker_error,omitempty"`
+	StartedAt       string                    `json:"started_at"`
+	FinishedAt      string                    `json:"finished_at,omitempty"`
+	CreatedAt       string                    `json:"created_at"`
+	UpdatedAt       string                    `json:"updated_at"`
+}
+
+type WorkflowRunListResponse struct {
+	Items []WorkflowRunResponse `json:"items"`
+	Total int32                 `json:"total"`
 }
 
 type WorkflowRunStepResponse struct {

@@ -401,6 +401,15 @@ func (s *Service) CreateRunWebhookSubscription(ctx context.Context, runID, userI
 		return nil, httpx.BadRequest("target_url 必须是 HTTPS；本地开发需开启 ALLOW_LOCAL_HTTP_ENDPOINTS 后才允许 loopback HTTP")
 	}
 	eventTypes := normalizeRunWebhookEventTypes(req.EventTypes)
+	pushAuthScheme, pushAuthCredentials := normalizePushAuth(req.PushAuthScheme, req.PushAuthCredentials)
+	pushMetadataMap := req.PushMetadata
+	if pushMetadataMap == nil {
+		pushMetadataMap = map[string]interface{}{}
+	}
+	pushMetadata, err := json.Marshal(pushMetadataMap)
+	if err != nil {
+		return nil, httpx.BadRequest("push_metadata 格式错误")
+	}
 
 	run, err := s.queries.GetRunByID(ctx, runID)
 	if err != nil {
@@ -419,11 +428,14 @@ func (s *Service) CreateRunWebhookSubscription(ctx context.Context, runID, userI
 		return nil, httpx.Internal("生成 webhook secret 失败")
 	}
 	sub, err := s.queries.CreateRunWebhookSubscription(ctx, db.CreateRunWebhookSubscriptionParams{
-		RunID:       runID,
-		OwnerUserID: userID,
-		TargetURL:   targetURL,
-		Secret:      secret,
-		EventTypes:  eventTypes,
+		RunID:               runID,
+		OwnerUserID:         userID,
+		TargetURL:           targetURL,
+		Secret:              secret,
+		EventTypes:          eventTypes,
+		PushAuthScheme:      pushAuthScheme,
+		PushAuthCredentials: pushAuthCredentials,
+		PushMetadata:        pushMetadata,
 	})
 	if err != nil {
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.CreateRunWebhookSubscription: insert")
@@ -567,7 +579,7 @@ func (s *Service) AttemptRunWebhookDelivery(ctx context.Context, deliveryID uuid
 		return nil
 	}
 
-	statusCode, respBody, attemptErr := s.doDeliverWithEvent(ctx, row.TargetURL, row.Secret, deliveryID, row.Payload, row.EventType)
+	statusCode, respBody, attemptErr := s.doDeliverWithEvent(ctx, row.TargetURL, row.Secret, deliveryID, row.Payload, row.EventType, row.PushAuthScheme, row.PushAuthCredentials)
 	if attemptErr == nil && statusCode >= 200 && statusCode < 300 {
 		statusPtr := int32(statusCode)
 		bodyPtr := truncate(respBody, responseBodyMaxLen)
@@ -663,11 +675,11 @@ func (s *Service) processPending(ctx context.Context) {
 func (s *Service) doDeliver(
 	ctx context.Context, url, secret string, deliveryID uuid.UUID, payload []byte,
 ) (int, string, error) {
-	return s.doDeliverWithEvent(ctx, url, secret, deliveryID, payload, eventRunCompleted)
+	return s.doDeliverWithEvent(ctx, url, secret, deliveryID, payload, eventRunCompleted, nil, nil)
 }
 
 func (s *Service) doDeliverWithEvent(
-	ctx context.Context, url, secret string, deliveryID uuid.UUID, payload []byte, eventType string,
+	ctx context.Context, url, secret string, deliveryID uuid.UUID, payload []byte, eventType string, pushAuthScheme, pushAuthCredentials *string,
 ) (int, string, error) {
 	signature := signPayload(payload, secret)
 
@@ -682,6 +694,13 @@ func (s *Service) doDeliverWithEvent(
 	req.Header.Set("X-OpenLinker-Event", eventType)
 	req.Header.Set("X-OpenLinker-Delivery", deliveryID.String())
 	req.Header.Set("X-OpenLinker-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
+	if pushAuthScheme != nil && pushAuthCredentials != nil {
+		scheme := strings.TrimSpace(*pushAuthScheme)
+		credentials := strings.TrimSpace(*pushAuthCredentials)
+		if scheme != "" && credentials != "" {
+			req.Header.Set("Authorization", scheme+" "+credentials)
+		}
+	}
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -809,6 +828,15 @@ func normalizeRunWebhookEventTypes(raw []string) []string {
 	return out
 }
 
+func normalizePushAuth(scheme, credentials string) (*string, *string) {
+	scheme = strings.TrimSpace(scheme)
+	credentials = strings.TrimSpace(credentials)
+	if scheme == "" || credentials == "" {
+		return nil, nil
+	}
+	return &scheme, &credentials
+}
+
 func runWebhookPayload(sub db.RunWebhookSubscription, event db.RunEvent) RunWebhookPayload {
 	payload := map[string]interface{}{}
 	if len(event.Payload) > 0 {
@@ -832,7 +860,7 @@ func runWebhookPayload(sub db.RunWebhookSubscription, event db.RunEvent) RunWebh
 }
 
 func runWebhookSubscriptionToResponse(sub db.RunWebhookSubscription) RunWebhookSubscriptionResponse {
-	return RunWebhookSubscriptionResponse{
+	resp := RunWebhookSubscriptionResponse{
 		ID:                  sub.ID.String(),
 		RunID:               sub.RunID.String(),
 		TargetURL:           sub.TargetURL,
@@ -842,6 +870,10 @@ func runWebhookSubscriptionToResponse(sub db.RunWebhookSubscription) RunWebhookS
 		CreatedAt:           sub.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:           sub.UpdatedAt.UTC().Format(time.RFC3339),
 	}
+	if sub.PushAuthScheme != nil {
+		resp.PushAuthScheme = *sub.PushAuthScheme
+	}
+	return resp
 }
 
 // toDeliveryListItem db.WebhookDelivery → API DTO。

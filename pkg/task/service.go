@@ -19,12 +19,10 @@ import (
 )
 
 const (
-	// 默认占位值。评分系统未上线前所有 Agent 显示统一评分。
-	placeholderAvgRating    float32 = 4.8
-	maxTaskSkillRefs                = 5
-	maxTaskMCPTools                 = 5
-	maxTaskResultSummaryLen         = 2000
-	maxTaskRevisionNoteLen          = 2000
+	maxTaskSkillRefs        = 5
+	maxTaskMCPTools         = 5
+	maxTaskResultSummaryLen = 2000
+	maxTaskRevisionNoteLen  = 2000
 )
 
 var mcpToolCatalog = []MCPToolRef{
@@ -884,7 +882,6 @@ func toAgentSummary(r *db.GetAgentsByIDsRow) AgentSummary {
 		Description:       r.Description,
 		PricePerCallCents: r.PricePerCallCents,
 		TotalCalls:        r.TotalCalls,
-		AvgRating:         placeholderAvgRating,
 		CreatorName:       r.CreatorName,
 		Tags:              append([]string{}, r.Tags...),
 	}

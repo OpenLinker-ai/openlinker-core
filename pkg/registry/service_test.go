@@ -2,6 +2,7 @@ package registry_test
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/kinzhi/openlinker-core/pkg/httpx"
 	"github.com/kinzhi/openlinker-core/pkg/registry"
 )
 
@@ -22,7 +24,7 @@ func setupRegistryBridgeDB(t *testing.T) *pgxpool.Pool {
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL 未设置，跳过 registry 集成测试")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
@@ -30,7 +32,7 @@ func setupRegistryBridgeDB(t *testing.T) *pgxpool.Pool {
 	_, err = pool.Exec(ctx, truncateRegistryBridgeTables)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cleanCancel()
 		_, _ = pool.Exec(cleanCtx, truncateRegistryBridgeTables)
 		pool.Close()
@@ -63,6 +65,13 @@ func insertRegistryAgent(t *testing.T, pool *pgxpool.Pool, ownerID uuid.UUID) uu
 		id, ownerID, "bridge-agent-"+id.String()[:8])
 	require.NoError(t, err)
 	return id
+}
+
+func requireHTTPStatus(t *testing.T, err error, status int) {
+	t.Helper()
+	var httpErr *httpx.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	assert.Equal(t, status, httpErr.Status)
 }
 
 func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
@@ -101,9 +110,18 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, node.ID, listing.RegistryNodeID)
 	assert.Equal(t, agentID.String(), listing.AgentID)
+	assert.Equal(t, "Bridge Agent", listing.AgentName)
+	assert.Equal(t, "private node agent", listing.AgentDescription)
+	assert.ElementsMatch(t, []string{"bridge"}, listing.AgentTags)
+	assert.Equal(t, "unknown", listing.AvailabilityStatus)
+	assert.NotEmpty(t, listing.MetadataSyncedAt)
 	assert.Equal(t, "linked", listing.SyncStatus)
 	assert.Equal(t, "pull_proxy", listing.RoutingMode)
 	assert.Equal(t, "metadata_only", listing.PayloadPolicy)
+	nodeID, err := uuid.Parse(node.ID)
+	require.NoError(t, err)
+	cloudListingID, err := uuid.Parse(listing.CloudListingID)
+	require.NoError(t, err)
 
 	heartbeat, err = svc.Heartbeat(ctx, node.NodeSecret)
 	require.NoError(t, err)
@@ -121,6 +139,53 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	require.Len(t, listings, 1)
 	assert.Equal(t, listing.CloudListingID, listings[0].CloudListingID)
 	assert.Equal(t, "Bridge Agent", listings[0].AgentName)
+	assert.Equal(t, "private node agent", listings[0].AgentDescription)
+	assert.Equal(t, "unknown", listings[0].AvailabilityStatus)
+
+	_, err = pool.Exec(ctx,
+		`UPDATE agents SET name='Bridge Agent Synced', description='synced description', tags=ARRAY['bridge','synced'] WHERE id=$1`,
+		agentID)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx,
+		`INSERT INTO agent_availability_snapshots (agent_id, availability_status, last_checked_at, updated_at)
+		 VALUES ($1, 'healthy', NOW(), NOW())
+		 ON CONFLICT (agent_id) DO UPDATE
+		 SET availability_status='healthy', last_checked_at=NOW(), updated_at=NOW()`,
+		agentID)
+	require.NoError(t, err)
+
+	listings, err = svc.ListCloudListings(ctx, ownerID)
+	require.NoError(t, err)
+	require.Len(t, listings, 1)
+	assert.Equal(t, "Bridge Agent", listings[0].AgentName, "listing uses the last synced snapshot before metadata sync")
+
+	synced, err := svc.SyncCloudListingMetadata(ctx, ownerID, cloudListingID)
+	require.NoError(t, err)
+	assert.Equal(t, "Bridge Agent Synced", synced.AgentName)
+	assert.Equal(t, "synced description", synced.AgentDescription)
+	assert.ElementsMatch(t, []string{"bridge", "synced"}, synced.AgentTags)
+	assert.Equal(t, "healthy", synced.AvailabilityStatus)
+	assert.NotEmpty(t, synced.MetadataSyncedAt)
+
+	_, err = pool.Exec(ctx,
+		`UPDATE agents SET name='Bridge Agent Node Synced', description='node synced description', tags=ARRAY['bridge','node'] WHERE id=$1`,
+		agentID)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx,
+		`UPDATE agent_availability_snapshots SET availability_status='degraded', last_checked_at=NOW(), updated_at=NOW() WHERE agent_id=$1`,
+		agentID)
+	require.NoError(t, err)
+	nodeSync, err := svc.SyncNodeMetadata(ctx, node.NodeSecret)
+	require.NoError(t, err)
+	assert.Equal(t, node.ID, nodeSync.RegistryNodeID)
+	assert.Equal(t, int32(1), nodeSync.SyncedListingCount)
+
+	listings, err = svc.ListCloudListings(ctx, ownerID)
+	require.NoError(t, err)
+	require.Len(t, listings, 1)
+	assert.Equal(t, "Bridge Agent Node Synced", listings[0].AgentName)
+	assert.Equal(t, "node synced description", listings[0].AgentDescription)
+	assert.Equal(t, "degraded", listings[0].AvailabilityStatus)
 
 	idempotencyKey := "proxy-test-" + uuid.NewString()
 	proxyRun, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
@@ -138,7 +203,8 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	assert.Equal(t, node.ID, proxyRun.RegistryNodeID)
 	assert.Equal(t, agentID.String(), proxyRun.LocalAgentID)
 	assert.Equal(t, "metadata_only", proxyRun.PayloadPolicy)
-	assert.Equal(t, "run SQL and summarize", proxyRun.Input["task"])
+	assert.Nil(t, proxyRun.Input)
+	assert.Empty(t, proxyRun.InputSummary)
 
 	heartbeat, err = svc.Heartbeat(ctx, node.NodeSecret)
 	require.NoError(t, err)
@@ -160,32 +226,445 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	assert.Equal(t, proxyRun.ID, claimed.ID)
 	assert.Equal(t, "claimed", claimed.Status)
 	assert.Equal(t, "run SQL and summarize", claimed.Input["task"])
+	assert.Equal(t, int32(1), claimed.AttemptCount)
+	runID, err := uuid.Parse(proxyRun.ID)
+	require.NoError(t, err)
+	var nodeInputStillStored bool
+	require.NoError(t, pool.QueryRow(ctx, `SELECT node_input IS NOT NULL FROM proxy_runs WHERE id=$1`, runID).Scan(&nodeInputStillStored))
+	assert.True(t, nodeInputStillStored)
 
 	heartbeat, err = svc.Heartbeat(ctx, node.NodeSecret)
 	require.NoError(t, err)
 	assert.Equal(t, int32(0), heartbeat.PendingRunCount)
 
-	runID, err := uuid.Parse(proxyRun.ID)
-	require.NoError(t, err)
 	completed, err := svc.CompleteProxyRun(ctx, node.NodeSecret, runID, &registry.CompleteProxyRunRequest{
 		Status: "success",
 		Output: map[string]any{
 			"summary": "SQL 查询完成，发现订单数为 42",
+			"artifacts": []map[string]any{{
+				"id":              "orders-csv",
+				"title":           "订单查询结果",
+				"artifact_type":   "file",
+				"file_uri":        "https://node.local/artifacts/orders.csv",
+				"file_name":       "orders.csv",
+				"mime_type":       "text/csv",
+				"file_sha256":     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				"file_size_bytes": 512,
+				"content": map[string]any{
+					"rows": 42,
+				},
+			}},
 		},
 		OutputSummary: "SQL 查询完成",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "success", completed.Status)
-	assert.Equal(t, "SQL 查询完成", completed.OutputSummary)
-	assert.Equal(t, "SQL 查询完成，发现订单数为 42", completed.Output["summary"])
+	assert.Empty(t, completed.OutputSummary)
+	assert.Nil(t, completed.Output)
 	assert.NotEmpty(t, completed.FinishedAt)
+	require.NoError(t, pool.QueryRow(ctx, `SELECT node_input IS NOT NULL FROM proxy_runs WHERE id=$1`, runID).Scan(&nodeInputStillStored))
+	assert.False(t, nodeInputStillStored)
 
 	fetched, err := svc.GetProxyRun(ctx, ownerID, runID)
 	require.NoError(t, err)
 	assert.Equal(t, "success", fetched.Status)
-	assert.Equal(t, "SQL 查询完成", fetched.OutputSummary)
+	assert.Empty(t, fetched.OutputSummary)
+	assert.Nil(t, fetched.Output)
+
+	artifacts, err := svc.ListProxyRunArtifacts(ctx, ownerID, runID)
+	require.NoError(t, err)
+	require.Len(t, artifacts, 1)
+	assert.Equal(t, "orders-csv", artifacts[0].SourceArtifactID)
+	assert.Equal(t, "file", artifacts[0].ArtifactType)
+	assert.Equal(t, "订单查询结果", artifacts[0].Title)
+	assert.Equal(t, "https://node.local/artifacts/orders.csv", artifacts[0].FileURI)
+	assert.Equal(t, "orders.csv", artifacts[0].FileName)
+	assert.Equal(t, "text/csv", artifacts[0].MimeType)
+	assert.Equal(t, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", artifacts[0].FileSHA256)
+	require.NotNil(t, artifacts[0].FileSizeBytes)
+	assert.Equal(t, int64(512), *artifacts[0].FileSizeBytes)
+	assert.Nil(t, artifacts[0].Content, "metadata_only keeps artifact file metadata but not artifact content")
 
 	emptyClaim, err := svc.ClaimProxyRun(ctx, node.NodeSecret)
 	require.NoError(t, err)
 	assert.Nil(t, emptyClaim)
+
+	paused, err := svc.UpdateCloudListingStatus(ctx, ownerID, cloudListingID, &registry.UpdateCloudListingStatusRequest{
+		SyncStatus: "paused",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "paused", paused.SyncStatus)
+
+	_, err = svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
+		CloudListingID: listing.CloudListingID,
+		IdempotencyKey: "paused-" + uuid.NewString(),
+	})
+	requireHTTPStatus(t, err, http.StatusNotFound)
+
+	resumed, err := svc.UpdateCloudListingStatus(ctx, ownerID, cloudListingID, &registry.UpdateCloudListingStatusRequest{
+		SyncStatus: "linked",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "linked", resumed.SyncStatus)
+
+	rotated, err := svc.RotateNodeSecret(ctx, ownerID, nodeID)
+	require.NoError(t, err)
+	require.NotEmpty(t, rotated.NodeSecret)
+	assert.NotEqual(t, node.NodeSecret, rotated.NodeSecret)
+	assert.NotEqual(t, node.SecretPrefix, rotated.SecretPrefix)
+
+	_, err = svc.Heartbeat(ctx, node.NodeSecret)
+	requireHTTPStatus(t, err, http.StatusUnauthorized)
+	heartbeat, err = svc.Heartbeat(ctx, rotated.NodeSecret)
+	require.NoError(t, err)
+	assert.Equal(t, node.ID, heartbeat.NodeID)
+
+	timeoutRun, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
+		CloudListingID: listing.CloudListingID,
+		IdempotencyKey: "timeout-" + uuid.NewString(),
+		InputSummary:   "will timeout",
+	})
+	require.NoError(t, err)
+	claimedTimeout, err := svc.ClaimProxyRun(ctx, rotated.NodeSecret)
+	require.NoError(t, err)
+	require.NotNil(t, claimedTimeout)
+	assert.Equal(t, timeoutRun.ID, claimedTimeout.ID)
+
+	expired, err := svc.ExpireStaleProxyRuns(ctx, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), expired)
+	timeoutRunID, err := uuid.Parse(timeoutRun.ID)
+	require.NoError(t, err)
+	fetchedTimeout, err := svc.GetProxyRun(ctx, ownerID, timeoutRunID)
+	require.NoError(t, err)
+	assert.Equal(t, "timeout", fetchedTimeout.Status)
+	assert.Equal(t, "PROXY_RUN_TIMEOUT", fetchedTimeout.ErrorCode)
+	assert.NotEmpty(t, fetchedTimeout.FinishedAt)
+
+	_, err = svc.CompleteProxyRun(ctx, rotated.NodeSecret, timeoutRunID, &registry.CompleteProxyRunRequest{
+		Status: "success",
+	})
+	requireHTTPStatus(t, err, http.StatusNotFound)
+
+	revoked, err := svc.RevokeNode(ctx, ownerID, nodeID)
+	require.NoError(t, err)
+	assert.Equal(t, "revoked", revoked.HeartbeatStatus)
+	assert.NotEmpty(t, revoked.RevokedAt)
+
+	_, err = svc.Heartbeat(ctx, rotated.NodeSecret)
+	requireHTTPStatus(t, err, http.StatusUnauthorized)
+	_, err = svc.RotateNodeSecret(ctx, ownerID, nodeID)
+	requireHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.UpdateCloudListingStatus(ctx, ownerID, cloudListingID, &registry.UpdateCloudListingStatusRequest{
+		SyncStatus: "linked",
+	})
+	requireHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
+		CloudListingID: listing.CloudListingID,
+		IdempotencyKey: "revoked-" + uuid.NewString(),
+	})
+	requireHTTPStatus(t, err, http.StatusNotFound)
+
+	listings, err = svc.ListCloudListings(ctx, ownerID)
+	require.NoError(t, err)
+	require.Len(t, listings, 1)
+	assert.Equal(t, "paused", listings[0].SyncStatus)
+}
+
+func TestProxyRunPayloadPolicies(t *testing.T) {
+	pool := setupRegistryBridgeDB(t)
+	svc := registry.NewService(pool)
+	ctx := context.Background()
+
+	ownerID := insertRegistryOwner(t, pool)
+	node, err := svc.CreateNode(ctx, ownerID, &registry.CreateNodeRequest{
+		NodeName: "Policy Bridge",
+		NodeType: "bridge_proxy",
+	})
+	require.NoError(t, err)
+
+	summaryAgentID := insertRegistryAgent(t, pool, ownerID)
+	summaryListing, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+		RegistryNodeID: node.ID,
+		AgentID:        summaryAgentID.String(),
+		PayloadPolicy:  "store_run_summary",
+	})
+	require.NoError(t, err)
+
+	summaryRun, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
+		CloudListingID: summaryListing.CloudListingID,
+		IdempotencyKey: "summary-" + uuid.NewString(),
+		Input: map[string]any{
+			"prompt": "contains private customer payload",
+			"secret": "do-not-store",
+		},
+		InputSummary: "private payload task",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "store_run_summary", summaryRun.PayloadPolicy)
+	assert.Nil(t, summaryRun.Input)
+	assert.Equal(t, "private payload task", summaryRun.InputSummary)
+
+	claimedSummary, err := svc.ClaimProxyRun(ctx, node.NodeSecret)
+	require.NoError(t, err)
+	require.NotNil(t, claimedSummary)
+	assert.Equal(t, "contains private customer payload", claimedSummary.Input["prompt"])
+	assert.Equal(t, "do-not-store", claimedSummary.Input["secret"])
+
+	summaryRunID, err := uuid.Parse(summaryRun.ID)
+	require.NoError(t, err)
+	completedSummary, err := svc.CompleteProxyRun(ctx, node.NodeSecret, summaryRunID, &registry.CompleteProxyRunRequest{
+		Status: "success",
+		Output: map[string]any{
+			"raw": "private result body",
+		},
+		OutputSummary: "private result summarized",
+	})
+	require.NoError(t, err)
+	assert.Nil(t, completedSummary.Output)
+	assert.Equal(t, "private result summarized", completedSummary.OutputSummary)
+
+	fetchedSummary, err := svc.GetProxyRun(ctx, ownerID, summaryRunID)
+	require.NoError(t, err)
+	assert.Nil(t, fetchedSummary.Input)
+	assert.Equal(t, "private payload task", fetchedSummary.InputSummary)
+	assert.Nil(t, fetchedSummary.Output)
+	assert.Equal(t, "private result summarized", fetchedSummary.OutputSummary)
+
+	fullAgentID := insertRegistryAgent(t, pool, ownerID)
+	fullListing, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+		RegistryNodeID:       node.ID,
+		AgentID:              fullAgentID.String(),
+		PayloadPolicy:        "store_full_payload",
+		PayloadRedactionKeys: []string{"secret", "apiKey"},
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"secret", "apiKey"}, fullListing.PayloadRedactionKeys)
+
+	fullRun, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
+		CloudListingID: fullListing.CloudListingID,
+		IdempotencyKey: "full-" + uuid.NewString(),
+		Input: map[string]any{
+			"prompt": "store this payload",
+			"secret": "do not persist",
+			"nested": map[string]any{
+				"apiKey": "nested secret",
+			},
+		},
+		InputSummary: "full payload task",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "store_full_payload", fullRun.PayloadPolicy)
+	assert.Equal(t, "store this payload", fullRun.Input["prompt"])
+	assert.Equal(t, "[redacted]", fullRun.Input["secret"])
+	require.IsType(t, map[string]any{}, fullRun.Input["nested"])
+	assert.Equal(t, "[redacted]", fullRun.Input["nested"].(map[string]any)["apiKey"])
+	assert.Equal(t, "full payload task", fullRun.InputSummary)
+
+	claimedFull, err := svc.ClaimProxyRun(ctx, node.NodeSecret)
+	require.NoError(t, err)
+	require.NotNil(t, claimedFull)
+	assert.Equal(t, fullRun.ID, claimedFull.ID)
+	assert.Equal(t, "store this payload", claimedFull.Input["prompt"])
+	assert.Equal(t, "do not persist", claimedFull.Input["secret"])
+	require.IsType(t, map[string]any{}, claimedFull.Input["nested"])
+	assert.Equal(t, "nested secret", claimedFull.Input["nested"].(map[string]any)["apiKey"])
+
+	fullRunID, err := uuid.Parse(fullRun.ID)
+	require.NoError(t, err)
+	completedFull, err := svc.CompleteProxyRun(ctx, node.NodeSecret, fullRunID, &registry.CompleteProxyRunRequest{
+		Status: "success",
+		Output: map[string]any{
+			"raw":    "stored result body",
+			"secret": "output secret",
+			"nested": map[string]any{
+				"apiKey": "output nested secret",
+			},
+			"artifacts": []map[string]any{{
+				"id":            "full-json",
+				"title":         "Full JSON Result",
+				"artifact_type": "data",
+				"content": map[string]any{
+					"summary": "stored artifact content",
+				},
+			}},
+		},
+		OutputSummary: "full result summary",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "stored result body", completedFull.Output["raw"])
+	assert.Equal(t, "[redacted]", completedFull.Output["secret"])
+	require.IsType(t, map[string]any{}, completedFull.Output["nested"])
+	assert.Equal(t, "[redacted]", completedFull.Output["nested"].(map[string]any)["apiKey"])
+	assert.Equal(t, "full result summary", completedFull.OutputSummary)
+	fullArtifacts, err := svc.ListProxyRunArtifacts(ctx, ownerID, fullRunID)
+	require.NoError(t, err)
+	require.Len(t, fullArtifacts, 1)
+	assert.Equal(t, "full-json", fullArtifacts[0].SourceArtifactID)
+	assert.Equal(t, "data", fullArtifacts[0].ArtifactType)
+	assert.Equal(t, "stored artifact content", fullArtifacts[0].Content["summary"])
+}
+
+func TestProxyRunRoutesAcrossMultipleHealthyNodesByLoad(t *testing.T) {
+	pool := setupRegistryBridgeDB(t)
+	svc := registry.NewService(pool)
+	ctx := context.Background()
+
+	ownerID := insertRegistryOwner(t, pool)
+	agentID := insertRegistryAgent(t, pool, ownerID)
+	nodeA, err := svc.CreateNode(ctx, ownerID, &registry.CreateNodeRequest{
+		NodeName: "Bridge A",
+		NodeType: "bridge_proxy",
+	})
+	require.NoError(t, err)
+	nodeB, err := svc.CreateNode(ctx, ownerID, &registry.CreateNodeRequest{
+		NodeName: "Bridge B",
+		NodeType: "bridge_proxy",
+	})
+	require.NoError(t, err)
+	_, err = svc.Heartbeat(ctx, nodeB.NodeSecret)
+	require.NoError(t, err)
+	_, err = svc.Heartbeat(ctx, nodeA.NodeSecret)
+	require.NoError(t, err)
+
+	listingA, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+		RegistryNodeID: nodeA.ID,
+		AgentID:        agentID.String(),
+		PayloadPolicy:  "store_run_summary",
+	})
+	require.NoError(t, err)
+	listingB, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+		CloudListingID: listingA.CloudListingID,
+		RegistryNodeID: nodeB.ID,
+		AgentID:        agentID.String(),
+		PayloadPolicy:  "store_run_summary",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, listingA.CloudListingID, listingB.CloudListingID)
+	assert.NotEqual(t, listingA.ID, listingB.ID)
+
+	first, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
+		CloudListingID: listingA.CloudListingID,
+		IdempotencyKey: "multi-" + uuid.NewString(),
+		Input: map[string]any{
+			"task": "first run keeps its node busy",
+		},
+		InputSummary: "first",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "pending", first.Status)
+
+	second, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
+		CloudListingID: listingA.CloudListingID,
+		IdempotencyKey: "multi-" + uuid.NewString(),
+		Input: map[string]any{
+			"task": "second run should route away from loaded node",
+		},
+		InputSummary: "second",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "pending", second.Status)
+	assert.NotEqual(t, first.RegistryNodeID, second.RegistryNodeID)
+	assert.Equal(t, first.CloudListingID, second.CloudListingID)
+
+	again, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
+		CloudListingID: listingA.CloudListingID,
+		IdempotencyKey: first.IdempotencyKey,
+		Input: map[string]any{
+			"task": "idempotent duplicate should keep the original node",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, again.ID)
+	assert.Equal(t, first.RegistryNodeID, again.RegistryNodeID)
+
+	claimByNode := map[string]*registry.ProxyRunResponse{}
+	for _, node := range []*registry.RegistryNodeResponse{nodeA, nodeB} {
+		claimed, err := svc.ClaimProxyRun(ctx, node.NodeSecret)
+		require.NoError(t, err)
+		require.NotNil(t, claimed)
+		claimByNode[node.ID] = claimed
+	}
+	assert.Equal(t, first.ID, claimByNode[first.RegistryNodeID].ID)
+	assert.Equal(t, second.ID, claimByNode[second.RegistryNodeID].ID)
+}
+
+func TestProxyRunRetryableFailureRequeues(t *testing.T) {
+	pool := setupRegistryBridgeDB(t)
+	svc := registry.NewService(pool)
+	ctx := context.Background()
+
+	ownerID := insertRegistryOwner(t, pool)
+	agentID := insertRegistryAgent(t, pool, ownerID)
+	node, err := svc.CreateNode(ctx, ownerID, &registry.CreateNodeRequest{
+		NodeName: "Retry Bridge",
+		NodeType: "bridge_proxy",
+	})
+	require.NoError(t, err)
+	listing, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+		RegistryNodeID: node.ID,
+		AgentID:        agentID.String(),
+		PayloadPolicy:  "metadata_only",
+	})
+	require.NoError(t, err)
+
+	proxyRun, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
+		CloudListingID: listing.CloudListingID,
+		IdempotencyKey: "retry-" + uuid.NewString(),
+		Input: map[string]any{
+			"task": "retry me once",
+		},
+	})
+	require.NoError(t, err)
+
+	firstClaim, err := svc.ClaimProxyRun(ctx, node.NodeSecret)
+	require.NoError(t, err)
+	require.NotNil(t, firstClaim)
+	assert.Equal(t, proxyRun.ID, firstClaim.ID)
+	assert.Equal(t, "retry me once", firstClaim.Input["task"])
+	assert.Equal(t, int32(1), firstClaim.AttemptCount)
+
+	runID, err := uuid.Parse(proxyRun.ID)
+	require.NoError(t, err)
+	requeued, err := svc.CompleteProxyRun(ctx, node.NodeSecret, runID, &registry.CompleteProxyRunRequest{
+		Status:       "failed",
+		ErrorCode:    "LOCAL_AGENT_UNREACHABLE",
+		ErrorMessage: "temporary network failure",
+		Retryable:    true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "pending", requeued.Status)
+	assert.Equal(t, int32(1), requeued.AttemptCount)
+	assert.Empty(t, requeued.FinishedAt)
+	assert.Equal(t, "LOCAL_AGENT_UNREACHABLE", requeued.ErrorCode)
+
+	secondClaim, err := svc.ClaimProxyRun(ctx, node.NodeSecret)
+	require.NoError(t, err)
+	require.NotNil(t, secondClaim)
+	assert.Equal(t, proxyRun.ID, secondClaim.ID)
+	assert.Equal(t, "retry me once", secondClaim.Input["task"])
+	assert.Equal(t, int32(2), secondClaim.AttemptCount)
+
+	completed, err := svc.CompleteProxyRun(ctx, node.NodeSecret, runID, &registry.CompleteProxyRunRequest{
+		Status: "success",
+		Output: map[string]any{
+			"summary": "completed after retry",
+		},
+		OutputSummary: "completed after retry",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "success", completed.Status)
+	assert.Equal(t, int32(2), completed.AttemptCount)
+	assert.Empty(t, completed.ErrorCode)
+	assert.Nil(t, completed.Output)
+
+	fetched, err := svc.GetProxyRun(ctx, ownerID, runID)
+	require.NoError(t, err)
+	assert.Equal(t, "success", fetched.Status)
+	assert.Equal(t, int32(2), fetched.AttemptCount)
+	assert.Nil(t, fetched.Input)
+	assert.Nil(t, fetched.Output)
+	var nodeInputStillStored bool
+	require.NoError(t, pool.QueryRow(ctx, `SELECT node_input IS NOT NULL FROM proxy_runs WHERE id=$1`, runID).Scan(&nodeInputStillStored))
+	assert.False(t, nodeInputStillStored)
 }

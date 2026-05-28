@@ -218,22 +218,33 @@ func (s *MarketService) GetAgentCardBySlug(ctx context.Context, slug string) (*A
 		})
 	}
 
+	a2aEndpoint := "/api/v1/a2a/agents/" + detail.Slug
 	return &AgentCardResponse{
-		Name:        detail.Name,
-		Description: detail.Description,
-		URL:         "/api/v1/run",
-		Version:     "v1",
+		Name:             detail.Name,
+		Description:      detail.Description,
+		URL:              a2aEndpoint,
+		Version:          "v1",
+		ProtocolVersion:  "1.0",
+		ProtocolVersions: []string{"0.3", "1.0"},
+		SupportedInterfaces: []AgentCardInterface{
+			{URL: a2aEndpoint, ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0"},
+			{URL: a2aEndpoint, ProtocolBinding: "HTTP+JSON", ProtocolVersion: "1.0"},
+			{URL: a2aEndpoint, ProtocolBinding: "JSONRPC", ProtocolVersion: "0.3"},
+		},
 		Provider: AgentCardProvider{
 			Organization: detail.Creator.DisplayName,
 		},
 		Capabilities: AgentCardCapabilities{
-			Streaming:         true,
-			PushNotifications: detail.ConnectionMode == ConnectionModeRuntimePull,
-			Delegation:        true,
+			Streaming:               true,
+			PushNotifications:       detail.ConnectionMode == ConnectionModeRuntimePull,
+			PushNotificationsLegacy: detail.ConnectionMode == ConnectionModeRuntimePull,
+			Delegation:              true,
 		},
-		DefaultInputModes:  []string{"application/json"},
-		DefaultOutputModes: []string{"application/json"},
-		Skills:             cardSkills,
+		DefaultInputModes:         []string{"application/json", "text/plain"},
+		DefaultOutputModes:        []string{"application/json", "text/plain"},
+		DefaultInputModesCurrent:  []string{"application/json", "text/plain"},
+		DefaultOutputModesCurrent: []string{"application/json", "text/plain"},
+		Skills:                    cardSkills,
 		Authentication: AgentCardAuth{
 			Schemes: []string{"Bearer"},
 			Scopes:  []string{"agents:run", "runs:read"},
@@ -247,8 +258,11 @@ func (s *MarketService) GetAgentCardBySlug(ctx context.Context, slug string) (*A
 			CertificationStatus:    detail.CertificationStatus,
 			VerifiedSkillCount:     detail.VerifiedSkillCount,
 			LatestBenchmarkBatchID: detail.LatestBenchmarkID,
-			InvocationEndpoint:     "/api/v1/run",
+			InvocationEndpoint:     a2aEndpoint,
+			StreamEndpoint:         a2aEndpoint + "/message:stream",
 			RunLookupEndpoint:      "/api/v1/runs/{run_id}",
+			TaskLookupEndpoint:     a2aEndpoint + "/tasks/{task_id}",
+			TaskSubscribeEndpoint:  a2aEndpoint + "/tasks/{task_id}:subscribe",
 			SkillIDs:               skillIDs,
 		},
 	}, nil

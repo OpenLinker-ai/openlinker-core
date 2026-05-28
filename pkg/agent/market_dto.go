@@ -94,17 +94,22 @@ type AgentDetailResponse struct {
 // It intentionally points clients at OpenLinker platform invocation endpoints
 // instead of exposing private endpoint secrets.
 type AgentCardResponse struct {
-	Name               string                 `json:"name"`
-	Description        string                 `json:"description"`
-	URL                string                 `json:"url"`
-	Version            string                 `json:"version"`
-	Provider           AgentCardProvider      `json:"provider"`
-	Capabilities       AgentCardCapabilities  `json:"capabilities"`
-	DefaultInputModes  []string               `json:"default_input_modes"`
-	DefaultOutputModes []string               `json:"default_output_modes"`
-	Skills             []AgentCardSkill       `json:"skills"`
-	Authentication     AgentCardAuth          `json:"authentication"`
-	OpenLinker         AgentCardOpenLinkerExt `json:"openlinker"`
+	Name                      string                 `json:"name"`
+	Description               string                 `json:"description"`
+	URL                       string                 `json:"url"`
+	Version                   string                 `json:"version"`
+	ProtocolVersion           string                 `json:"protocolVersion,omitempty"`
+	ProtocolVersions          []string               `json:"protocolVersions,omitempty"`
+	SupportedInterfaces       []AgentCardInterface   `json:"supportedInterfaces,omitempty"`
+	Provider                  AgentCardProvider      `json:"provider"`
+	Capabilities              AgentCardCapabilities  `json:"capabilities"`
+	DefaultInputModes         []string               `json:"default_input_modes"`
+	DefaultOutputModes        []string               `json:"default_output_modes"`
+	DefaultInputModesCurrent  []string               `json:"defaultInputModes,omitempty"`
+	DefaultOutputModesCurrent []string               `json:"defaultOutputModes,omitempty"`
+	Skills                    []AgentCardSkill       `json:"skills"`
+	Authentication            AgentCardAuth          `json:"authentication"`
+	OpenLinker                AgentCardOpenLinkerExt `json:"openlinker"`
 }
 
 type AgentCardProvider struct {
@@ -112,9 +117,17 @@ type AgentCardProvider struct {
 }
 
 type AgentCardCapabilities struct {
-	Streaming         bool `json:"streaming"`
-	PushNotifications bool `json:"push_notifications"`
-	Delegation        bool `json:"delegation"`
+	Streaming               bool `json:"streaming"`
+	PushNotifications       bool `json:"pushNotifications"`
+	PushNotificationsLegacy bool `json:"push_notifications"`
+	Delegation              bool `json:"delegation"`
+	ExtendedAgentCard       bool `json:"extendedAgentCard,omitempty"`
+}
+
+type AgentCardInterface struct {
+	URL             string `json:"url"`
+	ProtocolBinding string `json:"protocolBinding"`
+	ProtocolVersion string `json:"protocolVersion"`
 }
 
 type AgentCardSkill struct {
@@ -139,6 +152,9 @@ type AgentCardOpenLinkerExt struct {
 	VerifiedSkillCount     int32    `json:"verified_skill_count"`
 	LatestBenchmarkBatchID *string  `json:"latest_benchmark_batch_id,omitempty"`
 	InvocationEndpoint     string   `json:"invocation_endpoint"`
+	StreamEndpoint         string   `json:"stream_endpoint"`
 	RunLookupEndpoint      string   `json:"run_lookup_endpoint"`
+	TaskLookupEndpoint     string   `json:"task_lookup_endpoint"`
+	TaskSubscribeEndpoint  string   `json:"task_subscribe_endpoint"`
 	SkillIDs               []string `json:"skill_ids"`
 }

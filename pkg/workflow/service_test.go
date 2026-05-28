@@ -116,6 +116,454 @@ func TestWorkflowRunExecutesAgentNodesAndPersistsChildRuns(t *testing.T) {
 	require.Equal(t, 2, runCount)
 }
 
+func TestWorkflowRunExecutesIndependentBranchesInParallelAndAggregatesOutputs(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+
+	var mu sync.Mutex
+	active := 0
+	maxActive := 0
+	var inputs []map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req runtimemod.AgentRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+
+		mu.Lock()
+		active++
+		if active > maxActive {
+			maxActive = active
+		}
+		inputs = append(inputs, req.Input)
+		mu.Unlock()
+
+		nodeKey, _ := req.Input["node_key"].(string)
+		if nodeKey == "collect" || nodeKey == "analyze" {
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		mu.Lock()
+		active--
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		err := json.NewEncoder(w).Encode(map[string]interface{}{
+			"output": map[string]interface{}{
+				"step":         nodeKey,
+				"dependencies": req.Input["dependencies"],
+				"summary":      fmt.Sprintf("completed %v", nodeKey),
+			},
+		})
+		require.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	userID := insertWorkflowUser(t, pool, "wf-dag-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-dag-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
+
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		PlatformFeeRate:         0,
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	svc := workflow.NewService(pool, runtimeSvc)
+
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name:        "DAG workflow",
+		Description: "runs independent branches in parallel",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "collect", Title: "Collect", AgentID: agentID},
+			{Key: "analyze", Title: "Analyze", AgentID: agentID},
+			{Key: "synthesize", Title: "Synthesize", AgentID: agentID},
+		},
+		Edges: []map[string]interface{}{
+			{"from": "collect", "to": "synthesize"},
+			{"source": "analyze", "target": "synthesize"},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []map[string]interface{}{
+		{"from": "collect", "to": "synthesize"},
+		{"from": "analyze", "to": "synthesize"},
+	}, created.Edges)
+
+	run, err := svc.RunWorkflow(context.Background(), userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"topic": "parallel workflow validation"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "success", run.Status)
+	require.Len(t, run.Steps, 3)
+	require.Equal(t, "collect", run.Steps[0].NodeKey)
+	require.Equal(t, "analyze", run.Steps[1].NodeKey)
+	require.Equal(t, "synthesize", run.Steps[2].NodeKey)
+	require.Equal(t, "synthesize", run.Output["step"])
+
+	terminalNodes, ok := run.Output["terminal_nodes"].([]interface{})
+	require.True(t, ok)
+	require.Equal(t, "synthesize", terminalNodes[0])
+	workflowOutputs, ok := run.Output["workflow_outputs"].(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, workflowOutputs, "collect")
+	require.Contains(t, workflowOutputs, "analyze")
+	require.Contains(t, workflowOutputs, "synthesize")
+
+	deps, ok := run.Steps[2].Input["dependencies"].(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, deps, "collect")
+	require.Contains(t, deps, "analyze")
+
+	mu.Lock()
+	require.GreaterOrEqual(t, maxActive, 2)
+	require.Len(t, inputs, 3)
+	mu.Unlock()
+}
+
+func TestStartWorkflowRunQueuesAndWorkerExecutes(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req runtimemod.AgentRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+			"output": map[string]interface{}{
+				"step":    req.Input["node_key"],
+				"summary": "async workflow done",
+			},
+		}))
+	}))
+	t.Cleanup(server.Close)
+
+	userID := insertWorkflowUser(t, pool, "wf-async-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-async-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
+
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		PlatformFeeRate:         0,
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	svc := workflow.NewService(pool, runtimeSvc)
+
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Async workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "worker", Title: "Worker", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+
+	queued, err := svc.StartWorkflowRun(context.Background(), userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input:       map[string]interface{}{"topic": "async"},
+		MaxAttempts: 2,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "pending", queued.Status)
+	require.Equal(t, int32(0), queued.AttemptCount)
+	require.Equal(t, int32(2), queued.MaxAttempts)
+	require.Empty(t, queued.Steps)
+
+	claimed, err := svc.ClaimAndRunPendingWorkflow(context.Background())
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	done, err := svc.GetWorkflowRun(context.Background(), userID, uuid.MustParse(queued.ID))
+	require.NoError(t, err)
+	require.Equal(t, "success", done.Status)
+	require.Equal(t, int32(1), done.AttemptCount)
+	require.Len(t, done.Steps, 1)
+	require.Equal(t, "success", done.Steps[0].Status)
+
+	history, err := svc.ListWorkflowRuns(context.Background(), userID, uuid.MustParse(created.ID), 10)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), history.Total)
+	require.Len(t, history.Items, 1)
+	require.Equal(t, queued.ID, history.Items[0].ID)
+}
+
+func TestPauseResumeWorkflowRunControlsWorkerClaim(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req runtimemod.AgentRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+			"output": map[string]interface{}{
+				"step":    req.Input["node_key"],
+				"summary": "resumed workflow done",
+			},
+		}))
+	}))
+	t.Cleanup(server.Close)
+
+	userID := insertWorkflowUser(t, pool, "wf-pause-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-pause-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		PlatformFeeRate:         0,
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	svc := workflow.NewService(pool, runtimeSvc)
+
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Pausable workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "worker", Title: "Worker", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+
+	queued, err := svc.StartWorkflowRun(context.Background(), userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"topic": "pause"},
+	})
+	require.NoError(t, err)
+	paused, err := svc.PauseWorkflowRun(context.Background(), userID, uuid.MustParse(queued.ID))
+	require.NoError(t, err)
+	require.Equal(t, "paused", paused.Status)
+
+	claimed, err := svc.ClaimAndRunPendingWorkflow(context.Background())
+	require.NoError(t, err)
+	require.False(t, claimed)
+
+	resumed, err := svc.ResumeWorkflowRun(context.Background(), userID, uuid.MustParse(queued.ID))
+	require.NoError(t, err)
+	require.Equal(t, "pending", resumed.Status)
+	require.NotEmpty(t, resumed.NextRetryAt)
+
+	claimed, err = svc.ClaimAndRunPendingWorkflow(context.Background())
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	done, err := svc.GetWorkflowRun(context.Background(), userID, uuid.MustParse(queued.ID))
+	require.NoError(t, err)
+	require.Equal(t, "success", done.Status)
+	require.Equal(t, int32(1), done.AttemptCount)
+	require.Len(t, done.Steps, 1)
+}
+
+func TestCancelRunningWorkflowRunPreventsSuccessOverwrite(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+
+	agentCalled := make(chan struct{}, 1)
+	releaseAgent := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseAgent) }) }
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req runtimemod.AgentRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		select {
+		case agentCalled <- struct{}{}:
+		default:
+		}
+		<-releaseAgent
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+			"output": map[string]interface{}{
+				"step":    req.Input["node_key"],
+				"summary": "late success should not overwrite cancel",
+			},
+		}))
+	}))
+	t.Cleanup(release)
+	t.Cleanup(server.Close)
+
+	userID := insertWorkflowUser(t, pool, "wf-cancel-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-cancel-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		PlatformFeeRate:         0,
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	svc := workflow.NewService(pool, runtimeSvc)
+
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Cancelable workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "worker", Title: "Worker", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+	queued, err := svc.StartWorkflowRun(context.Background(), userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"topic": "cancel"},
+	})
+	require.NoError(t, err)
+
+	workerDone := make(chan error, 1)
+	go func() {
+		_, err := svc.ClaimAndRunPendingWorkflow(context.Background())
+		workerDone <- err
+	}()
+
+	select {
+	case <-agentCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("workflow worker did not call agent")
+	}
+
+	canceled, err := svc.CancelWorkflowRun(context.Background(), userID, uuid.MustParse(queued.ID))
+	require.NoError(t, err)
+	require.Equal(t, "canceled", canceled.Status)
+	release()
+
+	select {
+	case err := <-workerDone:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("workflow worker did not finish after cancel")
+	}
+
+	final, err := svc.GetWorkflowRun(context.Background(), userID, uuid.MustParse(queued.ID))
+	require.NoError(t, err)
+	require.Equal(t, "canceled", final.Status)
+	require.Equal(t, "workflow run canceled by user", final.Error)
+	require.Len(t, final.Steps, 1)
+	require.Equal(t, "success", final.Steps[0].Status)
+
+	claimed, err := svc.ClaimAndRunPendingWorkflow(context.Background())
+	require.NoError(t, err)
+	require.False(t, claimed)
+}
+
+func TestWorkflowWorkerRequeuesStaleRunAndCleansRetrySteps(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req runtimemod.AgentRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+			"output": map[string]interface{}{
+				"step":    req.Input["node_key"],
+				"summary": "retry workflow done",
+			},
+		}))
+	}))
+	t.Cleanup(server.Close)
+
+	userID := insertWorkflowUser(t, pool, "wf-retry-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-retry-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
+
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		PlatformFeeRate:         0,
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	svc := workflow.NewService(pool, runtimeSvc)
+
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Recover stale workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "worker", Title: "Worker", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+
+	queued, err := svc.StartWorkflowRun(context.Background(), userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"topic": "retry"},
+	})
+	require.NoError(t, err)
+
+	nodeID := uuid.MustParse(created.Nodes[0].ID)
+	runID := uuid.MustParse(queued.ID)
+	_, err = pool.Exec(context.Background(), `
+		UPDATE workflow_runs
+		SET status='running', attempt_count=1, claimed_at=NOW() - INTERVAL '1 hour'
+		WHERE id=$1`, runID)
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(), `
+		INSERT INTO workflow_run_steps (workflow_run_id, workflow_node_id, node_key, agent_id, status, input, sequence)
+		VALUES ($1, $2, 'worker', $3, 'running', '{}'::jsonb, 0)`, runID, nodeID, agentID)
+	require.NoError(t, err)
+
+	requeued, err := svc.RequeueStaleWorkflowRuns(context.Background(), 0)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), requeued)
+
+	recovered, err := svc.GetWorkflowRun(context.Background(), userID, runID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", recovered.Status)
+	require.Equal(t, int32(1), recovered.AttemptCount)
+	require.Equal(t, "workflow worker stale claim timed out", recovered.LastWorkerError)
+	require.Len(t, recovered.Steps, 1)
+
+	claimed, err := svc.ClaimAndRunPendingWorkflow(context.Background())
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	done, err := svc.GetWorkflowRun(context.Background(), userID, runID)
+	require.NoError(t, err)
+	require.Equal(t, "success", done.Status)
+	require.Equal(t, int32(2), done.AttemptCount)
+	require.Len(t, done.Steps, 1)
+	require.Equal(t, "success", done.Steps[0].Status)
+}
+
+func TestRetryWorkflowRunCreatesNewPendingRun(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+
+	userID := insertWorkflowUser(t, pool, "wf-manual-retry-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-manual-retry-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, "http://127.0.0.1:18080")
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		PlatformFeeRate:         0,
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	svc := workflow.NewService(pool, runtimeSvc)
+
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Manual retry workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "worker", Title: "Worker", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+
+	queued, err := svc.StartWorkflowRun(context.Background(), userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input:       map[string]interface{}{"topic": "manual retry"},
+		MaxAttempts: 4,
+	})
+	require.NoError(t, err)
+	msg := "original failure"
+	_, err = pool.Exec(context.Background(),
+		`UPDATE workflow_runs SET status='failed', error_message=$2, finished_at=NOW() WHERE id=$1`,
+		uuid.MustParse(queued.ID), msg)
+	require.NoError(t, err)
+
+	retry, err := svc.RetryWorkflowRun(context.Background(), userID, uuid.MustParse(queued.ID))
+	require.NoError(t, err)
+	require.Equal(t, "pending", retry.Status)
+	require.NotEqual(t, queued.ID, retry.ID)
+	require.Equal(t, int32(4), retry.MaxAttempts)
+	require.Equal(t, "manual retry", retry.Input["topic"])
+}
+
+func TestCreateWorkflowRejectsCyclicEdges(t *testing.T) {
+	svc := workflow.NewService(nil, nil)
+	agentID := uuid.New()
+	_, err := svc.CreateWorkflow(context.Background(), uuid.New(), &workflow.CreateWorkflowRequest{
+		Name: "Cyclic workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "a", AgentID: agentID},
+			{Key: "b", AgentID: agentID},
+		},
+		Edges: []map[string]interface{}{
+			{"from": "a", "to": "b"},
+			{"from": "b", "to": "a"},
+		},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "存在环")
+}
+
 func setupWorkflowTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")

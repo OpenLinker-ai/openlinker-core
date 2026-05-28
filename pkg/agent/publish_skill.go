@@ -55,9 +55,20 @@ OpenLinker calls your endpoint with:
   "metadata": { "source": "web" },
   "run_id": "run_uuid",
   "parent_run_id": "optional_parent_run_uuid",
-  "caller_agent_id": "optional_caller_agent_uuid"
+  "caller_agent_id": "optional_caller_agent_uuid",
+  "a2a": {
+    "current_run_id": "run_uuid",
+    "call_agent_endpoint": "https://api.openlinker.ai/api/v1/agent-runtime/call-agent",
+    "call_agent_method": "POST",
+    "runtime_token_type": "rt_live",
+    "runtime_scopes": ["agent:call"]
+  }
 }
 ` + "```" + `
+
+To delegate to another Agent, call a2a.call_agent_endpoint with your Runtime Token
+and pass current_run_id from a2a.current_run_id. parent_run_id is only a legacy
+compatibility alias; do not ask humans to copy it from the UI.
 
 Return success:
 

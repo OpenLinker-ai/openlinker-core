@@ -252,7 +252,15 @@ func scanCloudListingLink(row interface {
 		&l.LocalAgentID,
 		&l.RoutingMode,
 		&l.PayloadPolicy,
+		&l.PayloadRedactionKeys,
 		&l.SyncStatus,
+		&l.SyncedAgentSlug,
+		&l.SyncedAgentName,
+		&l.SyncedAgentDescription,
+		&l.SyncedAgentTags,
+		&l.SyncedAvailabilityStatus,
+		&l.MetadataSyncedAt,
+		&l.MetadataSyncError,
 		&l.LastSyncAt,
 		&l.CreatedAt,
 		&l.UpdatedAt,
@@ -261,35 +269,68 @@ func scanCloudListingLink(row interface {
 
 const upsertCloudListingLink = `-- name: UpsertCloudListingLink :one
 INSERT INTO cloud_listing_links (
-    registry_node_id, local_agent_id, routing_mode, payload_policy,
+    cloud_listing_id, registry_node_id, local_agent_id, routing_mode, payload_policy, payload_redaction_keys,
     sync_status, last_sync_at
 ) VALUES (
-    $1, $2, $3, $4,
+    $1, $2, $3, $4, $5, $6,
     'linked', NOW()
 )
 ON CONFLICT (registry_node_id, local_agent_id) DO UPDATE
 SET routing_mode = EXCLUDED.routing_mode,
     payload_policy = EXCLUDED.payload_policy,
+    payload_redaction_keys = EXCLUDED.payload_redaction_keys,
     sync_status = 'linked',
     last_sync_at = NOW()
 RETURNING id, cloud_listing_id, registry_node_id, local_agent_id,
-          routing_mode, payload_policy, sync_status,
+          routing_mode, payload_policy, payload_redaction_keys, sync_status,
+          synced_agent_slug, synced_agent_name, synced_agent_description,
+          synced_agent_tags, synced_availability_status,
+          metadata_synced_at, metadata_sync_error,
           last_sync_at, created_at, updated_at`
 
 type UpsertCloudListingLinkParams struct {
-	RegistryNodeID uuid.UUID `db:"registry_node_id" json:"registry_node_id"`
-	LocalAgentID   uuid.UUID `db:"local_agent_id" json:"local_agent_id"`
-	RoutingMode    string    `db:"routing_mode" json:"routing_mode"`
-	PayloadPolicy  string    `db:"payload_policy" json:"payload_policy"`
+	CloudListingID       uuid.UUID `db:"cloud_listing_id" json:"cloud_listing_id"`
+	RegistryNodeID       uuid.UUID `db:"registry_node_id" json:"registry_node_id"`
+	LocalAgentID         uuid.UUID `db:"local_agent_id" json:"local_agent_id"`
+	RoutingMode          string    `db:"routing_mode" json:"routing_mode"`
+	PayloadPolicy        string    `db:"payload_policy" json:"payload_policy"`
+	PayloadRedactionKeys []string  `db:"payload_redaction_keys" json:"payload_redaction_keys"`
 }
 
 func (q *Queries) UpsertCloudListingLink(ctx context.Context, arg UpsertCloudListingLinkParams) (CloudListingLink, error) {
 	row := q.db.QueryRow(ctx, upsertCloudListingLink,
+		arg.CloudListingID,
 		arg.RegistryNodeID,
 		arg.LocalAgentID,
 		arg.RoutingMode,
 		arg.PayloadPolicy,
+		arg.PayloadRedactionKeys,
 	)
+	var l CloudListingLink
+	err := scanCloudListingLink(row, &l)
+	return l, err
+}
+
+const getCloudListingLinkForOwner = `-- name: GetCloudListingLinkForOwner :one
+SELECT l.id, l.cloud_listing_id, l.registry_node_id, l.local_agent_id,
+       l.routing_mode, l.payload_policy, l.payload_redaction_keys, l.sync_status,
+       l.synced_agent_slug, l.synced_agent_name, l.synced_agent_description,
+       l.synced_agent_tags, l.synced_availability_status,
+       l.metadata_synced_at, l.metadata_sync_error,
+       l.last_sync_at, l.created_at, l.updated_at
+FROM cloud_listing_links l
+JOIN registry_nodes n ON n.id = l.registry_node_id
+WHERE l.cloud_listing_id = $1
+  AND n.owner_user_id = $2
+LIMIT 1`
+
+type GetCloudListingLinkForOwnerParams struct {
+	CloudListingID uuid.UUID `db:"cloud_listing_id" json:"cloud_listing_id"`
+	OwnerUserID    uuid.UUID `db:"owner_user_id" json:"owner_user_id"`
+}
+
+func (q *Queries) GetCloudListingLinkForOwner(ctx context.Context, arg GetCloudListingLinkForOwnerParams) (CloudListingLink, error) {
+	row := q.db.QueryRow(ctx, getCloudListingLinkForOwner, arg.CloudListingID, arg.OwnerUserID)
 	var l CloudListingLink
 	err := scanCloudListingLink(row, &l)
 	return l, err
@@ -297,8 +338,14 @@ func (q *Queries) UpsertCloudListingLink(ctx context.Context, arg UpsertCloudLis
 
 const listCloudListingLinksByOwner = `-- name: ListCloudListingLinksByOwner :many
 SELECT l.id, l.cloud_listing_id, l.registry_node_id, n.node_name,
-       l.local_agent_id, a.slug AS agent_slug, a.name AS agent_name,
-       l.routing_mode, l.payload_policy, l.sync_status,
+       l.local_agent_id,
+       COALESCE(NULLIF(l.synced_agent_slug, ''), a.slug) AS agent_slug,
+       COALESCE(NULLIF(l.synced_agent_name, ''), a.name) AS agent_name,
+       l.routing_mode, l.payload_policy, l.payload_redaction_keys, l.sync_status,
+       l.synced_agent_description AS agent_description,
+       l.synced_agent_tags AS agent_tags,
+       l.synced_availability_status AS availability_status,
+       l.metadata_synced_at, l.metadata_sync_error,
        l.last_sync_at, l.created_at, l.updated_at
 FROM cloud_listing_links l
 JOIN registry_nodes n ON n.id = l.registry_node_id
@@ -307,19 +354,25 @@ WHERE n.owner_user_id = $1
 ORDER BY l.created_at DESC`
 
 type ListCloudListingLinksByOwnerRow struct {
-	ID             uuid.UUID `db:"id" json:"id"`
-	CloudListingID uuid.UUID `db:"cloud_listing_id" json:"cloud_listing_id"`
-	RegistryNodeID uuid.UUID `db:"registry_node_id" json:"registry_node_id"`
-	NodeName       string    `db:"node_name" json:"node_name"`
-	LocalAgentID   uuid.UUID `db:"local_agent_id" json:"local_agent_id"`
-	AgentSlug      string    `db:"agent_slug" json:"agent_slug"`
-	AgentName      string    `db:"agent_name" json:"agent_name"`
-	RoutingMode    string    `db:"routing_mode" json:"routing_mode"`
-	PayloadPolicy  string    `db:"payload_policy" json:"payload_policy"`
-	SyncStatus     string    `db:"sync_status" json:"sync_status"`
-	LastSyncAt     time.Time `db:"last_sync_at" json:"last_sync_at"`
-	CreatedAt      time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt      time.Time `db:"updated_at" json:"updated_at"`
+	ID                   uuid.UUID  `db:"id" json:"id"`
+	CloudListingID       uuid.UUID  `db:"cloud_listing_id" json:"cloud_listing_id"`
+	RegistryNodeID       uuid.UUID  `db:"registry_node_id" json:"registry_node_id"`
+	NodeName             string     `db:"node_name" json:"node_name"`
+	LocalAgentID         uuid.UUID  `db:"local_agent_id" json:"local_agent_id"`
+	AgentSlug            string     `db:"agent_slug" json:"agent_slug"`
+	AgentName            string     `db:"agent_name" json:"agent_name"`
+	RoutingMode          string     `db:"routing_mode" json:"routing_mode"`
+	PayloadPolicy        string     `db:"payload_policy" json:"payload_policy"`
+	PayloadRedactionKeys []string   `db:"payload_redaction_keys" json:"payload_redaction_keys"`
+	SyncStatus           string     `db:"sync_status" json:"sync_status"`
+	AgentDescription     string     `db:"agent_description" json:"agent_description"`
+	AgentTags            []string   `db:"agent_tags" json:"agent_tags"`
+	AvailabilityStatus   string     `db:"availability_status" json:"availability_status"`
+	MetadataSyncedAt     *time.Time `db:"metadata_synced_at" json:"metadata_synced_at"`
+	MetadataSyncError    *string    `db:"metadata_sync_error" json:"metadata_sync_error"`
+	LastSyncAt           time.Time  `db:"last_sync_at" json:"last_sync_at"`
+	CreatedAt            time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt            time.Time  `db:"updated_at" json:"updated_at"`
 }
 
 func (q *Queries) ListCloudListingLinksByOwner(ctx context.Context, ownerUserID uuid.UUID) ([]ListCloudListingLinksByOwnerRow, error) {
@@ -341,7 +394,13 @@ func (q *Queries) ListCloudListingLinksByOwner(ctx context.Context, ownerUserID 
 			&l.AgentName,
 			&l.RoutingMode,
 			&l.PayloadPolicy,
+			&l.PayloadRedactionKeys,
 			&l.SyncStatus,
+			&l.AgentDescription,
+			&l.AgentTags,
+			&l.AvailabilityStatus,
+			&l.MetadataSyncedAt,
+			&l.MetadataSyncError,
 			&l.LastSyncAt,
 			&l.CreatedAt,
 			&l.UpdatedAt,
@@ -351,6 +410,55 @@ func (q *Queries) ListCloudListingLinksByOwner(ctx context.Context, ownerUserID 
 		items = append(items, l)
 	}
 	return items, rows.Err()
+}
+
+const getCloudListingLinkRowForOwner = `-- name: GetCloudListingLinkRowForOwner :one
+SELECT l.id, l.cloud_listing_id, l.registry_node_id, n.node_name,
+       l.local_agent_id,
+       COALESCE(NULLIF(l.synced_agent_slug, ''), a.slug) AS agent_slug,
+       COALESCE(NULLIF(l.synced_agent_name, ''), a.name) AS agent_name,
+       l.routing_mode, l.payload_policy, l.payload_redaction_keys, l.sync_status,
+       l.synced_agent_description AS agent_description,
+       l.synced_agent_tags AS agent_tags,
+       l.synced_availability_status AS availability_status,
+       l.metadata_synced_at, l.metadata_sync_error,
+       l.last_sync_at, l.created_at, l.updated_at
+FROM cloud_listing_links l
+JOIN registry_nodes n ON n.id = l.registry_node_id
+JOIN agents a ON a.id = l.local_agent_id
+WHERE l.id = $1
+  AND n.owner_user_id = $2`
+
+type GetCloudListingLinkRowForOwnerParams struct {
+	ID          uuid.UUID `db:"id" json:"id"`
+	OwnerUserID uuid.UUID `db:"owner_user_id" json:"owner_user_id"`
+}
+
+func (q *Queries) GetCloudListingLinkRowForOwner(ctx context.Context, arg GetCloudListingLinkRowForOwnerParams) (ListCloudListingLinksByOwnerRow, error) {
+	row := q.db.QueryRow(ctx, getCloudListingLinkRowForOwner, arg.ID, arg.OwnerUserID)
+	var l ListCloudListingLinksByOwnerRow
+	err := row.Scan(
+		&l.ID,
+		&l.CloudListingID,
+		&l.RegistryNodeID,
+		&l.NodeName,
+		&l.LocalAgentID,
+		&l.AgentSlug,
+		&l.AgentName,
+		&l.RoutingMode,
+		&l.PayloadPolicy,
+		&l.PayloadRedactionKeys,
+		&l.SyncStatus,
+		&l.AgentDescription,
+		&l.AgentTags,
+		&l.AvailabilityStatus,
+		&l.MetadataSyncedAt,
+		&l.MetadataSyncError,
+		&l.LastSyncAt,
+		&l.CreatedAt,
+		&l.UpdatedAt,
+	)
+	return l, err
 }
 
 const updateCloudListingLinkStatusForOwner = `-- name: UpdateCloudListingLinkStatusForOwner :one
@@ -364,8 +472,14 @@ WHERE l.cloud_listing_id = $1
   AND n.owner_user_id = $2
   AND ($3 <> 'linked' OR n.revoked_at IS NULL)
 RETURNING l.id, l.cloud_listing_id, l.registry_node_id, n.node_name,
-          l.local_agent_id, a.slug AS agent_slug, a.name AS agent_name,
-          l.routing_mode, l.payload_policy, l.sync_status,
+          l.local_agent_id,
+          COALESCE(NULLIF(l.synced_agent_slug, ''), a.slug) AS agent_slug,
+          COALESCE(NULLIF(l.synced_agent_name, ''), a.name) AS agent_name,
+          l.routing_mode, l.payload_policy, l.payload_redaction_keys, l.sync_status,
+          l.synced_agent_description AS agent_description,
+          l.synced_agent_tags AS agent_tags,
+          l.synced_availability_status AS availability_status,
+          l.metadata_synced_at, l.metadata_sync_error,
           l.last_sync_at, l.created_at, l.updated_at`
 
 type UpdateCloudListingLinkStatusForOwnerParams struct {
@@ -387,7 +501,13 @@ func (q *Queries) UpdateCloudListingLinkStatusForOwner(ctx context.Context, arg 
 		&l.AgentName,
 		&l.RoutingMode,
 		&l.PayloadPolicy,
+		&l.PayloadRedactionKeys,
 		&l.SyncStatus,
+		&l.AgentDescription,
+		&l.AgentTags,
+		&l.AvailabilityStatus,
+		&l.MetadataSyncedAt,
+		&l.MetadataSyncError,
 		&l.LastSyncAt,
 		&l.CreatedAt,
 		&l.UpdatedAt,
@@ -395,15 +515,123 @@ func (q *Queries) UpdateCloudListingLinkStatusForOwner(ctx context.Context, arg 
 	return l, err
 }
 
+const syncCloudListingMetadataForOwner = `-- name: SyncCloudListingMetadataForOwner :one
+UPDATE cloud_listing_links l
+SET synced_agent_slug = a.slug,
+    synced_agent_name = a.name,
+    synced_agent_description = a.description,
+    synced_agent_tags = a.tags,
+    synced_availability_status = COALESCE(av.availability_status, 'unknown'),
+    metadata_synced_at = NOW(),
+    metadata_sync_error = NULL,
+    last_sync_at = NOW()
+FROM registry_nodes n, agents a
+LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
+WHERE l.cloud_listing_id = $1
+  AND l.registry_node_id = n.id
+  AND a.id = l.local_agent_id
+  AND n.owner_user_id = $2
+  AND n.revoked_at IS NULL
+RETURNING l.id, l.cloud_listing_id, l.registry_node_id, n.node_name,
+          l.local_agent_id,
+          l.synced_agent_slug AS agent_slug,
+          l.synced_agent_name AS agent_name,
+          l.routing_mode, l.payload_policy, l.payload_redaction_keys, l.sync_status,
+          l.synced_agent_description AS agent_description,
+          l.synced_agent_tags AS agent_tags,
+          l.synced_availability_status AS availability_status,
+          l.metadata_synced_at, l.metadata_sync_error,
+          l.last_sync_at, l.created_at, l.updated_at`
+
+type SyncCloudListingMetadataForOwnerParams struct {
+	CloudListingID uuid.UUID `db:"cloud_listing_id" json:"cloud_listing_id"`
+	OwnerUserID    uuid.UUID `db:"owner_user_id" json:"owner_user_id"`
+}
+
+func (q *Queries) SyncCloudListingMetadataForOwner(ctx context.Context, arg SyncCloudListingMetadataForOwnerParams) (ListCloudListingLinksByOwnerRow, error) {
+	row := q.db.QueryRow(ctx, syncCloudListingMetadataForOwner, arg.CloudListingID, arg.OwnerUserID)
+	var l ListCloudListingLinksByOwnerRow
+	err := row.Scan(
+		&l.ID,
+		&l.CloudListingID,
+		&l.RegistryNodeID,
+		&l.NodeName,
+		&l.LocalAgentID,
+		&l.AgentSlug,
+		&l.AgentName,
+		&l.RoutingMode,
+		&l.PayloadPolicy,
+		&l.PayloadRedactionKeys,
+		&l.SyncStatus,
+		&l.AgentDescription,
+		&l.AgentTags,
+		&l.AvailabilityStatus,
+		&l.MetadataSyncedAt,
+		&l.MetadataSyncError,
+		&l.LastSyncAt,
+		&l.CreatedAt,
+		&l.UpdatedAt,
+	)
+	return l, err
+}
+
+const syncCloudListingMetadataByNode = `-- name: SyncCloudListingMetadataByNode :one
+WITH synced AS (
+    UPDATE cloud_listing_links l
+    SET synced_agent_slug = a.slug,
+        synced_agent_name = a.name,
+        synced_agent_description = a.description,
+        synced_agent_tags = a.tags,
+        synced_availability_status = COALESCE(av.availability_status, 'unknown'),
+        metadata_synced_at = NOW(),
+        metadata_sync_error = NULL,
+        last_sync_at = NOW()
+    FROM agents a
+    LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
+    WHERE l.registry_node_id = $1
+      AND a.id = l.local_agent_id
+      AND l.sync_status IN ('linked', 'paused')
+    RETURNING l.id
+)
+SELECT COUNT(*)::int AS total
+FROM synced`
+
+func (q *Queries) SyncCloudListingMetadataByNode(ctx context.Context, registryNodeID uuid.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, syncCloudListingMetadataByNode, registryNodeID)
+	var total int32
+	err := row.Scan(&total)
+	return total, err
+}
+
 const getCloudListingLinkForProxyRun = `-- name: GetCloudListingLinkForProxyRun :one
 SELECT l.id, l.cloud_listing_id, l.registry_node_id, l.local_agent_id,
-       l.routing_mode, l.payload_policy, l.sync_status,
+       l.routing_mode, l.payload_policy, l.payload_redaction_keys, l.sync_status,
+       l.synced_agent_slug, l.synced_agent_name, l.synced_agent_description,
+       l.synced_agent_tags, l.synced_availability_status,
+       l.metadata_synced_at, l.metadata_sync_error,
        l.last_sync_at, l.created_at, l.updated_at
 FROM cloud_listing_links l
 JOIN registry_nodes n ON n.id = l.registry_node_id
+LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS active_run_count
+    FROM proxy_runs p
+    WHERE p.registry_node_id = n.id
+      AND p.status IN ('pending', 'claimed')
+) load ON TRUE
 WHERE l.cloud_listing_id = $1
   AND l.sync_status = 'linked'
-  AND n.revoked_at IS NULL`
+  AND l.routing_mode = 'pull_proxy'
+  AND n.revoked_at IS NULL
+ORDER BY
+  CASE
+    WHEN n.heartbeat_status = 'healthy' THEN 0
+    WHEN n.heartbeat_status = 'unknown' THEN 1
+    ELSE 2
+  END,
+  COALESCE(load.active_run_count, 0) ASC,
+  n.last_heartbeat_at DESC NULLS LAST,
+  l.created_at ASC
+LIMIT 1`
 
 func (q *Queries) GetCloudListingLinkForProxyRun(ctx context.Context, cloudListingID uuid.UUID) (CloudListingLink, error) {
 	row := q.db.QueryRow(ctx, getCloudListingLinkForProxyRun, cloudListingID)
@@ -426,12 +654,16 @@ func scanProxyRun(row interface {
 		&r.IdempotencyKey,
 		&r.Status,
 		&r.PayloadPolicy,
+		&r.PayloadRedactionKeys,
 		&r.Input,
 		&r.InputSummary,
 		&r.Output,
 		&r.OutputSummary,
 		&r.ErrorCode,
 		&r.ErrorMessage,
+		&r.AttemptCount,
+		&r.MaxAttempts,
+		&r.NextRetryAt,
 		&r.ClaimedAt,
 		&r.FinishedAt,
 		&r.CreatedAt,
@@ -441,61 +673,75 @@ func scanProxyRun(row interface {
 
 const createProxyRun = `-- name: CreateProxyRun :one
 WITH link AS (
-    SELECT l.id, l.cloud_listing_id, l.registry_node_id, l.local_agent_id, l.payload_policy
+    SELECT l.id, l.cloud_listing_id, l.registry_node_id, l.local_agent_id, l.payload_policy,
+           l.payload_redaction_keys
     FROM cloud_listing_links l
     JOIN registry_nodes n ON n.id = l.registry_node_id
     WHERE l.cloud_listing_id = $1
+      AND l.id = $2
       AND l.sync_status = 'linked'
+      AND l.routing_mode = 'pull_proxy'
       AND n.revoked_at IS NULL
 ),
 inserted AS (
     INSERT INTO proxy_runs (
         cloud_listing_link_id, cloud_listing_id, registry_node_id, local_agent_id,
-        requesting_user_id, idempotency_key, payload_policy, input, input_summary
+        requesting_user_id, idempotency_key, payload_policy, payload_redaction_keys,
+        input, input_summary, node_input
     )
     SELECT id, cloud_listing_id, registry_node_id, local_agent_id,
-           $2, $3, payload_policy, $4::jsonb, $5
+           $3, $4, payload_policy, payload_redaction_keys, $5::jsonb, $6, $7::jsonb
     FROM link
-    ON CONFLICT (registry_node_id, idempotency_key) DO NOTHING
+    ON CONFLICT (cloud_listing_id, idempotency_key) DO NOTHING
     RETURNING id, cloud_run_id, cloud_listing_link_id, cloud_listing_id,
               registry_node_id, local_agent_id, requesting_user_id,
-              idempotency_key, status, payload_policy, input, input_summary,
+              idempotency_key, status, payload_policy, payload_redaction_keys,
+              input, input_summary,
               output, output_summary, error_code, error_message,
+              attempt_count, max_attempts, next_retry_at,
               claimed_at, finished_at, created_at, updated_at
 )
 SELECT id, cloud_run_id, cloud_listing_link_id, cloud_listing_id,
        registry_node_id, local_agent_id, requesting_user_id,
-       idempotency_key, status, payload_policy, input, input_summary,
+       idempotency_key, status, payload_policy, payload_redaction_keys,
+       input, input_summary,
        output, output_summary, error_code, error_message,
+       attempt_count, max_attempts, next_retry_at,
        claimed_at, finished_at, created_at, updated_at
 FROM inserted
 UNION ALL
 SELECT p.id, p.cloud_run_id, p.cloud_listing_link_id, p.cloud_listing_id,
        p.registry_node_id, p.local_agent_id, p.requesting_user_id,
-       p.idempotency_key, p.status, p.payload_policy, p.input, p.input_summary,
+       p.idempotency_key, p.status, p.payload_policy, p.payload_redaction_keys,
+       p.input, p.input_summary,
        p.output, p.output_summary, p.error_code, p.error_message,
+       p.attempt_count, p.max_attempts, p.next_retry_at,
        p.claimed_at, p.finished_at, p.created_at, p.updated_at
 FROM proxy_runs p
-JOIN link l ON l.registry_node_id = p.registry_node_id
-WHERE p.idempotency_key = $3
+WHERE p.cloud_listing_id = $1
+  AND p.idempotency_key = $4
   AND NOT EXISTS (SELECT 1 FROM inserted)
 LIMIT 1`
 
 type CreateProxyRunParams struct {
-	CloudListingID   uuid.UUID `db:"cloud_listing_id" json:"cloud_listing_id"`
-	RequestingUserID uuid.UUID `db:"requesting_user_id" json:"requesting_user_id"`
-	IdempotencyKey   string    `db:"idempotency_key" json:"idempotency_key"`
-	Input            []byte    `db:"input" json:"input"`
-	InputSummary     *string   `db:"input_summary" json:"input_summary"`
+	CloudListingID     uuid.UUID `db:"cloud_listing_id" json:"cloud_listing_id"`
+	CloudListingLinkID uuid.UUID `db:"cloud_listing_link_id" json:"cloud_listing_link_id"`
+	RequestingUserID   uuid.UUID `db:"requesting_user_id" json:"requesting_user_id"`
+	IdempotencyKey     string    `db:"idempotency_key" json:"idempotency_key"`
+	Input              []byte    `db:"input" json:"input"`
+	InputSummary       *string   `db:"input_summary" json:"input_summary"`
+	NodeInput          []byte    `db:"node_input" json:"node_input"`
 }
 
 func (q *Queries) CreateProxyRun(ctx context.Context, arg CreateProxyRunParams) (ProxyRun, error) {
 	row := q.db.QueryRow(ctx, createProxyRun,
 		arg.CloudListingID,
+		arg.CloudListingLinkID,
 		arg.RequestingUserID,
 		arg.IdempotencyKey,
 		arg.Input,
 		arg.InputSummary,
+		arg.NodeInput,
 	)
 	var r ProxyRun
 	err := scanProxyRun(row, &r)
@@ -505,8 +751,10 @@ func (q *Queries) CreateProxyRun(ctx context.Context, arg CreateProxyRunParams) 
 const getProxyRunForRequester = `-- name: GetProxyRunForRequester :one
 SELECT id, cloud_run_id, cloud_listing_link_id, cloud_listing_id,
        registry_node_id, local_agent_id, requesting_user_id,
-       idempotency_key, status, payload_policy, input, input_summary,
+       idempotency_key, status, payload_policy, payload_redaction_keys,
+       input, input_summary,
        output, output_summary, error_code, error_message,
+       attempt_count, max_attempts, next_retry_at,
        claimed_at, finished_at, created_at, updated_at
 FROM proxy_runs
 WHERE id = $1 AND requesting_user_id = $2`
@@ -523,25 +771,53 @@ func (q *Queries) GetProxyRunForRequester(ctx context.Context, arg GetProxyRunFo
 	return r, err
 }
 
+const getProxyRunForNode = `-- name: GetProxyRunForNode :one
+SELECT id, cloud_run_id, cloud_listing_link_id, cloud_listing_id,
+       registry_node_id, local_agent_id, requesting_user_id,
+       idempotency_key, status, payload_policy, payload_redaction_keys,
+       input, input_summary,
+       output, output_summary, error_code, error_message,
+       attempt_count, max_attempts, next_retry_at,
+       claimed_at, finished_at, created_at, updated_at
+FROM proxy_runs
+WHERE id = $1 AND registry_node_id = $2`
+
+type GetProxyRunForNodeParams struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	RegistryNodeID uuid.UUID `db:"registry_node_id" json:"registry_node_id"`
+}
+
+func (q *Queries) GetProxyRunForNode(ctx context.Context, arg GetProxyRunForNodeParams) (ProxyRun, error) {
+	row := q.db.QueryRow(ctx, getProxyRunForNode, arg.ID, arg.RegistryNodeID)
+	var r ProxyRun
+	err := scanProxyRun(row, &r)
+	return r, err
+}
+
 const claimPendingProxyRun = `-- name: ClaimPendingProxyRun :one
 WITH candidate AS (
-    SELECT id
+    SELECT id, COALESCE(node_input, input, '{}'::jsonb) AS claim_input
     FROM proxy_runs
     WHERE registry_node_id = $1
       AND status = 'pending'
+      AND (next_retry_at IS NULL OR next_retry_at <= NOW())
     ORDER BY created_at ASC
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )
 UPDATE proxy_runs p
 SET status = 'claimed',
-    claimed_at = NOW()
+    claimed_at = NOW(),
+    next_retry_at = NULL,
+    attempt_count = p.attempt_count + 1
 FROM candidate
 WHERE p.id = candidate.id
 RETURNING p.id, p.cloud_run_id, p.cloud_listing_link_id, p.cloud_listing_id,
           p.registry_node_id, p.local_agent_id, p.requesting_user_id,
-          p.idempotency_key, p.status, p.payload_policy, p.input, p.input_summary,
+          p.idempotency_key, p.status, p.payload_policy, p.payload_redaction_keys,
+          candidate.claim_input AS input, p.input_summary,
           p.output, p.output_summary, p.error_code, p.error_message,
+          p.attempt_count, p.max_attempts, p.next_retry_at,
           p.claimed_at, p.finished_at, p.created_at, p.updated_at`
 
 func (q *Queries) ClaimPendingProxyRun(ctx context.Context, registryNodeID uuid.UUID) (ProxyRun, error) {
@@ -553,20 +829,42 @@ func (q *Queries) ClaimPendingProxyRun(ctx context.Context, registryNodeID uuid.
 
 const completeProxyRun = `-- name: CompleteProxyRun :one
 UPDATE proxy_runs
-SET status = $3,
-    output = $4::jsonb,
+SET status = CASE
+        WHEN $8::boolean AND $3 = 'failed' AND attempt_count < max_attempts AND node_input IS NOT NULL THEN 'pending'
+        ELSE $3
+    END,
+    output = CASE
+        WHEN $8::boolean AND $3 = 'failed' AND attempt_count < max_attempts AND node_input IS NOT NULL THEN '{}'::jsonb
+        ELSE $4::jsonb
+    END,
     output_summary = $5,
     error_code = $6,
     error_message = $7,
-    claimed_at = COALESCE(claimed_at, NOW()),
-    finished_at = NOW()
+    claimed_at = CASE
+        WHEN $8::boolean AND $3 = 'failed' AND attempt_count < max_attempts AND node_input IS NOT NULL THEN NULL
+        ELSE COALESCE(claimed_at, NOW())
+    END,
+    finished_at = CASE
+        WHEN $8::boolean AND $3 = 'failed' AND attempt_count < max_attempts AND node_input IS NOT NULL THEN NULL
+        ELSE NOW()
+    END,
+    next_retry_at = CASE
+        WHEN $8::boolean AND $3 = 'failed' AND attempt_count < max_attempts AND node_input IS NOT NULL THEN NOW() + make_interval(secs => $9::int)
+        ELSE NULL
+    END,
+    node_input = CASE
+        WHEN $8::boolean AND $3 = 'failed' AND attempt_count < max_attempts AND node_input IS NOT NULL THEN node_input
+        ELSE NULL
+    END
 WHERE id = $1
   AND registry_node_id = $2
   AND status IN ('pending', 'claimed')
 RETURNING id, cloud_run_id, cloud_listing_link_id, cloud_listing_id,
           registry_node_id, local_agent_id, requesting_user_id,
-          idempotency_key, status, payload_policy, input, input_summary,
+          idempotency_key, status, payload_policy, payload_redaction_keys,
+          input, input_summary,
           output, output_summary, error_code, error_message,
+          attempt_count, max_attempts, next_retry_at,
           claimed_at, finished_at, created_at, updated_at`
 
 type CompleteProxyRunParams struct {
@@ -577,6 +875,8 @@ type CompleteProxyRunParams struct {
 	OutputSummary  *string   `db:"output_summary" json:"output_summary"`
 	ErrorCode      *string   `db:"error_code" json:"error_code"`
 	ErrorMessage   *string   `db:"error_message" json:"error_message"`
+	Retryable      bool      `db:"retryable" json:"retryable"`
+	RetryAfterSecs int32     `db:"retry_after_secs" json:"retry_after_secs"`
 }
 
 func (q *Queries) CompleteProxyRun(ctx context.Context, arg CompleteProxyRunParams) (ProxyRun, error) {
@@ -588,10 +888,126 @@ func (q *Queries) CompleteProxyRun(ctx context.Context, arg CompleteProxyRunPara
 		arg.OutputSummary,
 		arg.ErrorCode,
 		arg.ErrorMessage,
+		arg.Retryable,
+		arg.RetryAfterSecs,
 	)
 	var r ProxyRun
 	err := scanProxyRun(row, &r)
 	return r, err
+}
+
+func scanProxyRunArtifact(row interface {
+	Scan(dest ...any) error
+}, a *ProxyRunArtifact) error {
+	return row.Scan(
+		&a.ID,
+		&a.ProxyRunID,
+		&a.CloudRunID,
+		&a.SourceArtifactID,
+		&a.ArtifactType,
+		&a.Title,
+		&a.Content,
+		&a.MimeType,
+		&a.FileURI,
+		&a.FileName,
+		&a.FileSHA256,
+		&a.FileSizeBytes,
+		&a.CreatedAt,
+	)
+}
+
+const deleteProxyRunArtifacts = `-- name: DeleteProxyRunArtifacts :exec
+DELETE FROM proxy_run_artifacts
+WHERE proxy_run_id = $1`
+
+func (q *Queries) DeleteProxyRunArtifacts(ctx context.Context, proxyRunID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteProxyRunArtifacts, proxyRunID)
+	return err
+}
+
+const createProxyRunArtifact = `-- name: CreateProxyRunArtifact :one
+INSERT INTO proxy_run_artifacts (
+    proxy_run_id, cloud_run_id, source_artifact_id, artifact_type, title, content,
+    mime_type, file_uri, file_name, file_sha256, file_size_bytes
+) VALUES (
+    $1, $2, $3, $4, $5, $6::jsonb,
+    $7, $8, $9, $10, $11
+)
+ON CONFLICT (proxy_run_id, source_artifact_id) DO UPDATE
+SET artifact_type = EXCLUDED.artifact_type,
+    title = EXCLUDED.title,
+    content = EXCLUDED.content,
+    mime_type = EXCLUDED.mime_type,
+    file_uri = EXCLUDED.file_uri,
+    file_name = EXCLUDED.file_name,
+    file_sha256 = EXCLUDED.file_sha256,
+    file_size_bytes = EXCLUDED.file_size_bytes
+RETURNING id, proxy_run_id, cloud_run_id, source_artifact_id, artifact_type, title, content,
+          mime_type, file_uri, file_name, file_sha256, file_size_bytes, created_at`
+
+type CreateProxyRunArtifactParams struct {
+	ProxyRunID       uuid.UUID `db:"proxy_run_id" json:"proxy_run_id"`
+	CloudRunID       uuid.UUID `db:"cloud_run_id" json:"cloud_run_id"`
+	SourceArtifactID string    `db:"source_artifact_id" json:"source_artifact_id"`
+	ArtifactType     string    `db:"artifact_type" json:"artifact_type"`
+	Title            string    `db:"title" json:"title"`
+	Content          []byte    `db:"content" json:"content"`
+	MimeType         *string   `db:"mime_type" json:"mime_type"`
+	FileURI          *string   `db:"file_uri" json:"file_uri"`
+	FileName         *string   `db:"file_name" json:"file_name"`
+	FileSHA256       *string   `db:"file_sha256" json:"file_sha256"`
+	FileSizeBytes    *int64    `db:"file_size_bytes" json:"file_size_bytes"`
+}
+
+func (q *Queries) CreateProxyRunArtifact(ctx context.Context, arg CreateProxyRunArtifactParams) (ProxyRunArtifact, error) {
+	row := q.db.QueryRow(ctx, createProxyRunArtifact,
+		arg.ProxyRunID,
+		arg.CloudRunID,
+		arg.SourceArtifactID,
+		arg.ArtifactType,
+		arg.Title,
+		arg.Content,
+		arg.MimeType,
+		arg.FileURI,
+		arg.FileName,
+		arg.FileSHA256,
+		arg.FileSizeBytes,
+	)
+	var a ProxyRunArtifact
+	err := scanProxyRunArtifact(row, &a)
+	return a, err
+}
+
+const listProxyRunArtifactsForRequester = `-- name: ListProxyRunArtifactsForRequester :many
+SELECT a.id, a.proxy_run_id, a.cloud_run_id, a.source_artifact_id, a.artifact_type,
+       a.title, a.content, a.mime_type, a.file_uri, a.file_name, a.file_sha256,
+       a.file_size_bytes, a.created_at
+FROM proxy_run_artifacts a
+JOIN proxy_runs p ON p.id = a.proxy_run_id
+WHERE a.proxy_run_id = $1
+  AND p.requesting_user_id = $2
+ORDER BY a.created_at ASC, a.id ASC`
+
+type ListProxyRunArtifactsForRequesterParams struct {
+	ProxyRunID       uuid.UUID `db:"proxy_run_id" json:"proxy_run_id"`
+	RequestingUserID uuid.UUID `db:"requesting_user_id" json:"requesting_user_id"`
+}
+
+func (q *Queries) ListProxyRunArtifactsForRequester(ctx context.Context, arg ListProxyRunArtifactsForRequesterParams) ([]ProxyRunArtifact, error) {
+	rows, err := q.db.Query(ctx, listProxyRunArtifactsForRequester, arg.ProxyRunID, arg.RequestingUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ProxyRunArtifact
+	for rows.Next() {
+		var artifact ProxyRunArtifact
+		if err := scanProxyRunArtifact(rows, &artifact); err != nil {
+			return nil, err
+		}
+		items = append(items, artifact)
+	}
+	return items, rows.Err()
 }
 
 const timeoutStaleProxyRuns = `-- name: TimeoutStaleProxyRuns :one
@@ -603,7 +1019,9 @@ WITH expired AS (
         error_code = COALESCE(error_code, 'PROXY_RUN_TIMEOUT'),
         error_message = COALESCE(error_message, 'Registry Node did not complete the run before timeout'),
         claimed_at = COALESCE(claimed_at, NOW()),
-        finished_at = NOW()
+        finished_at = NOW(),
+        next_retry_at = NULL,
+        node_input = NULL
     WHERE status IN ('pending', 'claimed')
       AND COALESCE(claimed_at, created_at) < $1
     RETURNING id

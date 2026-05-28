@@ -28,14 +28,26 @@ func NewHandler(svc *Service) *Handler {
 //	GET  /workflows              查询自己的 workflow 列表
 //	GET  /workflows/:id          查询 workflow 定义
 //	POST /workflows/:id/run      同步执行 workflow
+//	POST /workflows/:id/runs     异步启动 workflow run
+//	GET  /workflows/:id/runs     查询 workflow run 历史
 //	GET  /workflow-runs/:id      查询 workflow run
+//	POST /workflow-runs/:id/retry 复制失败 run 输入并重新入队
+//	POST /workflow-runs/:id/pause 暂停 pending/running run
+//	POST /workflow-runs/:id/resume 恢复 paused run
+//	POST /workflow-runs/:id/cancel 取消 pending/running/paused run
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
 	g := api.Group("/workflows", jwtMiddleware)
 	g.POST("", h.Create)
 	g.GET("", h.List)
 	g.GET("/:id", h.Get)
 	g.POST("/:id/run", h.Run)
+	g.POST("/:id/runs", h.StartRun)
+	g.GET("/:id/runs", h.ListRuns)
 	api.GET("/workflow-runs/:id", h.GetRun, jwtMiddleware)
+	api.POST("/workflow-runs/:id/retry", h.RetryRun, jwtMiddleware)
+	api.POST("/workflow-runs/:id/pause", h.PauseRun, jwtMiddleware)
+	api.POST("/workflow-runs/:id/resume", h.ResumeRun, jwtMiddleware)
+	api.POST("/workflow-runs/:id/cancel", h.CancelRun, jwtMiddleware)
 }
 
 func (h *Handler) Create(c echo.Context) error {
@@ -98,7 +110,49 @@ func (h *Handler) Run(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return httpx.BadRequest("请求体格式错误")
 	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
 	resp, err := h.svc.RunWorkflow(c.Request().Context(), uid, id, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) StartRun(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathUUID(c)
+	if err != nil {
+		return err
+	}
+	var req RunWorkflowRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.StartWorkflowRun(c.Request().Context(), uid, id, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusAccepted, resp)
+}
+
+func (h *Handler) ListRuns(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathUUID(c)
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.ListWorkflowRuns(c.Request().Context(), uid, id, 20)
 	if err != nil {
 		return err
 	}
@@ -115,6 +169,70 @@ func (h *Handler) GetRun(c echo.Context) error {
 		return err
 	}
 	resp, err := h.svc.GetWorkflowRun(c.Request().Context(), uid, id)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) RetryRun(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathUUID(c)
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.RetryWorkflowRun(c.Request().Context(), uid, id)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusAccepted, resp)
+}
+
+func (h *Handler) PauseRun(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathUUID(c)
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.PauseWorkflowRun(c.Request().Context(), uid, id)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) ResumeRun(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathUUID(c)
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.ResumeWorkflowRun(c.Request().Context(), uid, id)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusAccepted, resp)
+}
+
+func (h *Handler) CancelRun(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathUUID(c)
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.CancelWorkflowRun(c.Request().Context(), uid, id)
 	if err != nil {
 		return err
 	}

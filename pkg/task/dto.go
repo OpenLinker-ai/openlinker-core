@@ -17,8 +17,6 @@ type RecommendRequest struct {
 }
 
 // AgentSummary 推荐返回的 Agent 简要信息（不含 endpoint / 鉴权头）。
-//
-// AvgRating 暂时用 4.8 占位（评分系统后续子轮接入）。
 type AgentSummary struct {
 	ID                string   `json:"id"`
 	Slug              string   `json:"slug"`
@@ -26,7 +24,7 @@ type AgentSummary struct {
 	Description       string   `json:"description"`
 	PricePerCallCents int32    `json:"price_per_call_cents"`
 	TotalCalls        int32    `json:"total_calls"`
-	AvgRating         float32  `json:"avg_rating"`
+	AvgRating         *float32 `json:"avg_rating,omitempty"`
 	CreatorName       string   `json:"creator_name"`
 	Tags              []string `json:"tags"`
 }

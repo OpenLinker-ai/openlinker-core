@@ -24,5 +24,5 @@ func TestNewManifestUsesStablePublicEntrypoints(t *testing.T) {
 	require.Contains(t, manifest.Auth.APIScopes, "agents:run")
 	require.Contains(t, manifest.Auth.RuntimeScopes, "agent:pull")
 	require.Equal(t, "no_pre_review", manifest.Policies["public_listing"])
-	require.Equal(t, "sequential_agent_workflow_api", manifest.Workflows.Builder)
+	require.Equal(t, "dag_async_agent_workflow_api", manifest.Workflows.Builder)
 }

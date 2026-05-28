@@ -148,6 +148,11 @@ type RunArtifact struct {
 	Content          []byte    `db:"content" json:"content"`
 	Visibility       string    `db:"visibility" json:"visibility"`
 	SourceArtifactID *string   `db:"source_artifact_id" json:"source_artifact_id"`
+	MimeType         *string   `db:"mime_type" json:"mime_type"`
+	FileUri          *string   `db:"file_uri" json:"file_uri"`
+	FileName         *string   `db:"file_name" json:"file_name"`
+	FileSha256       *string   `db:"file_sha256" json:"file_sha256"`
+	FileSizeBytes    *int64    `db:"file_size_bytes" json:"file_size_bytes"`
 	CreatedAt        time.Time `db:"created_at" json:"created_at"`
 }
 
@@ -163,6 +168,10 @@ type RunArtifactChunk struct {
 	LastChunk        bool      `db:"last_chunk" json:"last_chunk"`
 	Parts            []byte    `db:"parts" json:"parts"`
 	Payload          []byte    `db:"payload" json:"payload"`
+	PartsSha256      *string   `db:"parts_sha256" json:"parts_sha256"`
+	PayloadSha256    *string   `db:"payload_sha256" json:"payload_sha256"`
+	DeclaredSha256   *string   `db:"declared_sha256" json:"declared_sha256"`
+	ChecksumStatus   string    `db:"checksum_status" json:"checksum_status"`
 	CreatedAt        time.Time `db:"created_at" json:"created_at"`
 }
 
@@ -289,42 +298,73 @@ type RegistryNode struct {
 //
 // 它表达“用户显式把某个本地 Agent 暴露成 Cloud Listing”的关系。
 type CloudListingLink struct {
-	ID             uuid.UUID `db:"id" json:"id"`
-	CloudListingID uuid.UUID `db:"cloud_listing_id" json:"cloud_listing_id"`
-	RegistryNodeID uuid.UUID `db:"registry_node_id" json:"registry_node_id"`
-	LocalAgentID   uuid.UUID `db:"local_agent_id" json:"local_agent_id"`
-	RoutingMode    string    `db:"routing_mode" json:"routing_mode"`
-	PayloadPolicy  string    `db:"payload_policy" json:"payload_policy"`
-	SyncStatus     string    `db:"sync_status" json:"sync_status"`
-	LastSyncAt     time.Time `db:"last_sync_at" json:"last_sync_at"`
-	CreatedAt      time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt      time.Time `db:"updated_at" json:"updated_at"`
+	ID                       uuid.UUID  `db:"id" json:"id"`
+	CloudListingID           uuid.UUID  `db:"cloud_listing_id" json:"cloud_listing_id"`
+	RegistryNodeID           uuid.UUID  `db:"registry_node_id" json:"registry_node_id"`
+	LocalAgentID             uuid.UUID  `db:"local_agent_id" json:"local_agent_id"`
+	RoutingMode              string     `db:"routing_mode" json:"routing_mode"`
+	PayloadPolicy            string     `db:"payload_policy" json:"payload_policy"`
+	PayloadRedactionKeys     []string   `db:"payload_redaction_keys" json:"payload_redaction_keys"`
+	SyncStatus               string     `db:"sync_status" json:"sync_status"`
+	SyncedAgentSlug          string     `db:"synced_agent_slug" json:"synced_agent_slug"`
+	SyncedAgentName          string     `db:"synced_agent_name" json:"synced_agent_name"`
+	SyncedAgentDescription   string     `db:"synced_agent_description" json:"synced_agent_description"`
+	SyncedAgentTags          []string   `db:"synced_agent_tags" json:"synced_agent_tags"`
+	SyncedAvailabilityStatus string     `db:"synced_availability_status" json:"synced_availability_status"`
+	MetadataSyncedAt         *time.Time `db:"metadata_synced_at" json:"metadata_synced_at"`
+	MetadataSyncError        *string    `db:"metadata_sync_error" json:"metadata_sync_error"`
+	LastSyncAt               time.Time  `db:"last_sync_at" json:"last_sync_at"`
+	CreatedAt                time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt                time.Time  `db:"updated_at" json:"updated_at"`
 }
 
 // ProxyRun 对应 proxy_runs 表。
 //
 // 它是 Cloud Listing 经 Registry Node 拉取执行的云侧任务状态机。
 type ProxyRun struct {
-	ID                 uuid.UUID  `db:"id" json:"id"`
-	CloudRunID         uuid.UUID  `db:"cloud_run_id" json:"cloud_run_id"`
-	CloudListingLinkID uuid.UUID  `db:"cloud_listing_link_id" json:"cloud_listing_link_id"`
-	CloudListingID     uuid.UUID  `db:"cloud_listing_id" json:"cloud_listing_id"`
-	RegistryNodeID     uuid.UUID  `db:"registry_node_id" json:"registry_node_id"`
-	LocalAgentID       uuid.UUID  `db:"local_agent_id" json:"local_agent_id"`
-	RequestingUserID   uuid.UUID  `db:"requesting_user_id" json:"requesting_user_id"`
-	IdempotencyKey     string     `db:"idempotency_key" json:"idempotency_key"`
-	Status             string     `db:"status" json:"status"`
-	PayloadPolicy      string     `db:"payload_policy" json:"payload_policy"`
-	Input              []byte     `db:"input" json:"input"`
-	InputSummary       *string    `db:"input_summary" json:"input_summary"`
-	Output             []byte     `db:"output" json:"output"`
-	OutputSummary      *string    `db:"output_summary" json:"output_summary"`
-	ErrorCode          *string    `db:"error_code" json:"error_code"`
-	ErrorMessage       *string    `db:"error_message" json:"error_message"`
-	ClaimedAt          *time.Time `db:"claimed_at" json:"claimed_at"`
-	FinishedAt         *time.Time `db:"finished_at" json:"finished_at"`
-	CreatedAt          time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt          time.Time  `db:"updated_at" json:"updated_at"`
+	ID                   uuid.UUID  `db:"id" json:"id"`
+	CloudRunID           uuid.UUID  `db:"cloud_run_id" json:"cloud_run_id"`
+	CloudListingLinkID   uuid.UUID  `db:"cloud_listing_link_id" json:"cloud_listing_link_id"`
+	CloudListingID       uuid.UUID  `db:"cloud_listing_id" json:"cloud_listing_id"`
+	RegistryNodeID       uuid.UUID  `db:"registry_node_id" json:"registry_node_id"`
+	LocalAgentID         uuid.UUID  `db:"local_agent_id" json:"local_agent_id"`
+	RequestingUserID     uuid.UUID  `db:"requesting_user_id" json:"requesting_user_id"`
+	IdempotencyKey       string     `db:"idempotency_key" json:"idempotency_key"`
+	Status               string     `db:"status" json:"status"`
+	PayloadPolicy        string     `db:"payload_policy" json:"payload_policy"`
+	PayloadRedactionKeys []string   `db:"payload_redaction_keys" json:"payload_redaction_keys"`
+	Input                []byte     `db:"input" json:"input"`
+	InputSummary         *string    `db:"input_summary" json:"input_summary"`
+	Output               []byte     `db:"output" json:"output"`
+	OutputSummary        *string    `db:"output_summary" json:"output_summary"`
+	ErrorCode            *string    `db:"error_code" json:"error_code"`
+	ErrorMessage         *string    `db:"error_message" json:"error_message"`
+	AttemptCount         int32      `db:"attempt_count" json:"attempt_count"`
+	MaxAttempts          int32      `db:"max_attempts" json:"max_attempts"`
+	NextRetryAt          *time.Time `db:"next_retry_at" json:"next_retry_at"`
+	ClaimedAt            *time.Time `db:"claimed_at" json:"claimed_at"`
+	FinishedAt           *time.Time `db:"finished_at" json:"finished_at"`
+	CreatedAt            time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt            time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// ProxyRunArtifact stores artifact references returned by a Registry Node for a
+// proxy run. It deliberately keeps file metadata separate from proxy_runs.output
+// so metadata_only listings can still expose downloadable result references.
+type ProxyRunArtifact struct {
+	ID               uuid.UUID `db:"id" json:"id"`
+	ProxyRunID       uuid.UUID `db:"proxy_run_id" json:"proxy_run_id"`
+	CloudRunID       uuid.UUID `db:"cloud_run_id" json:"cloud_run_id"`
+	SourceArtifactID string    `db:"source_artifact_id" json:"source_artifact_id"`
+	ArtifactType     string    `db:"artifact_type" json:"artifact_type"`
+	Title            string    `db:"title" json:"title"`
+	Content          []byte    `db:"content" json:"content"`
+	MimeType         *string   `db:"mime_type" json:"mime_type"`
+	FileURI          *string   `db:"file_uri" json:"file_uri"`
+	FileName         *string   `db:"file_name" json:"file_name"`
+	FileSHA256       *string   `db:"file_sha256" json:"file_sha256"`
+	FileSizeBytes    *int64    `db:"file_size_bytes" json:"file_size_bytes"`
+	CreatedAt        time.Time `db:"created_at" json:"created_at"`
 }
 
 // AgentRegistrationToken 是创作者侧短期 Bootstrap Token，供 Agent 自注册流程使用。
@@ -609,6 +649,9 @@ type RunWebhookSubscription struct {
 	TargetURL           string     `db:"target_url" json:"target_url"`
 	Secret              string     `db:"secret" json:"-"`
 	EventTypes          []string   `db:"event_types" json:"event_types"`
+	PushAuthScheme      *string    `db:"push_auth_scheme" json:"push_auth_scheme,omitempty"`
+	PushAuthCredentials *string    `db:"push_auth_credentials" json:"-"`
+	PushMetadata        []byte     `db:"push_metadata" json:"push_metadata"`
 	Status              string     `db:"status" json:"status"`
 	ConsecutiveFailures int32      `db:"consecutive_failures" json:"consecutive_failures"`
 	CreatedAt           time.Time  `db:"created_at" json:"created_at"`
@@ -660,17 +703,22 @@ type WorkflowNode struct {
 
 // WorkflowRun 对应 workflow_runs 表。
 type WorkflowRun struct {
-	ID           uuid.UUID  `db:"id" json:"id"`
-	WorkflowID   uuid.UUID  `db:"workflow_id" json:"workflow_id"`
-	UserID       uuid.UUID  `db:"user_id" json:"user_id"`
-	Status       string     `db:"status" json:"status"`
-	Input        []byte     `db:"input" json:"input"`
-	Output       []byte     `db:"output" json:"output"`
-	ErrorMessage *string    `db:"error_message" json:"error_message"`
-	StartedAt    time.Time  `db:"started_at" json:"started_at"`
-	FinishedAt   *time.Time `db:"finished_at" json:"finished_at"`
-	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt    time.Time  `db:"updated_at" json:"updated_at"`
+	ID              uuid.UUID  `db:"id" json:"id"`
+	WorkflowID      uuid.UUID  `db:"workflow_id" json:"workflow_id"`
+	UserID          uuid.UUID  `db:"user_id" json:"user_id"`
+	Status          string     `db:"status" json:"status"`
+	Input           []byte     `db:"input" json:"input"`
+	Output          []byte     `db:"output" json:"output"`
+	ErrorMessage    *string    `db:"error_message" json:"error_message"`
+	StartedAt       time.Time  `db:"started_at" json:"started_at"`
+	FinishedAt      *time.Time `db:"finished_at" json:"finished_at"`
+	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time  `db:"updated_at" json:"updated_at"`
+	AttemptCount    int32      `db:"attempt_count" json:"attempt_count"`
+	MaxAttempts     int32      `db:"max_attempts" json:"max_attempts"`
+	NextRetryAt     *time.Time `db:"next_retry_at" json:"next_retry_at"`
+	ClaimedAt       *time.Time `db:"claimed_at" json:"claimed_at"`
+	LastWorkerError *string    `db:"last_worker_error" json:"last_worker_error"`
 }
 
 // WorkflowRunStep 对应 workflow_run_steps 表。

@@ -32,6 +32,7 @@ const (
 type Service struct {
 	queries *db.Queries
 	runtime *runtime.Service
+	runPush runPushManager
 }
 
 func NewService(pool *pgxpool.Pool, runtimeSvc *runtime.Service) *Service {
@@ -140,8 +141,14 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 	if err != nil {
 		return nil, err
 	}
-	parentRunID, _ := uuid.Parse(req.ParentRunID)
-	targetAgentID, _ := uuid.Parse(req.TargetAgentID)
+	parentRunID, err := currentRunIDFromRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	targetAgentID, err := uuid.Parse(req.TargetAgentID)
+	if err != nil {
+		return nil, httpx.Unprocessable("target_agent_id 不是合法 uuid")
+	}
 	if targetAgentID == callerToken.AgentID {
 		return nil, httpx.Unprocessable("Agent 不能通过 A2A 调用自己")
 	}
@@ -186,6 +193,25 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 		Input:    req.Input,
 		Metadata: req.Metadata,
 	})
+}
+
+func currentRunIDFromRequest(req *CallAgentRequest) (uuid.UUID, error) {
+	current := strings.TrimSpace(req.CurrentRunID)
+	legacyParent := strings.TrimSpace(req.ParentRunID)
+	if current == "" {
+		current = legacyParent
+	}
+	if current == "" {
+		return uuid.Nil, httpx.Unprocessable("current_run_id 或 parent_run_id 必填")
+	}
+	if legacyParent != "" && req.CurrentRunID != "" && legacyParent != current {
+		return uuid.Nil, httpx.Unprocessable("current_run_id 与 parent_run_id 不一致")
+	}
+	parsed, err := uuid.Parse(current)
+	if err != nil {
+		return uuid.Nil, httpx.Unprocessable("current_run_id 不是合法 uuid")
+	}
+	return parsed, nil
 }
 
 func (s *Service) ListChildren(ctx context.Context, userID, parentRunID uuid.UUID) ([]ChildRunResponse, error) {

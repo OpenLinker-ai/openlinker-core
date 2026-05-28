@@ -3,7 +3,9 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -150,6 +152,67 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 			Timeout: timeout,
 		},
 	}
+}
+
+func (s *Service) agentA2AContext(runID uuid.UUID, delegation *Delegation) *AgentA2AContext {
+	ctx := &AgentA2AContext{
+		CurrentRunID:      runID.String(),
+		CallAgentEndpoint: s.callAgentEndpointURL(),
+		CallAgentMethod:   "POST",
+		RuntimeTokenType:  "rt_live",
+		RuntimeScopes:     []string{"agent:call"},
+	}
+	if delegation != nil {
+		ctx.ParentRunID = delegation.ParentRunID.String()
+		ctx.CallerAgentID = delegation.CallerAgentID.String()
+	}
+	return ctx
+}
+
+func (s *Service) agentA2AContextForRun(ctx context.Context, runID uuid.UUID) *AgentA2AContext {
+	base := s.agentA2AContext(runID, nil)
+	delegation, err := s.queries.GetRunDelegationByChild(ctx, runID)
+	if err == nil {
+		base.ParentRunID = delegation.ParentRunID.String()
+		base.CallerAgentID = delegation.CallerAgentID.String()
+		return base
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.agentA2AContextForRun")
+	}
+	return base
+}
+
+func (s *Service) callAgentEndpointURL() string {
+	apiURL := ""
+	if s.cfg != nil {
+		apiURL = s.cfg.APIURL
+	}
+	apiBase := strings.TrimRight(strings.TrimSpace(apiURL), "/")
+	if apiBase == "" {
+		apiBase = "http://localhost:8080"
+	}
+	return apiBase + "/api/v1/agent-runtime/call-agent"
+}
+
+func agentA2AContextMap(ctx *AgentA2AContext) map[string]interface{} {
+	if ctx == nil {
+		return nil
+	}
+	value := map[string]interface{}{
+		"current_run_id":      ctx.CurrentRunID,
+		"call_agent_endpoint": ctx.CallAgentEndpoint,
+		"call_agent_method":   ctx.CallAgentMethod,
+		"runtime_token_type":  ctx.RuntimeTokenType,
+		"runtime_scopes":      ctx.RuntimeScopes,
+	}
+	if ctx.ParentRunID != "" {
+		value["parent_run_id"] = ctx.ParentRunID
+	}
+	if ctx.CallerAgentID != "" {
+		value["caller_agent_id"] = ctx.CallerAgentID
+	}
+	return value
 }
 
 // Run 调用 Agent。
@@ -714,6 +777,7 @@ func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string
 		Input:    input,
 		Metadata: map[string]interface{}{"claim_ttl_seconds": int(runtimePullClaimTTL.Seconds())},
 		Source:   run.Source,
+		A2A:      s.agentA2AContextForRun(ctx, run.ID),
 	}, nil
 }
 
@@ -883,6 +947,7 @@ func (s *Service) callAgentEndpoint(
 		Input:    req.Input,
 		Metadata: req.Metadata,
 		RunID:    runID.String(),
+		A2A:      s.agentA2AContext(runID, delegation),
 	}
 	if delegation != nil {
 		request.ParentRunID = delegation.ParentRunID.String()
@@ -991,6 +1056,7 @@ func (s *Service) callMCPServer(
 		metadata["parent_run_id"] = delegation.ParentRunID.String()
 		metadata["caller_agent_id"] = delegation.CallerAgentID.String()
 	}
+	metadata["a2a"] = agentA2AContextMap(s.agentA2AContext(runID, delegation))
 	payload, err := json.Marshal(mcpToolCallRequest{
 		JSONRPC: "2.0",
 		ID:      runID.String(),
@@ -1261,10 +1327,15 @@ func (s *Service) handleFailure(
 }
 
 type runArtifactDraft struct {
-	ArtifactType string
-	Title        string
-	Content      map[string]interface{}
-	Visibility   string
+	ArtifactType  string
+	Title         string
+	Content       map[string]interface{}
+	Visibility    string
+	MimeType      string
+	FileURI       string
+	FileName      string
+	FileSHA256    string
+	FileSizeBytes *int64
 }
 
 type runArtifactDeltaDraft struct {
@@ -1272,6 +1343,11 @@ type runArtifactDeltaDraft struct {
 	ArtifactType     string
 	Title            string
 	Visibility       string
+	MimeType         string
+	FileURI          string
+	FileName         string
+	FileSHA256       string
+	FileSizeBytes    *int64
 	Append           bool
 	LastChunk        bool
 	Parts            []interface{}
@@ -1285,11 +1361,16 @@ func (s *Service) createRunArtifacts(ctx context.Context, q *db.Queries, runID u
 			return err
 		}
 		if _, err := q.CreateRunArtifact(ctx, db.CreateRunArtifactParams{
-			RunID:        runID,
-			ArtifactType: artifact.ArtifactType,
-			Title:        artifact.Title,
-			Content:      raw,
-			Visibility:   artifact.Visibility,
+			RunID:         runID,
+			ArtifactType:  artifact.ArtifactType,
+			Title:         artifact.Title,
+			Content:       raw,
+			Visibility:    artifact.Visibility,
+			MimeType:      stringPtrOrNil(artifact.MimeType),
+			FileUri:       stringPtrOrNil(artifact.FileURI),
+			FileName:      stringPtrOrNil(artifact.FileName),
+			FileSha256:    stringPtrOrNil(artifact.FileSHA256),
+			FileSizeBytes: artifact.FileSizeBytes,
 		}); err != nil {
 			return err
 		}
@@ -1330,6 +1411,11 @@ func (s *Service) upsertRunArtifactDelta(ctx context.Context, q *db.Queries, run
 			Content:          emptyContent,
 			Visibility:       draft.Visibility,
 			SourceArtifactID: &sourceID,
+			MimeType:         stringPtrOrNil(draft.MimeType),
+			FileUri:          stringPtrOrNil(draft.FileURI),
+			FileName:         stringPtrOrNil(draft.FileName),
+			FileSha256:       stringPtrOrNil(draft.FileSHA256),
+			FileSizeBytes:    draft.FileSizeBytes,
 		})
 	}
 	if err != nil {
@@ -1344,6 +1430,9 @@ func (s *Service) upsertRunArtifactDelta(ctx context.Context, q *db.Queries, run
 	if err != nil {
 		return err
 	}
+	partsSHA := sha256Hex(partsJSON)
+	payloadSHA := sha256Hex(payloadJSON)
+	declaredSHA, checksumStatus := artifactChunkChecksum(draft.Payload, partsSHA)
 	chunk, err := q.CreateRunArtifactChunk(ctx, db.CreateRunArtifactChunkParams{
 		RunID:            runID,
 		RunArtifactID:    artifact.ID,
@@ -1353,6 +1442,10 @@ func (s *Service) upsertRunArtifactDelta(ctx context.Context, q *db.Queries, run
 		LastChunk:        draft.LastChunk,
 		Parts:            partsJSON,
 		Payload:          payloadJSON,
+		PartsSha256:      &partsSHA,
+		PayloadSha256:    &payloadSHA,
+		DeclaredSha256:   stringPtrOrNil(declaredSHA),
+		ChecksumStatus:   checksumStatus,
 	})
 	if err != nil {
 		return err
@@ -1368,12 +1461,17 @@ func (s *Service) upsertRunArtifactDelta(ctx context.Context, q *db.Queries, run
 		return err
 	}
 	_, err = q.UpdateRunArtifactContent(ctx, db.UpdateRunArtifactContentParams{
-		ID:           artifact.ID,
-		RunID:        runID,
-		ArtifactType: draft.ArtifactType,
-		Title:        draft.Title,
-		Content:      contentJSON,
-		Visibility:   draft.Visibility,
+		ID:            artifact.ID,
+		RunID:         runID,
+		ArtifactType:  draft.ArtifactType,
+		Title:         draft.Title,
+		Content:       contentJSON,
+		Visibility:    draft.Visibility,
+		MimeType:      stringPtrOrNil(draft.MimeType),
+		FileUri:       stringPtrOrNil(draft.FileURI),
+		FileName:      stringPtrOrNil(draft.FileName),
+		FileSha256:    stringPtrOrNil(draft.FileSHA256),
+		FileSizeBytes: draft.FileSizeBytes,
 	})
 	return err
 }
@@ -1432,11 +1530,37 @@ func artifactDraftFromMap(raw map[string]interface{}, fallbackTitle string) runA
 			content[k] = v
 		}
 	}
+	meta := artifactFileMetadataFromMap(raw)
+	if meta.FileURI == "" {
+		meta = mergeArtifactFileMetadata(meta, artifactFileMetadataFromMap(content))
+	}
+	if artifactType == "file" {
+		if meta.FileURI != "" {
+			content["file_uri"] = meta.FileURI
+		}
+		if meta.FileName != "" {
+			content["file_name"] = meta.FileName
+		}
+		if meta.MimeType != "" {
+			content["mime_type"] = meta.MimeType
+		}
+		if meta.FileSHA256 != "" {
+			content["file_sha256"] = meta.FileSHA256
+		}
+		if meta.FileSizeBytes != nil {
+			content["file_size_bytes"] = *meta.FileSizeBytes
+		}
+	}
 	return runArtifactDraft{
-		ArtifactType: artifactType,
-		Title:        title,
-		Content:      content,
-		Visibility:   visibility,
+		ArtifactType:  artifactType,
+		Title:         title,
+		Content:       content,
+		Visibility:    visibility,
+		MimeType:      meta.MimeType,
+		FileURI:       meta.FileURI,
+		FileName:      meta.FileName,
+		FileSHA256:    meta.FileSHA256,
+		FileSizeBytes: meta.FileSizeBytes,
 	}
 }
 
@@ -1474,14 +1598,27 @@ func artifactDeltaDraftFromPayload(payload map[string]interface{}) runArtifactDe
 	if title == "" {
 		title = "Artifact " + normalizeArtifactSourceID(sourceID)
 	}
+	parts := artifactDeltaPartsFromPayload(payload)
+	meta := artifactFileMetadataFromMap(payload)
+	if meta.FileURI == "" {
+		meta = mergeArtifactFileMetadata(meta, artifactFileMetadataFromParts(parts))
+	}
+	if artifactType == "data" && meta.FileURI != "" {
+		artifactType = "file"
+	}
 	return runArtifactDeltaDraft{
 		SourceArtifactID: normalizeArtifactSourceID(sourceID),
 		ArtifactType:     artifactType,
 		Title:            normalizeArtifactTitle(title),
 		Visibility:       visibility,
+		MimeType:         meta.MimeType,
+		FileURI:          meta.FileURI,
+		FileName:         meta.FileName,
+		FileSHA256:       meta.FileSHA256,
+		FileSizeBytes:    meta.FileSizeBytes,
 		Append:           appendChunk,
 		LastChunk:        lastChunk,
-		Parts:            artifactDeltaPartsFromPayload(payload),
+		Parts:            parts,
 		Payload:          payload,
 	}
 }
@@ -1522,10 +1659,20 @@ func mergeArtifactDeltaContent(content map[string]interface{}, draft runArtifact
 	parts = append(parts, draft.Parts...)
 
 	chunkItem := map[string]interface{}{
-		"index":      chunk.ChunkIndex,
-		"append":     draft.Append,
-		"last_chunk": draft.LastChunk,
-		"parts":      draft.Parts,
+		"index":           chunk.ChunkIndex,
+		"append":          draft.Append,
+		"last_chunk":      draft.LastChunk,
+		"parts":           draft.Parts,
+		"checksum_status": chunk.ChecksumStatus,
+	}
+	if chunk.PartsSha256 != nil {
+		chunkItem["parts_sha256"] = *chunk.PartsSha256
+	}
+	if chunk.PayloadSha256 != nil {
+		chunkItem["payload_sha256"] = *chunk.PayloadSha256
+	}
+	if chunk.DeclaredSha256 != nil {
+		chunkItem["declared_sha256"] = *chunk.DeclaredSha256
 	}
 	if chunk.EventSequence != nil {
 		chunkItem["event_sequence"] = *chunk.EventSequence
@@ -1536,6 +1683,25 @@ func mergeArtifactDeltaContent(content map[string]interface{}, draft runArtifact
 	if text := artifactTextFromParts(parts); text != "" {
 		content["text"] = text
 	}
+	if draft.MimeType != "" {
+		content["mime_type"] = draft.MimeType
+	}
+	if draft.FileURI != "" {
+		content["file_uri"] = draft.FileURI
+	}
+	if draft.FileName != "" {
+		content["file_name"] = draft.FileName
+	}
+	if draft.FileSHA256 != "" {
+		content["file_sha256"] = draft.FileSHA256
+	}
+	if draft.FileSizeBytes != nil {
+		content["file_size_bytes"] = *draft.FileSizeBytes
+	}
+	if chunk.PartsSha256 != nil {
+		content["last_parts_sha256"] = *chunk.PartsSha256
+	}
+	content["last_checksum_status"] = chunk.ChecksumStatus
 	return content
 }
 
@@ -1562,6 +1728,148 @@ func artifactTextFromParts(parts []interface{}) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func artifactChunkChecksum(payload map[string]interface{}, partsSHA string) (string, string) {
+	raw := firstArtifactString(payload, "parts_sha256", "partsSha256", "chunk_sha256", "chunkSha256", "chunk_parts_sha256", "chunkPartsSha256")
+	if raw == "" {
+		return "", "not_provided"
+	}
+	declared := normalizeSHA256(raw)
+	if declared == "" {
+		return "", "invalid"
+	}
+	if declared == partsSHA {
+		return declared, "verified"
+	}
+	return declared, "mismatch"
+}
+
+func sha256Hex(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+type artifactFileMetadata struct {
+	MimeType      string
+	FileURI       string
+	FileName      string
+	FileSHA256    string
+	FileSizeBytes *int64
+}
+
+func artifactFileMetadataFromMap(raw map[string]interface{}) artifactFileMetadata {
+	if raw == nil {
+		return artifactFileMetadata{}
+	}
+	meta := artifactFileMetadata{
+		MimeType:   normalizeArtifactMetadataString(firstArtifactString(raw, "mime_type", "mimeType", "content_type", "contentType"), 200),
+		FileURI:    normalizeArtifactMetadataString(firstArtifactString(raw, "file_uri", "fileUri", "uri", "url"), 2000),
+		FileName:   normalizeArtifactMetadataString(firstArtifactString(raw, "file_name", "fileName", "name", "filename"), 500),
+		FileSHA256: normalizeSHA256(firstArtifactString(raw, "file_sha256", "fileSha256", "sha256", "checksum")),
+	}
+	if size, ok := firstArtifactInt64(raw, "file_size_bytes", "fileSizeBytes", "size_bytes", "sizeBytes", "size"); ok {
+		meta.FileSizeBytes = &size
+	}
+	for _, key := range []string{"file", "file_ref", "fileRef", "binary", "bytes"} {
+		if nested, ok := raw[key].(map[string]interface{}); ok {
+			meta = mergeArtifactFileMetadata(meta, artifactFileMetadataFromMap(nested))
+		}
+	}
+	return meta
+}
+
+func artifactFileMetadataFromParts(parts []interface{}) artifactFileMetadata {
+	var meta artifactFileMetadata
+	for _, part := range parts {
+		m, ok := part.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if file, ok := m["file"].(map[string]interface{}); ok {
+			meta = mergeArtifactFileMetadata(meta, artifactFileMetadataFromMap(file))
+		}
+		meta = mergeArtifactFileMetadata(meta, artifactFileMetadataFromMap(m))
+	}
+	return meta
+}
+
+func mergeArtifactFileMetadata(base, next artifactFileMetadata) artifactFileMetadata {
+	if base.MimeType == "" {
+		base.MimeType = next.MimeType
+	}
+	if base.FileURI == "" {
+		base.FileURI = next.FileURI
+	}
+	if base.FileName == "" {
+		base.FileName = next.FileName
+	}
+	if base.FileSHA256 == "" {
+		base.FileSHA256 = next.FileSHA256
+	}
+	if base.FileSizeBytes == nil {
+		base.FileSizeBytes = next.FileSizeBytes
+	}
+	return base
+}
+
+func firstArtifactString(raw map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := raw[key].(string); ok && strings.TrimSpace(value) != "" {
+			return normalizeArtifactMetadataString(value, 2000)
+		}
+	}
+	return ""
+}
+
+func firstArtifactInt64(raw map[string]interface{}, keys ...string) (int64, bool) {
+	for _, key := range keys {
+		switch value := raw[key].(type) {
+		case int64:
+			if value >= 0 {
+				return value, true
+			}
+		case int:
+			if value >= 0 {
+				return int64(value), true
+			}
+		case int32:
+			if value >= 0 {
+				return int64(value), true
+			}
+		case float64:
+			if value >= 0 {
+				return int64(value), true
+			}
+		case float32:
+			if value >= 0 {
+				return int64(value), true
+			}
+		}
+	}
+	return 0, false
+}
+
+func normalizeSHA256(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) != 64 {
+		return ""
+	}
+	for _, r := range value {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return ""
+		}
+	}
+	return strings.ToLower(value)
+}
+
+func normalizeArtifactMetadataString(value string, max int) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) > max {
+		return string(runes[:max])
+	}
+	return value
 }
 
 func normalizeArtifactSourceID(value string) string {
@@ -1763,6 +2071,11 @@ func runArtifactToResponse(a db.RunArtifact) RunArtifactResponse {
 		Content:          content,
 		Visibility:       a.Visibility,
 		SourceArtifactID: stringPtrValue(a.SourceArtifactID),
+		MimeType:         stringPtrValue(a.MimeType),
+		FileURI:          stringPtrValue(a.FileUri),
+		FileName:         stringPtrValue(a.FileName),
+		FileSHA256:       stringPtrValue(a.FileSha256),
+		FileSizeBytes:    a.FileSizeBytes,
 		CreatedAt:        a.CreatedAt,
 	}
 }
@@ -1941,6 +2254,14 @@ func stringPtrValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func stringPtrOrNil(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func createRunEvent(ctx context.Context, q *db.Queries, runID uuid.UUID, parentRunID *uuid.UUID, eventType string, payload map[string]interface{}) error {

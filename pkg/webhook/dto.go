@@ -33,8 +33,11 @@ type DeliveryListItem struct {
 
 // CreateRunWebhookRequest POST /api/v1/runs/:id/webhooks.
 type CreateRunWebhookRequest struct {
-	URL        string   `json:"target_url" validate:"required,url,max=500"`
-	EventTypes []string `json:"event_types,omitempty" validate:"omitempty,dive,oneof=run.created run.started run.dispatch.pending run.dispatch.claimed run.requirements.snapshotted run.message.delta run.artifact.delta run.status.changed run.child.created run.child.completed run.completed run.failed"`
+	URL                 string                 `json:"target_url" validate:"required,url,max=500"`
+	EventTypes          []string               `json:"event_types,omitempty" validate:"omitempty,dive,oneof=run.created run.started run.dispatch.pending run.dispatch.claimed run.requirements.snapshotted run.message.delta run.artifact.delta run.status.changed run.child.created run.child.completed run.completed run.failed"`
+	PushAuthScheme      string                 `json:"push_auth_scheme,omitempty" validate:"omitempty,max=80"`
+	PushAuthCredentials string                 `json:"push_auth_credentials,omitempty" validate:"omitempty,max=1000"`
+	PushMetadata        map[string]interface{} `json:"push_metadata,omitempty"`
 }
 
 // RunWebhookSubscriptionResponse is returned to the run owner.
@@ -43,6 +46,7 @@ type RunWebhookSubscriptionResponse struct {
 	RunID               string   `json:"run_id"`
 	TargetURL           string   `json:"target_url"`
 	EventTypes          []string `json:"event_types"`
+	PushAuthScheme      string   `json:"push_auth_scheme,omitempty"`
 	Status              string   `json:"status"`
 	ConsecutiveFailures int32    `json:"consecutive_failures"`
 	Secret              string   `json:"secret,omitempty"`

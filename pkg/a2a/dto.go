@@ -31,7 +31,8 @@ type CallPolicyResponse struct {
 
 // CallAgentRequest is sent by Agent A using its runtime token.
 type CallAgentRequest struct {
-	ParentRunID   string                 `json:"parent_run_id" validate:"required,uuid"`
+	ParentRunID   string                 `json:"parent_run_id,omitempty" validate:"omitempty,uuid"`
+	CurrentRunID  string                 `json:"current_run_id,omitempty" validate:"omitempty,uuid"`
 	TargetAgentID string                 `json:"target_agent_id" validate:"required,uuid"`
 	Reason        string                 `json:"reason" validate:"max=500"`
 	Input         map[string]interface{} `json:"input" validate:"required"`

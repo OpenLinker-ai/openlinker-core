@@ -75,6 +75,10 @@ func TestRuntimePull_ClaimAndCompleteSuccess(t *testing.T) {
 	assert.Equal(t, "from user", claimed.Input["q"])
 	assert.Equal(t, "web", claimed.Source)
 	assert.Equal(t, 300, claimed.Metadata["claim_ttl_seconds"])
+	require.NotNil(t, claimed.A2A)
+	assert.Equal(t, started.RunID, claimed.A2A.CurrentRunID)
+	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", claimed.A2A.CallAgentEndpoint)
+	assert.Contains(t, claimed.A2A.RuntimeScopes, "agent:call")
 
 	completed, err := svc.CompleteRuntimePullRun(ctx, token, runID, &runtime.RuntimePullResultRequest{
 		Status: "success",

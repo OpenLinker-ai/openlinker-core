@@ -40,6 +40,8 @@ package runtime_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -62,6 +64,8 @@ import (
 
 const truncateAll = "TRUNCATE run_requirement_evidence, run_artifact_chunks, run_artifacts, run_messages, run_events, run_webhook_deliveries, run_webhook_subscriptions, wallets, runs, charges, withdrawals, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"
 
+const testDBOpTimeout = 30 * time.Second
+
 // ────────────────────────────────────────────────────────────
 // DB / Service setup
 // ────────────────────────────────────────────────────────────
@@ -73,15 +77,18 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL 未设置，跳过 runtime 集成测试")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testDBOpTimeout)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
 	require.NoError(t, pool.Ping(ctx))
-	_, err = pool.Exec(ctx, truncateAll)
+
+	truncateCtx, truncateCancel := context.WithTimeout(context.Background(), testDBOpTimeout)
+	defer truncateCancel()
+	_, err = pool.Exec(truncateCtx, truncateAll)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		c, cancel := context.WithTimeout(context.Background(), testDBOpTimeout)
 		defer cancel()
 		_, _ = pool.Exec(c, truncateAll)
 		pool.Close()
@@ -512,12 +519,59 @@ func TestRun_PersistsDeclaredArtifacts(t *testing.T) {
 	artifacts, err := svc.ListRunArtifacts(ctx, userID, mustParseUUID(t, resp.RunID))
 	require.NoError(t, err)
 	require.Len(t, artifacts, 2)
-	assert.Equal(t, "结论摘要", artifacts[0].Title)
-	assert.Equal(t, "shared", artifacts[0].Visibility)
-	assert.Equal(t, "ok", artifacts[0].Content["summary"])
-	assert.Equal(t, "原始数据", artifacts[1].Title)
-	assert.Equal(t, "data", artifacts[1].ArtifactType)
-	assert.Equal(t, float64(3), artifacts[1].Content["rows"])
+	byTitle := map[string]runtime.RunArtifactResponse{}
+	for _, artifact := range artifacts {
+		byTitle[artifact.Title] = artifact
+	}
+	summary := byTitle["结论摘要"]
+	assert.Equal(t, "shared", summary.Visibility)
+	assert.Equal(t, "ok", summary.Content["summary"])
+	rawData := byTitle["原始数据"]
+	assert.Equal(t, "data", rawData.ArtifactType)
+	assert.Equal(t, float64(3), rawData.Content["rows"])
+}
+
+func TestRun_PersistsFileArtifactMetadata(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{
+		"output":{
+			"summary":"file ready",
+			"artifacts":[
+				{
+					"title":"报告 CSV",
+					"artifact_type":"file",
+					"file_uri":"https://files.example/report.csv",
+					"file_name":"report.csv",
+					"mime_type":"text/csv",
+					"file_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+					"file_size_bytes":128,
+					"content":{"rows":3}
+				}
+			]
+		}
+	}`))
+	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
+
+	resp, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "file artifact"}), "")
+	require.NoError(t, err)
+	require.Equal(t, "success", resp.Status)
+
+	artifacts, err := svc.ListRunArtifacts(ctx, userID, mustParseUUID(t, resp.RunID))
+	require.NoError(t, err)
+	require.Len(t, artifacts, 1)
+	assert.Equal(t, "file", artifacts[0].ArtifactType)
+	assert.Equal(t, "text/csv", artifacts[0].MimeType)
+	assert.Equal(t, "https://files.example/report.csv", artifacts[0].FileURI)
+	assert.Equal(t, "report.csv", artifacts[0].FileName)
+	assert.Equal(t, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", artifacts[0].FileSHA256)
+	require.NotNil(t, artifacts[0].FileSizeBytes)
+	assert.Equal(t, int64(128), *artifacts[0].FileSizeBytes)
+	assert.Equal(t, float64(3), artifacts[0].Content["rows"])
 }
 
 func TestRun_NextActionFromAgentOutput(t *testing.T) {
@@ -1127,6 +1181,129 @@ func TestReportRunEvent_PersistsArtifactDelta(t *testing.T) {
 	require.NotNil(t, chunks[1].EventSequence)
 	assert.Equal(t, int32(2), *chunks[1].EventSequence)
 	assert.True(t, chunks[1].LastChunk)
+}
+
+func TestReportRunEvent_VerifiesArtifactChunkChecksum(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
+	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
+	setAgentEndpointToken(t, pool, agentID, "agent-secret")
+	runID := insertRunningRun(t, pool, userID, agentID)
+
+	parts := []interface{}{
+		map[string]interface{}{"type": "text", "text": "checksum chunk"},
+	}
+	partsRaw, err := json.Marshal(parts)
+	require.NoError(t, err)
+	expectedSHA := sha256String(partsRaw)
+
+	_, err = svc.ReportRunEvent(ctx, runID, "agent-secret", &runtime.ReportRunEventRequest{
+		EventType: "run.artifact.delta",
+		Payload: map[string]interface{}{
+			"artifact_id":   "checksum-report",
+			"title":         "Checksum Report",
+			"artifact_type": "text",
+			"parts":         parts,
+			"parts_sha256":  expectedSHA,
+			"last_chunk":    true,
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = svc.ReportRunEvent(ctx, runID, "agent-secret", &runtime.ReportRunEventRequest{
+		EventType: "run.artifact.delta",
+		Payload: map[string]interface{}{
+			"artifact_id":   "checksum-report",
+			"title":         "Checksum Report",
+			"artifact_type": "text",
+			"append":        true,
+			"parts": []interface{}{
+				map[string]interface{}{"type": "text", "text": "tampered"},
+			},
+			"parts_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			"last_chunk":   true,
+		},
+	})
+	require.NoError(t, err)
+
+	chunks, err := db.New(pool).ListRunArtifactChunksByRun(ctx, runID)
+	require.NoError(t, err)
+	require.Len(t, chunks, 2)
+	require.NotNil(t, chunks[0].PartsSha256)
+	require.NotNil(t, chunks[0].PayloadSha256)
+	require.NotNil(t, chunks[0].DeclaredSha256)
+	assert.Equal(t, expectedSHA, *chunks[0].PartsSha256)
+	assert.Equal(t, expectedSHA, *chunks[0].DeclaredSha256)
+	assert.Equal(t, "verified", chunks[0].ChecksumStatus)
+	require.NotNil(t, chunks[1].DeclaredSha256)
+	assert.Equal(t, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", *chunks[1].DeclaredSha256)
+	assert.Equal(t, "mismatch", chunks[1].ChecksumStatus)
+
+	artifacts, err := svc.ListRunArtifacts(ctx, userID, runID)
+	require.NoError(t, err)
+	require.Len(t, artifacts, 1)
+	require.Len(t, artifacts[0].Content["chunks"], 2)
+	assert.Equal(t, "mismatch", artifacts[0].Content["last_checksum_status"])
+}
+
+func TestReportRunEvent_PersistsFilePartMetadata(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
+	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
+	setAgentEndpointToken(t, pool, agentID, "agent-secret")
+	runID := insertRunningRun(t, pool, userID, agentID)
+
+	_, err := svc.ReportRunEvent(ctx, runID, "agent-secret", &runtime.ReportRunEventRequest{
+		EventType: "run.artifact.delta",
+		Payload: map[string]interface{}{
+			"artifact_id":   "file-report",
+			"title":         "File Report",
+			"artifact_type": "file",
+			"append":        true,
+			"last_chunk":    true,
+			"parts": []interface{}{
+				map[string]interface{}{
+					"kind": "file",
+					"file": map[string]interface{}{
+						"uri":       "https://files.example/from-delta.pdf",
+						"name":      "from-delta.pdf",
+						"mimeType":  "application/pdf",
+						"sha256":    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+						"sizeBytes": float64(4096),
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	artifacts, err := svc.ListRunArtifacts(ctx, userID, runID)
+	require.NoError(t, err)
+	require.Len(t, artifacts, 1)
+	assert.Equal(t, "file-report", artifacts[0].SourceArtifactID)
+	assert.Equal(t, "file", artifacts[0].ArtifactType)
+	assert.Equal(t, "application/pdf", artifacts[0].MimeType)
+	assert.Equal(t, "https://files.example/from-delta.pdf", artifacts[0].FileURI)
+	assert.Equal(t, "from-delta.pdf", artifacts[0].FileName)
+	assert.Equal(t, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", artifacts[0].FileSHA256)
+	require.NotNil(t, artifacts[0].FileSizeBytes)
+	assert.Equal(t, int64(4096), *artifacts[0].FileSizeBytes)
+	assert.Equal(t, "https://files.example/from-delta.pdf", artifacts[0].Content["file_uri"])
+}
+
+func sha256String(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }
 
 func TestReportRunEvent_RejectsInvalidToken(t *testing.T) {

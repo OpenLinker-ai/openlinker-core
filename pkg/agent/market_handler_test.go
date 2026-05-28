@@ -247,10 +247,16 @@ func TestGetAgentCard_HandlerHappyPath(t *testing.T) {
 	var card map[string]any
 	require.NoError(t, json.Unmarshal(raw, &card), "raw=%s", string(raw))
 	assert.Equal(t, "Agent Card", card["name"])
-	assert.Equal(t, "/api/v1/run", card["url"])
+	assert.Equal(t, "/api/v1/a2a/agents/agent-card", card["url"])
+	assert.Equal(t, "1.0", card["protocolVersion"])
+	require.Contains(t, card, "supportedInterfaces")
 	openlinker, ok := card["openlinker"].(map[string]any)
 	require.True(t, ok, "openlinker extension must exist; body=%s", string(raw))
 	assert.Equal(t, "agent-card", openlinker["slug"])
+	assert.Equal(t, "/api/v1/a2a/agents/agent-card", openlinker["invocation_endpoint"])
+	assert.Equal(t, "/api/v1/a2a/agents/agent-card/message:stream", openlinker["stream_endpoint"])
+	assert.Equal(t, "/api/v1/a2a/agents/agent-card/tasks/{task_id}", openlinker["task_lookup_endpoint"])
+	assert.Equal(t, "/api/v1/a2a/agents/agent-card/tasks/{task_id}:subscribe", openlinker["task_subscribe_endpoint"])
 	assert.NotContains(t, string(raw), "endpoint_auth_header")
 }
 

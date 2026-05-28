@@ -5,6 +5,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -148,14 +149,16 @@ func scanWorkflowRun(row interface {
 	return row.Scan(
 		&r.ID, &r.WorkflowID, &r.UserID, &r.Status, &r.Input, &r.Output, &r.ErrorMessage,
 		&r.StartedAt, &r.FinishedAt, &r.CreatedAt, &r.UpdatedAt,
+		&r.AttemptCount, &r.MaxAttempts, &r.NextRetryAt, &r.ClaimedAt, &r.LastWorkerError,
 	)
 }
 
 const createWorkflowRun = `-- name: CreateWorkflowRun :one
-INSERT INTO workflow_runs (workflow_id, user_id, status, input)
-VALUES ($1, $2, 'running', $3)
-RETURNING id, workflow_id, user_id, status, input, output, error_message,
-          started_at, finished_at, created_at, updated_at`
+	INSERT INTO workflow_runs (workflow_id, user_id, status, input)
+	VALUES ($1, $2, 'running', $3)
+	RETURNING id, workflow_id, user_id, status, input, output, error_message,
+	          started_at, finished_at, created_at, updated_at,
+	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
 
 type CreateWorkflowRunParams struct {
 	WorkflowID uuid.UUID `db:"workflow_id" json:"workflow_id"`
@@ -170,16 +173,39 @@ func (q *Queries) CreateWorkflowRun(ctx context.Context, arg CreateWorkflowRunPa
 	return r, err
 }
 
+const createPendingWorkflowRun = `-- name: CreatePendingWorkflowRun :one
+	INSERT INTO workflow_runs (workflow_id, user_id, status, input, max_attempts)
+	VALUES ($1, $2, 'pending', $3, $4)
+	RETURNING id, workflow_id, user_id, status, input, output, error_message,
+	          started_at, finished_at, created_at, updated_at,
+	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
+
+type CreatePendingWorkflowRunParams struct {
+	WorkflowID  uuid.UUID `db:"workflow_id" json:"workflow_id"`
+	UserID      uuid.UUID `db:"user_id" json:"user_id"`
+	Input       []byte    `db:"input" json:"input"`
+	MaxAttempts int32     `db:"max_attempts" json:"max_attempts"`
+}
+
+func (q *Queries) CreatePendingWorkflowRun(ctx context.Context, arg CreatePendingWorkflowRunParams) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, createPendingWorkflowRun, arg.WorkflowID, arg.UserID, arg.Input, arg.MaxAttempts)
+	var r WorkflowRun
+	err := scanWorkflowRun(row, &r)
+	return r, err
+}
+
 const markWorkflowRunSuccess = `-- name: MarkWorkflowRunSuccess :one
-UPDATE workflow_runs
-SET status = 'success',
-    output = $2,
-    error_message = NULL,
-    finished_at = NOW(),
-    updated_at = NOW()
-WHERE id = $1
-RETURNING id, workflow_id, user_id, status, input, output, error_message,
-          started_at, finished_at, created_at, updated_at`
+	UPDATE workflow_runs
+		SET status = 'success',
+	    output = $2,
+	    error_message = NULL,
+	    finished_at = NOW(),
+	    updated_at = NOW()
+		WHERE id = $1
+		  AND status = 'running'
+		RETURNING id, workflow_id, user_id, status, input, output, error_message,
+		          started_at, finished_at, created_at, updated_at,
+		          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
 
 type MarkWorkflowRunSuccessParams struct {
 	ID     uuid.UUID `db:"id" json:"id"`
@@ -194,14 +220,16 @@ func (q *Queries) MarkWorkflowRunSuccess(ctx context.Context, arg MarkWorkflowRu
 }
 
 const markWorkflowRunFailed = `-- name: MarkWorkflowRunFailed :one
-UPDATE workflow_runs
-SET status = 'failed',
-    error_message = $2,
-    finished_at = NOW(),
-    updated_at = NOW()
-WHERE id = $1
-RETURNING id, workflow_id, user_id, status, input, output, error_message,
-          started_at, finished_at, created_at, updated_at`
+		UPDATE workflow_runs
+	SET status = 'failed',
+	    error_message = $2,
+	    finished_at = NOW(),
+	    updated_at = NOW()
+		WHERE id = $1
+		  AND status = 'running'
+		RETURNING id, workflow_id, user_id, status, input, output, error_message,
+		          started_at, finished_at, created_at, updated_at,
+		          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
 
 type MarkWorkflowRunFailedParams struct {
 	ID           uuid.UUID `db:"id" json:"id"`
@@ -215,17 +243,196 @@ func (q *Queries) MarkWorkflowRunFailed(ctx context.Context, arg MarkWorkflowRun
 	return r, err
 }
 
+const pauseWorkflowRun = `-- name: PauseWorkflowRun :one
+	UPDATE workflow_runs
+	SET status = 'paused',
+	    claimed_at = NULL,
+	    next_retry_at = NULL,
+	    last_worker_error = NULL,
+	    updated_at = NOW()
+	WHERE id = $1
+	  AND status IN ('pending', 'running')
+	RETURNING id, workflow_id, user_id, status, input, output, error_message,
+	          started_at, finished_at, created_at, updated_at,
+	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
+
+func (q *Queries) PauseWorkflowRun(ctx context.Context, id uuid.UUID) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, pauseWorkflowRun, id)
+	var r WorkflowRun
+	err := scanWorkflowRun(row, &r)
+	return r, err
+}
+
+const resumeWorkflowRun = `-- name: ResumeWorkflowRun :one
+	UPDATE workflow_runs
+	SET status = 'pending',
+	    claimed_at = NULL,
+	    next_retry_at = NOW(),
+	    finished_at = NULL,
+	    error_message = NULL,
+	    last_worker_error = NULL,
+	    updated_at = NOW()
+	WHERE id = $1
+	  AND status = 'paused'
+	RETURNING id, workflow_id, user_id, status, input, output, error_message,
+	          started_at, finished_at, created_at, updated_at,
+	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
+
+func (q *Queries) ResumeWorkflowRun(ctx context.Context, id uuid.UUID) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, resumeWorkflowRun, id)
+	var r WorkflowRun
+	err := scanWorkflowRun(row, &r)
+	return r, err
+}
+
+const cancelWorkflowRun = `-- name: CancelWorkflowRun :one
+	UPDATE workflow_runs
+	SET status = 'canceled',
+	    claimed_at = NULL,
+	    next_retry_at = NULL,
+	    error_message = COALESCE(error_message, 'workflow run canceled by user'),
+	    finished_at = COALESCE(finished_at, NOW()),
+	    updated_at = NOW()
+	WHERE id = $1
+	  AND status IN ('pending', 'running', 'paused')
+	RETURNING id, workflow_id, user_id, status, input, output, error_message,
+	          started_at, finished_at, created_at, updated_at,
+	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
+
+func (q *Queries) CancelWorkflowRun(ctx context.Context, id uuid.UUID) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, cancelWorkflowRun, id)
+	var r WorkflowRun
+	err := scanWorkflowRun(row, &r)
+	return r, err
+}
+
 const getWorkflowRunByID = `-- name: GetWorkflowRunByID :one
-SELECT id, workflow_id, user_id, status, input, output, error_message,
-       started_at, finished_at, created_at, updated_at
-FROM workflow_runs
-WHERE id = $1`
+		SELECT id, workflow_id, user_id, status, input, output, error_message,
+	       started_at, finished_at, created_at, updated_at,
+	       attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error
+	FROM workflow_runs
+	WHERE id = $1`
 
 func (q *Queries) GetWorkflowRunByID(ctx context.Context, id uuid.UUID) (WorkflowRun, error) {
 	row := q.db.QueryRow(ctx, getWorkflowRunByID, id)
 	var r WorkflowRun
 	err := scanWorkflowRun(row, &r)
 	return r, err
+}
+
+const listWorkflowRunsByWorkflow = `-- name: ListWorkflowRunsByWorkflow :many
+	SELECT id, workflow_id, user_id, status, input, output, error_message,
+	       started_at, finished_at, created_at, updated_at,
+	       attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error
+	FROM workflow_runs
+	WHERE workflow_id = $1
+	ORDER BY created_at DESC
+	LIMIT $2`
+
+type ListWorkflowRunsByWorkflowParams struct {
+	WorkflowID uuid.UUID `db:"workflow_id" json:"workflow_id"`
+	Limit      int32     `db:"limit" json:"limit"`
+}
+
+func (q *Queries) ListWorkflowRunsByWorkflow(ctx context.Context, arg ListWorkflowRunsByWorkflowParams) ([]WorkflowRun, error) {
+	rows, err := q.db.Query(ctx, listWorkflowRunsByWorkflow, arg.WorkflowID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WorkflowRun
+	for rows.Next() {
+		var r WorkflowRun
+		if err := scanWorkflowRun(rows, &r); err != nil {
+			return nil, err
+		}
+		items = append(items, r)
+	}
+	return items, rows.Err()
+}
+
+const countWorkflowRunsByWorkflow = `-- name: CountWorkflowRunsByWorkflow :one
+	SELECT COUNT(*)::int
+	FROM workflow_runs
+	WHERE workflow_id = $1`
+
+func (q *Queries) CountWorkflowRunsByWorkflow(ctx context.Context, workflowID uuid.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, countWorkflowRunsByWorkflow, workflowID)
+	var count int32
+	err := row.Scan(&count)
+	return count, err
+}
+
+const claimPendingWorkflowRun = `-- name: ClaimPendingWorkflowRun :one
+	WITH candidate AS (
+	    SELECT id
+	    FROM workflow_runs
+	    WHERE status = 'pending'
+	      AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+	    ORDER BY created_at ASC
+	    LIMIT 1
+	    FOR UPDATE SKIP LOCKED
+	)
+	UPDATE workflow_runs r
+	SET status = 'running',
+	    claimed_at = NOW(),
+	    next_retry_at = NULL,
+	    attempt_count = r.attempt_count + 1,
+	    last_worker_error = NULL,
+	    updated_at = NOW()
+	FROM candidate
+	WHERE r.id = candidate.id
+	RETURNING r.id, r.workflow_id, r.user_id, r.status, r.input, r.output, r.error_message,
+	          r.started_at, r.finished_at, r.created_at, r.updated_at,
+	          r.attempt_count, r.max_attempts, r.next_retry_at, r.claimed_at, r.last_worker_error`
+
+func (q *Queries) ClaimPendingWorkflowRun(ctx context.Context) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, claimPendingWorkflowRun)
+	var r WorkflowRun
+	err := scanWorkflowRun(row, &r)
+	return r, err
+}
+
+const requeueStaleWorkflowRuns = `-- name: RequeueStaleWorkflowRuns :execrows
+	UPDATE workflow_runs
+	SET status = CASE
+	        WHEN attempt_count < max_attempts THEN 'pending'
+	        ELSE 'failed'
+	    END,
+	    next_retry_at = CASE
+	        WHEN attempt_count < max_attempts THEN NOW()
+	        ELSE NULL
+	    END,
+	    claimed_at = NULL,
+	    finished_at = CASE
+	        WHEN attempt_count < max_attempts THEN finished_at
+	        ELSE NOW()
+	    END,
+	    error_message = CASE
+	        WHEN attempt_count < max_attempts THEN error_message
+	        ELSE COALESCE(error_message, 'workflow run timed out before worker completed')
+	    END,
+	    last_worker_error = 'workflow worker stale claim timed out',
+	    updated_at = NOW()
+	WHERE status = 'running'
+	  AND claimed_at IS NOT NULL
+	  AND claimed_at < $1`
+
+func (q *Queries) RequeueStaleWorkflowRuns(ctx context.Context, before time.Time) (int64, error) {
+	tag, err := q.db.Exec(ctx, requeueStaleWorkflowRuns, before)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+const deleteWorkflowRunSteps = `-- name: DeleteWorkflowRunSteps :exec
+	DELETE FROM workflow_run_steps
+	WHERE workflow_run_id = $1`
+
+func (q *Queries) DeleteWorkflowRunSteps(ctx context.Context, workflowRunID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteWorkflowRunSteps, workflowRunID)
+	return err
 }
 
 func scanWorkflowRunStep(row interface {
