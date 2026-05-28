@@ -99,7 +99,7 @@ type Agent struct {
 
 // Run 对应 runs 表（每次调用一行）。
 //
-// status: 'running' | 'success' | 'failed' | 'timeout'
+// status: 'running' | 'success' | 'failed' | 'timeout' | 'canceled'
 // 金额单位 cents（int32）：cost_cents = platform_fee_cents + creator_revenue_cents
 // input/output 是 JSONB（[]byte，原样透传）
 type Run struct {

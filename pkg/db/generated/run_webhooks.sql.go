@@ -104,6 +104,40 @@ func (q *Queries) ListRunWebhookSubscriptionsByRun(ctx context.Context, arg List
 	return items, rows.Err()
 }
 
+const listRunWebhookSubscriptionsByOwner = `-- name: ListRunWebhookSubscriptionsByOwner :many
+SELECT id, run_id, owner_user_id, caller_agent_id, target_url, secret,
+       event_types, push_auth_scheme, push_auth_credentials, push_metadata,
+       status, consecutive_failures, created_at, updated_at, deleted_at
+FROM run_webhook_subscriptions
+WHERE owner_user_id = $1
+  AND status <> 'deleted'
+  AND ($2::text = '' OR status = $2)
+ORDER BY updated_at DESC, created_at DESC
+LIMIT $3`
+
+type ListRunWebhookSubscriptionsByOwnerParams struct {
+	OwnerUserID uuid.UUID `db:"owner_user_id" json:"owner_user_id"`
+	Status      string    `db:"status" json:"status"`
+	Limit       int32     `db:"limit" json:"limit"`
+}
+
+func (q *Queries) ListRunWebhookSubscriptionsByOwner(ctx context.Context, arg ListRunWebhookSubscriptionsByOwnerParams) ([]RunWebhookSubscription, error) {
+	rows, err := q.db.Query(ctx, listRunWebhookSubscriptionsByOwner, arg.OwnerUserID, arg.Status, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RunWebhookSubscription
+	for rows.Next() {
+		var s RunWebhookSubscription
+		if err := scanRunWebhookSubscription(rows, &s); err != nil {
+			return nil, err
+		}
+		items = append(items, s)
+	}
+	return items, rows.Err()
+}
+
 const deleteRunWebhookSubscriptionForOwner = `-- name: DeleteRunWebhookSubscriptionForOwner :execrows
 UPDATE run_webhook_subscriptions
 SET status = 'deleted',
@@ -149,6 +183,42 @@ func (q *Queries) UpdateRunWebhookSubscriptionStatusForOwner(ctx context.Context
 	var s RunWebhookSubscription
 	err := scanRunWebhookSubscription(row, &s)
 	return s, err
+}
+
+const batchUpdateRunWebhookSubscriptionsForOwner = `-- name: BatchUpdateRunWebhookSubscriptionsForOwner :many
+UPDATE run_webhook_subscriptions
+SET status = $3,
+    consecutive_failures = CASE WHEN $3 = 'active' THEN 0 ELSE consecutive_failures END,
+    deleted_at = CASE WHEN $3 = 'deleted' THEN NOW() ELSE deleted_at END,
+    updated_at = NOW()
+WHERE owner_user_id = $1
+  AND id = ANY($2::uuid[])
+  AND status <> 'deleted'
+RETURNING id, run_id, owner_user_id, caller_agent_id, target_url, secret,
+          event_types, push_auth_scheme, push_auth_credentials, push_metadata,
+          status, consecutive_failures, created_at, updated_at, deleted_at`
+
+type BatchUpdateRunWebhookSubscriptionsForOwnerParams struct {
+	OwnerUserID uuid.UUID   `db:"owner_user_id" json:"owner_user_id"`
+	IDs         []uuid.UUID `db:"ids" json:"ids"`
+	Status      string      `db:"status" json:"status"`
+}
+
+func (q *Queries) BatchUpdateRunWebhookSubscriptionsForOwner(ctx context.Context, arg BatchUpdateRunWebhookSubscriptionsForOwnerParams) ([]RunWebhookSubscription, error) {
+	rows, err := q.db.Query(ctx, batchUpdateRunWebhookSubscriptionsForOwner, arg.OwnerUserID, arg.IDs, arg.Status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RunWebhookSubscription
+	for rows.Next() {
+		var s RunWebhookSubscription
+		if err := scanRunWebhookSubscription(rows, &s); err != nil {
+			return nil, err
+		}
+		items = append(items, s)
+	}
+	return items, rows.Err()
 }
 
 const listActiveRunWebhookSubscriptionsForEvent = `-- name: ListActiveRunWebhookSubscriptionsForEvent :many

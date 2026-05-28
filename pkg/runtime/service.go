@@ -497,8 +497,9 @@ func (s *Service) executeRun(ctx context.Context, invocation *runInvocation) *Ru
 
 	// 处理结果
 	var resp *RunResponse
+	triggerExternalDelivery := invocation.delegation == nil
 	if callErr != nil || agentErr != nil {
-		resp = s.handleFailure(ctx, invocation.runID, invocation.userID, invocation.agent.ID, invocation.cost, duration, callErr, agentErr, invocation.settle)
+		resp = s.handleFailure(ctx, invocation.runID, invocation.userID, invocation.agent.ID, invocation.cost, duration, callErr, agentErr, invocation.settle, triggerExternalDelivery)
 	} else {
 		resp = s.handleSuccess(
 			ctx,
@@ -511,6 +512,7 @@ func (s *Service) executeRun(ctx context.Context, invocation *runInvocation) *Ru
 			agentEvents,
 			duration,
 			invocation.settle,
+			triggerExternalDelivery,
 		)
 	}
 	if invocation.delegation != nil {
@@ -572,6 +574,67 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.GetRun: GetRunDelegationByChild")
 		return nil, httpx.Internal("查询调用关系失败")
 	}
+	return resp, nil
+}
+
+// CancelRun marks a running run as canceled. Only the run owner can cancel it.
+func (s *Service) CancelRun(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
+	const canceledMessage = "run canceled by user"
+	var canceled db.Run
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		q := s.queries.WithTx(tx)
+		row, cancelErr := q.CancelRun(ctx, db.CancelRunParams{
+			ID:           runID,
+			UserID:       userID,
+			ErrorMessage: canceledMessage,
+		})
+		if cancelErr != nil {
+			return cancelErr
+		}
+		canceled = row
+		if s.walletCharger != nil && row.CostCents > 0 {
+			return s.walletCharger.Refund(ctx, tx, userID, int64(row.CostCents))
+		}
+		return nil
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		existing, lookupErr := s.queries.GetRunByID(ctx, runID)
+		if errors.Is(lookupErr, pgx.ErrNoRows) || (lookupErr == nil && existing.UserID != userID) {
+			return nil, httpx.NotFound("调用记录不存在")
+		}
+		if lookupErr != nil {
+			log.Error().Err(lookupErr).Str("run_id", runID.String()).Msg("runtime.CancelRun: GetRunByID")
+			return nil, httpx.Internal("查询调用记录失败")
+		}
+		if existing.Status == "canceled" {
+			resp := runToResponse(&existing)
+			s.attachRunRequirementEvidence(ctx, runID, resp)
+			return resp, nil
+		}
+		return nil, httpx.Conflict("run 已结束，不能取消")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Str("user_id", userID.String()).Msg("runtime.CancelRun")
+		return nil, httpx.Internal("取消调用失败")
+	}
+
+	duration := int32(0)
+	if canceled.DurationMs != nil {
+		duration = *canceled.DurationMs
+	}
+	s.recordRunEventBestEffort(ctx, runID, "run.canceled", map[string]interface{}{
+		"status":        "canceled",
+		"error_code":    "CANCELED",
+		"error_message": canceledMessage,
+		"duration_ms":   duration,
+	})
+	if s.shouldTriggerExternalDelivery(ctx, runID) {
+		s.triggerWebhookByRun(runID)
+		s.triggerDelivery(runID)
+	}
+
+	resp := runToResponse(&canceled)
+	s.attachRunRequirementEvidence(ctx, runID, resp)
 	return resp, nil
 }
 
@@ -815,6 +878,7 @@ func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken str
 	if duration <= 0 {
 		duration = int32(time.Since(state.StartedAt).Milliseconds())
 	}
+	triggerExternalDelivery := s.shouldTriggerExternalDelivery(ctx, runID)
 	var resp *RunResponse
 	switch req.Status {
 	case "success":
@@ -822,13 +886,13 @@ func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken str
 		if output == nil {
 			output = map[string]interface{}{}
 		}
-		resp = s.handleSuccess(ctx, runID, token.AgentID, agent.CreatorID, state.CostCents, state.CreatorRevenueCents, output, req.Events, duration, false)
+		resp = s.handleSuccess(ctx, runID, token.AgentID, agent.CreatorID, state.CostCents, state.CreatorRevenueCents, output, req.Events, duration, false, triggerExternalDelivery)
 	case "failed", "timeout":
 		agentErr := req.Error
 		if agentErr == nil {
 			agentErr = &AgentError{Code: "AGENT_REPORTED_FAILURE", Message: "Agent runtime reported " + req.Status}
 		}
-		resp = s.handleFailure(ctx, runID, state.UserID, token.AgentID, state.CostCents, duration, nil, agentErr, false)
+		resp = s.handleFailure(ctx, runID, state.UserID, token.AgentID, state.CostCents, duration, nil, agentErr, false, triggerExternalDelivery)
 	default:
 		return nil, httpx.BadRequest("status 取值非法")
 	}
@@ -1172,6 +1236,7 @@ func (s *Service) handleSuccess(
 	agentEvents []AgentEvent,
 	duration int32,
 	settle bool,
+	triggerExternalDelivery bool,
 ) *RunResponse {
 	outputJSON, err := json.Marshal(output)
 	if err != nil {
@@ -1225,8 +1290,8 @@ func (s *Service) handleSuccess(
 		})
 	}
 
-	if settle {
-		// 委派子 run 不自动外发中间产物；最终交付由父 run 决定。
+	if triggerExternalDelivery {
+		// 委派子 run 不自动外发；最终交付由父 run 决定。
 		s.triggerWebhook(runID, agentID, output)
 		s.triggerDelivery(runID)
 	}
@@ -1254,6 +1319,7 @@ func (s *Service) handleFailure(
 	callErr error,
 	agentErr *AgentError,
 	settle bool,
+	triggerExternalDelivery bool,
 ) *RunResponse {
 	errCode := "INTERNAL_ERROR"
 	errMsg := "调用失败"
@@ -1309,8 +1375,8 @@ func (s *Service) handleFailure(
 		})
 	}
 
-	if settle {
-		// 失败也触发 webhook（status='failed' / 'timeout'），让创作者侧能感知失败。
+	if triggerExternalDelivery {
+		// 失败也触发 webhook / delivery，让外部系统能感知失败。
 		s.triggerWebhookByRun(runID)
 		s.triggerDelivery(runID)
 	}
@@ -2017,6 +2083,18 @@ func (s *Service) triggerDelivery(runID uuid.UUID) {
 	}()
 }
 
+func (s *Service) shouldTriggerExternalDelivery(ctx context.Context, runID uuid.UUID) bool {
+	_, err := s.queries.GetRunDelegationByChild(ctx, runID)
+	if err == nil {
+		return false
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		log.Warn().Err(err).Str("run_id", runID.String()).
+			Msg("runtime.shouldTriggerExternalDelivery: GetRunDelegationByChild")
+	}
+	return true
+}
+
 // runToResponse 把 db.Run 转成 RunResponse（GetRun 用）。
 //
 // 失败的 run 也展示原始 cost_cents=0 还是 cost_cents=原值由产品决定；
@@ -2039,7 +2117,7 @@ func runToResponse(r *db.Run) *RunResponse {
 				resp.Output = out
 			}
 		}
-	case "failed", "timeout":
+	case "failed", "timeout", "canceled":
 		// 已退款
 		resp.CostCents = 0
 		if r.ErrorCode != nil {

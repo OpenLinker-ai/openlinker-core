@@ -25,12 +25,14 @@ func NewMarketHandler(svc *MarketService) *MarketHandler {
 //	GET /agents                       市场列表（支持 tags / q / page / size）
 //	GET /agents/:slug                 详情页
 //	GET /agents/:slug/agent-card.json 机器可读 Agent Card
+//	GET /agents/:slug/agent-card.extended.json 扩展 Agent Card
 //
 // 与模块 2 的 GET /agents/check-slug 共存：echo v4 的路由匹配中
 // 静态前缀（"check-slug"）优先于参数（":slug"），因此两个端点都能命中。
 func (h *MarketHandler) Register(api *echo.Group) {
 	api.GET("/agents", h.ListMarket)
 	api.GET("/agents/:slug/agent-card.json", h.GetAgentCard)
+	api.GET("/agents/:slug/agent-card.extended.json", h.GetExtendedAgentCard)
 	api.GET("/agents/:slug", h.GetBySlug)
 }
 
@@ -82,6 +84,18 @@ func (h *MarketHandler) GetBySlug(c echo.Context) error {
 func (h *MarketHandler) GetAgentCard(c echo.Context) error {
 	slug := strings.TrimSpace(c.Param("slug"))
 	resp, err := h.svc.GetAgentCardBySlug(c.Request().Context(), slug)
+	if err != nil {
+		return err
+	}
+	c.Response().Header().Set(echo.HeaderCacheControl, "public, max-age=300")
+	return c.JSON(http.StatusOK, resp)
+}
+
+// GetExtendedAgentCard returns the public extended card with richer capability
+// and example metadata, still without endpoint secrets.
+func (h *MarketHandler) GetExtendedAgentCard(c echo.Context) error {
+	slug := strings.TrimSpace(c.Param("slug"))
+	resp, err := h.svc.GetExtendedAgentCardBySlug(c.Request().Context(), slug)
 	if err != nil {
 		return err
 	}

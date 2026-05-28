@@ -1010,6 +1010,29 @@ func (q *Queries) ListProxyRunArtifactsForRequester(ctx context.Context, arg Lis
 	return items, rows.Err()
 }
 
+const getProxyRunArtifactForRequester = `-- name: GetProxyRunArtifactForRequester :one
+SELECT a.id, a.proxy_run_id, a.cloud_run_id, a.source_artifact_id, a.artifact_type,
+       a.title, a.content, a.mime_type, a.file_uri, a.file_name, a.file_sha256,
+       a.file_size_bytes, a.created_at
+FROM proxy_run_artifacts a
+JOIN proxy_runs p ON p.id = a.proxy_run_id
+WHERE a.id = $1
+  AND a.proxy_run_id = $2
+  AND p.requesting_user_id = $3`
+
+type GetProxyRunArtifactForRequesterParams struct {
+	ID               uuid.UUID `db:"id" json:"id"`
+	ProxyRunID       uuid.UUID `db:"proxy_run_id" json:"proxy_run_id"`
+	RequestingUserID uuid.UUID `db:"requesting_user_id" json:"requesting_user_id"`
+}
+
+func (q *Queries) GetProxyRunArtifactForRequester(ctx context.Context, arg GetProxyRunArtifactForRequesterParams) (ProxyRunArtifact, error) {
+	row := q.db.QueryRow(ctx, getProxyRunArtifactForRequester, arg.ID, arg.ProxyRunID, arg.RequestingUserID)
+	var artifact ProxyRunArtifact
+	err := scanProxyRunArtifact(row, &artifact)
+	return artifact, err
+}
+
 const timeoutStaleProxyRuns = `-- name: TimeoutStaleProxyRuns :one
 WITH expired AS (
     UPDATE proxy_runs

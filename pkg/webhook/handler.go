@@ -42,6 +42,8 @@ func NewHandler(svc *Service, cfg ...*config.Config) *Handler {
 //	POST   /runs/:id/webhooks/:webhookID/pause     暂停 run push webhook
 //	POST   /runs/:id/webhooks/:webhookID/resume    恢复 run push webhook
 //	DELETE /runs/:id/webhooks/:webhookID           删除 run push webhook
+//	GET    /run-webhooks                           汇总当前用户的 run push webhook
+//	POST   /run-webhooks/batch                     批量 pause / resume / delete
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
 	g := api.Group("/creator/agents/:id/webhook", jwtMiddleware)
 	g.POST("", h.Set)
@@ -55,6 +57,10 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	runHooks.POST("/:webhookID/pause", h.PauseRunWebhook)
 	runHooks.POST("/:webhookID/resume", h.ResumeRunWebhook)
 	runHooks.DELETE("/:webhookID", h.DeleteRunWebhook)
+
+	runHookManager := api.Group("/run-webhooks", jwtMiddleware)
+	runHookManager.GET("", h.ListManagedRunWebhooks)
+	runHookManager.POST("/batch", h.BatchManageRunWebhooks)
 }
 
 // Set 设置 webhook（生成新 secret，仅本次返回）。
@@ -185,6 +191,48 @@ func (h *Handler) ListRunWebhooks(c echo.Context) error {
 		items = []RunWebhookSubscriptionResponse{}
 	}
 	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *Handler) ListManagedRunWebhooks(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	limit := 0
+	if v := c.QueryParam("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return httpx.BadRequest("limit 必须是整数")
+		}
+		limit = n
+	}
+	items, err := h.svc.ListRunWebhookSubscriptionsForOwner(c.Request().Context(), uid, c.QueryParam("status"), limit)
+	if err != nil {
+		return err
+	}
+	if items == nil {
+		items = []RunWebhookSubscriptionResponse{}
+	}
+	return c.JSON(http.StatusOK, RunWebhookSubscriptionListResponse{Items: items})
+}
+
+func (h *Handler) BatchManageRunWebhooks(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	var req BatchRunWebhookSubscriptionsRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.BatchManageRunWebhookSubscriptions(c.Request().Context(), uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 func (h *Handler) DeleteRunWebhook(c echo.Context) error {

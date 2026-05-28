@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -236,6 +237,189 @@ func (s *Service) RetryWorkflowRun(ctx context.Context, userID, workflowRunID uu
 		Input:       input,
 		MaxAttempts: run.MaxAttempts,
 	})
+}
+
+func (s *Service) RerunWorkflowStep(ctx context.Context, userID, workflowRunID uuid.UUID, req *RerunWorkflowStepRequest) (*WorkflowStepRerunResponse, error) {
+	if s.runtime == nil {
+		return nil, httpx.Internal("workflow runtime 未配置")
+	}
+	if req == nil {
+		return nil, httpx.BadRequest("请求体不能为空")
+	}
+	nodeKey := strings.TrimSpace(req.NodeKey)
+	if nodeKey == "" {
+		return nil, httpx.BadRequest("node_key 不能为空")
+	}
+	sourceRun, err := s.getWorkflowRunForOwner(ctx, userID, workflowRunID)
+	if err != nil {
+		return nil, err
+	}
+	switch sourceRun.Status {
+	case workflowRunStatusSuccess, workflowRunStatusFailed:
+	default:
+		return nil, httpx.Conflict("只有 success / failed workflow_run 可以 step 级重跑")
+	}
+	w, nodes, err := s.getWorkflowForOwner(ctx, userID, sourceRun.WorkflowID)
+	if err != nil {
+		return nil, err
+	}
+	graph, err := workflowGraphFromDefinition(w, nodes)
+	if err != nil {
+		return nil, err
+	}
+	nodeByKey := map[string]db.WorkflowNode{}
+	for _, node := range nodes {
+		nodeByKey[node.NodeKey] = node
+	}
+	if _, ok := nodeByKey[nodeKey]; !ok {
+		return nil, httpx.NotFound("workflow step 不存在")
+	}
+
+	sourceSteps, err := s.queries.ListWorkflowRunSteps(ctx, sourceRun.ID)
+	if err != nil {
+		log.Error().Err(err).Str("workflow_run_id", sourceRun.ID.String()).Msg("workflow.RerunWorkflowStep: source steps")
+		return nil, httpx.Internal("查询 workflow_run_steps 失败")
+	}
+	sourceStepByKey := latestWorkflowStepByNodeKey(sourceSteps)
+	if _, ok := sourceStepByKey[nodeKey]; !ok {
+		return nil, httpx.Conflict("source workflow_run 尚未执行该 step，请重跑已执行过的 step 或其失败父节点")
+	}
+	affected := workflowAffectedNodeKeys(graph, nodeKey)
+	for _, node := range nodes {
+		if _, shouldRerun := affected[node.NodeKey]; shouldRerun {
+			continue
+		}
+		step, ok := sourceStepByKey[node.NodeKey]
+		if !ok || step.Status != workflowRunStatusSuccess {
+			return nil, httpx.Conflict("非重跑路径上的 step 必须已成功，无法复用: " + node.NodeKey)
+		}
+	}
+
+	input := map[string]interface{}{}
+	if len(sourceRun.Input) > 0 {
+		if err := json.Unmarshal(sourceRun.Input, &input); err != nil {
+			return nil, httpx.Internal("workflow_run input 不是合法 JSON")
+		}
+	}
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return nil, httpx.BadRequest("input 不是合法 JSON")
+	}
+	rerun, err := s.queries.CreateWorkflowRun(ctx, db.CreateWorkflowRunParams{
+		WorkflowID: sourceRun.WorkflowID,
+		UserID:     userID,
+		Input:      inputJSON,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("workflow_run_id", sourceRun.ID.String()).Msg("workflow.RerunWorkflowStep: CreateWorkflowRun")
+		return nil, httpx.Internal("创建 step rerun workflow_run 失败")
+	}
+
+	outputsByNode := map[string]map[string]interface{}{}
+	reusedKeys := []string{}
+	rerunKeys := []string{}
+	for _, level := range graph.Levels {
+		for _, node := range level {
+			if _, shouldRerun := affected[node.NodeKey]; !shouldRerun {
+				sourceStep := sourceStepByKey[node.NodeKey]
+				output, err := workflowStepOutputMap(sourceStep)
+				if err != nil {
+					_ = s.markWorkflowRunFailedStatus(ctx, rerun.ID, err.Error())
+					return nil, httpx.Internal(err.Error())
+				}
+				if err := s.copyWorkflowRunStep(ctx, rerun.ID, sourceStep); err != nil {
+					_ = s.markWorkflowRunFailedStatus(ctx, rerun.ID, err.Error())
+					return nil, err
+				}
+				outputsByNode[node.NodeKey] = output
+				reusedKeys = append(reusedKeys, node.NodeKey)
+				continue
+			}
+
+			stepInput := workflowStepInput(input, outputsByNode, graph.Parents[node.NodeKey], node)
+			result := s.runWorkflowNode(ctx, userID, w, rerun, node, stepInput, graph.Sequence[node.NodeKey])
+			rerunKeys = append(rerunKeys, node.NodeKey)
+			if result.Err != nil {
+				if err := s.markWorkflowRunFailedStatus(ctx, rerun.ID, result.Err.Error()); err != nil {
+					return nil, err
+				}
+				runResp, err := s.GetWorkflowRun(ctx, userID, rerun.ID)
+				if err != nil {
+					return nil, err
+				}
+				comparison, err := s.CompareWorkflowRuns(ctx, userID, sourceRun.ID, rerun.ID)
+				if err != nil {
+					return nil, err
+				}
+				return &WorkflowStepRerunResponse{
+					SourceRunID:    sourceRun.ID.String(),
+					RerunRunID:     rerun.ID.String(),
+					NodeKey:        nodeKey,
+					ReusedNodeKeys: reusedKeys,
+					RerunNodeKeys:  rerunKeys,
+					Run:            *runResp,
+					Comparison:     *comparison,
+				}, nil
+			}
+			outputsByNode[result.NodeKey] = result.Output
+		}
+	}
+
+	finalOutput := workflowFinalOutput(outputsByNode, graph.Sinks)
+	finalJSON, _ := json.Marshal(finalOutput)
+	if _, err := s.queries.MarkWorkflowRunSuccess(ctx, db.MarkWorkflowRunSuccessParams{
+		ID:     rerun.ID,
+		Output: finalJSON,
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.Conflict("step rerun workflow_run 已不是 running 状态")
+		}
+		log.Error().Err(err).Str("workflow_run_id", rerun.ID.String()).Msg("workflow.RerunWorkflowStep: MarkWorkflowRunSuccess")
+		return nil, httpx.Internal("更新 step rerun workflow_run 失败")
+	}
+	runResp, err := s.GetWorkflowRun(ctx, userID, rerun.ID)
+	if err != nil {
+		return nil, err
+	}
+	comparison, err := s.CompareWorkflowRuns(ctx, userID, sourceRun.ID, rerun.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &WorkflowStepRerunResponse{
+		SourceRunID:    sourceRun.ID.String(),
+		RerunRunID:     rerun.ID.String(),
+		NodeKey:        nodeKey,
+		ReusedNodeKeys: reusedKeys,
+		RerunNodeKeys:  rerunKeys,
+		Run:            *runResp,
+		Comparison:     *comparison,
+	}, nil
+}
+
+func (s *Service) CompareWorkflowRuns(ctx context.Context, userID, baseRunID, candidateRunID uuid.UUID) (*WorkflowRunComparisonResponse, error) {
+	baseRun, err := s.getWorkflowRunForOwner(ctx, userID, baseRunID)
+	if err != nil {
+		return nil, err
+	}
+	candidateRun, err := s.getWorkflowRunForOwner(ctx, userID, candidateRunID)
+	if err != nil {
+		return nil, err
+	}
+	if baseRun.WorkflowID != candidateRun.WorkflowID {
+		return nil, httpx.Conflict("只能对比同一个 workflow 的运行")
+	}
+	baseSteps, err := s.queries.ListWorkflowRunSteps(ctx, baseRun.ID)
+	if err != nil {
+		log.Error().Err(err).Str("workflow_run_id", baseRun.ID.String()).Msg("workflow.CompareWorkflowRuns: base steps")
+		return nil, httpx.Internal("查询 workflow_run_steps 失败")
+	}
+	candidateSteps, err := s.queries.ListWorkflowRunSteps(ctx, candidateRun.ID)
+	if err != nil {
+		log.Error().Err(err).Str("workflow_run_id", candidateRun.ID.String()).Msg("workflow.CompareWorkflowRuns: candidate steps")
+		return nil, httpx.Internal("查询 workflow_run_steps 失败")
+	}
+	resp := compareWorkflowRuns(baseRun, candidateRun, baseSteps, candidateSteps)
+	return &resp, nil
 }
 
 func (s *Service) PauseWorkflowRun(ctx context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {
@@ -642,6 +826,14 @@ func (s *Service) getWorkflowDefinition(ctx context.Context, workflowID uuid.UUI
 
 func (s *Service) failWorkflowRun(ctx context.Context, workflowRunID uuid.UUID, message string) error {
 	msg := truncate(message, 1000)
+	if err := s.markWorkflowRunFailedStatus(ctx, workflowRunID, msg); err != nil {
+		return err
+	}
+	return httpx.Internal("workflow 执行失败: " + msg)
+}
+
+func (s *Service) markWorkflowRunFailedStatus(ctx context.Context, workflowRunID uuid.UUID, message string) error {
+	msg := truncate(message, 1000)
 	_, err := s.queries.MarkWorkflowRunFailed(ctx, db.MarkWorkflowRunFailedParams{
 		ID:           workflowRunID,
 		ErrorMessage: &msg,
@@ -653,7 +845,35 @@ func (s *Service) failWorkflowRun(ctx context.Context, workflowRunID uuid.UUID, 
 		log.Error().Err(err).Str("workflow_run_id", workflowRunID.String()).Msg("workflow.failWorkflowRun")
 		return httpx.Internal("更新 workflow_run 失败")
 	}
-	return httpx.Internal("workflow 执行失败: " + msg)
+	return nil
+}
+
+func (s *Service) copyWorkflowRunStep(ctx context.Context, workflowRunID uuid.UUID, sourceStep db.WorkflowRunStep) error {
+	step, err := s.queries.CreateWorkflowRunStep(ctx, db.CreateWorkflowRunStepParams{
+		WorkflowRunID:  workflowRunID,
+		WorkflowNodeID: sourceStep.WorkflowNodeID,
+		NodeKey:        sourceStep.NodeKey,
+		AgentID:        sourceStep.AgentID,
+		Input:          sourceStep.Input,
+		Sequence:       sourceStep.Sequence,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("workflow_run_id", workflowRunID.String()).Str("node_key", sourceStep.NodeKey).Msg("workflow.copyWorkflowRunStep: create")
+		return httpx.Internal("复制 workflow step 失败")
+	}
+	output := sourceStep.Output
+	if len(output) == 0 {
+		output = []byte(`{}`)
+	}
+	if _, err := s.queries.MarkWorkflowRunStepSuccess(ctx, db.MarkWorkflowRunStepSuccessParams{
+		ID:     step.ID,
+		RunID:  sourceStep.RunID,
+		Output: output,
+	}); err != nil {
+		log.Error().Err(err).Str("workflow_run_id", workflowRunID.String()).Str("node_key", sourceStep.NodeKey).Msg("workflow.copyWorkflowRunStep: success")
+		return httpx.Internal("复制 workflow step 输出失败")
+	}
+	return nil
 }
 
 type workflowGraph struct {
@@ -1030,6 +1250,128 @@ func workflowRunStepToResponse(step db.WorkflowRunStep) WorkflowRunStepResponse 
 		resp.FinishedAt = step.FinishedAt.UTC().Format(time.RFC3339)
 	}
 	return resp
+}
+
+func latestWorkflowStepByNodeKey(steps []db.WorkflowRunStep) map[string]db.WorkflowRunStep {
+	out := map[string]db.WorkflowRunStep{}
+	for _, step := range steps {
+		out[step.NodeKey] = step
+	}
+	return out
+}
+
+func workflowAffectedNodeKeys(graph *workflowGraph, nodeKey string) map[string]struct{} {
+	affected := map[string]struct{}{nodeKey: {}}
+	queue := []string{nodeKey}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, child := range graph.Children[current] {
+			if _, ok := affected[child]; ok {
+				continue
+			}
+			affected[child] = struct{}{}
+			queue = append(queue, child)
+		}
+	}
+	return affected
+}
+
+func workflowStepOutputMap(step db.WorkflowRunStep) (map[string]interface{}, error) {
+	output := map[string]interface{}{}
+	if len(step.Output) == 0 {
+		return output, nil
+	}
+	if err := json.Unmarshal(step.Output, &output); err != nil {
+		return nil, fmt.Errorf("workflow step %s output 不是合法 JSON", step.NodeKey)
+	}
+	return output, nil
+}
+
+func compareWorkflowRuns(baseRun, candidateRun db.WorkflowRun, baseSteps, candidateSteps []db.WorkflowRunStep) WorkflowRunComparisonResponse {
+	baseByKey := latestWorkflowStepByNodeKey(baseSteps)
+	candidateByKey := latestWorkflowStepByNodeKey(candidateSteps)
+	resp := WorkflowRunComparisonResponse{
+		BaseRunID:      baseRun.ID.String(),
+		CandidateRunID: candidateRun.ID.String(),
+		WorkflowID:     baseRun.WorkflowID.String(),
+		StatusChanged:  baseRun.Status != candidateRun.Status,
+		OutputChanged:  !jsonBytesEqual(baseRun.Output, candidateRun.Output),
+		Steps:          []WorkflowRunStepCompareResponse{},
+	}
+	for _, key := range orderedWorkflowStepKeys(baseSteps, candidateSteps) {
+		baseStep, hasBase := baseByKey[key]
+		candidateStep, hasCandidate := candidateByKey[key]
+		step := WorkflowRunStepCompareResponse{NodeKey: key}
+		if hasBase {
+			step.BaseStatus = baseStep.Status
+			if baseStep.RunID != nil {
+				step.BaseRunID = baseStep.RunID.String()
+			}
+		}
+		if hasCandidate {
+			step.CandidateStatus = candidateStep.Status
+			if candidateStep.RunID != nil {
+				step.CandidateRunID = candidateStep.RunID.String()
+			}
+		}
+		step.StatusChanged = !hasBase || !hasCandidate || baseStep.Status != candidateStep.Status
+		step.RunChanged = !hasBase || !hasCandidate || workflowRunIDString(baseStep.RunID) != workflowRunIDString(candidateStep.RunID)
+		step.OutputChanged = !hasBase || !hasCandidate || !jsonBytesEqual(baseStep.Output, candidateStep.Output)
+		step.ErrorChanged = !hasBase || !hasCandidate || stringPtrValue(baseStep.ErrorMessage) != stringPtrValue(candidateStep.ErrorMessage)
+		step.Changed = step.StatusChanged || step.RunChanged || step.OutputChanged || step.ErrorChanged
+		if step.Changed {
+			resp.ChangedNodeKeys = append(resp.ChangedNodeKeys, key)
+		}
+		resp.Steps = append(resp.Steps, step)
+	}
+	return resp
+}
+
+func orderedWorkflowStepKeys(baseSteps, candidateSteps []db.WorkflowRunStep) []string {
+	seen := map[string]struct{}{}
+	keys := []string{}
+	add := func(steps []db.WorkflowRunStep) {
+		for _, step := range steps {
+			if _, ok := seen[step.NodeKey]; ok {
+				continue
+			}
+			seen[step.NodeKey] = struct{}{}
+			keys = append(keys, step.NodeKey)
+		}
+	}
+	add(baseSteps)
+	add(candidateSteps)
+	return keys
+}
+
+func jsonBytesEqual(left, right []byte) bool {
+	return reflect.DeepEqual(jsonComparableValue(left), jsonComparableValue(right))
+}
+
+func jsonComparableValue(raw []byte) interface{} {
+	if len(raw) == 0 {
+		return map[string]interface{}{}
+	}
+	var out interface{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return string(raw)
+	}
+	return out
+}
+
+func workflowRunIDString(id *uuid.UUID) string {
+	if id == nil {
+		return ""
+	}
+	return id.String()
+}
+
+func stringPtrValue(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 func truncate(s string, n int) string {

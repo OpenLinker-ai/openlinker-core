@@ -374,9 +374,9 @@ func TestRunTaskUsesSelectedAgentAndTaskInput(t *testing.T) {
 	var taskID uuid.UUID
 	err := pool.QueryRow(context.Background(),
 		`INSERT INTO task_queries (
-			user_id, query, parsed_skills, recommended_agent_ids, chosen_agent_id, chosen_at
+			user_id, query, parsed_skills, mcp_tools, recommended_agent_ids, chosen_agent_id, chosen_at
 		) VALUES (
-			$1, '做 SQL 查询', '{data/sql-query}', $2, $3, NOW()
+			$1, '做 SQL 查询', '{data/sql-query}', '{run_agent}', $2, $3, NOW()
 		) RETURNING id`,
 		userID, []uuid.UUID{agentID}, agentID).Scan(&taskID)
 	require.NoError(t, err)
@@ -394,6 +394,7 @@ func TestRunTaskUsesSelectedAgentAndTaskInput(t *testing.T) {
 	assert.Equal(t, agentID.String(), runner.gotReq.AgentID)
 	assert.Equal(t, "做 SQL 查询", runner.gotReq.Input["text"])
 	assert.Equal(t, taskID.String(), runner.gotReq.Metadata["task_id"])
+	assert.Equal(t, []string{"run_agent"}, runner.gotReq.Metadata["used_mcp_tools"])
 	assert.Equal(t, userID, runner.gotUserID)
 }
 

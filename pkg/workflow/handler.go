@@ -32,6 +32,8 @@ func NewHandler(svc *Service) *Handler {
 //	GET  /workflows/:id/runs     查询 workflow run 历史
 //	GET  /workflow-runs/:id      查询 workflow run
 //	POST /workflow-runs/:id/retry 复制失败 run 输入并重新入队
+//	POST /workflow-runs/:id/steps/rerun 基于既有 run 重跑某个 step 及其下游
+//	GET  /workflow-runs/:id/compare/:other_id 对比两个 workflow run
 //	POST /workflow-runs/:id/pause 暂停 pending/running run
 //	POST /workflow-runs/:id/resume 恢复 paused run
 //	POST /workflow-runs/:id/cancel 取消 pending/running/paused run
@@ -45,6 +47,8 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	g.GET("/:id/runs", h.ListRuns)
 	api.GET("/workflow-runs/:id", h.GetRun, jwtMiddleware)
 	api.POST("/workflow-runs/:id/retry", h.RetryRun, jwtMiddleware)
+	api.POST("/workflow-runs/:id/steps/rerun", h.RerunStep, jwtMiddleware)
+	api.GET("/workflow-runs/:id/compare/:other_id", h.CompareRuns, jwtMiddleware)
 	api.POST("/workflow-runs/:id/pause", h.PauseRun, jwtMiddleware)
 	api.POST("/workflow-runs/:id/resume", h.ResumeRun, jwtMiddleware)
 	api.POST("/workflow-runs/:id/cancel", h.CancelRun, jwtMiddleware)
@@ -189,6 +193,49 @@ func (h *Handler) RetryRun(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusAccepted, resp)
+}
+
+func (h *Handler) RerunStep(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathUUID(c)
+	if err != nil {
+		return err
+	}
+	var req RerunWorkflowStepRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.RerunWorkflowStep(c.Request().Context(), uid, id, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) CompareRuns(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathUUID(c)
+	if err != nil {
+		return err
+	}
+	otherID, err := uuid.Parse(c.Param("other_id"))
+	if err != nil {
+		return httpx.BadRequest("other_id 不是合法 uuid")
+	}
+	resp, err := h.svc.CompareWorkflowRuns(c.Request().Context(), uid, id, otherID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 func (h *Handler) PauseRun(c echo.Context) error {

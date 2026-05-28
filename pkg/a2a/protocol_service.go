@@ -21,6 +21,7 @@ const (
 	a2aTaskStateSubmitted = "submitted"
 	a2aTaskStateWorking   = "working"
 	a2aTaskStateCompleted = "completed"
+	a2aTaskStateCanceled  = "canceled"
 	a2aTaskStateFailed    = "failed"
 )
 
@@ -154,6 +155,19 @@ func (s *Service) GetProtocolTask(ctx context.Context, userID uuid.UUID, slug, t
 		}
 	}
 	return taskFromRun(resp, "", artifacts, messages), nil
+}
+
+// CancelProtocolTask maps A2A tasks/cancel onto a real OpenLinker run cancellation.
+func (s *Service) CancelProtocolTask(ctx context.Context, userID uuid.UUID, slug, taskID string) (*A2ATask, error) {
+	runID, err := s.ensureProtocolRun(ctx, userID, slug, taskID)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.runtime.CancelRun(ctx, userID, runID)
+	if err != nil {
+		return nil, err
+	}
+	return taskFromRun(resp, "", nil, nil), nil
 }
 
 func (s *Service) ListProtocolTaskEvents(ctx context.Context, userID uuid.UUID, slug, taskID string, afterSequence int32) ([]interface{}, bool, int32, error) {
@@ -435,6 +449,8 @@ func stateFromRunStatus(status string) string {
 		return a2aTaskStateWorking
 	case "success":
 		return a2aTaskStateCompleted
+	case "canceled":
+		return a2aTaskStateCanceled
 	case "failed", "timeout":
 		return a2aTaskStateFailed
 	case "":
@@ -465,7 +481,9 @@ func statusUpdateFromRunEvent(taskID, contextID string, event runtime.RunEventRe
 		state = a2aTaskStateSubmitted
 	case "run.completed":
 		state = a2aTaskStateCompleted
-	case "run.failed", "run.canceled":
+	case "run.canceled":
+		state = a2aTaskStateCanceled
+	case "run.failed":
 		state = a2aTaskStateFailed
 	}
 	status := A2ATaskStatus{
@@ -601,6 +619,12 @@ func statusMessageFromRun(resp *runtime.RunResponse) *A2AMessage {
 		}
 		if text == "" {
 			text = "OpenLinker run failed"
+		}
+		return &A2AMessage{Kind: "message", Role: "agent", Parts: []map[string]interface{}{{"kind": "text", "text": text}}}
+	case "canceled":
+		text := strings.TrimSpace(resp.ErrorMsg)
+		if text == "" {
+			text = "OpenLinker task canceled"
 		}
 		return &A2AMessage{Kind: "message", Role: "agent", Parts: []map[string]interface{}{{"kind": "text", "text": text}}}
 	case "running":

@@ -42,6 +42,75 @@ type NodeMetadataSyncResponse struct {
 	SyncedAt           string `json:"synced_at"`
 }
 
+type CreateRegistryPeerRequest struct {
+	Name          string `json:"name" validate:"required,min=2,max=120"`
+	APIBaseURL    string `json:"api_base_url" validate:"required,url,max=500"`
+	BearerToken   string `json:"bearer_token" validate:"required,min=8,max=4096"`
+	InitialStatus string `json:"initial_status,omitempty" validate:"omitempty,oneof=active paused"`
+}
+
+type RegistryPeerResponse struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	APIBaseURL     string `json:"api_base_url"`
+	CredentialHint string `json:"credential_hint"`
+	Status         string `json:"status"`
+	LastUsedAt     string `json:"last_used_at,omitempty"`
+	CreatedAt      string `json:"created_at"`
+	UpdatedAt      string `json:"updated_at"`
+}
+
+type RegistryPeerListResponse struct {
+	Items []RegistryPeerResponse `json:"items"`
+}
+
+type CreateRegistryFederationInviteRequest struct {
+	Name             string `json:"name" validate:"required,min=2,max=120"`
+	APIBaseURL       string `json:"api_base_url" validate:"required,url,max=500"`
+	BearerToken      string `json:"bearer_token,omitempty" validate:"omitempty,min=8,max=4096"`
+	ExpiresInSeconds int32  `json:"expires_in_seconds,omitempty" validate:"omitempty,min=60,max=604800"`
+}
+
+type RegistryFederationInviteResponse struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	APIBaseURL      string `json:"api_base_url"`
+	CredentialHint  string `json:"credential_hint"`
+	Status          string `json:"status"`
+	TokenPrefix     string `json:"token_prefix,omitempty"`
+	FederationToken string `json:"federation_token,omitempty"`
+	ExchangeURL     string `json:"exchange_url"`
+	ExpiresAt       string `json:"expires_at"`
+	ConsumedAt      string `json:"consumed_at,omitempty"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
+}
+
+type ConsumeRegistryFederationInviteRequest struct {
+	FederationToken string `json:"federation_token" validate:"required,min=8,max=4096"`
+}
+
+type RegistryFederationExchangeMaterial struct {
+	Name           string `json:"name"`
+	APIBaseURL     string `json:"api_base_url"`
+	BearerToken    string `json:"bearer_token"`
+	CredentialHint string `json:"credential_hint"`
+	ExpiresAt      string `json:"expires_at"`
+}
+
+type ExchangeRegistryFederationInviteRequest struct {
+	ExchangeURL     string `json:"exchange_url" validate:"required,url,max=600"`
+	FederationToken string `json:"federation_token" validate:"required,min=8,max=4096"`
+	Name            string `json:"name,omitempty" validate:"omitempty,min=2,max=120"`
+	InitialStatus   string `json:"initial_status,omitempty" validate:"omitempty,oneof=active paused"`
+}
+
+type RegistryFederationExchangeResponse struct {
+	Peer                 RegistryPeerResponse `json:"peer"`
+	ExchangeURL          string               `json:"exchange_url"`
+	RemoteCredentialHint string               `json:"remote_credential_hint"`
+}
+
 type CreateCloudListingRequest struct {
 	CloudListingID       string   `json:"cloud_listing_id,omitempty" validate:"omitempty,uuid"`
 	RegistryNodeID       string   `json:"registry_node_id" validate:"required,uuid"`
@@ -88,6 +157,16 @@ type CreateProxyRunRequest struct {
 	InputSummary   string         `json:"input_summary,omitempty" validate:"omitempty,max=500"`
 }
 
+type CreateRemoteProxyRunRequest struct {
+	RegistryPeerID       string         `json:"registry_peer_id,omitempty" validate:"omitempty,uuid"`
+	RemoteAPIBaseURL     string         `json:"remote_api_base_url,omitempty" validate:"omitempty,url,max=500"`
+	RemoteBearerToken    string         `json:"remote_bearer_token,omitempty" validate:"omitempty,min=8,max=4096"`
+	RemoteCloudListingID string         `json:"remote_cloud_listing_id" validate:"required,uuid"`
+	IdempotencyKey       string         `json:"idempotency_key,omitempty" validate:"omitempty,min=8,max=160"`
+	Input                map[string]any `json:"input,omitempty"`
+	InputSummary         string         `json:"input_summary,omitempty" validate:"omitempty,max=500"`
+}
+
 type CompleteProxyRunRequest struct {
 	Status        string         `json:"status" validate:"required,oneof=success failed timeout"`
 	Output        map[string]any `json:"output,omitempty"`
@@ -124,6 +203,13 @@ type ProxyRunResponse struct {
 	UpdatedAt          string         `json:"updated_at"`
 }
 
+type RemoteProxyRunResponse struct {
+	RemoteAPIBaseURL string           `json:"remote_api_base_url"`
+	RegistryPeerID   string           `json:"registry_peer_id,omitempty"`
+	RouteMode        string           `json:"route_mode"`
+	RemoteRun        ProxyRunResponse `json:"remote_run"`
+}
+
 type ProxyRunArtifactResponse struct {
 	ID               string         `json:"id"`
 	ProxyRunID       string         `json:"proxy_run_id"`
@@ -143,4 +229,13 @@ type ProxyRunArtifactResponse struct {
 type ProxyRunArtifactListResponse struct {
 	ProxyRunID string                     `json:"proxy_run_id"`
 	Items      []ProxyRunArtifactResponse `json:"items"`
+}
+
+type ProxyRunArtifactDownload struct {
+	ArtifactID  string
+	FileName    string
+	ContentType string
+	SizeBytes   int64
+	SHA256      string
+	Body        []byte
 }

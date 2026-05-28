@@ -87,6 +87,19 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
 		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, task, protocolVersion))
+	case "tasks/cancel":
+		if err := requireScope(c, "agents:run"); err != nil {
+			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
+		}
+		var params A2ATaskQueryParams
+		if err := decodeJSONRPCParams(req.Params, &params); err != nil {
+			return c.JSON(http.StatusOK, jsonRPCError(req.ID, jsonRPCInvalidParams, err.Error(), nil))
+		}
+		task, err := h.svc.CancelProtocolTask(c.Request().Context(), userID, c.Param("slug"), params.ID)
+		if err != nil {
+			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
+		}
+		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, task, protocolVersion))
 	case "tasks/resubscribe":
 		if err := requireScope(c, "runs:read"); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
@@ -277,6 +290,44 @@ func (h *Handler) SubscribeTaskHTTP(c echo.Context) error {
 	return h.streamProtocolTask(c, userID, c.Param("slug"), taskID, nil, false, task, protocolVersion)
 }
 
+// TaskActionHTTP dispatches literal A2A task colon actions such as /tasks/{id}:subscribe and /tasks/{id}:cancel.
+func (h *Handler) TaskActionHTTP(c echo.Context) error {
+	raw := strings.TrimSpace(c.Param("*"))
+	switch {
+	case strings.HasSuffix(raw, ":subscribe") || strings.HasSuffix(raw, "/subscribe"):
+		return h.SubscribeTaskHTTP(c)
+	case strings.HasSuffix(raw, ":cancel") || strings.HasSuffix(raw, "/cancel"):
+		return h.CancelTaskHTTP(c)
+	default:
+		return httpx.NotFound("A2A task action 不存在")
+	}
+}
+
+// CancelTaskHTTP handles the A2A HTTP+JSON alias POST /tasks/:taskID:cancel.
+func (h *Handler) CancelTaskHTTP(c echo.Context) error {
+	protocolVersion, err := a2aVersionFromRequest(c)
+	if err != nil {
+		return err
+	}
+	setA2AVersionHeader(c, protocolVersion)
+	if err := requireScope(c, "agents:run"); err != nil {
+		return err
+	}
+	userID, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	taskID, err := taskIDFromActionRequest(c, "cancel")
+	if err != nil {
+		return err
+	}
+	task, err := h.svc.CancelProtocolTask(c.Request().Context(), userID, c.Param("slug"), taskID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, normalizeA2AResultForVersion(task, protocolVersion))
+}
+
 func (h *Handler) SetTaskPushNotificationHTTP(c echo.Context) error {
 	protocolVersion, err := a2aVersionFromRequest(c)
 	if err != nil {
@@ -375,6 +426,8 @@ func normalizeA2AJSONRPCMethod(method string) string {
 		return "message/stream"
 	case "tasks/get", "GetTask":
 		return "tasks/get"
+	case "tasks/cancel", "CancelTask":
+		return "tasks/cancel"
 	case "tasks/resubscribe", "SubscribeToTask":
 		return "tasks/resubscribe"
 	case "tasks/pushNotificationConfig/set", "SetTaskPushNotificationConfig", "CreateTaskPushNotificationConfig":
@@ -665,14 +718,20 @@ func afterSequenceFromA2ASSE(c echo.Context) (int32, error) {
 }
 
 func taskIDFromSubscribeRequest(c echo.Context) (string, error) {
+	return taskIDFromActionRequest(c, "subscribe")
+}
+
+func taskIDFromActionRequest(c echo.Context, action string) (string, error) {
 	raw := c.Param("taskID")
 	if raw == "" {
 		raw = c.Param("*")
 	}
 	raw = strings.TrimSpace(raw)
 	raw = strings.TrimPrefix(raw, "tasks/")
-	raw = strings.TrimSuffix(raw, ":subscribe")
-	raw = strings.TrimSuffix(raw, "/subscribe")
+	if action != "" {
+		raw = strings.TrimSuffix(raw, ":"+action)
+		raw = strings.TrimSuffix(raw, "/"+action)
+	}
 	if raw == "" {
 		var body struct {
 			Name string `json:"name"`

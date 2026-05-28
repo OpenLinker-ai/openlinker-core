@@ -34,7 +34,7 @@ type DeliveryListItem struct {
 // CreateRunWebhookRequest POST /api/v1/runs/:id/webhooks.
 type CreateRunWebhookRequest struct {
 	URL                 string                 `json:"target_url" validate:"required,url,max=500"`
-	EventTypes          []string               `json:"event_types,omitempty" validate:"omitempty,dive,oneof=run.created run.started run.dispatch.pending run.dispatch.claimed run.requirements.snapshotted run.message.delta run.artifact.delta run.status.changed run.child.created run.child.completed run.completed run.failed"`
+	EventTypes          []string               `json:"event_types,omitempty" validate:"omitempty,dive,oneof=run.created run.started run.dispatch.pending run.dispatch.claimed run.requirements.snapshotted run.message.delta run.artifact.delta run.status.changed run.child.created run.child.completed run.completed run.failed run.canceled"`
 	PushAuthScheme      string                 `json:"push_auth_scheme,omitempty" validate:"omitempty,max=80"`
 	PushAuthCredentials string                 `json:"push_auth_credentials,omitempty" validate:"omitempty,max=1000"`
 	PushMetadata        map[string]interface{} `json:"push_metadata,omitempty"`
@@ -52,6 +52,21 @@ type RunWebhookSubscriptionResponse struct {
 	Secret              string   `json:"secret,omitempty"`
 	CreatedAt           string   `json:"created_at"`
 	UpdatedAt           string   `json:"updated_at"`
+}
+
+type BatchRunWebhookSubscriptionsRequest struct {
+	SubscriptionIDs []string `json:"subscription_ids" validate:"required,min=1,max=50,dive,uuid"`
+	Action          string   `json:"action" validate:"required,oneof=pause resume delete"`
+}
+
+type RunWebhookSubscriptionListResponse struct {
+	Items []RunWebhookSubscriptionResponse `json:"items"`
+}
+
+type BatchRunWebhookSubscriptionsResponse struct {
+	Action       string                           `json:"action"`
+	UpdatedCount int                              `json:"updated_count"`
+	Items        []RunWebhookSubscriptionResponse `json:"items"`
 }
 
 // RunWebhookPayload is the A2A-style push body derived from run_events.

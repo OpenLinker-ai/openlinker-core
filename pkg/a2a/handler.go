@@ -36,6 +36,7 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.
 	protocol.POST("", h.JSONRPC)
 	protocol.POST("/message:action", h.MessageHTTP)
 	protocol.GET("/tasks/:taskID", h.GetTaskHTTP)
+	protocol.POST("/tasks/:taskID/cancel", h.CancelTaskHTTP)
 	protocol.POST("/tasks/:taskID/pushNotificationConfig", h.SetTaskPushNotificationHTTP)
 	protocol.GET("/tasks/:taskID/pushNotificationConfig", h.ListTaskPushNotificationsHTTP)
 	protocol.GET("/tasks/:taskID/pushNotificationConfig/:configID", h.GetTaskPushNotificationHTTP)
@@ -46,8 +47,8 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.
 	protocol.DELETE("/tasks/:taskID/pushNotificationConfigs/:configID", h.DeleteTaskPushNotificationHTTP)
 	protocol.GET("/tasks/:taskID/subscribe", h.SubscribeTaskHTTP)
 	protocol.POST("/tasks/:taskID/subscribe", h.SubscribeTaskHTTP)
-	protocol.GET("/tasks/*", h.SubscribeTaskHTTP)
-	protocol.POST("/tasks/*", h.SubscribeTaskHTTP)
+	protocol.GET("/tasks/*", h.TaskActionHTTP)
+	protocol.POST("/tasks/*", h.TaskActionHTTP)
 	api.GET("/runs/:id/children", h.ListChildren, queryMiddleware)
 }
 

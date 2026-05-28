@@ -22,6 +22,10 @@ type RunWorkflowRequest struct {
 	MaxAttempts int32                  `json:"max_attempts,omitempty" validate:"omitempty,min=1,max=10"`
 }
 
+type RerunWorkflowStepRequest struct {
+	NodeKey string `json:"node_key" validate:"required,min=1,max=80"`
+}
+
 type WorkflowResponse struct {
 	ID          string                   `json:"id"`
 	Name        string                   `json:"name"`
@@ -70,6 +74,39 @@ type WorkflowRunResponse struct {
 type WorkflowRunListResponse struct {
 	Items []WorkflowRunResponse `json:"items"`
 	Total int32                 `json:"total"`
+}
+
+type WorkflowStepRerunResponse struct {
+	SourceRunID    string                        `json:"source_run_id"`
+	RerunRunID     string                        `json:"rerun_run_id"`
+	NodeKey        string                        `json:"node_key"`
+	ReusedNodeKeys []string                      `json:"reused_node_keys"`
+	RerunNodeKeys  []string                      `json:"rerun_node_keys"`
+	Run            WorkflowRunResponse           `json:"run"`
+	Comparison     WorkflowRunComparisonResponse `json:"comparison"`
+}
+
+type WorkflowRunComparisonResponse struct {
+	BaseRunID       string                           `json:"base_run_id"`
+	CandidateRunID  string                           `json:"candidate_run_id"`
+	WorkflowID      string                           `json:"workflow_id"`
+	StatusChanged   bool                             `json:"status_changed"`
+	OutputChanged   bool                             `json:"output_changed"`
+	ChangedNodeKeys []string                         `json:"changed_node_keys"`
+	Steps           []WorkflowRunStepCompareResponse `json:"steps"`
+}
+
+type WorkflowRunStepCompareResponse struct {
+	NodeKey         string `json:"node_key"`
+	BaseStatus      string `json:"base_status,omitempty"`
+	CandidateStatus string `json:"candidate_status,omitempty"`
+	BaseRunID       string `json:"base_run_id,omitempty"`
+	CandidateRunID  string `json:"candidate_run_id,omitempty"`
+	StatusChanged   bool   `json:"status_changed"`
+	RunChanged      bool   `json:"run_changed"`
+	OutputChanged   bool   `json:"output_changed"`
+	ErrorChanged    bool   `json:"error_changed"`
+	Changed         bool   `json:"changed"`
 }
 
 type WorkflowRunStepResponse struct {

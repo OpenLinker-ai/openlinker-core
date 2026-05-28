@@ -733,6 +733,10 @@ func TestStartRun_ReturnsRunningAndCompletesInBackground(t *testing.T) {
 	assert.Equal(t, "success", completed.Status)
 	assert.Equal(t, "async ok", completed.Output["text"])
 
+	require.Eventually(t, func() bool {
+		got := readRunEvents(t, pool, runID)
+		return len(got) >= 3 && got[2].EventType == "run.completed"
+	}, 3*time.Second, 20*time.Millisecond)
 	events = readRunEvents(t, pool, runID)
 	require.Len(t, events, 3)
 	assert.Equal(t, "run.completed", events[2].EventType)

@@ -69,6 +69,7 @@ func TestNormalizeA2AJSONRPCMethodAcceptsStandardAliases(t *testing.T) {
 	assert.Equal(t, "message/send", normalizeA2AJSONRPCMethod("SendMessage"))
 	assert.Equal(t, "message/stream", normalizeA2AJSONRPCMethod("SendStreamingMessage"))
 	assert.Equal(t, "tasks/get", normalizeA2AJSONRPCMethod("GetTask"))
+	assert.Equal(t, "tasks/cancel", normalizeA2AJSONRPCMethod("CancelTask"))
 	assert.Equal(t, "tasks/resubscribe", normalizeA2AJSONRPCMethod("SubscribeToTask"))
 	assert.Equal(t, "tasks/pushNotificationConfig/list", normalizeA2AJSONRPCMethod("ListTaskPushNotificationConfigs"))
 }

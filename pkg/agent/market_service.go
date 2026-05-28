@@ -2,7 +2,14 @@ package agent
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -193,6 +200,14 @@ func (s *MarketService) GetBySlug(ctx context.Context, slug string) (*AgentDetai
 // GetAgentCardBySlug returns a public Agent Card derived from the same public
 // detail record used by the market page.
 func (s *MarketService) GetAgentCardBySlug(ctx context.Context, slug string) (*AgentCardResponse, error) {
+	return s.getAgentCardBySlug(ctx, slug, false)
+}
+
+func (s *MarketService) GetExtendedAgentCardBySlug(ctx context.Context, slug string) (*AgentCardResponse, error) {
+	return s.getAgentCardBySlug(ctx, slug, true)
+}
+
+func (s *MarketService) getAgentCardBySlug(ctx context.Context, slug string, extended bool) (*AgentCardResponse, error) {
 	detail, err := s.GetBySlug(ctx, slug)
 	if err != nil {
 		return nil, err
@@ -219,7 +234,12 @@ func (s *MarketService) GetAgentCardBySlug(ctx context.Context, slug string) (*A
 	}
 
 	a2aEndpoint := "/api/v1/a2a/agents/" + detail.Slug
-	return &AgentCardResponse{
+	extendedCardEndpoint := "/api/v1/agents/" + detail.Slug + "/agent-card.extended.json"
+	cardVariant := "public"
+	if extended {
+		cardVariant = "extended"
+	}
+	card := &AgentCardResponse{
 		Name:             detail.Name,
 		Description:      detail.Description,
 		URL:              a2aEndpoint,
@@ -236,9 +256,10 @@ func (s *MarketService) GetAgentCardBySlug(ctx context.Context, slug string) (*A
 		},
 		Capabilities: AgentCardCapabilities{
 			Streaming:               true,
-			PushNotifications:       detail.ConnectionMode == ConnectionModeRuntimePull,
-			PushNotificationsLegacy: detail.ConnectionMode == ConnectionModeRuntimePull,
+			PushNotifications:       true,
+			PushNotificationsLegacy: true,
 			Delegation:              true,
+			ExtendedAgentCard:       true,
 		},
 		DefaultInputModes:         []string{"application/json", "text/plain"},
 		DefaultOutputModes:        []string{"application/json", "text/plain"},
@@ -252,12 +273,16 @@ func (s *MarketService) GetAgentCardBySlug(ctx context.Context, slug string) (*A
 		OpenLinker: AgentCardOpenLinkerExt{
 			AgentID:                detail.ID,
 			Slug:                   detail.Slug,
+			CardVariant:            cardVariant,
+			ExtendedCardEndpoint:   extendedCardEndpoint,
 			ConnectionMode:         detail.ConnectionMode,
 			MCPToolName:            detail.MCPToolName,
 			AvailabilityStatus:     detail.Availability.Status,
 			CertificationStatus:    detail.CertificationStatus,
 			VerifiedSkillCount:     detail.VerifiedSkillCount,
 			LatestBenchmarkBatchID: detail.LatestBenchmarkID,
+			CapabilityDeclared:     detail.Capability != nil,
+			ExampleCount:           int32(len(detail.Examples)),
 			InvocationEndpoint:     a2aEndpoint,
 			StreamEndpoint:         a2aEndpoint + "/message:stream",
 			RunLookupEndpoint:      "/api/v1/runs/{run_id}",
@@ -265,7 +290,60 @@ func (s *MarketService) GetAgentCardBySlug(ctx context.Context, slug string) (*A
 			TaskSubscribeEndpoint:  a2aEndpoint + "/tasks/{task_id}:subscribe",
 			SkillIDs:               skillIDs,
 		},
-	}, nil
+	}
+	if extended {
+		card.Capability = detail.Capability
+		card.Examples = detail.Examples
+	}
+	signAgentCard(card)
+	return card, nil
+}
+
+func signAgentCard(card *AgentCardResponse) {
+	seed := agentCardSigningSeed()
+	if len(seed) != ed25519.SeedSize {
+		return
+	}
+	card.Signature = nil
+	payload, err := json.Marshal(card)
+	if err != nil {
+		return
+	}
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	digest := sha256.Sum256(payload)
+	keyDigest := sha256.Sum256(publicKey)
+	card.Signature = &AgentCardSignature{
+		Algorithm:     "Ed25519",
+		KeyID:         base64.RawURLEncoding.EncodeToString(keyDigest[:12]),
+		PublicKey:     base64.RawURLEncoding.EncodeToString(publicKey),
+		PayloadDigest: "sha256-" + base64.RawURLEncoding.EncodeToString(digest[:]),
+		Signature:     base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, payload)),
+	}
+}
+
+func agentCardSigningSeed() []byte {
+	raw := strings.TrimSpace(os.Getenv("AGENT_CARD_SIGNING_SEED"))
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv("OPENLINKER_AGENT_CARD_SIGNING_SEED"))
+	}
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv("JWT_SECRET"))
+	}
+	if raw == "" {
+		return nil
+	}
+	if decoded, err := hex.DecodeString(raw); err == nil && len(decoded) == ed25519.SeedSize {
+		return decoded
+	}
+	if decoded, err := base64.RawURLEncoding.DecodeString(raw); err == nil && len(decoded) == ed25519.SeedSize {
+		return decoded
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil && len(decoded) == ed25519.SeedSize {
+		return decoded
+	}
+	sum := sha256.Sum256([]byte(raw))
+	return sum[:]
 }
 
 func (s *MarketService) agentAvailability(ctx context.Context, agentID uuid.UUID) Availability {

@@ -321,6 +321,87 @@ func TestRunWebhookSubscriptionCanPauseAndResumeNonTerminalEvents(t *testing.T) 
 	}
 }
 
+func TestRunWebhookBatchManagementAcrossRuns(t *testing.T) {
+	pool := setupWebhookTestDB(t)
+	svc := NewService(pool)
+	userID := insertWebhookUser(t, pool, false)
+	otherUserID := insertWebhookUser(t, pool, false)
+	creatorID := insertWebhookUser(t, pool, true)
+	agentID := insertWebhookAgent(t, pool, creatorID, "run-webhook-batch-"+uuid.NewString()[:8])
+	runA := insertWebhookRun(t, pool, userID, agentID)
+	runB := insertWebhookRun(t, pool, userID, agentID)
+	otherRun := insertWebhookRun(t, pool, otherUserID, agentID)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	subA, err := svc.CreateRunWebhookSubscription(context.Background(), runA.ID, userID, &CreateRunWebhookRequest{
+		URL:        server.URL,
+		EventTypes: []string{"run.completed"},
+	})
+	require.NoError(t, err)
+	subB, err := svc.CreateRunWebhookSubscription(context.Background(), runB.ID, userID, &CreateRunWebhookRequest{
+		URL:        server.URL,
+		EventTypes: []string{"run.failed"},
+	})
+	require.NoError(t, err)
+	otherSub, err := svc.CreateRunWebhookSubscription(context.Background(), otherRun.ID, otherUserID, &CreateRunWebhookRequest{
+		URL:        server.URL,
+		EventTypes: []string{"run.completed"},
+	})
+	require.NoError(t, err)
+
+	active, err := svc.ListRunWebhookSubscriptionsForOwner(context.Background(), userID, "active", 20)
+	require.NoError(t, err)
+	require.Len(t, active, 2)
+
+	paused, err := svc.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{
+		Action:          "pause",
+		SubscriptionIDs: []string{subA.ID, subB.ID, otherSub.ID},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "pause", paused.Action)
+	assert.Equal(t, 2, paused.UpdatedCount)
+	assert.Len(t, paused.Items, 2)
+	for _, item := range paused.Items {
+		assert.Equal(t, "paused", item.Status)
+	}
+
+	pausedList, err := svc.ListRunWebhookSubscriptionsForOwner(context.Background(), userID, "paused", 20)
+	require.NoError(t, err)
+	require.Len(t, pausedList, 2)
+
+	resumed, err := svc.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{
+		Action:          "resume",
+		SubscriptionIDs: []string{subA.ID},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, resumed.UpdatedCount)
+	assert.Equal(t, "active", resumed.Items[0].Status)
+
+	deleted, err := svc.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{
+		Action:          "delete",
+		SubscriptionIDs: []string{subB.ID},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted.UpdatedCount)
+	assert.Equal(t, "deleted", deleted.Items[0].Status)
+
+	all, err := svc.ListRunWebhookSubscriptionsForOwner(context.Background(), userID, "", 20)
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	assert.Equal(t, subA.ID, all[0].ID)
+	assert.Equal(t, "active", all[0].Status)
+
+	other, err := svc.ListRunWebhookSubscriptionsForOwner(context.Background(), otherUserID, "", 20)
+	require.NoError(t, err)
+	require.Len(t, other, 1)
+	assert.Equal(t, otherSub.ID, other[0].ID)
+	assert.Equal(t, "active", other[0].Status)
+}
+
 func TestAttemptDeliveryRetriesAndThenFailsFinal(t *testing.T) {
 	pool := setupWebhookTestDB(t)
 	svc := NewService(pool)

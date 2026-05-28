@@ -477,6 +477,62 @@ func (s *Service) ListRunWebhookSubscriptions(ctx context.Context, runID, userID
 	return items, nil
 }
 
+func (s *Service) ListRunWebhookSubscriptionsForOwner(ctx context.Context, userID uuid.UUID, status string, limit int) ([]RunWebhookSubscriptionResponse, error) {
+	status = strings.TrimSpace(status)
+	if status != "" && status != "active" && status != "paused" && status != "failed" {
+		return nil, httpx.BadRequest("status 只能是 active、paused 或 failed")
+	}
+	if limit <= 0 || limit > maxListLimit {
+		limit = defaultListLimit
+	}
+	rows, err := s.queries.ListRunWebhookSubscriptionsByOwner(ctx, db.ListRunWebhookSubscriptionsByOwnerParams{
+		OwnerUserID: userID,
+		Status:      status,
+		Limit:       int32(limit),
+	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID.String()).Str("status", status).Msg("webhook.ListRunWebhookSubscriptionsForOwner")
+		return nil, httpx.Internal("查询 run webhook 失败")
+	}
+	items := make([]RunWebhookSubscriptionResponse, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, runWebhookSubscriptionToResponse(row))
+	}
+	return items, nil
+}
+
+func (s *Service) BatchManageRunWebhookSubscriptions(ctx context.Context, userID uuid.UUID, req *BatchRunWebhookSubscriptionsRequest) (*BatchRunWebhookSubscriptionsResponse, error) {
+	if req == nil {
+		return nil, httpx.BadRequest("请求体不能为空")
+	}
+	status, err := batchActionToRunWebhookStatus(req.Action)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := parseRunWebhookSubscriptionIDs(req.SubscriptionIDs)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.queries.BatchUpdateRunWebhookSubscriptionsForOwner(ctx, db.BatchUpdateRunWebhookSubscriptionsForOwnerParams{
+		OwnerUserID: userID,
+		IDs:         ids,
+		Status:      status,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID.String()).Str("action", req.Action).Msg("webhook.BatchManageRunWebhookSubscriptions")
+		return nil, httpx.Internal("批量更新 run webhook 失败")
+	}
+	items := make([]RunWebhookSubscriptionResponse, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, runWebhookSubscriptionToResponse(row))
+	}
+	return &BatchRunWebhookSubscriptionsResponse{
+		Action:       strings.TrimSpace(req.Action),
+		UpdatedCount: len(items),
+		Items:        items,
+	}, nil
+}
+
 // UpdateRunWebhookSubscriptionStatus pauses or resumes a run push callback.
 func (s *Service) UpdateRunWebhookSubscriptionStatus(ctx context.Context, runID, subscriptionID, userID uuid.UUID, status string) (*RunWebhookSubscriptionResponse, error) {
 	if status != "active" && status != "paused" {
@@ -815,7 +871,8 @@ func normalizeRunWebhookEventTypes(raw []string) []string {
 			"run.child.created",
 			"run.child.completed",
 			"run.completed",
-			"run.failed":
+			"run.failed",
+			"run.canceled":
 			if _, ok := seen[item]; !ok {
 				seen[item] = struct{}{}
 				out = append(out, item)
@@ -823,7 +880,7 @@ func normalizeRunWebhookEventTypes(raw []string) []string {
 		}
 	}
 	if len(out) == 0 {
-		return []string{"run.completed", "run.failed"}
+		return []string{"run.completed", "run.failed", "run.canceled"}
 	}
 	return out
 }
@@ -835,6 +892,42 @@ func normalizePushAuth(scheme, credentials string) (*string, *string) {
 		return nil, nil
 	}
 	return &scheme, &credentials
+}
+
+func batchActionToRunWebhookStatus(action string) (string, error) {
+	switch strings.TrimSpace(action) {
+	case "pause":
+		return "paused", nil
+	case "resume":
+		return "active", nil
+	case "delete":
+		return "deleted", nil
+	default:
+		return "", httpx.BadRequest("action 只能是 pause、resume 或 delete")
+	}
+}
+
+func parseRunWebhookSubscriptionIDs(raw []string) ([]uuid.UUID, error) {
+	if len(raw) == 0 {
+		return nil, httpx.BadRequest("subscription_ids 不能为空")
+	}
+	if len(raw) > 50 {
+		return nil, httpx.BadRequest("subscription_ids 最多 50 个")
+	}
+	seen := map[uuid.UUID]struct{}{}
+	out := make([]uuid.UUID, 0, len(raw))
+	for _, item := range raw {
+		id, err := uuid.Parse(strings.TrimSpace(item))
+		if err != nil {
+			return nil, httpx.BadRequest("subscription_ids 包含非法 uuid")
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out, nil
 }
 
 func runWebhookPayload(sub db.RunWebhookSubscription, event db.RunEvent) RunWebhookPayload {

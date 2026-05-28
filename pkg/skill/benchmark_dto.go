@@ -84,15 +84,15 @@ type BenchmarkBatchSummary struct {
 
 // TopAgentForSkill /skills 列表页 top-N 行。
 type TopAgentForSkill struct {
-	AgentID           string  `json:"agent_id"`
-	Slug              string  `json:"slug"`
-	Name              string  `json:"name"`
-	Description       string  `json:"description"`
+	AgentID           string   `json:"agent_id"`
+	Slug              string   `json:"slug"`
+	Name              string   `json:"name"`
+	Description       string   `json:"description"`
 	Tags              []string `json:"tags"`
-	PricePerCallCents int32   `json:"price_per_call_cents"`
-	TotalCalls        int32   `json:"total_calls"`
-	AverageScore      *int32  `json:"average_score,omitempty"`
-	VerifiedAt        *string `json:"verified_at,omitempty"`
+	PricePerCallCents int32    `json:"price_per_call_cents"`
+	TotalCalls        int32    `json:"total_calls"`
+	AverageScore      *int32   `json:"average_score,omitempty"`
+	VerifiedAt        *string  `json:"verified_at,omitempty"`
 }
 
 // formatTimePtr 把 *time.Time 转 RFC3339 字符串指针；nil → nil。

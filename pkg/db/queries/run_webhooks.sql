@@ -22,6 +22,17 @@ WHERE run_id = $1
   AND status <> 'deleted'
 ORDER BY created_at DESC;
 
+-- name: ListRunWebhookSubscriptionsByOwner :many
+SELECT id, run_id, owner_user_id, caller_agent_id, target_url, secret,
+       event_types, push_auth_scheme, push_auth_credentials, push_metadata,
+       status, consecutive_failures, created_at, updated_at, deleted_at
+FROM run_webhook_subscriptions
+WHERE owner_user_id = $1
+  AND status <> 'deleted'
+  AND ($2::text = '' OR status = $2)
+ORDER BY updated_at DESC, created_at DESC
+LIMIT $3;
+
 -- name: DeleteRunWebhookSubscriptionForOwner :execrows
 UPDATE run_webhook_subscriptions
 SET status = 'deleted',
@@ -39,6 +50,19 @@ SET status = $4,
 WHERE id = $1
   AND run_id = $2
   AND owner_user_id = $3
+  AND status <> 'deleted'
+RETURNING id, run_id, owner_user_id, caller_agent_id, target_url, secret,
+          event_types, push_auth_scheme, push_auth_credentials, push_metadata,
+          status, consecutive_failures, created_at, updated_at, deleted_at;
+
+-- name: BatchUpdateRunWebhookSubscriptionsForOwner :many
+UPDATE run_webhook_subscriptions
+SET status = $3,
+    consecutive_failures = CASE WHEN $3 = 'active' THEN 0 ELSE consecutive_failures END,
+    deleted_at = CASE WHEN $3 = 'deleted' THEN NOW() ELSE deleted_at END,
+    updated_at = NOW()
+WHERE owner_user_id = $1
+  AND id = ANY($2::uuid[])
   AND status <> 'deleted'
 RETURNING id, run_id, owner_user_id, caller_agent_id, target_url, secret,
           event_types, push_auth_scheme, push_auth_credentials, push_metadata,

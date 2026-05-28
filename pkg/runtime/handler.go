@@ -79,7 +79,7 @@ func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
 // PostRun 调用 Agent。
 //
 // 同步等待创作者 endpoint 返回（Phase 1 不做流式 / 异步队列）。
-// 失败 / 超时 → status='failed' or 'timeout'，已退款。
+// 失败 / 超时 / 取消 → status='failed' or 'timeout' or 'canceled'，已退款。
 func (h *Handler) PostRun(c echo.Context) error {
 	if err := requireAPIKeyScope(c, "agents:run"); err != nil {
 		return err

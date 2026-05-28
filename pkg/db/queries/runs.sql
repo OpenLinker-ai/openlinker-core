@@ -43,6 +43,19 @@ SET status = $2,
     finished_at = NOW()
 WHERE id = $1 AND status = 'running';
 
+-- name: CancelRun :one
+-- 用户取消 running run。仅 owner 可取消，终态 run 不被覆盖。
+UPDATE runs
+SET status = 'canceled',
+    error_code = 'CANCELED',
+    error_message = $3,
+    duration_ms = GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000))::int,
+    finished_at = NOW()
+WHERE id = $1 AND user_id = $2 AND status = 'running'
+RETURNING id, user_id, agent_id, input, output, status, error_code, error_message,
+          cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
+          started_at, finished_at, source;
+
 -- name: GetRunByID :one
 SELECT id, user_id, agent_id, input, output, status, error_code, error_message,
        cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,

@@ -524,13 +524,18 @@ func (s *Service) RunTask(ctx context.Context, taskID, userID uuid.UUID, req *Ru
 	if input == nil {
 		input = map[string]interface{}{"text": t.Query}
 	}
+	metadata := map[string]interface{}{
+		"task_id": taskID.String(),
+		"source":  "task",
+	}
+	if usedTools := taskRunUsedMCPTools(t.MCPTools); len(usedTools) > 0 {
+		metadata["used_mcp_tools"] = usedTools
+	}
+
 	resp, err := s.runner.StartRun(ctx, userID, &runtime.RunRequest{
-		AgentID: req.AgentID.String(),
-		Input:   input,
-		Metadata: map[string]interface{}{
-			"task_id": taskID.String(),
-			"source":  "task",
-		},
+		AgentID:  req.AgentID.String(),
+		Input:    input,
+		Metadata: metadata,
 	}, "web")
 	if err != nil {
 		return nil, err
@@ -972,6 +977,17 @@ func normalizeDeliveryVisibility(raw string) string {
 	default:
 		return "private"
 	}
+}
+
+func taskRunUsedMCPTools(required []string) []string {
+	out := make([]string, 0, 1)
+	for _, tool := range required {
+		if strings.TrimSpace(tool) == "run_agent" {
+			out = append(out, "run_agent")
+			break
+		}
+	}
+	return out
 }
 
 func deliveryArtifact(raw []byte) DeliveryArtifact {

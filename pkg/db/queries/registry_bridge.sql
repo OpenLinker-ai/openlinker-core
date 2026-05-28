@@ -433,6 +433,16 @@ WHERE a.proxy_run_id = $1
   AND p.requesting_user_id = $2
 ORDER BY a.created_at ASC, a.id ASC;
 
+-- name: GetProxyRunArtifactForRequester :one
+SELECT a.id, a.proxy_run_id, a.cloud_run_id, a.source_artifact_id, a.artifact_type,
+       a.title, a.content, a.mime_type, a.file_uri, a.file_name, a.file_sha256,
+       a.file_size_bytes, a.created_at
+FROM proxy_run_artifacts a
+JOIN proxy_runs p ON p.id = a.proxy_run_id
+WHERE a.id = $1
+  AND a.proxy_run_id = $2
+  AND p.requesting_user_id = $3;
+
 -- name: TimeoutStaleProxyRuns :one
 WITH expired AS (
     UPDATE proxy_runs

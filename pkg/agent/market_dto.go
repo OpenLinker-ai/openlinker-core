@@ -110,6 +110,9 @@ type AgentCardResponse struct {
 	Skills                    []AgentCardSkill       `json:"skills"`
 	Authentication            AgentCardAuth          `json:"authentication"`
 	OpenLinker                AgentCardOpenLinkerExt `json:"openlinker"`
+	Capability                *CapabilityResponse    `json:"capability,omitempty"`
+	Examples                  []ExampleResponse      `json:"examples,omitempty"`
+	Signature                 *AgentCardSignature    `json:"signature,omitempty"`
 }
 
 type AgentCardProvider struct {
@@ -145,16 +148,28 @@ type AgentCardAuth struct {
 type AgentCardOpenLinkerExt struct {
 	AgentID                string   `json:"agent_id"`
 	Slug                   string   `json:"slug"`
+	CardVariant            string   `json:"card_variant"`
+	ExtendedCardEndpoint   string   `json:"extended_card_endpoint"`
 	ConnectionMode         string   `json:"connection_mode"`
 	MCPToolName            *string  `json:"mcp_tool_name,omitempty"`
 	AvailabilityStatus     string   `json:"availability_status"`
 	CertificationStatus    string   `json:"certification_status"`
 	VerifiedSkillCount     int32    `json:"verified_skill_count"`
 	LatestBenchmarkBatchID *string  `json:"latest_benchmark_batch_id,omitempty"`
+	CapabilityDeclared     bool     `json:"capability_declared"`
+	ExampleCount           int32    `json:"example_count"`
 	InvocationEndpoint     string   `json:"invocation_endpoint"`
 	StreamEndpoint         string   `json:"stream_endpoint"`
 	RunLookupEndpoint      string   `json:"run_lookup_endpoint"`
 	TaskLookupEndpoint     string   `json:"task_lookup_endpoint"`
 	TaskSubscribeEndpoint  string   `json:"task_subscribe_endpoint"`
 	SkillIDs               []string `json:"skill_ids"`
+}
+
+type AgentCardSignature struct {
+	Algorithm     string `json:"algorithm"`
+	KeyID         string `json:"key_id"`
+	PublicKey     string `json:"public_key"`
+	PayloadDigest string `json:"payload_digest"`
+	Signature     string `json:"signature"`
 }

@@ -1,11 +1,15 @@
 package registry
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -25,19 +29,57 @@ const (
 	nodeSecretPrefix              = "rn_live_"
 	nodeSecretPrefixLen           = 12
 	nodeSecretRandomSize          = 32
+	federationTokenPrefix         = "rf_live_"
+	federationTokenPrefixLen      = 12
+	federationTokenRandomSize     = 32
+	defaultFederationInviteTTL    = 15 * time.Minute
 	defaultNodeType               = "bridge_proxy"
 	defaultRoutingMode            = "pull_proxy"
 	payloadPolicyMetadataOnly     = "metadata_only"
 	payloadPolicyStoreRunSummary  = "store_run_summary"
 	payloadPolicyStoreFullPayload = "store_full_payload"
 	defaultPayloadPolicy          = payloadPolicyMetadataOnly
+	maxProxyArtifactDownloadBytes = int64(32 << 20)
 )
 
 var defaultNodeScopes = []string{"heartbeat", "listing:sync", "proxy:pull", "proxy:result"}
 
+var proxyArtifactHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var remoteRegistryHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var errFederationInviteExpired = errors.New("registry federation invite expired")
+
 type Service struct {
 	q    *db.Queries
 	pool *pgxpool.Pool
+}
+
+type registryPeerRow struct {
+	ID             uuid.UUID
+	OwnerUserID    uuid.UUID
+	Name           string
+	APIBaseURL     string
+	BearerToken    string
+	CredentialHint string
+	Status         string
+	LastUsedAt     *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type registryFederationInviteRow struct {
+	ID             uuid.UUID
+	OwnerUserID    uuid.UUID
+	Name           string
+	APIBaseURL     string
+	BearerToken    string
+	TokenPrefix    string
+	TokenHash      string
+	CredentialHint string
+	Status         string
+	ExpiresAt      time.Time
+	ConsumedAt     *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 func NewService(pool *pgxpool.Pool) *Service {
@@ -355,6 +397,283 @@ func (s *Service) SyncNodeMetadata(ctx context.Context, plaintextSecret string) 
 	}, nil
 }
 
+func (s *Service) CreateRegistryPeer(ctx context.Context, ownerID uuid.UUID, req *CreateRegistryPeerRequest) (*RegistryPeerResponse, error) {
+	if s.pool == nil {
+		return nil, httpx.Internal("Registry Peer 存储未初始化")
+	}
+	name := strings.TrimSpace(req.Name)
+	if len([]rune(name)) < 2 || len([]rune(name)) > 120 {
+		return nil, httpx.Unprocessable("name 长度需在 2-120 字符之间")
+	}
+	apiBaseURL, err := normalizeRemoteAPIBaseURL(req.APIBaseURL)
+	if err != nil {
+		return nil, err
+	}
+	token := strings.TrimSpace(req.BearerToken)
+	if len([]rune(token)) < 8 || len([]rune(token)) > 4096 {
+		return nil, httpx.Unprocessable("bearer_token 长度需在 8-4096 字符之间")
+	}
+	status := strings.TrimSpace(req.InitialStatus)
+	if status == "" {
+		status = "active"
+	}
+	if status != "active" && status != "paused" {
+		return nil, httpx.Unprocessable("initial_status 只能是 active 或 paused")
+	}
+	row, err := scanRegistryPeer(s.pool.QueryRow(ctx, `
+		INSERT INTO registry_peers (owner_user_id, name, api_base_url, bearer_token, credential_hint, status)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, owner_user_id, name, api_base_url, bearer_token, credential_hint, status,
+		          last_used_at, created_at, updated_at
+	`, ownerID, name, apiBaseURL, token, registryCredentialHint(token), status))
+	if err != nil {
+		log.Error().Err(err).Str("owner_id", ownerID.String()).Str("api_base_url", apiBaseURL).Msg("registry.CreateRegistryPeer")
+		return nil, httpx.Internal("创建 Registry Peer 失败")
+	}
+	resp := registryPeerToResponse(row)
+	return &resp, nil
+}
+
+func (s *Service) ListRegistryPeers(ctx context.Context, ownerID uuid.UUID) ([]RegistryPeerResponse, error) {
+	if s.pool == nil {
+		return nil, httpx.Internal("Registry Peer 存储未初始化")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, owner_user_id, name, api_base_url, bearer_token, credential_hint, status,
+		       last_used_at, created_at, updated_at
+		FROM registry_peers
+		WHERE owner_user_id = $1
+		ORDER BY created_at DESC
+	`, ownerID)
+	if err != nil {
+		log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.ListRegistryPeers")
+		return nil, httpx.Internal("查询 Registry Peer 失败")
+	}
+	defer rows.Close()
+	out := []RegistryPeerResponse{}
+	for rows.Next() {
+		row, err := scanRegistryPeer(rows)
+		if err != nil {
+			log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.ListRegistryPeers: scan")
+			return nil, httpx.Internal("查询 Registry Peer 失败")
+		}
+		out = append(out, registryPeerToResponse(row))
+	}
+	if err := rows.Err(); err != nil {
+		log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.ListRegistryPeers: rows")
+		return nil, httpx.Internal("查询 Registry Peer 失败")
+	}
+	return out, nil
+}
+
+func (s *Service) DeleteRegistryPeer(ctx context.Context, ownerID, peerID uuid.UUID) error {
+	if s.pool == nil {
+		return httpx.Internal("Registry Peer 存储未初始化")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM registry_peers
+		WHERE id = $1 AND owner_user_id = $2
+	`, peerID, ownerID)
+	if err != nil {
+		log.Error().Err(err).Str("peer_id", peerID.String()).Msg("registry.DeleteRegistryPeer")
+		return httpx.Internal("删除 Registry Peer 失败")
+	}
+	if tag.RowsAffected() == 0 {
+		return httpx.NotFound("Registry Peer 不存在")
+	}
+	return nil
+}
+
+func (s *Service) CreateRegistryFederationInvite(ctx context.Context, ownerID uuid.UUID, req *CreateRegistryFederationInviteRequest) (*RegistryFederationInviteResponse, error) {
+	if s.pool == nil {
+		return nil, httpx.Internal("Registry Federation 存储未初始化")
+	}
+	name := strings.TrimSpace(req.Name)
+	if len([]rune(name)) < 2 || len([]rune(name)) > 120 {
+		return nil, httpx.Unprocessable("name 长度需在 2-120 字符之间")
+	}
+	apiBaseURL, err := normalizeRemoteAPIBaseURL(req.APIBaseURL)
+	if err != nil {
+		return nil, err
+	}
+	tokenForPeer := strings.TrimSpace(req.BearerToken)
+	if len([]rune(tokenForPeer)) < 8 || len([]rune(tokenForPeer)) > 4096 {
+		return nil, httpx.Unprocessable("bearer_token 长度需在 8-4096 字符之间")
+	}
+	ttl := defaultFederationInviteTTL
+	if req.ExpiresInSeconds > 0 {
+		ttl = time.Duration(req.ExpiresInSeconds) * time.Second
+	}
+	if ttl < time.Minute || ttl > 7*24*time.Hour {
+		return nil, httpx.Unprocessable("expires_in_seconds 需在 60-604800 之间")
+	}
+	federationToken, tokenPrefix, err := generateFederationToken()
+	if err != nil {
+		log.Error().Err(err).Msg("registry.CreateRegistryFederationInvite: generate token")
+		return nil, httpx.Internal("生成 Federation Token 失败")
+	}
+	tokenHash, err := bcrypt.GenerateFromPassword([]byte(federationToken), bcrypt.DefaultCost)
+	if err != nil {
+		log.Error().Err(err).Msg("registry.CreateRegistryFederationInvite: hash token")
+		return nil, httpx.Internal("生成 Federation Token 失败")
+	}
+	row, err := scanRegistryFederationInvite(s.pool.QueryRow(ctx, `
+		INSERT INTO registry_federation_invites (
+		    owner_user_id, name, api_base_url, bearer_token,
+		    token_prefix, token_hash, credential_hint, expires_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + ($8::int * INTERVAL '1 second'))
+		RETURNING id, owner_user_id, name, api_base_url, bearer_token,
+		          token_prefix, token_hash, credential_hint, status,
+		          expires_at, consumed_at, created_at, updated_at
+	`, ownerID, name, apiBaseURL, tokenForPeer, tokenPrefix, string(tokenHash), registryCredentialHint(tokenForPeer), int32(ttl.Seconds())))
+	if err != nil {
+		log.Error().Err(err).Str("owner_id", ownerID.String()).Str("api_base_url", apiBaseURL).Msg("registry.CreateRegistryFederationInvite")
+		return nil, httpx.Internal("创建 Registry Federation Invite 失败")
+	}
+	resp := registryFederationInviteToResponse(row, true)
+	resp.FederationToken = federationToken
+	return &resp, nil
+}
+
+func (s *Service) ConsumeRegistryFederationInvite(ctx context.Context, req *ConsumeRegistryFederationInviteRequest) (*RegistryFederationExchangeMaterial, error) {
+	if s.pool == nil {
+		return nil, httpx.Internal("Registry Federation 存储未初始化")
+	}
+	token := strings.TrimSpace(req.FederationToken)
+	if !strings.HasPrefix(token, federationTokenPrefix) || len(token) < federationTokenPrefixLen {
+		return nil, httpx.Unauthorized("Federation Token 无效或已使用")
+	}
+	prefix := token[:federationTokenPrefixLen]
+	var matched registryFederationInviteRow
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT id, owner_user_id, name, api_base_url, bearer_token,
+			       token_prefix, token_hash, credential_hint, status,
+			       expires_at, consumed_at, created_at, updated_at
+			FROM registry_federation_invites
+			WHERE token_prefix = $1 AND status = 'active'
+			FOR UPDATE
+		`, prefix)
+		if err != nil {
+			return err
+		}
+		candidates := []registryFederationInviteRow{}
+		for rows.Next() {
+			row, scanErr := scanRegistryFederationInvite(rows)
+			if scanErr != nil {
+				rows.Close()
+				return scanErr
+			}
+			candidates = append(candidates, row)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		for _, row := range candidates {
+			if bcrypt.CompareHashAndPassword([]byte(row.TokenHash), []byte(token)) == nil {
+				matched = row
+				break
+			}
+		}
+		if matched.ID == uuid.Nil {
+			return pgx.ErrNoRows
+		}
+		if time.Now().After(matched.ExpiresAt) {
+			_, _ = tx.Exec(ctx, `
+				UPDATE registry_federation_invites
+				SET status = 'expired'
+				WHERE id = $1 AND status = 'active'
+			`, matched.ID)
+			return errFederationInviteExpired
+		}
+		tag, err := tx.Exec(ctx, `
+			UPDATE registry_federation_invites
+			SET status = 'consumed', consumed_at = NOW()
+			WHERE id = $1 AND status = 'active'
+		`, matched.ID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return pgx.ErrNoRows
+		}
+		return nil
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.Unauthorized("Federation Token 无效或已使用")
+	}
+	if errors.Is(err, errFederationInviteExpired) {
+		return nil, httpx.Unauthorized("Federation Token 已过期")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("token_prefix", prefix).Msg("registry.ConsumeRegistryFederationInvite")
+		return nil, httpx.Internal("交换 Registry Federation Token 失败")
+	}
+	return &RegistryFederationExchangeMaterial{
+		Name:           matched.Name,
+		APIBaseURL:     matched.APIBaseURL,
+		BearerToken:    matched.BearerToken,
+		CredentialHint: matched.CredentialHint,
+		ExpiresAt:      matched.ExpiresAt.UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func (s *Service) ExchangeRegistryFederationInvite(ctx context.Context, ownerID uuid.UUID, req *ExchangeRegistryFederationInviteRequest) (*RegistryFederationExchangeResponse, error) {
+	exchangeURL, err := normalizeFederationExchangeURL(req.ExchangeURL)
+	if err != nil {
+		return nil, err
+	}
+	token := strings.TrimSpace(req.FederationToken)
+	if len([]rune(token)) < 8 || len([]rune(token)) > 4096 {
+		return nil, httpx.Unprocessable("federation_token 长度需在 8-4096 字符之间")
+	}
+	body, err := json.Marshal(ConsumeRegistryFederationInviteRequest{FederationToken: token})
+	if err != nil {
+		return nil, httpx.Internal("序列化 federation exchange 请求失败")
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, exchangeURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, httpx.Unprocessable("exchange_url 不是合法 URL")
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := remoteRegistryHTTPClient.Do(httpReq)
+	if err != nil {
+		log.Warn().Err(err).Str("exchange_url", exchangeURL).Msg("registry.ExchangeRegistryFederationInvite: request")
+		return nil, httpx.ServiceUnavailable("远端 Registry Federation Exchange 不可用")
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Warn().Int("status", resp.StatusCode).Str("exchange_url", exchangeURL).Str("body", string(raw)).Msg("registry.ExchangeRegistryFederationInvite: status")
+		return nil, httpx.ServiceUnavailable("远端 Registry Federation Exchange 失败")
+	}
+	var material RegistryFederationExchangeMaterial
+	if err := json.Unmarshal(raw, &material); err != nil {
+		log.Warn().Err(err).Str("exchange_url", exchangeURL).Msg("registry.ExchangeRegistryFederationInvite: decode")
+		return nil, httpx.ServiceUnavailable("远端 Registry Federation Exchange 响应格式错误")
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = material.Name
+	}
+	peer, err := s.CreateRegistryPeer(ctx, ownerID, &CreateRegistryPeerRequest{
+		Name:          name,
+		APIBaseURL:    material.APIBaseURL,
+		BearerToken:   material.BearerToken,
+		InitialStatus: req.InitialStatus,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &RegistryFederationExchangeResponse{
+		Peer:                 *peer,
+		ExchangeURL:          exchangeURL,
+		RemoteCredentialHint: material.CredentialHint,
+	}, nil
+}
+
 func (s *Service) CreateProxyRun(ctx context.Context, requestingUserID uuid.UUID, req *CreateProxyRunRequest) (*ProxyRunResponse, error) {
 	cloudListingID, err := uuid.Parse(strings.TrimSpace(req.CloudListingID))
 	if err != nil {
@@ -402,6 +721,186 @@ func (s *Service) CreateProxyRun(ctx context.Context, requestingUserID uuid.UUID
 	}
 	resp := proxyRunToResponse(run)
 	return &resp, nil
+}
+
+func (s *Service) CreateRemoteProxyRun(ctx context.Context, requestingUserID uuid.UUID, req *CreateRemoteProxyRunRequest) (*RemoteProxyRunResponse, error) {
+	remoteRoot, token, registryPeerID, routeMode, err := s.resolveRemoteRegistryCredentials(ctx, requestingUserID, req)
+	if err != nil {
+		return nil, err
+	}
+	remoteCloudListingID, err := uuid.Parse(strings.TrimSpace(req.RemoteCloudListingID))
+	if err != nil {
+		return nil, httpx.BadRequest("remote_cloud_listing_id 不是合法 uuid")
+	}
+	idempotencyKey := strings.TrimSpace(req.IdempotencyKey)
+	if idempotencyKey == "" {
+		idempotencyKey = uuid.NewString()
+	}
+	if len([]rune(idempotencyKey)) < 8 || len([]rune(idempotencyKey)) > 160 {
+		return nil, httpx.Unprocessable("idempotency_key 长度需在 8-160 字符之间")
+	}
+	inputSummary, err := optionalText(req.InputSummary, 500, "input_summary")
+	if err != nil {
+		return nil, err
+	}
+
+	payload := map[string]any{
+		"cloud_listing_id": remoteCloudListingID.String(),
+		"idempotency_key":  idempotencyKey,
+		"input":            req.Input,
+	}
+	if inputSummary != nil {
+		payload["input_summary"] = *inputSummary
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, httpx.Internal("创建跨 Registry 路由请求失败")
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, remoteRoot+"/proxy/runs", bytes.NewReader(body))
+	if err != nil {
+		return nil, httpx.Internal("创建跨 Registry 路由请求失败")
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("User-Agent", "OpenLinker-Cross-Registry-Router/1.0")
+
+	httpResp, err := remoteRegistryHTTPClient.Do(httpReq)
+	if err != nil {
+		log.Warn().Err(err).Str("remote_api_base_url", remoteRoot).Msg("registry.CreateRemoteProxyRun: request")
+		return nil, httpx.ServiceUnavailable("远端 Registry 暂不可用")
+	}
+	defer httpResp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
+	if err != nil {
+		return nil, httpx.ServiceUnavailable("读取远端 Registry 响应失败")
+	}
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		msg := strings.TrimSpace(string(respBody))
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		if msg == "" {
+			msg = http.StatusText(httpResp.StatusCode)
+		}
+		return nil, httpx.NewError(http.StatusBadGateway, httpx.CodeServiceUnavailable, "远端 Registry 创建 Proxy Run 失败: "+msg)
+	}
+	var remoteRun ProxyRunResponse
+	if err := json.Unmarshal(respBody, &remoteRun); err != nil {
+		log.Warn().Err(err).Str("remote_api_base_url", remoteRoot).Msg("registry.CreateRemoteProxyRun: decode")
+		return nil, httpx.ServiceUnavailable("远端 Registry 响应格式无法识别")
+	}
+	if remoteRun.ID == "" || remoteRun.CloudListingID == "" {
+		return nil, httpx.ServiceUnavailable("远端 Registry 响应缺少 Proxy Run 标识")
+	}
+	return &RemoteProxyRunResponse{
+		RemoteAPIBaseURL: remoteRoot,
+		RegistryPeerID:   registryPeerID,
+		RouteMode:        routeMode,
+		RemoteRun:        remoteRun,
+	}, nil
+}
+
+func (s *Service) resolveRemoteRegistryCredentials(ctx context.Context, requestingUserID uuid.UUID, req *CreateRemoteProxyRunRequest) (string, string, string, string, error) {
+	peerIDRaw := strings.TrimSpace(req.RegistryPeerID)
+	if peerIDRaw == "" {
+		if strings.TrimSpace(req.RemoteAPIBaseURL) == "" && strings.TrimSpace(req.RemoteBearerToken) == "" {
+			row, err := s.resolveSingleActiveRegistryPeer(ctx, requestingUserID)
+			if err != nil {
+				return "", "", "", "", err
+			}
+			if err := s.markRegistryPeerUsed(ctx, row.ID, requestingUserID); err != nil {
+				log.Warn().Err(err).Str("peer_id", row.ID.String()).Msg("registry.resolveRemoteRegistryCredentials: mark auto peer used")
+			}
+			return row.APIBaseURL, row.BearerToken, row.ID.String(), "registry_peer_auto", nil
+		}
+		remoteRoot, err := normalizeRemoteAPIBaseURL(req.RemoteAPIBaseURL)
+		if err != nil {
+			return "", "", "", "", err
+		}
+		token := strings.TrimSpace(req.RemoteBearerToken)
+		if len([]rune(token)) < 8 || len([]rune(token)) > 4096 {
+			return "", "", "", "", httpx.Unprocessable("remote_bearer_token 长度需在 8-4096 字符之间")
+		}
+		return remoteRoot, token, "", "explicit", nil
+	}
+	if strings.TrimSpace(req.RemoteAPIBaseURL) != "" || strings.TrimSpace(req.RemoteBearerToken) != "" {
+		return "", "", "", "", httpx.Unprocessable("使用 registry_peer_id 时不要同时传 remote_api_base_url 或 remote_bearer_token")
+	}
+	if s.pool == nil {
+		return "", "", "", "", httpx.Internal("Registry Peer 存储未初始化")
+	}
+	peerID, err := uuid.Parse(peerIDRaw)
+	if err != nil {
+		return "", "", "", "", httpx.BadRequest("registry_peer_id 不是合法 uuid")
+	}
+	row, err := scanRegistryPeer(s.pool.QueryRow(ctx, `
+		SELECT id, owner_user_id, name, api_base_url, bearer_token, credential_hint, status,
+		       last_used_at, created_at, updated_at
+		FROM registry_peers
+		WHERE id = $1 AND owner_user_id = $2 AND status = 'active'
+	`, peerID, requestingUserID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", "", "", httpx.NotFound("Registry Peer 不存在或已暂停")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("peer_id", peerID.String()).Msg("registry.resolveRemoteRegistryCredentials")
+		return "", "", "", "", httpx.Internal("查询 Registry Peer 失败")
+	}
+	if err := s.markRegistryPeerUsed(ctx, peerID, requestingUserID); err != nil {
+		log.Warn().Err(err).Str("peer_id", peerID.String()).Msg("registry.resolveRemoteRegistryCredentials: mark used")
+	}
+	return row.APIBaseURL, row.BearerToken, row.ID.String(), "registry_peer", nil
+}
+
+func (s *Service) resolveSingleActiveRegistryPeer(ctx context.Context, ownerID uuid.UUID) (registryPeerRow, error) {
+	if s.pool == nil {
+		return registryPeerRow{}, httpx.Internal("Registry Peer 存储未初始化")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, owner_user_id, name, api_base_url, bearer_token, credential_hint, status,
+		       last_used_at, created_at, updated_at
+		FROM registry_peers
+		WHERE owner_user_id = $1 AND status = 'active'
+		ORDER BY last_used_at ASC NULLS FIRST, created_at ASC
+		LIMIT 2
+	`, ownerID)
+	if err != nil {
+		log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.resolveSingleActiveRegistryPeer")
+		return registryPeerRow{}, httpx.Internal("查询 Registry Peer 失败")
+	}
+	defer rows.Close()
+	peers := []registryPeerRow{}
+	for rows.Next() {
+		row, err := scanRegistryPeer(rows)
+		if err != nil {
+			log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.resolveSingleActiveRegistryPeer: scan")
+			return registryPeerRow{}, httpx.Internal("查询 Registry Peer 失败")
+		}
+		peers = append(peers, row)
+	}
+	if err := rows.Err(); err != nil {
+		log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.resolveSingleActiveRegistryPeer: rows")
+		return registryPeerRow{}, httpx.Internal("查询 Registry Peer 失败")
+	}
+	switch len(peers) {
+	case 0:
+		return registryPeerRow{}, httpx.Unprocessable("未提供 registry_peer_id 或远端凭证，且没有 active Registry Peer 可用于自动路由")
+	case 1:
+		return peers[0], nil
+	default:
+		return registryPeerRow{}, httpx.Conflict("存在多个 active Registry Peer，请传 registry_peer_id 明确选择")
+	}
+}
+
+func (s *Service) markRegistryPeerUsed(ctx context.Context, peerID, ownerID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE registry_peers
+		SET last_used_at = NOW()
+		WHERE id = $1 AND owner_user_id = $2
+	`, peerID, ownerID)
+	return err
 }
 
 func (s *Service) ExpireStaleProxyRuns(ctx context.Context, staleAfter time.Duration) (int32, error) {
@@ -579,6 +1078,89 @@ func (s *Service) ListProxyRunArtifacts(ctx context.Context, requestingUserID, r
 	return items, nil
 }
 
+func (s *Service) DownloadProxyRunArtifact(ctx context.Context, requestingUserID, runID, artifactID uuid.UUID) (*ProxyRunArtifactDownload, error) {
+	artifact, err := s.q.GetProxyRunArtifactForRequester(ctx, db.GetProxyRunArtifactForRequesterParams{
+		ID:               artifactID,
+		ProxyRunID:       runID,
+		RequestingUserID: requestingUserID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("Proxy Run Artifact 不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Str("artifact_id", artifactID.String()).
+			Msg("registry.DownloadProxyRunArtifact: artifact")
+		return nil, httpx.Internal("查询 Proxy Run 产物失败")
+	}
+	if artifact.FileURI == nil || strings.TrimSpace(*artifact.FileURI) == "" {
+		return nil, httpx.Unprocessable("该产物没有可代理下载的 file_uri")
+	}
+	fileURL, err := url.Parse(strings.TrimSpace(*artifact.FileURI))
+	if err != nil || fileURL.Scheme == "" || fileURL.Host == "" {
+		return nil, httpx.Unprocessable("该产物 file_uri 不是合法 URL")
+	}
+	if fileURL.Scheme != "http" && fileURL.Scheme != "https" {
+		return nil, httpx.Unprocessable("该产物 file_uri 仅支持 http/https")
+	}
+	if artifact.FileSizeBytes != nil && *artifact.FileSizeBytes > maxProxyArtifactDownloadBytes {
+		return nil, httpx.NewError(http.StatusRequestEntityTooLarge, httpx.CodeUnprocessable, "产物超过代理下载大小限制")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL.String(), nil)
+	if err != nil {
+		return nil, httpx.Internal("创建产物下载请求失败")
+	}
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("User-Agent", "OpenLinker-Artifact-Proxy/1.0")
+	resp, err := proxyArtifactHTTPClient.Do(req)
+	if err != nil {
+		log.Warn().Err(err).Str("artifact_id", artifactID.String()).Str("file_uri", fileURL.String()).
+			Msg("registry.DownloadProxyRunArtifact: fetch")
+		return nil, httpx.ServiceUnavailable("产物源文件暂不可用")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, httpx.ServiceUnavailable("产物源文件返回非成功状态")
+	}
+	if resp.ContentLength > maxProxyArtifactDownloadBytes {
+		return nil, httpx.NewError(http.StatusRequestEntityTooLarge, httpx.CodeUnprocessable, "产物超过代理下载大小限制")
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxProxyArtifactDownloadBytes+1))
+	if err != nil {
+		log.Warn().Err(err).Str("artifact_id", artifactID.String()).Msg("registry.DownloadProxyRunArtifact: read")
+		return nil, httpx.ServiceUnavailable("读取产物源文件失败")
+	}
+	if int64(len(body)) > maxProxyArtifactDownloadBytes {
+		return nil, httpx.NewError(http.StatusRequestEntityTooLarge, httpx.CodeUnprocessable, "产物超过代理下载大小限制")
+	}
+	if artifact.FileSizeBytes != nil && int64(len(body)) != *artifact.FileSizeBytes {
+		return nil, httpx.ServiceUnavailable("产物源文件大小与声明不一致")
+	}
+	sum := sha256.Sum256(body)
+	actualSHA := hex.EncodeToString(sum[:])
+	if artifact.FileSHA256 != nil && *artifact.FileSHA256 != "" && !strings.EqualFold(*artifact.FileSHA256, actualSHA) {
+		return nil, httpx.ServiceUnavailable("产物源文件 SHA256 与声明不一致")
+	}
+	contentType := "application/octet-stream"
+	if artifact.MimeType != nil && strings.TrimSpace(*artifact.MimeType) != "" {
+		contentType = strings.TrimSpace(*artifact.MimeType)
+	} else if upstreamType := strings.TrimSpace(resp.Header.Get("Content-Type")); upstreamType != "" {
+		contentType = upstreamType
+	}
+	fileName := artifact.SourceArtifactID
+	if artifact.FileName != nil && strings.TrimSpace(*artifact.FileName) != "" {
+		fileName = strings.TrimSpace(*artifact.FileName)
+	}
+	return &ProxyRunArtifactDownload{
+		ArtifactID:  artifact.ID.String(),
+		FileName:    fileName,
+		ContentType: contentType,
+		SizeBytes:   int64(len(body)),
+		SHA256:      actualSHA,
+		Body:        body,
+	}, nil
+}
+
 func (s *Service) verifyNodeSecret(ctx context.Context, plaintext, requiredScope string) (db.RegistryNode, error) {
 	plaintext = strings.TrimSpace(plaintext)
 	if !strings.HasPrefix(plaintext, nodeSecretPrefix) || len(plaintext) != len(nodeSecretPrefix)+nodeSecretRandomSize*2 {
@@ -612,6 +1194,51 @@ func normalizeBaseURL(raw string) (*string, error) {
 		return nil, httpx.Unprocessable("base_url 最多 500 字符")
 	}
 	return &raw, nil
+}
+
+func normalizeRemoteAPIBaseURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", httpx.Unprocessable("remote_api_base_url 不能为空")
+	}
+	if len(raw) > 500 {
+		return "", httpx.Unprocessable("remote_api_base_url 最多 500 字符")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", httpx.Unprocessable("remote_api_base_url 不是合法 URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", httpx.Unprocessable("remote_api_base_url 仅支持 http/https")
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.Path = strings.TrimRight(u.Path, "/")
+	out := strings.TrimRight(u.String(), "/")
+	if !strings.HasSuffix(out, "/api/v1") {
+		out += "/api/v1"
+	}
+	return out, nil
+}
+
+func normalizeFederationExchangeURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", httpx.Unprocessable("exchange_url 不能为空")
+	}
+	if len(raw) > 600 {
+		return "", httpx.Unprocessable("exchange_url 最多 600 字符")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", httpx.Unprocessable("exchange_url 不是合法 URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", httpx.Unprocessable("exchange_url 仅支持 http/https")
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 func normalizeScopes(scopes []string) ([]string, error) {
@@ -764,6 +1391,97 @@ func generateNodeSecret() (plaintext, prefix string, err error) {
 	}
 	plaintext = nodeSecretPrefix + hex.EncodeToString(buf)
 	return plaintext, plaintext[:nodeSecretPrefixLen], nil
+}
+
+func generateFederationToken() (plaintext, prefix string, err error) {
+	buf := make([]byte, federationTokenRandomSize)
+	if _, err := rand.Read(buf); err != nil {
+		return "", "", err
+	}
+	plaintext = federationTokenPrefix + hex.EncodeToString(buf)
+	return plaintext, plaintext[:federationTokenPrefixLen], nil
+}
+
+type registryPeerScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRegistryPeer(scanner registryPeerScanner) (registryPeerRow, error) {
+	var row registryPeerRow
+	err := scanner.Scan(
+		&row.ID,
+		&row.OwnerUserID,
+		&row.Name,
+		&row.APIBaseURL,
+		&row.BearerToken,
+		&row.CredentialHint,
+		&row.Status,
+		&row.LastUsedAt,
+		&row.CreatedAt,
+		&row.UpdatedAt,
+	)
+	return row, err
+}
+
+type registryFederationInviteScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRegistryFederationInvite(scanner registryFederationInviteScanner) (registryFederationInviteRow, error) {
+	var row registryFederationInviteRow
+	err := scanner.Scan(
+		&row.ID,
+		&row.OwnerUserID,
+		&row.Name,
+		&row.APIBaseURL,
+		&row.BearerToken,
+		&row.TokenPrefix,
+		&row.TokenHash,
+		&row.CredentialHint,
+		&row.Status,
+		&row.ExpiresAt,
+		&row.ConsumedAt,
+		&row.CreatedAt,
+		&row.UpdatedAt,
+	)
+	return row, err
+}
+
+func registryCredentialHint(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return "sha256:" + hex.EncodeToString(sum[:])[:12]
+}
+
+func registryPeerToResponse(row registryPeerRow) RegistryPeerResponse {
+	return RegistryPeerResponse{
+		ID:             row.ID.String(),
+		Name:           row.Name,
+		APIBaseURL:     row.APIBaseURL,
+		CredentialHint: row.CredentialHint,
+		Status:         row.Status,
+		LastUsedAt:     timePtrString(row.LastUsedAt),
+		CreatedAt:      row.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:      row.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func registryFederationInviteToResponse(row registryFederationInviteRow, includeTokenPrefix bool) RegistryFederationInviteResponse {
+	resp := RegistryFederationInviteResponse{
+		ID:             row.ID.String(),
+		Name:           row.Name,
+		APIBaseURL:     row.APIBaseURL,
+		CredentialHint: row.CredentialHint,
+		Status:         row.Status,
+		ExchangeURL:    row.APIBaseURL + "/registry-peers/federation-invitations/exchange",
+		ExpiresAt:      row.ExpiresAt.UTC().Format(time.RFC3339),
+		ConsumedAt:     timePtrString(row.ConsumedAt),
+		CreatedAt:      row.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:      row.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	if includeTokenPrefix {
+		resp.TokenPrefix = row.TokenPrefix
+	}
+	return resp
 }
 
 func registryNodeToResponse(node db.RegistryNode) RegistryNodeResponse {

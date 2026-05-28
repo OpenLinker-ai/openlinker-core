@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 const runsCount = `-- name: RunsCount :one
@@ -88,7 +89,10 @@ type MarkRunSuccessParams struct {
 // MarkRunSuccess 调用成功：写 output 与耗时。
 // status='running' 守卫保证幂等（重放无副作用）。
 func (q *Queries) MarkRunSuccess(ctx context.Context, arg MarkRunSuccessParams) error {
-	_, err := q.db.Exec(ctx, markRunSuccess, arg.ID, arg.Output, arg.DurationMs)
+	tag, err := q.db.Exec(ctx, markRunSuccess, arg.ID, arg.Output, arg.DurationMs)
+	if err == nil && tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
 	return err
 }
 
@@ -101,7 +105,7 @@ SET status = $2,
     finished_at = NOW()
 WHERE id = $1 AND status = 'running'`
 
-// MarkRunFailedParams 入参。Status 取值 'failed' 或 'timeout'。
+// MarkRunFailedParams 入参。Status 取值 'failed'、'timeout' 或 'canceled'。
 type MarkRunFailedParams struct {
 	ID           uuid.UUID `db:"id" json:"id"`
 	Status       string    `db:"status" json:"status"`
@@ -112,14 +116,43 @@ type MarkRunFailedParams struct {
 
 // MarkRunFailed 调用失败：写错误信息与耗时。
 func (q *Queries) MarkRunFailed(ctx context.Context, arg MarkRunFailedParams) error {
-	_, err := q.db.Exec(ctx, markRunFailed,
+	tag, err := q.db.Exec(ctx, markRunFailed,
 		arg.ID,
 		arg.Status,
 		arg.ErrorCode,
 		arg.ErrorMessage,
 		arg.DurationMs,
 	)
+	if err == nil && tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
 	return err
+}
+
+const cancelRun = `-- name: CancelRun :one
+UPDATE runs
+SET status = 'canceled',
+    error_code = 'CANCELED',
+    error_message = $3,
+    duration_ms = GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000))::int,
+    finished_at = NOW()
+WHERE id = $1 AND user_id = $2 AND status = 'running'
+RETURNING id, user_id, agent_id, input, output, status, error_code, error_message,
+          cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
+          started_at, finished_at, source`
+
+type CancelRunParams struct {
+	ID           uuid.UUID `db:"id" json:"id"`
+	UserID       uuid.UUID `db:"user_id" json:"user_id"`
+	ErrorMessage string    `db:"error_message" json:"error_message"`
+}
+
+// CancelRun marks an owner-readable running run as canceled and returns the final row.
+func (q *Queries) CancelRun(ctx context.Context, arg CancelRunParams) (Run, error) {
+	row := q.db.QueryRow(ctx, cancelRun, arg.ID, arg.UserID, arg.ErrorMessage)
+	var r Run
+	err := scanRun(row, &r)
+	return r, err
 }
 
 const getRunByID = `-- name: GetRunByID :one

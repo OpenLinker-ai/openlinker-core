@@ -22,6 +22,9 @@ package agent_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -233,6 +236,7 @@ func TestGetBySlug_HandlerNotFound(t *testing.T) {
 }
 
 func TestGetAgentCard_HandlerHappyPath(t *testing.T) {
+	t.Setenv("AGENT_CARD_SIGNING_SEED", "agent-card-test-signing-seed")
 	srv, pool := setupTestServer(t)
 	creatorID, _ := setupTestData(t, pool)
 
@@ -250,14 +254,65 @@ func TestGetAgentCard_HandlerHappyPath(t *testing.T) {
 	assert.Equal(t, "/api/v1/a2a/agents/agent-card", card["url"])
 	assert.Equal(t, "1.0", card["protocolVersion"])
 	require.Contains(t, card, "supportedInterfaces")
+	capabilities, ok := card["capabilities"].(map[string]any)
+	require.True(t, ok, "capabilities must exist; body=%s", string(raw))
+	assert.Equal(t, true, capabilities["streaming"])
+	assert.Equal(t, true, capabilities["pushNotifications"])
+	assert.Equal(t, true, capabilities["push_notifications"])
+	assert.Equal(t, true, capabilities["extendedAgentCard"])
 	openlinker, ok := card["openlinker"].(map[string]any)
 	require.True(t, ok, "openlinker extension must exist; body=%s", string(raw))
 	assert.Equal(t, "agent-card", openlinker["slug"])
+	assert.Equal(t, "public", openlinker["card_variant"])
+	assert.Equal(t, "/api/v1/agents/agent-card/agent-card.extended.json", openlinker["extended_card_endpoint"])
 	assert.Equal(t, "/api/v1/a2a/agents/agent-card", openlinker["invocation_endpoint"])
 	assert.Equal(t, "/api/v1/a2a/agents/agent-card/message:stream", openlinker["stream_endpoint"])
 	assert.Equal(t, "/api/v1/a2a/agents/agent-card/tasks/{task_id}", openlinker["task_lookup_endpoint"])
 	assert.Equal(t, "/api/v1/a2a/agents/agent-card/tasks/{task_id}:subscribe", openlinker["task_subscribe_endpoint"])
+	verifyAgentCardSignature(t, raw)
 	assert.NotContains(t, string(raw), "endpoint_auth_header")
+}
+
+func TestGetExtendedAgentCard_HandlerHappyPath(t *testing.T) {
+	t.Setenv("AGENT_CARD_SIGNING_SEED", "agent-card-test-signing-seed")
+	srv, pool := setupTestServer(t)
+	creatorID, _ := setupTestData(t, pool)
+
+	createApprovedAgent(t, pool, creatorID, "agent-card-extended",
+		WithName("Extended Agent Card"),
+		WithTags([]string{"finance"}))
+
+	resp, raw := getJSON(t, srv.URL, "/api/v1/agents/agent-card-extended/agent-card.extended.json", nil)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "body=%s", string(raw))
+	assert.Equal(t, "public, max-age=300", resp.Header.Get("Cache-Control"))
+
+	var card map[string]any
+	require.NoError(t, json.Unmarshal(raw, &card), "raw=%s", string(raw))
+	openlinker, ok := card["openlinker"].(map[string]any)
+	require.True(t, ok, "openlinker extension must exist; body=%s", string(raw))
+	assert.Equal(t, "extended", openlinker["card_variant"])
+	assert.Contains(t, card, "signature")
+	verifyAgentCardSignature(t, raw)
+	assert.NotContains(t, string(raw), "endpoint_auth_header")
+}
+
+func verifyAgentCardSignature(t *testing.T, raw []byte) {
+	t.Helper()
+	var card agent.AgentCardResponse
+	require.NoError(t, json.Unmarshal(raw, &card), "raw=%s", string(raw))
+	require.NotNil(t, card.Signature, "signed Agent Card must include signature")
+	assert.Equal(t, "Ed25519", card.Signature.Algorithm)
+	publicKey, err := base64.RawURLEncoding.DecodeString(card.Signature.PublicKey)
+	require.NoError(t, err)
+	signature, err := base64.RawURLEncoding.DecodeString(card.Signature.Signature)
+	require.NoError(t, err)
+	signed := card.Signature
+	card.Signature = nil
+	payload, err := json.Marshal(card)
+	require.NoError(t, err)
+	digest := sha256.Sum256(payload)
+	assert.Equal(t, "sha256-"+base64.RawURLEncoding.EncodeToString(digest[:]), signed.PayloadDigest)
+	assert.True(t, ed25519.Verify(ed25519.PublicKey(publicKey), payload, signature))
 }
 
 // TestGetBySlug_NoAuthRequired 验证市场端点完全公开 —— 不带 Authorization 仍 200。

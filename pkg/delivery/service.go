@@ -20,7 +20,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
+	"github.com/kinzhi/openlinker-core/pkg/config"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
+	"github.com/kinzhi/openlinker-core/pkg/endpointurl"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
@@ -61,27 +63,32 @@ func nextRetryDelay(attempt int) time.Duration {
 // CRUD delivery_targets + 创建/重试 run_deliveries。
 // HMAC 签名（webhook）/ Slack incoming webhook（slack）。
 type Service struct {
-	queries    *db.Queries
-	pool       *pgxpool.Pool
-	httpClient *http.Client
+	queries        *db.Queries
+	pool           *pgxpool.Pool
+	httpClient     *http.Client
+	allowLocalHTTP bool
 }
 
-func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{
+func NewService(pool *pgxpool.Pool, cfg ...*config.Config) *Service {
+	s := &Service{
 		queries: db.New(pool),
 		pool:    pool,
 		httpClient: &http.Client{
 			Timeout: httpTimeout,
 		},
 	}
+	if len(cfg) > 0 && cfg[0] != nil {
+		s.allowLocalHTTP = cfg[0].AllowLocalHTTPEndpoints
+	}
+	return s
 }
 
 // CreateTarget 用户新增投递目标。
 //
 // 当 IsDefault=true 时先清掉原 default 避免唯一索引冲突。
 func (s *Service) CreateTarget(ctx context.Context, userID uuid.UUID, req *CreateTargetRequest) (*TargetResponse, error) {
-	if !strings.HasPrefix(req.URL, "https://") {
-		return nil, httpx.BadRequest("url 必须以 https:// 开头")
+	if err := endpointurl.Validate(req.URL, s.allowLocalHTTP); err != nil {
+		return nil, httpx.BadRequest("url 必须是 HTTPS；本地开发需开启 ALLOW_LOCAL_HTTP_ENDPOINTS 后才允许 loopback HTTP")
 	}
 
 	// 应用层限制：每用户最多 10 个 target

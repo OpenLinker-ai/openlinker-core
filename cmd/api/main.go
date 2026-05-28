@@ -213,7 +213,7 @@ func main() {
 	mcpHandler := mcp.NewHandler(mcpSvc)
 	mcpHandler.Register(api, hybridMw)
 
-	deliverySvc := delivery.NewService(pool)
+	deliverySvc := delivery.NewService(pool, cfg)
 	deliveryHandler := delivery.NewHandler(deliverySvc)
 	deliveryHandler.RegisterProtected(api, jwtMiddleware)
 	runtimeSvc.SetDeliveryEnqueuer(deliverySvc)

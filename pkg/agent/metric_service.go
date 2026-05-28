@@ -24,14 +24,14 @@ func NewMetricService(pool *pgxpool.Pool) *MetricService {
 
 // MetricSnapshot 单个窗口的指标。
 type MetricSnapshot struct {
-	TimeWindow      string  `json:"time_window"`
-	CallCount       int32   `json:"call_count"`
-	SuccessCount    int32   `json:"success_count"`
-	FailureCount    int32   `json:"failure_count"`
-	SuccessRateBps  int32   `json:"success_rate_bps"`
-	MedianLatencyMs *int32  `json:"median_latency_ms,omitempty"`
-	P95LatencyMs    *int32  `json:"p95_latency_ms,omitempty"`
-	SnapshottedAt   string  `json:"snapshotted_at"`
+	TimeWindow      string `json:"time_window"`
+	CallCount       int32  `json:"call_count"`
+	SuccessCount    int32  `json:"success_count"`
+	FailureCount    int32  `json:"failure_count"`
+	SuccessRateBps  int32  `json:"success_rate_bps"`
+	MedianLatencyMs *int32 `json:"median_latency_ms,omitempty"`
+	P95LatencyMs    *int32 `json:"p95_latency_ms,omitempty"`
+	SnapshottedAt   string `json:"snapshotted_at"`
 }
 
 // MetricSnapshotsResponse 公开 GET /agents/:id/metrics 响应。

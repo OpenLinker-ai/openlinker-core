@@ -26,6 +26,7 @@ import (
 const truncateAll = "TRUNCATE runs, agents, users RESTART IDENTITY CASCADE"
 
 const testDBOpTimeout = 30 * time.Second
+const agentTestAdvisoryLockID int64 = 270017
 
 // skipIfNoDB 检查 TEST_DATABASE_URL 环境变量；未设置则 skip 当前 test。
 // 返回 dsn 字符串，调用方可以用它再连一次（少见）。
@@ -50,17 +51,21 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err, "connect test db")
 	require.NoError(t, pool.Ping(ctx), "ping test db")
 
-	truncateCtx, truncateCancel := context.WithTimeout(context.Background(), testDBOpTimeout)
-	defer truncateCancel()
-	_, err = pool.Exec(truncateCtx, truncateAll)
-	require.NoError(t, err, "truncate test tables")
+	_, err = pool.Exec(ctx, `SELECT pg_advisory_lock($1)`, agentTestAdvisoryLockID)
+	require.NoError(t, err, "lock agent test db")
 
 	t.Cleanup(func() {
 		clean, cancel := context.WithTimeout(context.Background(), testDBOpTimeout)
 		defer cancel()
 		_, _ = pool.Exec(clean, truncateAll)
+		_, _ = pool.Exec(clean, `SELECT pg_advisory_unlock($1)`, agentTestAdvisoryLockID)
 		pool.Close()
 	})
+
+	truncateCtx, truncateCancel := context.WithTimeout(context.Background(), testDBOpTimeout)
+	defer truncateCancel()
+	_, err = pool.Exec(truncateCtx, truncateAll)
+	require.NoError(t, err, "truncate test tables")
 	return pool
 }
 

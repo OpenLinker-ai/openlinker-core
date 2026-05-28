@@ -2,6 +2,7 @@ package skill
 
 import (
 	"net/http"
+	"net/url"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
@@ -33,6 +34,7 @@ func NewBenchmarkHandler(svc *BenchmarkService) *BenchmarkHandler {
 //	GET /agents/:id/benchmark-results               docs/25 §5.3 别名 → 转发 skill-scores by id
 func (h *BenchmarkHandler) Register(api *echo.Group) {
 	api.GET("/skills/:id/top-agents", h.ListTopAgents)
+	api.GET("/skills/:category/:name/top-agents", h.ListTopAgents)
 	api.GET("/agents/:slug/skill-scores", h.ListScoresBySlug)
 	api.GET("/agents/:id/benchmarks", h.ListBatchSummariesPublic)
 	api.GET("/agents/:id/benchmarks/:batchID", h.GetBatchPublic)
@@ -132,7 +134,7 @@ func (h *BenchmarkHandler) ListScoresBySlug(c echo.Context) error {
 
 // ListTopAgents GET /skills/:id/top-agents?limit=3。
 func (h *BenchmarkHandler) ListTopAgents(c echo.Context) error {
-	skillID := c.Param("id")
+	skillID := skillIDFromPath(c)
 	if skillID == "" {
 		return httpx.BadRequest("skill id 不能为空")
 	}
@@ -148,6 +150,17 @@ func (h *BenchmarkHandler) ListTopAgents(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
+func skillIDFromPath(c echo.Context) string {
+	skillID := c.Param("id")
+	if skillID == "" && c.Param("category") != "" && c.Param("name") != "" {
+		skillID = c.Param("category") + "/" + c.Param("name")
+	}
+	if decoded, err := url.PathUnescape(skillID); err == nil {
+		skillID = decoded
+	}
+	return skillID
 }
 
 // ListBatchSummariesPublic GET /agents/:id/benchmarks

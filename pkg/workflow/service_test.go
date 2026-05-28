@@ -218,6 +218,99 @@ func TestWorkflowRunExecutesIndependentBranchesInParallelAndAggregatesOutputs(t 
 	mu.Unlock()
 }
 
+func TestRerunWorkflowStepReusesUnaffectedStepsAndComparesRuns(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+
+	var mu sync.Mutex
+	callCountByNode := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req runtimemod.AgentRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		nodeKey, _ := req.Input["node_key"].(string)
+		mu.Lock()
+		callCountByNode[nodeKey]++
+		callNumber := callCountByNode[nodeKey]
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+			"output": map[string]interface{}{
+				"step":         nodeKey,
+				"node_call":    callNumber,
+				"dependencies": req.Input["dependencies"],
+			},
+		}))
+	}))
+	t.Cleanup(server.Close)
+
+	userID := insertWorkflowUser(t, pool, "wf-step-rerun-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-step-rerun-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		PlatformFeeRate:         0,
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	svc := workflow.NewService(pool, runtimeSvc)
+
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Step rerun workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "collect", Title: "Collect", AgentID: agentID},
+			{Key: "analyze", Title: "Analyze", AgentID: agentID},
+			{Key: "synthesize", Title: "Synthesize", AgentID: agentID},
+		},
+		Edges: []map[string]interface{}{
+			{"from": "collect", "to": "synthesize"},
+			{"from": "analyze", "to": "synthesize"},
+		},
+	})
+	require.NoError(t, err)
+
+	original, err := svc.RunWorkflow(context.Background(), userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"topic": "step rerun"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "success", original.Status)
+	require.Len(t, original.Steps, 3)
+
+	rerun, err := svc.RerunWorkflowStep(context.Background(), userID, uuid.MustParse(original.ID), &workflow.RerunWorkflowStepRequest{
+		NodeKey: "analyze",
+	})
+	require.NoError(t, err)
+	require.Equal(t, original.ID, rerun.SourceRunID)
+	require.NotEqual(t, original.ID, rerun.RerunRunID)
+	require.Equal(t, "success", rerun.Run.Status)
+	require.Equal(t, []string{"collect"}, rerun.ReusedNodeKeys)
+	require.Equal(t, []string{"analyze", "synthesize"}, rerun.RerunNodeKeys)
+	require.Equal(t, "collect", rerun.Run.Steps[0].NodeKey)
+	require.Equal(t, original.Steps[0].RunID, rerun.Run.Steps[0].RunID)
+	require.Equal(t, original.Steps[0].Output, rerun.Run.Steps[0].Output)
+	require.NotEqual(t, original.Steps[1].RunID, rerun.Run.Steps[1].RunID)
+	require.NotEqual(t, original.Steps[2].RunID, rerun.Run.Steps[2].RunID)
+	require.Equal(t, float64(2), rerun.Run.Steps[1].Output["node_call"])
+	require.Equal(t, float64(2), rerun.Run.Steps[2].Output["node_call"])
+	require.True(t, rerun.Comparison.OutputChanged)
+	require.ElementsMatch(t, []string{"analyze", "synthesize"}, rerun.Comparison.ChangedNodeKeys)
+
+	comparison, err := svc.CompareWorkflowRuns(context.Background(), userID, uuid.MustParse(original.ID), uuid.MustParse(rerun.RerunRunID))
+	require.NoError(t, err)
+	require.False(t, comparison.StatusChanged)
+	require.True(t, comparison.OutputChanged)
+	require.Len(t, comparison.Steps, 3)
+	require.False(t, comparison.Steps[0].Changed)
+	require.True(t, comparison.Steps[1].RunChanged)
+	require.True(t, comparison.Steps[2].RunChanged)
+
+	var runCount int
+	err = pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM runs WHERE user_id = $1 AND agent_id = $2`, userID, agentID).
+		Scan(&runCount)
+	require.NoError(t, err)
+	require.Equal(t, 5, runCount)
+}
+
 func TestStartWorkflowRunQueuesAndWorkerExecutes(t *testing.T) {
 	pool := setupWorkflowTestDB(t)
 

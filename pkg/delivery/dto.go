@@ -9,11 +9,12 @@ import (
 
 // CreateTargetRequest POST /api/v1/delivery-targets。
 //
-// 仅支持 webhook / slack 两种 type；URL 必须 https 防意外明文外发。
+// 仅支持 webhook / slack 两种 type。URL 默认必须 HTTPS；
+// 本地开发可由服务端配置允许 loopback HTTP。
 type CreateTargetRequest struct {
 	Name      string `json:"name" validate:"required,min=1,max=80"`
 	Type      string `json:"type" validate:"required,oneof=webhook slack"`
-	URL       string `json:"url" validate:"required,url,startswith=https://,max=500"`
+	URL       string `json:"url" validate:"required,url,max=500"`
 	IsDefault bool   `json:"is_default"`
 }
 

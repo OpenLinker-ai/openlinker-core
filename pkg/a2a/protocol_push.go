@@ -195,6 +195,7 @@ func pushEventTypes(raw []string) []string {
 		"run.artifact.delta",
 		"run.completed",
 		"run.failed",
+		"run.canceled",
 	}
 }
 
