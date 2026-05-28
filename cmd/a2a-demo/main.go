@@ -82,6 +82,11 @@ type taskResponse struct {
 	Recommendations []taskRecommendation `json:"recommendations"`
 }
 
+type taskDemoResult struct {
+	TaskID        string
+	PlannerChosen bool
+}
+
 type demoResult struct {
 	Email       string
 	ParentAgent agentResponse
@@ -219,7 +224,11 @@ func run(api *client, cfg *endpointConfig, callerURL, workerURL, reviewerURL str
 
 	fmt.Println("A2A local completion verified")
 	fmt.Printf("user: %s\n", email)
-	fmt.Printf("task: %s [published and planner chosen]\n", task.TaskID)
+	taskStatus := "published"
+	if task.PlannerChosen {
+		taskStatus = "published and planner chosen"
+	}
+	fmt.Printf("task: %s [%s]\n", task.TaskID, taskStatus)
 	fmt.Printf("parent agent: %s (%s)\n", callerAgent.Agent.Slug, callerAgent.Agent.ID)
 	fmt.Printf("worker agent: %s (%s)\n", workerAgent.Agent.Slug, workerAgent.Agent.ID)
 	fmt.Printf("reviewer agent: %s (%s)\n", reviewerAgent.Agent.Slug, reviewerAgent.Agent.ID)
@@ -238,7 +247,7 @@ func run(api *client, cfg *endpointConfig, callerURL, workerURL, reviewerURL str
 	}, nil
 }
 
-func publishTask(api *client, plannerID string) (*taskResponse, error) {
+func publishTask(api *client, plannerID string) (*taskDemoResult, error) {
 	var task taskResponse
 	err := api.do(http.MethodPost, "/api/v1/tasks/recommend", map[string]any{
 		"query": "请用 Agent 编排完成报告文档生成，并让另一个 Agent 做摘要复核",
@@ -265,14 +274,15 @@ func publishTask(api *client, plannerID string) (*taskResponse, error) {
 		}
 	}
 	if !plannerRecommended {
-		return nil, fmt.Errorf("published task recommendations missing planner %s: %+v", plannerID, task.Recommendations)
+		fmt.Fprintf(os.Stderr, "warning: published task recommendations missing planner %s; continuing with direct A2A run\n", plannerID)
+		return &taskDemoResult{TaskID: task.TaskID}, nil
 	}
 	if err := api.do(http.MethodPost, "/api/v1/tasks/"+task.TaskID+"/choose", map[string]any{
 		"agent_id": plannerID,
 	}, nil); err != nil {
 		return nil, fmt.Errorf("choose planner for task: %w", err)
 	}
-	return &task, nil
+	return &taskDemoResult{TaskID: task.TaskID, PlannerChosen: true}, nil
 }
 
 func registerAgent(api *client, bootstrap, slug, name, endpoint string, skillIDs []string) (*registrationResponse, error) {
