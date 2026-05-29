@@ -1,6 +1,9 @@
 package mcp
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-playground/validator/v10"
@@ -9,6 +12,8 @@ import (
 
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
+
+const mcpProtocolVersion = "2025-06-18"
 
 // Handler /api/v1/mcp/* 路由。
 //
@@ -29,6 +34,8 @@ func NewHandler(svc *Service) *Handler {
 
 // Register 挂载所有 MCP 路由。
 //
+//	GET  /mcp                 入口说明；若客户端请求 SSE stream，返回 405
+//	POST /mcp                 MCP Streamable HTTP JSON-RPC（JSON response mode）
 //	GET  /mcp/tools           工具元信息
 //	POST /mcp/search_agents   市场搜索
 //	POST /mcp/get_agent       Agent 详情
@@ -37,6 +44,8 @@ func NewHandler(svc *Service) *Handler {
 //	POST /mcp/create_task     自然语言 → 推荐 Agent
 func (h *Handler) Register(api *echo.Group, mw echo.MiddlewareFunc) {
 	g := api.Group("/mcp", mw)
+	g.GET("", h.GetEndpointInfo)
+	g.POST("", h.PostRPC)
 	g.GET("/tools", h.GetTools)
 	g.POST("/search_agents", h.PostSearchAgents)
 	g.POST("/get_agent", h.PostGetAgent)
@@ -45,12 +54,186 @@ func (h *Handler) Register(api *echo.Group, mw echo.MiddlewareFunc) {
 	g.POST("/create_task", h.PostCreateTask)
 }
 
+// GetEndpointInfo 让浏览器打开 /api/v1/mcp 时能看到真实用法。
+// MCP 的独立 GET SSE stream 当前不实现；符合 Streamable HTTP 的 405 降级语义。
+func (h *Handler) GetEndpointInfo(c echo.Context) error {
+	if acceptsEventStream(c.Request()) {
+		return c.NoContent(http.StatusMethodNotAllowed)
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"name":             "openlinker-mcp",
+		"transport":        "streamable_http_json_response",
+		"protocol_version": mcpProtocolVersion,
+		"endpoint":         "/api/v1/mcp",
+		"auth":             "Authorization: Bearer ol_live_...",
+		"methods":          []string{"initialize", "tools/list", "tools/call"},
+		"tools":            toMCPTools(h.tools()),
+		"rest_fallback":    "/api/v1/mcp/tools, /api/v1/mcp/search_agents, /api/v1/mcp/run_agent, /api/v1/mcp/get_run, /api/v1/mcp/create_task",
+	})
+}
+
+// PostRPC exposes OpenLinker as an MCP server endpoint.
+//
+// It implements the core JSON-RPC methods MCP clients need for tool discovery
+// and invocation. Responses use application/json rather than SSE streaming.
+func (h *Handler) PostRPC(c echo.Context) error {
+	raw, err := readJSONRPCBody(c)
+	if err != nil {
+		return writeRPCError(c, nil, http.StatusBadRequest, -32700, "Parse error")
+	}
+	if bytes.HasPrefix(bytes.TrimSpace(raw), []byte("[")) {
+		return writeRPCError(c, nil, http.StatusOK, -32600, "Batch JSON-RPC requests are not supported")
+	}
+
+	var req rpcRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return writeRPCError(c, nil, http.StatusOK, -32600, "Invalid Request")
+	}
+	if req.Method == "" || len(req.ID) == 0 {
+		return c.NoContent(http.StatusAccepted)
+	}
+	if req.JSONRPC != "2.0" {
+		return writeRPCError(c, req.ID, http.StatusOK, -32600, "Invalid Request")
+	}
+	if err := assertAPIKeyAuth(c); err != nil {
+		return writeRPCHTTPError(c, req.ID, err)
+	}
+
+	switch req.Method {
+	case "initialize":
+		return writeRPCResult(c, req.ID, map[string]interface{}{
+			"protocolVersion": mcpProtocolVersion,
+			"capabilities": map[string]interface{}{
+				"tools": map[string]interface{}{
+					"listChanged": false,
+				},
+			},
+			"serverInfo": map[string]interface{}{
+				"name":    "openlinker",
+				"version": "0.1.0",
+			},
+		})
+	case "tools/list":
+		return writeRPCResult(c, req.ID, map[string]interface{}{
+			"tools": toMCPTools(h.tools()),
+		})
+	case "tools/call":
+		return h.postRPCToolCall(c, req.ID, req.Params)
+	default:
+		return writeRPCError(c, req.ID, http.StatusOK, -32601, "Method not found: "+req.Method)
+	}
+}
+
 // GetTools 列出工具描述。所有 5 个工具都列出来；客户端按 name 选择调用。
 func (h *Handler) GetTools(c echo.Context) error {
 	if err := assertAPIKeyAuth(c); err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, ToolsResponse{Tools: h.svc.Tools()})
+	return c.JSON(http.StatusOK, ToolsResponse{Tools: h.tools()})
+}
+
+func (h *Handler) postRPCToolCall(c echo.Context, id json.RawMessage, params json.RawMessage) error {
+	var req rpcToolCallParams
+	if len(bytes.TrimSpace(params)) == 0 {
+		return writeRPCError(c, id, http.StatusOK, -32602, "tools/call requires params")
+	}
+	if err := json.Unmarshal(params, &req); err != nil {
+		return writeRPCError(c, id, http.StatusOK, -32602, "Invalid tools/call params")
+	}
+	if req.Name == "" {
+		return writeRPCError(c, id, http.StatusOK, -32602, "tools/call params.name is required")
+	}
+
+	result, rpcErr := h.callTool(c, req.Name, req.Arguments)
+	if rpcErr != nil {
+		return writeRPCError(c, id, http.StatusOK, rpcErr.Code, rpcErr.Message)
+	}
+	return writeRPCResult(c, id, result)
+}
+
+func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage) (mcpToolResult, *rpcError) {
+	switch name {
+	case "search_agents":
+		if err := requireAPIKeyScope(c, "agents:read"); err != nil {
+			return toolError(err), nil
+		}
+		var req SearchAgentsRequest
+		if err := decodeToolArguments(args, &req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		resp, err := h.svc.SearchAgents(c.Request().Context(), &req)
+		return toolResult(resp, err), nil
+	case "get_agent":
+		if err := requireAPIKeyScope(c, "agents:read"); err != nil {
+			return toolError(err), nil
+		}
+		var req GetAgentRequest
+		if err := decodeToolArguments(args, &req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		if err := h.validator.Struct(&req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		resp, err := h.svc.GetAgent(c.Request().Context(), &req)
+		return toolResult(resp, err), nil
+	case "run_agent":
+		if err := requireAPIKeyScope(c, "agents:run"); err != nil {
+			return toolError(err), nil
+		}
+		uid, err := userIDFromCtx(c)
+		if err != nil {
+			return toolError(err), nil
+		}
+		var req RunAgentRequest
+		if err := decodeToolArguments(args, &req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		if err := h.validator.Struct(&req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		resp, err := h.svc.RunAgent(c.Request().Context(), uid, &req)
+		return toolResult(resp, err), nil
+	case "get_run":
+		if err := requireAPIKeyScope(c, "runs:read"); err != nil {
+			return toolError(err), nil
+		}
+		uid, err := userIDFromCtx(c)
+		if err != nil {
+			return toolError(err), nil
+		}
+		var req GetRunRequest
+		if err := decodeToolArguments(args, &req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		if err := h.validator.Struct(&req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		runID, err := uuid.Parse(req.RunID)
+		if err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: run_id is not a uuid"}
+		}
+		resp, err := h.svc.GetRun(c.Request().Context(), uid, runID)
+		return toolResult(resp, err), nil
+	case "create_task":
+		if err := requireAPIKeyScope(c, "tasks:write"); err != nil {
+			return toolError(err), nil
+		}
+		uid, err := userIDFromCtx(c)
+		if err != nil {
+			return toolError(err), nil
+		}
+		var req CreateTaskRequest
+		if err := decodeToolArguments(args, &req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		if err := h.validator.Struct(&req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		resp, err := h.svc.CreateTask(c.Request().Context(), uid, &req)
+		return toolResult(resp, err), nil
+	default:
+		return mcpToolResult{}, &rpcError{Code: -32602, Message: "Unknown tool: " + name}
+	}
 }
 
 // PostSearchAgents 市场搜索。
@@ -189,4 +372,153 @@ func userIDFromCtx(c echo.Context) (uuid.UUID, error) {
 		return uuid.Nil, httpx.Unauthorized("token 无效")
 	}
 	return uid, nil
+}
+
+type rpcRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type rpcResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Result  interface{}     `json:"result,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
+}
+
+type rpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type rpcToolCallParams struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+type mcpToolDefinition struct {
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description"`
+	InputSchema  map[string]interface{} `json:"inputSchema"`
+	OutputSchema map[string]interface{} `json:"outputSchema,omitempty"`
+}
+
+type mcpTextContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type mcpToolResult struct {
+	Content           []mcpTextContent `json:"content"`
+	StructuredContent interface{}      `json:"structuredContent,omitempty"`
+	IsError           bool             `json:"isError"`
+}
+
+func readJSONRPCBody(c echo.Context) (json.RawMessage, error) {
+	defer c.Request().Body.Close()
+	var raw json.RawMessage
+	dec := json.NewDecoder(c.Request().Body)
+	if err := dec.Decode(&raw); err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, errors.New("empty body")
+	}
+	return raw, nil
+}
+
+func writeRPCResult(c echo.Context, id json.RawMessage, result interface{}) error {
+	return c.JSON(http.StatusOK, rpcResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  result,
+	})
+}
+
+func writeRPCError(c echo.Context, id json.RawMessage, status int, code int, message string) error {
+	return c.JSON(status, rpcResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error: &rpcError{
+			Code:    code,
+			Message: message,
+		},
+	})
+}
+
+func writeRPCHTTPError(c echo.Context, id json.RawMessage, err error) error {
+	var he *httpx.HTTPError
+	if errors.As(err, &he) {
+		return writeRPCError(c, id, he.Status, -32000, he.Message)
+	}
+	return writeRPCError(c, id, http.StatusInternalServerError, -32000, "internal error")
+}
+
+func decodeToolArguments(raw json.RawMessage, out interface{}) error {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		raw = []byte("{}")
+	}
+	return json.Unmarshal(raw, out)
+}
+
+func toolResult(payload interface{}, err error) mcpToolResult {
+	if err != nil {
+		return toolError(err)
+	}
+	pretty, marshalErr := json.MarshalIndent(payload, "", "  ")
+	if marshalErr != nil {
+		return toolError(marshalErr)
+	}
+	return mcpToolResult{
+		Content: []mcpTextContent{{
+			Type: "text",
+			Text: string(pretty),
+		}},
+		StructuredContent: payload,
+		IsError:           false,
+	}
+}
+
+func toolError(err error) mcpToolResult {
+	message := "tool execution failed"
+	if err != nil && err.Error() != "" {
+		message = err.Error()
+	}
+	return mcpToolResult{
+		Content: []mcpTextContent{{
+			Type: "text",
+			Text: message,
+		}},
+		IsError: true,
+	}
+}
+
+func (h *Handler) tools() []ToolDescriptor {
+	if h.svc == nil {
+		return mcpTools
+	}
+	return h.svc.Tools()
+}
+
+func toMCPTools(tools []ToolDescriptor) []mcpToolDefinition {
+	out := make([]mcpToolDefinition, 0, len(tools))
+	for _, tool := range tools {
+		inputSchema := tool.InputSchema
+		if inputSchema == nil {
+			inputSchema = map[string]interface{}{"type": "object"}
+		}
+		out = append(out, mcpToolDefinition{
+			Name:         tool.Name,
+			Description:  tool.Description,
+			InputSchema:  inputSchema,
+			OutputSchema: tool.OutputSchema,
+		})
+	}
+	return out
+}
+
+func acceptsEventStream(r *http.Request) bool {
+	return bytes.Contains([]byte(r.Header.Get("Accept")), []byte("text/event-stream"))
 }
