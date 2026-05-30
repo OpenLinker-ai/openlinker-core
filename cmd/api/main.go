@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -80,10 +81,13 @@ func main() {
 	e.Use(emw.Recover())
 	e.Use(emw.RequestID())
 	e.Use(emw.CORSWithConfig(emw.CORSConfig{
-		AllowOrigins:     []string{cfg.FrontendURL, "http://localhost:3000"},
+		AllowOrigins:     allowedCORSOrigins(cfg),
 		AllowCredentials: true,
 		AllowHeaders:     []string{echo.HeaderContentType, echo.HeaderAuthorization},
 	}))
+	if cfg.IsProduction() {
+		e.Use(emw.RateLimiterWithConfig(rateLimiterConfig()))
+	}
 	e.Use(requestLogger())
 	e.HTTPErrorHandler = func(err error, c echo.Context) {
 		if c.Response().Committed {
@@ -305,6 +309,34 @@ func requestLogger() echo.MiddlewareFunc {
 				Msg("http")
 			return err
 		}
+	}
+}
+
+func allowedCORSOrigins(cfg *config.Config) []string {
+	origins := []string{}
+	if origin := strings.TrimSpace(cfg.FrontendURL); origin != "" {
+		origins = append(origins, origin)
+	}
+	if !cfg.IsProduction() {
+		origins = append(origins, "http://localhost:3000")
+	}
+	return origins
+}
+
+func rateLimiterConfig() emw.RateLimiterConfig {
+	return emw.RateLimiterConfig{
+		Skipper: func(c echo.Context) bool {
+			path := c.Request().URL.Path
+			return path == "/healthz" || path == "/healthz/db"
+		},
+		Store: emw.NewRateLimiterMemoryStoreWithConfig(emw.RateLimiterMemoryStoreConfig{
+			Rate:      50,
+			Burst:     200,
+			ExpiresIn: 3 * time.Minute,
+		}),
+		DenyHandler: func(c echo.Context, _ string, _ error) error {
+			return httpx.NewError(http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁，请稍后再试")
+		},
 	}
 }
 
