@@ -26,7 +26,7 @@ func setupWebhookTestDB(t *testing.T) *pgxpool.Pool {
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL 未设置，跳过 webhook 集成测试")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
@@ -34,7 +34,7 @@ func setupWebhookTestDB(t *testing.T) *pgxpool.Pool {
 	_, err = pool.Exec(ctx, truncateWebhookTables)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		cleanCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cleanCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		_, _ = pool.Exec(cleanCtx, truncateWebhookTables)
 		pool.Close()

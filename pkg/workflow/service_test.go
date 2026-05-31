@@ -663,14 +663,14 @@ func setupWorkflowTestDB(t *testing.T) *pgxpool.Pool {
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL 未设置，跳过 workflow 集成测试")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
 	require.NoError(t, pool.Ping(ctx))
 	truncateWorkflowTables(t, pool)
 	t.Cleanup(func() {
-		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		c, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		_, _ = pool.Exec(c, `TRUNCATE workflows, runs, agents, users RESTART IDENTITY CASCADE`)
 		pool.Close()
