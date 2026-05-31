@@ -166,8 +166,9 @@ ORDER BY s.average_score DESC NULLS LAST, a.total_calls DESC, a.id
 LIMIT $2;
 
 -- name: ListAgentsBySkillsWithVerified :many
--- 改造 RecommendAgentsBySkills 加 verified 加权：
--- 命中 skill 数 desc → verified 数 desc → total_calls desc。
+-- 改造 RecommendAgentsBySkills 加 verified/availability 加权：
+-- 过滤无近期 runtime 心跳的 runtime_pull Agent，避免推荐给用户后 Run 长时间无人领取。
+-- 排序：命中 skill 数 desc → 可用性 → verified 数 desc → total_calls desc。
 -- 同时返回 verified_count 让上层决定排序权重。
 SELECT a.id AS agent_id,
        COUNT(DISTINCT ag.skill_id)::int AS match_count,
@@ -175,11 +176,28 @@ SELECT a.id AS agent_id,
        a.total_calls
 FROM agent_skills ag
 JOIN agents a ON a.id = ag.agent_id
+LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
+LEFT JOIN LATERAL (
+    SELECT MAX(last_used_at) AS last_runtime_token_used_at
+    FROM agent_runtime_tokens
+    WHERE agent_id = a.id AND revoked_at IS NULL
+) rt ON TRUE
 LEFT JOIN agent_skill_scores s
        ON s.agent_id = ag.agent_id
       AND s.skill_id = ag.skill_id
       AND s.skill_id = ANY($1::text[])
 WHERE ag.skill_id = ANY($1::text[])
   AND a.visibility = 'public' AND a.lifecycle_status = 'active'
-GROUP BY a.id, a.total_calls
-ORDER BY match_count DESC, verified_count DESC, a.total_calls DESC, a.id;
+  AND (
+      a.connection_mode <> 'runtime_pull'
+      OR rt.last_runtime_token_used_at >= NOW() - INTERVAL '5 minutes'
+  )
+GROUP BY a.id, a.total_calls, av.availability_status
+ORDER BY match_count DESC,
+    CASE COALESCE(av.availability_status, 'unknown')
+    WHEN 'healthy' THEN 0
+    WHEN 'unknown' THEN 1
+    WHEN 'degraded' THEN 2
+    ELSE 3
+END ASC,
+    verified_count DESC, a.total_calls DESC, a.id;

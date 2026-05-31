@@ -33,6 +33,16 @@ WHERE prefix = $1 AND revoked_at IS NULL;
 UPDATE agent_runtime_tokens SET last_used_at = NOW()
 WHERE id = $1 AND revoked_at IS NULL;
 
+-- name: HasRecentRuntimePullToken :one
+SELECT EXISTS(
+    SELECT 1
+    FROM agent_runtime_tokens
+    WHERE agent_id = $1
+      AND revoked_at IS NULL
+      AND 'agent:pull' = ANY(scopes)
+      AND last_used_at >= NOW() - INTERVAL '5 minutes'
+)::bool AS has_recent_runtime_pull_token;
+
 -- name: RevokeAgentRuntimeTokenForOwner :execrows
 UPDATE agent_runtime_tokens t
 SET revoked_at = NOW()

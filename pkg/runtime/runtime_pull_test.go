@@ -51,6 +51,12 @@ func insertRuntimeToken(t *testing.T, pool *pgxpool.Pool, agentID, creatorID uui
 	return plaintext
 }
 
+func markRuntimePullAvailable(t *testing.T, svc *runtime.Service, token string) {
+	t.Helper()
+	_, err := svc.HeartbeatAgent(context.Background(), token)
+	require.NoError(t, err)
+}
+
 func TestRuntimePull_ClaimAndCompleteSuccess(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
@@ -61,6 +67,7 @@ func TestRuntimePull_ClaimAndCompleteSuccess(t *testing.T) {
 	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
 	setRuntimePullMode(t, pool, agentID)
 	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
+	markRuntimePullAvailable(t, svc, token)
 
 	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "from user"}), "")
 	require.NoError(t, err)
@@ -125,6 +132,7 @@ func TestRuntimePull_OnlyClaimingTokenCanComplete(t *testing.T) {
 	setRuntimePullMode(t, pool, agentID)
 	claimingToken := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
 	otherToken := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
+	markRuntimePullAvailable(t, svc, claimingToken)
 
 	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "claim"}), "")
 	require.NoError(t, err)
@@ -164,6 +172,8 @@ func TestRuntimePull_RequiresPullScope(t *testing.T) {
 	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
 	setRuntimePullMode(t, pool, agentID)
 	callOnlyToken := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call"})
+	pullToken := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:pull"})
+	markRuntimePullAvailable(t, svc, pullToken)
 
 	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "scope"}), "")
 	require.NoError(t, err)
@@ -172,6 +182,27 @@ func TestRuntimePull_RequiresPullScope(t *testing.T) {
 	claimed, err := svc.ClaimRuntimePullRun(ctx, callOnlyToken)
 	require.Nil(t, claimed)
 	assertHTTPStatus(t, err, 401)
+}
+
+func TestRuntimePull_RunRequiresRecentPullHeartbeat(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:pull"})
+
+	_, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "offline"}), "")
+	assertHTTPStatus(t, err, 409)
+	assert.Equal(t, 0, countRunsForUser(t, pool, userID))
+
+	markRuntimePullAvailable(t, svc, token)
+	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "online"}), "")
+	require.NoError(t, err)
+	assert.Equal(t, "running", started.Status)
 }
 
 func TestAgentHeartbeat_MarksAgentHealthy(t *testing.T) {
@@ -216,6 +247,7 @@ func TestRuntimePull_ReclaimsStaleClaim(t *testing.T) {
 	setRuntimePullMode(t, pool, agentID)
 	oldToken := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
 	newToken := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
+	markRuntimePullAvailable(t, svc, oldToken)
 
 	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "stale"}), "")
 	require.NoError(t, err)

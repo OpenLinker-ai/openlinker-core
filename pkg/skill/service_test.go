@@ -17,7 +17,7 @@ import (
 	"github.com/kinzhi/openlinker-core/pkg/skill"
 )
 
-const truncateSkillTables = "TRUNCATE webhook_deliveries, api_keys, wallets, runs, charges, withdrawals, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"
+const truncateSkillTables = "TRUNCATE webhook_deliveries, api_keys, wallets, runs, charges, withdrawals, task_queries, agent_runtime_tokens, agent_availability_snapshots, agent_skills, agents, users RESTART IDENTITY CASCADE"
 
 func setupSkillTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -79,6 +79,39 @@ func insertSkillAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, slu
 	return id
 }
 
+func insertSkillRuntimePullAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, slug string, totalCalls int32, lastUsedAt *time.Time) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO agents (
+			id, creator_id, slug, name, description, endpoint_url, price_per_call_cents,
+			tags, lifecycle_status, visibility, certification_status, total_calls, connection_mode
+		) VALUES ($1, $2, $3, $4, 'Skill test runtime agent', $5, 100, '{data}', 'active', 'public', 'unreviewed', $6, 'runtime_pull')`,
+		id, creatorID, slug, "Skill Runtime "+slug, "openlinker-runtime-pull://"+slug, totalCalls)
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(),
+		`INSERT INTO agent_runtime_tokens (
+			id, agent_id, created_by_user_id, name, prefix, token_hash, scopes, last_used_at
+		) VALUES ($1, $2, $3, 'Runtime token', $4, 'hash', ARRAY['agent:pull']::text[], $5)`,
+		uuid.New(), id, creatorID, "rt_live_"+uuid.NewString()[:8], lastUsedAt)
+	require.NoError(t, err)
+	return id
+}
+
+func markSkillAgentAvailability(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, status string) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO agent_availability_snapshots (
+			agent_id, availability_status, last_checked_at, updated_at
+		) VALUES ($1, $2, NOW(), NOW())
+		ON CONFLICT (agent_id) DO UPDATE
+		SET availability_status = EXCLUDED.availability_status,
+		    last_checked_at = EXCLUDED.last_checked_at,
+		    updated_at = EXCLUDED.updated_at`,
+		agentID, status)
+	require.NoError(t, err)
+}
+
 func assertSkillHTTPStatus(t *testing.T, err error, want int) {
 	t.Helper()
 	require.Error(t, err)
@@ -125,6 +158,41 @@ func TestSetListAndRecommendAgentSkills(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, limited, 1)
 	assert.Equal(t, best, limited[0].AgentID)
+}
+
+func TestRecommendAgentsBySkillsFiltersStaleRuntimePullAgents(t *testing.T) {
+	pool := setupSkillTestDB(t)
+	svc := skill.NewService(pool)
+	creatorID := insertSkillCreator(t, pool)
+	ctx := context.Background()
+	recent := time.Now().Add(-2 * time.Minute)
+	stale := time.Now().Add(-10 * time.Minute)
+
+	activeRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-active-"+uuid.NewString()[:8], 100, &recent)
+	staleRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-stale-"+uuid.NewString()[:8], 1000, &stale)
+	neverHeartbeat := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-never-"+uuid.NewString()[:8], 1000, nil)
+	betterDirect := insertSkillAgent(t, pool, creatorID, "skill-direct-better-"+uuid.NewString()[:8], "approved", 1)
+	direct := insertSkillAgent(t, pool, creatorID, "skill-direct-"+uuid.NewString()[:8], "approved", 1)
+	markSkillAgentAvailability(t, pool, activeRuntime, "healthy")
+	markSkillAgentAvailability(t, pool, staleRuntime, "healthy")
+	markSkillAgentAvailability(t, pool, neverHeartbeat, "healthy")
+
+	require.NoError(t, svc.SetAgentSkills(ctx, betterDirect, []string{"data/sql-query", "data/analysis"}))
+	require.NoError(t, svc.SetAgentSkills(ctx, activeRuntime, []string{"data/sql-query"}))
+	require.NoError(t, svc.SetAgentSkills(ctx, staleRuntime, []string{"data/sql-query"}))
+	require.NoError(t, svc.SetAgentSkills(ctx, neverHeartbeat, []string{"data/sql-query"}))
+	require.NoError(t, svc.SetAgentSkills(ctx, direct, []string{"data/sql-query"}))
+
+	matches, err := svc.RecommendAgentsBySkills(ctx, []string{"data/sql-query", "data/analysis"}, 10)
+	require.NoError(t, err)
+	require.Len(t, matches, 3)
+	assert.Equal(t, betterDirect, matches[0].AgentID)
+	assert.Equal(t, int32(2), matches[0].MatchCount)
+	assert.Equal(t, activeRuntime, matches[1].AgentID)
+	assert.Equal(t, direct, matches[2].AgentID)
+	recommendedIDs := []uuid.UUID{matches[0].AgentID, matches[1].AgentID, matches[2].AgentID}
+	assert.NotContains(t, recommendedIDs, staleRuntime)
+	assert.NotContains(t, recommendedIDs, neverHeartbeat)
 }
 
 func TestSetAgentSkillsValidation(t *testing.T) {

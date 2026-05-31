@@ -41,6 +41,7 @@ const (
 	defaultPage int32 = 1
 	defaultSize int32 = 12
 	maxSize     int32 = 50
+	runtimePullConnectionMode = "runtime_pull"
 )
 
 // ListMarket 列出已公开 Agent。
@@ -88,7 +89,7 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 
 	items := make([]MarketListItem, 0, len(rows))
 	for _, r := range rows {
-		availability := s.agentAvailability(ctx, r.ID)
+		availability := s.agentAvailability(ctx, r.ID, r.ConnectionMode)
 		items = append(items, MarketListItem{
 			ID:                r.ID.String(),
 			Slug:              r.Slug,
@@ -144,7 +145,7 @@ func (s *MarketService) GetBySlug(ctx context.Context, slug string) (*AgentDetai
 		Skills:            []SkillMini{},
 		ConnectionMode:    r.ConnectionMode,
 		MCPToolName:       r.MCPToolName,
-		Availability:      s.agentAvailability(ctx, r.ID),
+		Availability:      s.agentAvailability(ctx, r.ID, r.ConnectionMode),
 	}
 	if r.CertifiedAt != nil {
 		s := r.CertifiedAt.UTC().Format(time.RFC3339)
@@ -346,21 +347,39 @@ func agentCardSigningSeed() []byte {
 	return sum[:]
 }
 
-func (s *MarketService) agentAvailability(ctx context.Context, agentID uuid.UUID) Availability {
+func (s *MarketService) agentAvailability(ctx context.Context, agentID uuid.UUID, connectionMode string) Availability {
 	snapshot, err := s.queries.GetAgentAvailabilitySnapshot(ctx, agentID)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.MarketService.agentAvailability")
 		}
-		return availabilityResponse("unknown", nil, nil, nil, 0)
+		return s.runtimeAwareAvailability(ctx, agentID, connectionMode, availabilityResponse("unknown", nil, nil, nil, 0))
 	}
-	return availabilityResponse(
+	return s.runtimeAwareAvailability(ctx, agentID, connectionMode, availabilityResponse(
 		snapshot.AvailabilityStatus,
 		snapshot.LastSuccessfulRunAt,
 		snapshot.LastFailedRunAt,
 		snapshot.LastCheckedAt,
 		snapshot.ConsecutiveFailures,
-	)
+	))
+}
+
+func (s *MarketService) runtimeAwareAvailability(ctx context.Context, agentID uuid.UUID, connectionMode string, availability Availability) Availability {
+	if connectionMode != runtimePullConnectionMode {
+		return availability
+	}
+	hasRuntime, err := s.queries.HasRecentRuntimePullToken(ctx, agentID)
+	if err != nil {
+		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.MarketService.runtimeAwareAvailability")
+		return availability
+	}
+	if hasRuntime {
+		return availability
+	}
+	availability.Status = "unreachable"
+	availability.Label = "不可达"
+	availability.Hint = "Runtime Pull Agent 最近没有运行时心跳或领取轮询，暂不建议试用。"
+	return availability
 }
 
 func availabilityResponse(status string, successAt, failedAt, checkedAt *time.Time, failures int32) Availability {
