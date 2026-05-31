@@ -55,6 +55,28 @@ func NewBenchmarkService(parent *Service, runner EndpointRunner, llmClient llm.C
 	}
 }
 
+func (b *BenchmarkService) RuntimeStatus() BenchmarkRuntimeStatus {
+	reasons := make([]string, 0, 2)
+	if b.runner == nil {
+		reasons = append(reasons, "endpoint_runner_unavailable")
+	}
+	if b.llm == nil {
+		reasons = append(reasons, "llm_not_configured")
+	}
+	if len(reasons) == 0 {
+		return BenchmarkRuntimeStatus{
+			CanRun:  true,
+			Reasons: []string{},
+			Message: "Benchmark runtime is ready.",
+		}
+	}
+	return BenchmarkRuntimeStatus{
+		CanRun:  false,
+		Reasons: reasons,
+		Message: "Benchmark runtime is not ready.",
+	}
+}
+
 // RunBenchmark 创作者触发某 skill 的 benchmark。
 //
 // 校验：

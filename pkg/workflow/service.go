@@ -39,6 +39,22 @@ const (
 	workflowRunStatusFailed   = "failed"
 )
 
+const (
+	runtimeRunStatusRunning  = "running"
+	runtimeRunStatusPending  = "pending"
+	runtimeRunStatusSuccess  = "success"
+	runtimeRunStatusFailed   = "failed"
+	runtimeRunStatusTimeout  = "timeout"
+	runtimeRunStatusCanceled = "canceled"
+)
+
+const workflowNodeRunPollInterval = 250 * time.Millisecond
+const workflowNodeRunPollMaxLoops = 240
+
+func normalizeRunStatus(status string) string {
+	return strings.ToLower(strings.TrimSpace(status))
+}
+
 func NewService(pool *pgxpool.Pool, runtimeSvc *runtime.Service) *Service {
 	return &Service{queries: db.New(pool), pool: pool, runtime: runtimeSvc}
 }
@@ -651,6 +667,7 @@ func (s *Service) runWorkflowNode(
 		})
 		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
 	}
+	resp.Status = normalizeRunStatus(resp.Status)
 	childRunID := uuid.Nil
 	if resp.RunID != "" {
 		childRunID, _ = uuid.Parse(resp.RunID)
@@ -658,6 +675,19 @@ func (s *Service) runWorkflowNode(
 	childRunIDPtr := &childRunID
 	if childRunID == uuid.Nil {
 		childRunIDPtr = nil
+	}
+	if resp.Status == runtimeRunStatusRunning || resp.Status == runtimeRunStatusPending {
+		completed, err := s.waitForRuntimeRunCompletion(ctx, userID, childRunID)
+		if err != nil {
+			msg := err.Error()
+			_, _ = s.queries.MarkWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
+				ID:           step.ID,
+				RunID:        childRunIDPtr,
+				ErrorMessage: &msg,
+			})
+			return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
+		}
+		resp = completed
 	}
 	if resp.Status != "success" {
 		msg := strings.TrimSpace(resp.ErrorMsg)
@@ -684,6 +714,34 @@ func (s *Service) runWorkflowNode(
 		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: fmt.Errorf("更新 step 失败: %w", err)}
 	}
 	return workflowNodeRunResult{NodeKey: node.NodeKey, Output: output}
+}
+
+func (s *Service) waitForRuntimeRunCompletion(ctx context.Context, userID, runID uuid.UUID) (*runtime.RunResponse, error) {
+	if runID == uuid.Nil {
+		return nil, fmt.Errorf("workflow node runID 为空")
+	}
+	for i := 0; i < workflowNodeRunPollMaxLoops; i += 1 {
+		childRun, err := s.runtime.GetRun(ctx, userID, runID)
+		if err != nil {
+			return nil, err
+		}
+		childRun.Status = normalizeRunStatus(childRun.Status)
+		switch childRun.Status {
+		case runtimeRunStatusSuccess, runtimeRunStatusFailed, runtimeRunStatusTimeout, runtimeRunStatusCanceled:
+			return childRun, nil
+		case runtimeRunStatusRunning, runtimeRunStatusPending:
+			sleep := time.After(workflowNodeRunPollInterval)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-sleep:
+				continue
+			}
+		default:
+			return childRun, nil
+		}
+	}
+	return nil, fmt.Errorf("workflow node run %s did not finish within %s", runID.String(), (workflowNodeRunPollInterval * workflowNodeRunPollMaxLoops))
 }
 
 func (s *Service) GetWorkflowRun(ctx context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {

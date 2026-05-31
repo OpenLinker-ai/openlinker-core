@@ -32,7 +32,9 @@ func NewBenchmarkHandler(svc *BenchmarkService) *BenchmarkHandler {
 //	GET /agents/:id/benchmarks                      Phase 2 缺口 3：公开 batch 概览
 //	GET /agents/:id/benchmarks/:batchID             Phase 2 缺口 3：公开 batch 详情（脱敏）
 //	GET /agents/:id/benchmark-results               docs/25 §5.3 别名 → 转发 skill-scores by id
+//	GET /benchmark/status                           主动测评运行能力状态（不泄露密钥）
 func (h *BenchmarkHandler) Register(api *echo.Group) {
+	api.GET("/benchmark/status", h.GetRuntimeStatus)
 	api.GET("/skills/:id/top-agents", h.ListTopAgents)
 	api.GET("/skills/:category/:name/top-agents", h.ListTopAgents)
 	api.GET("/agents/:slug/skill-scores", h.ListScoresBySlug)
@@ -75,6 +77,11 @@ func (h *BenchmarkHandler) RunBenchmark(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusAccepted, resp)
+}
+
+// GetRuntimeStatus GET /benchmark/status。
+func (h *BenchmarkHandler) GetRuntimeStatus(c echo.Context) error {
+	return c.JSON(http.StatusOK, h.svc.RuntimeStatus())
 }
 
 // ListMyScores GET /creator/agents/:id/skill-scores。

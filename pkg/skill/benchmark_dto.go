@@ -36,6 +36,14 @@ type RunBenchmarkResponse struct {
 	Status  string `json:"status"` // "running"
 }
 
+// BenchmarkRuntimeStatus describes whether the platform can start active
+// benchmark runs. It intentionally exposes only coarse readiness flags.
+type BenchmarkRuntimeStatus struct {
+	CanRun  bool     `json:"can_run"`
+	Reasons []string `json:"reasons"`
+	Message string   `json:"message"`
+}
+
 // SkillScoreItem 单条 (agent × skill) 评分概览。
 type SkillScoreItem struct {
 	SkillID      string  `json:"skill_id"`
