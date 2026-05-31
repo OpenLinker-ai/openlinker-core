@@ -315,6 +315,15 @@ func (s *Service) createRunningRun(
 			log.Warn().Err(err).Str("agent_id", agent.ID.String()).Msg("runtime.Run: endpoint policy rejected")
 			return nil, nil, httpx.Forbidden("Agent endpoint 当前不可调用")
 		}
+	} else {
+		available, checkErr := s.queries.HasRecentRuntimePullToken(ctx, agent.ID)
+		if checkErr != nil {
+			log.Error().Err(checkErr).Str("agent_id", agent.ID.String()).Msg("runtime.Run: HasRecentRuntimePullToken")
+			return nil, nil, httpx.Internal("检查 Agent runtime 状态失败")
+		}
+		if !available {
+			return nil, nil, httpx.Conflict("Agent runtime 当前离线，请稍后再试")
+		}
 	}
 	if agent.ConnectionMode == connectionModeMCPServer && (agent.MCPToolName == nil || strings.TrimSpace(*agent.MCPToolName) == "") {
 		log.Warn().Str("agent_id", agent.ID.String()).Msg("runtime.Run: missing mcp tool")

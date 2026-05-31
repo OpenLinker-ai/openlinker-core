@@ -111,6 +111,62 @@ func TestListMarket_SortsByAvailability(t *testing.T) {
 	assert.Equal(t, "sort-unreachable", resp.Items[2].Slug)
 }
 
+func TestListMarket_RuntimePullWithoutRecentWorkerShownUnreachable(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := agent.NewMarketService(pool)
+	creatorID, _ := setupTestData(t, pool)
+	ctx := context.Background()
+
+	agentID := createApprovedAgent(t, pool, creatorID, "runtime-offline")
+	_, err := pool.Exec(ctx,
+		`UPDATE agents
+		 SET connection_mode='runtime_pull',
+		     endpoint_url=$2
+		 WHERE id=$1`,
+		agentID,
+		"openlinker-runtime-pull://runtime-offline",
+	)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx,
+		`INSERT INTO agent_availability_snapshots (
+			agent_id, availability_status, last_successful_run_at, last_checked_at, consecutive_failures
+		) VALUES ($1, 'healthy', NOW(), NOW(), 0)`,
+		agentID,
+	)
+	require.NoError(t, err)
+
+	resp, err := svc.ListMarket(ctx, nil, "runtime-offline", 1, 12)
+	require.NoError(t, err)
+	require.Len(t, resp.Items, 1)
+	assert.Equal(t, "unreachable", resp.Items[0].Availability.Status)
+	assert.Contains(t, resp.Items[0].Availability.Hint, "运行时心跳")
+
+	createApprovedAgent(t, pool, creatorID, "runtime-direct-fallback")
+	resp, err = svc.ListMarket(ctx, nil, "", 1, 12)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp.Items), 2)
+	assert.Equal(t, "runtime-direct-fallback", resp.Items[0].Slug)
+	assert.Equal(t, "runtime-offline", resp.Items[len(resp.Items)-1].Slug)
+
+	_, err = pool.Exec(ctx,
+		`INSERT INTO agent_runtime_tokens (
+			agent_id, created_by_user_id, name, prefix, token_hash, scopes, last_used_at
+		) VALUES ($1, $2, 'worker', 'rt_live_aabbccdd', 'hash', ARRAY['agent:pull']::text[], NOW())`,
+		agentID,
+		creatorID,
+	)
+	require.NoError(t, err)
+
+	detail, err := svc.GetBySlug(ctx, "runtime-offline")
+	require.NoError(t, err)
+	assert.Equal(t, "healthy", detail.Availability.Status)
+
+	resp, err = svc.ListMarket(ctx, nil, "", 1, 12)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp.Items), 2)
+	assert.Equal(t, "runtime-offline", resp.Items[0].Slug)
+}
+
 func TestListMarket_FilterByTags(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := agent.NewMarketService(pool)
