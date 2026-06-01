@@ -43,6 +43,31 @@ func TestRegistrationService_MintBootstrapToken_NonCreatorRejected(t *testing.T)
 	assertHTTPStatus(t, err, 403)
 }
 
+func TestAgentTokenPrefixesAllowCollisions(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "Token Collision Creator")
+	agentID := createApprovedAgent(t, pool, creatorID, "token-prefix-collision")
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx,
+		`INSERT INTO agent_registration_tokens (
+			creator_user_id, label, prefix, token_hash, max_agents, expires_at
+		) VALUES
+			($1, 'registration token A', 'ol_live_beef', 'hash-a', 1, NOW() + INTERVAL '30 minutes'),
+			($1, 'registration token B', 'ol_live_beef', 'hash-b', 1, NOW() + INTERVAL '30 minutes')`,
+		creatorID)
+	require.NoError(t, err, "registration token prefix is only a lookup hint and must allow collisions")
+
+	_, err = pool.Exec(ctx,
+		`INSERT INTO agent_runtime_tokens (
+			agent_id, created_by_user_id, name, prefix, token_hash, scopes
+		) VALUES
+			($1, $2, 'runtime token A', 'ol_live_cafe', 'hash-a', ARRAY['agent:call']::text[]),
+			($1, $2, 'runtime token B', 'ol_live_cafe', 'hash-b', ARRAY['agent:call']::text[])`,
+		agentID, creatorID)
+	require.NoError(t, err, "runtime token prefix is only a lookup hint and must allow collisions")
+}
+
 func TestRegistrationService_RegisterAgentViaBootstrap_HappyPath(t *testing.T) {
 	pool := setupTestDB(t)
 	creatorID := insertCreatorUser(t, pool, "Bootstrap Creator")
