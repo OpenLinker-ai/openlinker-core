@@ -20,8 +20,11 @@ type OpenLinkerManifest struct {
 	BaseURLs    ManifestBaseURLs       `json:"base_urls"`
 	Docs        ManifestDocs           `json:"docs"`
 	Tools       ManifestTools          `json:"tools"`
+	Protocols   ManifestProtocols      `json:"protocols"`
 	Auth        ManifestAuth           `json:"auth"`
+	TokenScopes map[string]string      `json:"token_scopes"`
 	Policies    map[string]string      `json:"policies"`
+	States      ManifestStates         `json:"states"`
 	Workflows   ManifestWorkflowStatus `json:"workflows"`
 }
 
@@ -32,6 +35,7 @@ type ManifestBaseURLs struct {
 
 type ManifestDocs struct {
 	PublishAgent string `json:"publish_agent"`
+	ConsumeAgent string `json:"consume_agent"`
 	Connect      string `json:"connect"`
 	APIKeys      string `json:"api_keys"`
 	MCP          string `json:"mcp"`
@@ -45,6 +49,16 @@ type ManifestTools struct {
 	Names    []string `json:"names"`
 }
 
+type ManifestProtocols struct {
+	AgentCard     string `json:"agent_card"`
+	ExtendedCard  string `json:"extended_agent_card"`
+	A2A           string `json:"a2a"`
+	A2ATaskLookup string `json:"a2a_task_lookup"`
+	A2ASubscribe  string `json:"a2a_subscribe"`
+	RunEvents     string `json:"run_events"`
+	MCP           string `json:"mcp"`
+}
+
 type ManifestAuth struct {
 	AccessTokenHeader   string   `json:"access_token_header"`
 	AccessTokenType     string   `json:"access_token_type"`
@@ -56,6 +70,13 @@ type ManifestAuth struct {
 type ManifestWorkflowStatus struct {
 	ProductionA2A string `json:"production_a2a"`
 	Builder       string `json:"builder"`
+}
+
+type ManifestStates struct {
+	Run      []string `json:"run"`
+	Task     []string `json:"task"`
+	Delivery []string `json:"delivery"`
+	Workflow []string `json:"workflow"`
 }
 
 // NewManifest builds the public discovery manifest. It intentionally contains
@@ -80,6 +101,7 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 		},
 		Docs: ManifestDocs{
 			PublishAgent: apiBase + "/skill/publish-agent",
+			ConsumeAgent: apiBase + "/skill/consume-agent",
 			Connect:      webBase + "/connect",
 			APIKeys:      webBase + "/settings/api-keys",
 			MCP:          apiBase + "/api/v1/mcp/tools",
@@ -97,6 +119,15 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 				"create_task",
 			},
 		},
+		Protocols: ManifestProtocols{
+			AgentCard:     apiBase + "/api/v1/agents/{slug}/agent-card.json",
+			ExtendedCard:  apiBase + "/api/v1/agents/{slug}/agent-card.extended.json",
+			A2A:           apiBase + "/api/v1/a2a/agents/{slug}",
+			A2ATaskLookup: apiBase + "/api/v1/a2a/agents/{slug}/tasks/{task_id}",
+			A2ASubscribe:  apiBase + "/api/v1/a2a/agents/{slug}/tasks/{task_id}:subscribe",
+			RunEvents:     apiBase + "/api/v1/runs/{run_id}/events",
+			MCP:           apiBase + "/api/v1/mcp",
+		},
 		Auth: ManifestAuth{
 			AccessTokenHeader:   "Authorization: Bearer ol_live_...",
 			AccessTokenType:     "ol_live_...",
@@ -104,13 +135,30 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			APIScopes:           []string{"agents:read", "agents:run", "runs:read", "tasks:write"},
 			RuntimeScopes:       []string{"agent:call", "agent:pull"},
 		},
+		TokenScopes: map[string]string{
+			"agents:read":    "search and inspect public agents through REST or MCP",
+			"agents:run":     "run public agents through REST, MCP, A2A, or delegated calls",
+			"runs:read":      "read run status, output, events, children and artifacts allowed to the owner",
+			"tasks:write":    "create tasks and task recommendations through OpenLinker tools",
+			"agent:pull":     "runtime_pull agents can heartbeat, claim runs, and submit results",
+			"agent:call":     "an agent currently handling a run can delegate to another agent",
+			"register:agent": "one-time or short-lived creator invitation for agent self-registration",
+		},
 		Policies: map[string]string{
-			"public_listing": "no_pre_review",
-			"certification":  "review_required",
-			"benchmark":      "creator_triggered_public_read",
-			"payments":       "not_enabled",
-			"human_session":  "jwt_only",
-			"agent_tokens":   "single_ol_live_token_scoped_by_purpose_binding_and_expiry",
+			"public_listing":            "no_pre_review",
+			"certification":             "review_required",
+			"benchmark":                 "creator_triggered_public_read",
+			"payments":                  "not_enabled",
+			"agent_autonomous_purchase": "not_enabled",
+			"public_artifacts":          "explicit_only",
+			"human_session":             "jwt_only",
+			"agent_tokens":              "single_ol_live_token_scoped_by_purpose_binding_and_expiry",
+		},
+		States: ManifestStates{
+			Run:      []string{"pending", "running", "success", "failed", "timeout", "canceled"},
+			Task:     []string{"open", "claimed", "running", "submitted", "revision_requested", "accepted", "rejected", "canceled"},
+			Delivery: []string{"pending", "succeeded", "failed"},
+			Workflow: []string{"pending", "running", "paused", "success", "failed", "canceled"},
 		},
 		Workflows: ManifestWorkflowStatus{
 			ProductionA2A: "platform_parent_child_runs",

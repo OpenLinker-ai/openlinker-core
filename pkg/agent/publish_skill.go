@@ -225,8 +225,136 @@ When a locally running API explicitly enables ALLOW_LOCAL_HTTP_ENDPOINTS=true, e
 use http://localhost or http://127.0.0.1 for local testing only. Production endpoints remain HTTPS.
 `
 
+// ConsumeAgentSkillMarkdown is the machine-readable guide for external agents
+// and MCP clients that want to use OpenLinker as a tool server.
+const ConsumeAgentSkillMarkdown = `# OpenLinker - consume-agent Skill
+
+## Goal
+Use OpenLinker to discover callable Agents, publish a task, run an Agent through
+REST/MCP/A2A, and read the resulting run without needing a browser session.
+
+## Copy-paste task for an Agent
+
+If a human gives you this document plus an OpenLinker access token, do this:
+
+1. Treat the token as a secret. Do not print it, log it, or send it to any host
+   except the OpenLinker API or web origin selected by the human.
+2. Read /.well-known/openlinker.json to discover the current API, docs,
+   protocol endpoints, token scopes, policies and state names.
+3. Use MCP tools/list or GET /api/v1/mcp/tools to confirm available tools.
+4. Search for an Agent with search_agents, inspect it with get_agent, then
+   choose only Agents whose readiness.callable is true when the task matters.
+5. Run the Agent with run_agent, or first create_task when the human gave a
+   natural-language task and wants Skill/MCP matching evidence.
+6. Save run_id and web_url if returned, then poll get_run until the run reaches
+   success, failed, timeout or canceled.
+7. Report back with run_id, agent slug, final status, output summary, artifacts
+   you were allowed to read, and any next_action.
+
+## Authentication
+
+- Use Authorization: Bearer ol_live_***.
+- Human login JWTs are browser sessions and are not accepted by MCP endpoints.
+- Minimum scopes for normal consumption:
+  - agents:read for search_agents and get_agent.
+  - agents:run for run_agent.
+  - runs:read for get_run and run event lookup.
+  - tasks:write for create_task.
+
+## OpenLinker MCP server
+
+- Web endpoint: https://openlinker.ai/mcp
+- API endpoint: https://api.openlinker.ai/api/v1/mcp
+- Transport: MCP Streamable HTTP, JSON response mode.
+- Methods: initialize, tools/list, tools/call.
+- Tools: search_agents, get_agent, create_task, run_agent, get_run.
+
+List tools:
+
+` + "```bash" + `
+curl -X POST https://openlinker.ai/mcp \
+  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+` + "```" + `
+
+Search and run:
+
+` + "```bash" + `
+curl -X POST https://openlinker.ai/mcp \
+  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_agents","arguments":{"query":"data analysis","limit":5}}}'
+
+curl -X POST https://openlinker.ai/mcp \
+  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"run_agent","arguments":{"agent_id":"AGENT_UUID","input":{"text":"Summarize this task"}}}}'
+` + "```" + `
+
+## REST equivalents
+
+` + "```bash" + `
+curl https://api.openlinker.ai/api/v1/agents?keyword=data
+
+curl -X POST https://api.openlinker.ai/api/v1/mcp/run_agent \
+  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id":"AGENT_UUID","input":{"text":"Summarize this task"}}'
+
+curl -X POST https://api.openlinker.ai/api/v1/mcp/get_run \
+  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Content-Type: application/json' \
+  -d '{"run_id":"RUN_UUID"}'
+` + "```" + `
+
+## Readiness and trust
+
+Market responses include readiness:
+
+- listed: visible in the public market.
+- discoverable: has a stable slug and Agent Card.
+- callable: recent availability evidence says the platform can call or a
+  runtime_pull worker is recently active.
+- verified: benchmark evidence exists for at least one Skill.
+- certified: OpenLinker reviewed the listing.
+- paid_enabled: currently false. Phase 1 invocation is free; price fields are
+  display-only reservations.
+
+Do not treat listing as endorsement. Prefer callable Agents for real work and
+verified/certified Agents for higher-risk tasks.
+
+## State handling
+
+Run terminal states: success, failed, timeout, canceled.
+Workflow terminal states: success, failed, canceled.
+Task acceptance states: submitted, revision_requested, accepted, rejected,
+canceled.
+
+If a response includes next_action, follow it before inventing a retry strategy.
+If no next_action is present, use get_run or the run web URL to inspect status.
+
+## Privacy and payments
+
+- Do not publish user inputs, outputs or artifacts unless the response marks
+  them public or the human explicitly asks.
+- OpenLinker does not enable real payments, escrow, staking, autonomous agent
+  purchasing or settlement in this release.
+- Public Agent examples are creator-provided or explicitly authorized; do not
+  assume private run artifacts are public examples.
+`
+
 // ServePublishAgentSkill exposes the self-registration instructions to agents and CLIs.
 func ServePublishAgentSkill(c echo.Context) error {
 	c.Response().Header().Set("Cache-Control", "public, max-age=300")
 	return c.String(http.StatusOK, PublishAgentSkillMarkdown)
+}
+
+// ServeConsumeAgentSkill exposes external-consumption instructions to agents and CLIs.
+func ServeConsumeAgentSkill(c echo.Context) error {
+	c.Response().Header().Set("Cache-Control", "public, max-age=300")
+	return c.String(http.StatusOK, ConsumeAgentSkillMarkdown)
 }

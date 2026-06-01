@@ -75,6 +75,16 @@ func TestListMarket_HappyPath(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Len(t, resp.Items, 5, "should return all 5 approved agents")
 	assert.Equal(t, int32(5), resp.Total, "total should be 5")
+	for _, item := range resp.Items {
+		assert.True(t, item.Readiness.Listed)
+		assert.True(t, item.Readiness.Discoverable)
+		assert.False(t, item.Readiness.Callable, "no run evidence yet")
+		assert.False(t, item.Readiness.Verified, "no benchmark evidence yet")
+		assert.False(t, item.Readiness.Certified)
+		assert.False(t, item.Readiness.PaidEnabled)
+		assert.Equal(t, "/api/v1/agents/"+item.Slug+"/agent-card.json", item.Readiness.AgentCardURL)
+		assert.Equal(t, item.Availability.Status, item.Readiness.AvailabilityStatus)
+	}
 }
 
 func TestListMarket_SortsByAvailability(t *testing.T) {
@@ -140,6 +150,7 @@ func TestListMarket_RuntimePullWithoutRecentWorkerShownUnreachable(t *testing.T)
 	require.Len(t, resp.Items, 1)
 	assert.Equal(t, "unreachable", resp.Items[0].Availability.Status)
 	assert.Contains(t, resp.Items[0].Availability.Hint, "运行时心跳")
+	assert.False(t, resp.Items[0].Readiness.Callable)
 
 	createApprovedAgent(t, pool, creatorID, "runtime-direct-fallback")
 	resp, err = svc.ListMarket(ctx, nil, "", 1, 12)
@@ -160,6 +171,7 @@ func TestListMarket_RuntimePullWithoutRecentWorkerShownUnreachable(t *testing.T)
 	detail, err := svc.GetBySlug(ctx, "runtime-offline")
 	require.NoError(t, err)
 	assert.Equal(t, "healthy", detail.Availability.Status)
+	assert.True(t, detail.Readiness.Callable)
 
 	resp, err = svc.ListMarket(ctx, nil, "", 1, 12)
 	require.NoError(t, err)
@@ -362,6 +374,51 @@ func TestGetBySlug_HappyPath(t *testing.T) {
 	assert.Equal(t, "可用", detail.Availability.Label)
 	assert.Equal(t, int32(0), detail.Availability.ConsecutiveFailures)
 	require.NotNil(t, detail.Availability.LastSuccessfulRunAt)
+	assert.True(t, detail.Readiness.Listed)
+	assert.True(t, detail.Readiness.Discoverable)
+	assert.True(t, detail.Readiness.Callable)
+	assert.False(t, detail.Readiness.Verified)
+	assert.False(t, detail.Readiness.Certified)
+	assert.False(t, detail.Readiness.PaidEnabled)
+	assert.Equal(t, "/api/v1/agents/fin-review/agent-card.json", detail.Readiness.AgentCardURL)
+	assert.Equal(t, "/api/v1/a2a/agents/fin-review", detail.Readiness.A2AEndpoint)
+	assert.Equal(t, detail.Availability.LastSuccessfulRunAt, detail.Readiness.LastSuccessfulRunAt)
+	assert.Equal(t, "healthy", detail.Readiness.AvailabilityStatus)
+}
+
+func TestGetBySlug_ReadinessReflectsCertificationBenchmarkAndUnlisted(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := agent.NewMarketService(pool)
+	creatorID, _ := setupTestData(t, pool)
+	ctx := context.Background()
+
+	agentID := createApprovedAgent(t, pool, creatorID, "ready-agent", WithStatus("certified"))
+	_, err := pool.Exec(ctx,
+		`UPDATE agents SET visibility='unlisted' WHERE id=$1`,
+		agentID,
+	)
+	require.NoError(t, err)
+	batchID := uuid.New()
+	_, err = pool.Exec(ctx,
+		`INSERT INTO agent_skill_scores (
+			agent_id, skill_id, status, average_score, pass_count, total_count, last_batch_id, verified_at
+		) VALUES ($1, 'data/sql-query', 'verified', 92, 3, 3, $2, NOW())`,
+		agentID,
+		batchID,
+	)
+	require.NoError(t, err)
+
+	detail, err := svc.GetBySlug(ctx, "ready-agent")
+	require.NoError(t, err)
+	assert.False(t, detail.Readiness.Listed, "unlisted agents are not public market listings")
+	assert.True(t, detail.Readiness.Discoverable, "unlisted agents remain discoverable by direct slug/card")
+	assert.True(t, detail.Readiness.Verified)
+	assert.True(t, detail.Readiness.Certified)
+	assert.False(t, detail.Readiness.PaidEnabled)
+	assert.Equal(t, int32(1), detail.Readiness.VerifiedSkillCount)
+	require.NotNil(t, detail.Readiness.LatestBenchmarkBatchID)
+	assert.Equal(t, batchID.String(), *detail.Readiness.LatestBenchmarkBatchID)
+	assert.Equal(t, "payments are not enabled in the current release", detail.Readiness.Explanation["paid_enabled"])
 }
 
 func TestGetAgentCardBySlug_HappyPath(t *testing.T) {

@@ -142,6 +142,7 @@ func main() {
 	agent.StartMetricWorker(rootCtx, metricSvc, approvalSvc)
 
 	e.GET("/skill/publish-agent", agent.ServePublishAgentSkill)
+	e.GET("/skill/consume-agent", agent.ServeConsumeAgentSkill)
 
 	skillSvc := skill.NewService(pool)
 	skillHandler := skill.NewHandler(skillSvc, pool)

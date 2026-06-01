@@ -47,24 +47,34 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 	ctx, cancel := context.WithTimeout(context.Background(), testDBOpTimeout)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dsn)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	require.NoError(t, err, "parse test db dsn")
+	cfg.ConnConfig.RuntimeParams["lock_timeout"] = "5s"
+	cfg.ConnConfig.RuntimeParams["statement_timeout"] = testDBOpTimeout.String()
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	require.NoError(t, err, "connect test db")
 	require.NoError(t, pool.Ping(ctx), "ping test db")
 
-	_, err = pool.Exec(ctx, `SELECT pg_advisory_lock($1)`, agentTestAdvisoryLockID)
+	lockConn, err := pool.Acquire(ctx)
+	require.NoError(t, err, "acquire agent test lock connection")
+
+	_, err = lockConn.Exec(ctx, `SELECT pg_advisory_lock($1)`, agentTestAdvisoryLockID)
 	require.NoError(t, err, "lock agent test db")
 
 	t.Cleanup(func() {
 		clean, cancel := context.WithTimeout(context.Background(), testDBOpTimeout)
 		defer cancel()
-		_, _ = pool.Exec(clean, truncateAll)
-		_, _ = pool.Exec(clean, `SELECT pg_advisory_unlock($1)`, agentTestAdvisoryLockID)
+		// The next setupTestDB call truncates before creating fixtures. Avoid a
+		// second TRUNCATE here; it doubles suite time and can mask leaked locks.
+		_, _ = lockConn.Exec(clean, `SELECT pg_advisory_unlock($1)`, agentTestAdvisoryLockID)
+		lockConn.Release()
 		pool.Close()
 	})
 
 	truncateCtx, truncateCancel := context.WithTimeout(context.Background(), testDBOpTimeout)
 	defer truncateCancel()
-	_, err = pool.Exec(truncateCtx, truncateAll)
+	_, err = lockConn.Exec(truncateCtx, truncateAll)
 	require.NoError(t, err, "truncate test tables")
 	return pool
 }

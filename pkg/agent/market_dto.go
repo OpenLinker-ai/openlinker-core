@@ -20,6 +20,7 @@ type MarketListItem struct {
 	ConnectionMode    string       `json:"connection_mode"`
 	MCPToolName       *string      `json:"mcp_tool_name,omitempty"`
 	Availability      Availability `json:"availability"`
+	Readiness         Readiness    `json:"readiness"`
 }
 
 // CreatorMini 列表 / 详情里嵌入的创作者轻量信息。
@@ -60,6 +61,26 @@ type Availability struct {
 	ConsecutiveFailures int32   `json:"consecutive_failures"`
 }
 
+// Readiness separates public listing/discovery from actual callability and trust.
+//
+// It is intentionally conservative: missing evidence is false/null, not a
+// positive badge. paid_enabled stays false until real payments are enabled.
+type Readiness struct {
+	Listed                 bool              `json:"listed"`
+	Discoverable           bool              `json:"discoverable"`
+	Callable               bool              `json:"callable"`
+	Verified               bool              `json:"verified"`
+	Certified              bool              `json:"certified"`
+	PaidEnabled            bool              `json:"paid_enabled"`
+	AgentCardURL           string            `json:"agent_card_url"`
+	A2AEndpoint            string            `json:"a2a_endpoint"`
+	LastSuccessfulRunAt    *string           `json:"last_successful_run_at,omitempty"`
+	AvailabilityStatus     string            `json:"availability_status"`
+	VerifiedSkillCount     int32             `json:"verified_skill_count"`
+	LatestBenchmarkBatchID *string           `json:"latest_benchmark_batch_id,omitempty"`
+	Explanation            map[string]string `json:"explanation"`
+}
+
 // AgentDetailResponse GET /agents/:slug 响应。
 //
 // 详情页比列表多 endpoint_url / created_at / certified_at 等字段，
@@ -82,6 +103,7 @@ type AgentDetailResponse struct {
 	ConnectionMode      string              `json:"connection_mode"`
 	MCPToolName         *string             `json:"mcp_tool_name,omitempty"`
 	Availability        Availability        `json:"availability"`
+	Readiness           Readiness           `json:"readiness"`
 	VerifiedSkillCount  int32               `json:"verified_skill_count"`
 	LatestBenchmarkID   *string             `json:"latest_benchmark_batch_id,omitempty"`
 	Skills              []SkillMini         `json:"skills"`

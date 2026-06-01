@@ -38,10 +38,10 @@ func NewMarketService(pool *pgxpool.Pool) *MarketService {
 //
 // size 上限设为 50，避免恶意大查询拖慢数据库（agents.tags 是 GIN 索引但仍要 scan）。
 const (
-	defaultPage int32 = 1
-	defaultSize int32 = 12
-	maxSize     int32 = 50
-	runtimePullConnectionMode = "runtime_pull"
+	defaultPage               int32 = 1
+	defaultSize               int32 = 12
+	maxSize                   int32 = 50
+	runtimePullConnectionMode       = "runtime_pull"
 )
 
 // ListMarket 列出已公开 Agent。
@@ -90,6 +90,7 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 	items := make([]MarketListItem, 0, len(rows))
 	for _, r := range rows {
 		availability := s.agentAvailability(ctx, r.ID, r.ConnectionMode)
+		verifiedCount, latestBenchmarkID := s.agentVerifiedSkillStats(ctx, r.ID)
 		items = append(items, MarketListItem{
 			ID:                r.ID.String(),
 			Slug:              r.Slug,
@@ -102,6 +103,15 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 			ConnectionMode:    r.ConnectionMode,
 			MCPToolName:       r.MCPToolName,
 			Availability:      availability,
+			Readiness: readinessForAgent(
+				r.Slug,
+				r.LifecycleStatus,
+				r.Visibility,
+				r.CertificationStatus,
+				availability,
+				verifiedCount,
+				latestBenchmarkID,
+			),
 		})
 	}
 
@@ -162,6 +172,15 @@ func (s *MarketService) GetBySlug(ctx context.Context, slug string) (*AgentDetai
 			resp.LatestBenchmarkID = &id
 		}
 	}
+	resp.Readiness = readinessForAgent(
+		resp.Slug,
+		resp.LifecycleStatus,
+		resp.Visibility,
+		resp.CertificationStatus,
+		resp.Availability,
+		resp.VerifiedSkillCount,
+		resp.LatestBenchmarkID,
+	)
 
 	skills, err := s.queries.ListAgentSkills(ctx, r.ID)
 	if err != nil {
@@ -364,6 +383,19 @@ func (s *MarketService) agentAvailability(ctx context.Context, agentID uuid.UUID
 	))
 }
 
+func (s *MarketService) agentVerifiedSkillStats(ctx context.Context, agentID uuid.UUID) (int32, *string) {
+	stats, err := s.queries.GetAgentVerifiedSkillStats(ctx, agentID)
+	if err != nil {
+		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.MarketService.agentVerifiedSkillStats")
+		return 0, nil
+	}
+	if stats.LatestBatchID == nil {
+		return stats.VerifiedCount, nil
+	}
+	id := stats.LatestBatchID.String()
+	return stats.VerifiedCount, &id
+}
+
 func (s *MarketService) runtimeAwareAvailability(ctx context.Context, agentID uuid.UUID, connectionMode string, availability Availability) Availability {
 	if connectionMode != runtimePullConnectionMode {
 		return availability
@@ -380,6 +412,49 @@ func (s *MarketService) runtimeAwareAvailability(ctx context.Context, agentID uu
 	availability.Label = "不可达"
 	availability.Hint = "Runtime Pull Agent 最近没有运行时心跳或领取轮询，暂不建议试用。"
 	return availability
+}
+
+func readinessForAgent(
+	slug string,
+	lifecycleStatus string,
+	visibility string,
+	certificationStatus string,
+	availability Availability,
+	verifiedSkillCount int32,
+	latestBenchmarkID *string,
+) Readiness {
+	listed := lifecycleStatus == "active" && visibility == "public"
+	discoverable := lifecycleStatus == "active" && slug != "" && (visibility == "public" || visibility == "unlisted")
+	callable := availability.Status == "healthy" || (availability.Status != "unreachable" && availability.LastSuccessfulRunAt != nil)
+	verified := verifiedSkillCount > 0
+	certified := certificationStatus == "certified"
+	readiness := Readiness{
+		Listed:                 listed,
+		Discoverable:           discoverable,
+		Callable:               callable,
+		Verified:               verified,
+		Certified:              certified,
+		PaidEnabled:            false,
+		AgentCardURL:           "/api/v1/agents/" + slug + "/agent-card.json",
+		A2AEndpoint:            "/api/v1/a2a/agents/" + slug,
+		LastSuccessfulRunAt:    availability.LastSuccessfulRunAt,
+		AvailabilityStatus:     availability.Status,
+		VerifiedSkillCount:     verifiedSkillCount,
+		LatestBenchmarkBatchID: latestBenchmarkID,
+		Explanation: map[string]string{
+			"listed":       "public listing is visible only when lifecycle is active and visibility is public",
+			"discoverable": "public or unlisted active agents expose a slug and machine-readable Agent Card",
+			"callable":     "true only with a healthy availability signal or at least one successful run that is not currently unreachable",
+			"verified":     "true only when Skill Benchmark evidence exists",
+			"certified":    "true only after OpenLinker certification review",
+			"paid_enabled": "payments are not enabled in the current release",
+		},
+	}
+	if slug == "" {
+		readiness.AgentCardURL = ""
+		readiness.A2AEndpoint = ""
+	}
+	return readiness
 }
 
 func availabilityResponse(status string, successAt, failedAt, checkedAt *time.Time, failures int32) Availability {

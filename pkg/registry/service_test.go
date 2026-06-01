@@ -21,6 +21,7 @@ import (
 )
 
 const truncateRegistryBridgeTables = "TRUNCATE proxy_runs, registry_peers, cloud_listing_links, registry_nodes, agent_skills, agents, wallets, users RESTART IDENTITY CASCADE"
+const registryTestDBTimeout = 30 * time.Second
 
 func setupRegistryBridgeDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -28,17 +29,21 @@ func setupRegistryBridgeDB(t *testing.T) *pgxpool.Pool {
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL 未设置，跳过 registry 集成测试")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), registryTestDBTimeout)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, dsn)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	require.NoError(t, err)
+	cfg.ConnConfig.RuntimeParams["lock_timeout"] = "5s"
+	cfg.ConnConfig.RuntimeParams["statement_timeout"] = registryTestDBTimeout.String()
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	require.NoError(t, err)
 	require.NoError(t, pool.Ping(ctx))
 	_, err = pool.Exec(ctx, truncateRegistryBridgeTables)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cleanCancel()
-		_, _ = pool.Exec(cleanCtx, truncateRegistryBridgeTables)
+		// setupRegistryBridgeDB truncates before each test. Closing here is
+		// enough and avoids doubling suite time with a second TRUNCATE.
 		pool.Close()
 	})
 	return pool
