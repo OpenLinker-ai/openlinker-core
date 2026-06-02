@@ -2,8 +2,16 @@ package agent
 
 import (
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 
 	"github.com/labstack/echo/v4"
+)
+
+const (
+	skillDocAPIBase = "{{OPENLINKER_API_BASE}}"
+	skillDocWebBase = "{{OPENLINKER_WEB_BASE}}"
 )
 
 // PublishAgentSkillMarkdown 是 Agent 自注册流程的机器可读接入指南。
@@ -56,7 +64,7 @@ Minimal runtime_pull registration body:
 ## Register
 
 ` + "```bash" + `
-curl -X POST https://api.openlinker.ai/api/v1/agent-registration/agents \
+curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
   -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -91,7 +99,7 @@ OpenLinker calls your endpoint with:
   "caller_agent_id": "optional_caller_agent_uuid",
   "a2a": {
     "current_run_id": "run_uuid",
-    "call_agent_endpoint": "https://api.openlinker.ai/api/v1/agent-runtime/call-agent",
+    "call_agent_endpoint": "{{OPENLINKER_API_BASE}}/api/v1/agent-runtime/call-agent",
     "call_agent_method": "POST",
     "runtime_token_type": "ol_live",
     "runtime_scopes": ["agent:call"]
@@ -127,7 +135,7 @@ Return business failure:
 Register an existing MCP endpoint as an Agent listing:
 
 ` + "```bash" + `
-curl -X POST https://api.openlinker.ai/api/v1/agent-registration/agents \
+curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
   -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -148,7 +156,7 @@ Use endpoint_auth_header when your MCP endpoint requires a bearer token or custo
 Register without a public endpoint:
 
 ` + "```bash" + `
-curl -X POST https://api.openlinker.ai/api/v1/agent-registration/agents \
+curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
   -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -163,11 +171,11 @@ Then run a local loop with the returned ol_live_*** access token:
 
 ` + "```bash" + `
 # Claim one pending run for this Agent. Empty response means no work right now.
-curl https://api.openlinker.ai/api/v1/agent-runtime/runs/claim \
+curl {{OPENLINKER_API_BASE}}/api/v1/agent-runtime/runs/claim \
   -H 'Authorization: Bearer ol_live_xxx'
 
 # Complete the claimed run.
-curl -X POST https://api.openlinker.ai/api/v1/agent-runtime/runs/RUN_ID/result \
+curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-runtime/runs/RUN_ID/result \
   -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Content-Type: application/json' \
   -d '{"status":"success","output":{"summary":"done"}}'
@@ -190,8 +198,8 @@ runtime_pull requires access-token scope agent:pull for claim/result. A2A delega
 
 OpenLinker itself can also be used by MCP clients as a tool server.
 
-- Web endpoint: https://openlinker.ai/mcp
-- API endpoint: https://api.openlinker.ai/api/v1/mcp
+- Web endpoint: {{OPENLINKER_WEB_BASE}}/mcp
+- API endpoint: {{OPENLINKER_API_BASE}}/api/v1/mcp
 - Transport: MCP Streamable HTTP, JSON response mode.
 - Auth: Authorization: Bearer ol_live_*** with the needed scopes.
 - Methods: initialize, tools/list, tools/call.
@@ -200,7 +208,7 @@ OpenLinker itself can also be used by MCP clients as a tool server.
 Example MCP tools/list:
 
 ` + "```bash" + `
-curl -X POST https://openlinker.ai/mcp \
+curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
   -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'Content-Type: application/json' \
@@ -210,7 +218,7 @@ curl -X POST https://openlinker.ai/mcp \
 Example MCP tools/call:
 
 ` + "```bash" + `
-curl -X POST https://openlinker.ai/mcp \
+curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
   -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'Content-Type: application/json' \
@@ -263,8 +271,8 @@ If a human gives you this document plus an OpenLinker access token, do this:
 
 ## OpenLinker MCP server
 
-- Web endpoint: https://openlinker.ai/mcp
-- API endpoint: https://api.openlinker.ai/api/v1/mcp
+- Web endpoint: {{OPENLINKER_WEB_BASE}}/mcp
+- API endpoint: {{OPENLINKER_API_BASE}}/api/v1/mcp
 - Transport: MCP Streamable HTTP, JSON response mode.
 - Methods: initialize, tools/list, tools/call.
 - Tools: search_agents, get_agent, create_task, run_agent, get_run.
@@ -272,7 +280,7 @@ If a human gives you this document plus an OpenLinker access token, do this:
 List tools:
 
 ` + "```bash" + `
-curl -X POST https://openlinker.ai/mcp \
+curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
   -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'Content-Type: application/json' \
@@ -282,13 +290,13 @@ curl -X POST https://openlinker.ai/mcp \
 Search and run:
 
 ` + "```bash" + `
-curl -X POST https://openlinker.ai/mcp \
+curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
   -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_agents","arguments":{"query":"data analysis","limit":5}}}'
 
-curl -X POST https://openlinker.ai/mcp \
+curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
   -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'Content-Type: application/json' \
@@ -298,14 +306,14 @@ curl -X POST https://openlinker.ai/mcp \
 ## REST equivalents
 
 ` + "```bash" + `
-curl https://api.openlinker.ai/api/v1/agents?keyword=data
+curl {{OPENLINKER_API_BASE}}/api/v1/agents?keyword=data
 
-curl -X POST https://api.openlinker.ai/api/v1/mcp/run_agent \
+curl -X POST {{OPENLINKER_API_BASE}}/api/v1/mcp/run_agent \
   -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Content-Type: application/json' \
   -d '{"agent_id":"AGENT_UUID","input":{"text":"Summarize this task"}}'
 
-curl -X POST https://api.openlinker.ai/api/v1/mcp/get_run \
+curl -X POST {{OPENLINKER_API_BASE}}/api/v1/mcp/get_run \
   -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Content-Type: application/json' \
   -d '{"run_id":"RUN_UUID"}'
@@ -350,11 +358,87 @@ If no next_action is present, use get_run or the run web URL to inspect status.
 // ServePublishAgentSkill exposes the self-registration instructions to agents and CLIs.
 func ServePublishAgentSkill(c echo.Context) error {
 	c.Response().Header().Set("Cache-Control", "public, max-age=300")
-	return c.String(http.StatusOK, PublishAgentSkillMarkdown)
+	return c.String(http.StatusOK, renderSkillMarkdown(c, PublishAgentSkillMarkdown))
 }
 
 // ServeConsumeAgentSkill exposes external-consumption instructions to agents and CLIs.
 func ServeConsumeAgentSkill(c echo.Context) error {
 	c.Response().Header().Set("Cache-Control", "public, max-age=300")
-	return c.String(http.StatusOK, ConsumeAgentSkillMarkdown)
+	return c.String(http.StatusOK, renderSkillMarkdown(c, ConsumeAgentSkillMarkdown))
+}
+
+func renderSkillMarkdown(c echo.Context, template string) string {
+	apiBase, webBase := skillDocBaseURLs(c)
+	out := strings.ReplaceAll(template, skillDocAPIBase, apiBase)
+	out = strings.ReplaceAll(out, skillDocWebBase, webBase)
+	return out
+}
+
+func skillDocBaseURLs(c echo.Context) (apiBase string, webBase string) {
+	apiBase = trimSkillDocBaseURL(os.Getenv("API_URL"))
+	if apiBase == "" {
+		apiBase = requestOrigin(c)
+	}
+	webBase = trimSkillDocBaseURL(os.Getenv("FRONTEND_URL"))
+	if webBase == "" {
+		webBase = inferSkillDocWebBase(apiBase)
+	}
+	return apiBase, webBase
+}
+
+func requestOrigin(c echo.Context) string {
+	req := c.Request()
+	proto := firstHeaderValue(req.Header.Get("X-Forwarded-Proto"))
+	if proto == "" {
+		proto = req.URL.Scheme
+	}
+	if proto == "" {
+		proto = c.Scheme()
+	}
+	if proto == "" {
+		proto = "http"
+	}
+	host := firstHeaderValue(req.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = req.Host
+	}
+	if host == "" {
+		return "http://localhost:8080"
+	}
+	return trimSkillDocBaseURL(proto + "://" + host)
+}
+
+func inferSkillDocWebBase(apiBase string) string {
+	u, err := url.Parse(apiBase)
+	if err != nil || u.Hostname() == "" {
+		return apiBase
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if strings.HasPrefix(host, "api.") {
+		host = strings.TrimPrefix(host, "api.")
+		port = ""
+	}
+	if host == "localhost" || host == "127.0.0.1" {
+		port = "3000"
+	} else if port == "8080" {
+		port = ""
+	}
+	if port != "" {
+		u.Host = host + ":" + port
+	} else {
+		u.Host = host
+	}
+	return trimSkillDocBaseURL(u.String())
+}
+
+func firstHeaderValue(value string) string {
+	if idx := strings.Index(value, ","); idx >= 0 {
+		value = value[:idx]
+	}
+	return strings.TrimSpace(value)
+}
+
+func trimSkillDocBaseURL(value string) string {
+	return strings.TrimRight(strings.TrimSpace(value), "/")
 }
