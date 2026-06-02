@@ -40,6 +40,9 @@ func scanTaskQuery(row interface {
 		&t.AcceptedAt,
 		&t.RevisionRequestedAt,
 		&t.RevisionNote,
+		&t.Visibility,
+		&t.PublicSummary,
+		&t.PublishedAt,
 		&t.CreatedAt,
 	)
 }
@@ -53,6 +56,7 @@ RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           completed_at, completion_summary, completion_run_id,
           delivery_status, delivery_visibility, delivery_artifact,
           accepted_at, revision_requested_at, revision_note,
+          visibility, public_summary, published_at,
           created_at`
 
 // CreateTaskQueryParams 入参。
@@ -85,6 +89,7 @@ SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
        completed_at, completion_summary, completion_run_id,
        delivery_status, delivery_visibility, delivery_artifact,
        accepted_at, revision_requested_at, revision_note,
+       visibility, public_summary, published_at,
        created_at
 FROM task_queries
 WHERE id = $1`
@@ -108,6 +113,7 @@ RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           completed_at, completion_summary, completion_run_id,
           delivery_status, delivery_visibility, delivery_artifact,
           accepted_at, revision_requested_at, revision_note,
+          visibility, public_summary, published_at,
           created_at`
 
 // MarkTaskQueryChosenParams 入参。
@@ -125,12 +131,44 @@ func (q *Queries) MarkTaskQueryChosen(ctx context.Context, arg MarkTaskQueryChos
 	return t, err
 }
 
+const publishTaskQuery = `-- name: PublishTaskQuery :one
+UPDATE task_queries
+SET visibility = 'public',
+    public_summary = $3,
+    published_at = COALESCE(published_at, NOW())
+WHERE id = $1
+  AND user_id = $2
+  AND visibility = 'private'
+  AND completed_at IS NULL
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          visibility, public_summary, published_at,
+          created_at`
+
+type PublishTaskQueryParams struct {
+	ID            uuid.UUID `db:"id" json:"id"`
+	UserID        uuid.UUID `db:"user_id" json:"user_id"`
+	PublicSummary string    `db:"public_summary" json:"public_summary"`
+}
+
+func (q *Queries) PublishTaskQuery(ctx context.Context, arg PublishTaskQueryParams) (TaskQuery, error) {
+	row := q.db.QueryRow(ctx, publishTaskQuery, arg.ID, arg.UserID, arg.PublicSummary)
+	var t TaskQuery
+	err := scanTaskQuery(row, &t)
+	return t, err
+}
+
 const claimTaskQuery = `-- name: ClaimTaskQuery :one
 UPDATE task_queries
 SET claimed_agent_id = $3,
     claimed_by_user_id = $2,
     claimed_at = NOW()
 WHERE id = $1
+  AND visibility = 'public'
   AND claimed_agent_id IS NULL
   AND completed_at IS NULL
   AND chosen_agent_id IS NULL
@@ -140,6 +178,7 @@ RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           completed_at, completion_summary, completion_run_id,
           delivery_status, delivery_visibility, delivery_artifact,
           accepted_at, revision_requested_at, revision_note,
+          visibility, public_summary, published_at,
           created_at`
 
 type ClaimTaskQueryParams struct {
@@ -183,6 +222,7 @@ RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           completed_at, completion_summary, completion_run_id,
           delivery_status, delivery_visibility, delivery_artifact,
           accepted_at, revision_requested_at, revision_note,
+          visibility, public_summary, published_at,
           created_at`
 
 type CompleteTaskQueryParams struct {
@@ -223,6 +263,7 @@ RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           completed_at, completion_summary, completion_run_id,
           delivery_status, delivery_visibility, delivery_artifact,
           accepted_at, revision_requested_at, revision_note,
+          visibility, public_summary, published_at,
           created_at`
 
 type AcceptTaskDeliveryParams struct {
@@ -252,6 +293,7 @@ RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           completed_at, completion_summary, completion_run_id,
           delivery_status, delivery_visibility, delivery_artifact,
           accepted_at, revision_requested_at, revision_note,
+          visibility, public_summary, published_at,
           created_at`
 
 type RequestTaskRevisionParams struct {
@@ -274,6 +316,7 @@ SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
        completed_at, completion_summary, completion_run_id,
        delivery_status, delivery_visibility, delivery_artifact,
        accepted_at, revision_requested_at, revision_note,
+       visibility, public_summary, published_at,
        created_at
 FROM task_queries
 WHERE user_id = $1
@@ -314,15 +357,17 @@ SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
        completed_at, completion_summary, completion_run_id,
        delivery_status, delivery_visibility, delivery_artifact,
        accepted_at, revision_requested_at, revision_note,
+       visibility, public_summary, published_at,
        created_at
 FROM task_queries
-ORDER BY created_at DESC
+WHERE visibility = 'public'
+ORDER BY published_at DESC, created_at DESC
 LIMIT $1`
 
 // ListPublicTaskQueries 最近公开任务流（任务广场用）。
 //
-// 当前 task_queries 暂无 visibility 字段；本查询不返回用户邮箱/姓名，仅用于展示
-// 需求文本、Skill 和匹配状态。
+// 只返回 visibility=public 的任务；本查询不返回用户邮箱/姓名，仅用于展示
+// 公开摘要、Skill 和匹配状态。
 func (q *Queries) ListPublicTaskQueries(ctx context.Context, limit int32) ([]TaskQuery, error) {
 	rows, err := q.db.Query(ctx, listPublicTaskQueries, limit)
 	if err != nil {

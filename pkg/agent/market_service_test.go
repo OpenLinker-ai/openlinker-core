@@ -121,6 +121,34 @@ func TestListMarket_SortsByAvailability(t *testing.T) {
 	assert.Equal(t, "sort-unreachable", resp.Items[2].Slug)
 }
 
+func TestListMarket_CallableOnlyFiltersUncallable(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := agent.NewMarketService(pool)
+	creatorID, _ := setupTestData(t, pool)
+	ctx := context.Background()
+
+	healthyID := createApprovedAgent(t, pool, creatorID, "callable-healthy")
+	createApprovedAgent(t, pool, creatorID, "callable-unknown")
+	unreachableID := createApprovedAgent(t, pool, creatorID, "callable-unreachable")
+	_, err := pool.Exec(ctx,
+		`INSERT INTO agent_availability_snapshots (
+			agent_id, availability_status, last_checked_at, consecutive_failures
+		) VALUES
+			($1, 'healthy', NOW(), 0),
+			($2, 'unreachable', NOW(), 3)`,
+		healthyID,
+		unreachableID,
+	)
+	require.NoError(t, err)
+
+	resp, err := svc.ListMarket(ctx, nil, "", 1, 12, true)
+	require.NoError(t, err)
+	require.Len(t, resp.Items, 1)
+	assert.Equal(t, "callable-healthy", resp.Items[0].Slug)
+	assert.True(t, resp.Items[0].Readiness.Callable)
+	assert.Equal(t, int32(1), resp.Total)
+}
+
 func TestListMarket_RuntimePullWithoutRecentWorkerShownUnreachable(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := agent.NewMarketService(pool)

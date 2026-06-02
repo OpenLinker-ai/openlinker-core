@@ -23,6 +23,9 @@ const (
 	maxTaskMCPTools         = 5
 	maxTaskResultSummaryLen = 2000
 	maxTaskRevisionNoteLen  = 2000
+	maxTaskPublicSummaryLen = 240
+	taskVisibilityPrivate   = "private"
+	taskVisibilityPublic    = "public"
 )
 
 var mcpToolCatalog = []MCPToolRef{
@@ -147,6 +150,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 
 	// 2. 解析空 → 写入 task_query 但 recommendations 为空，便于离线追踪 miss
 	resp := &RecommendResponse{
+		Visibility:      taskVisibilityPrivate,
 		ParsedSkills:    parsed,
 		ParsedSkillRefs: skillRefsForIDs(parsed, skillByID),
 		MCPTools:        append([]string{}, mcpTools...),
@@ -160,6 +164,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 			return nil, err
 		}
 		resp.TaskID = taskID
+		resp.NextAction = nextActionForNeedsAgent(taskID, "暂未识别到足够稳定的 Skill，任务已先保存为私有草稿")
 		return resp, nil
 	}
 
@@ -176,6 +181,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 			return nil, err
 		}
 		resp.TaskID = taskID
+		resp.NextAction = nextActionForNeedsAgent(taskID, "已识别 Skill，但当前没有可推荐的公开 Agent")
 		return resp, nil
 	}
 
@@ -234,7 +240,48 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 	}
 	resp.TaskID = taskID
 	resp.Recommendations = recs
+	if len(recs) == 0 {
+		resp.NextAction = nextActionForNeedsAgent(taskID, "候选 Agent 当前不可公开推荐或已不可用")
+	}
 	return resp, nil
+}
+
+// Publish 把私有推荐草稿显式发布到任务广场。公开列表只展示 public_summary。
+func (s *Service) Publish(ctx context.Context, taskID, userID uuid.UUID, req *PublishRequest) (*DetailResponse, error) {
+	t, err := s.queries.GetTaskQuery(ctx, taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("任务不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Publish: GetTaskQuery")
+		return nil, httpx.Internal("查询任务失败")
+	}
+	if t.UserID != userID {
+		return nil, httpx.NotFound("任务不存在")
+	}
+	if t.Visibility == taskVisibilityPublic {
+		return s.GetByID(ctx, taskID, userID)
+	}
+	if t.CompletedAt != nil {
+		return nil, httpx.Conflict("任务已完成，不能发布到任务广场")
+	}
+	summary, err := normalizePublicSummary(req, t.Query)
+	if err != nil {
+		return nil, err
+	}
+	published, err := s.queries.PublishTaskQuery(ctx, db.PublishTaskQueryParams{
+		ID:            taskID,
+		UserID:        userID,
+		PublicSummary: summary,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.Conflict("任务状态已变化，请刷新后重试")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Publish: PublishTaskQuery")
+		return nil, httpx.Internal("发布任务失败")
+	}
+	return s.detailFromTask(ctx, &published)
 }
 
 // Choose 用户在推荐里选定一个 Agent。校验：
@@ -310,6 +357,9 @@ func (s *Service) Claim(ctx context.Context, taskID, userID, agentID uuid.UUID) 
 	}
 	if t.CompletedAt != nil {
 		return nil, httpx.Conflict("任务已完成，不能重复接入")
+	}
+	if t.Visibility != taskVisibilityPublic {
+		return nil, httpx.Conflict("任务还是私有草稿，发布到任务广场后才能接入")
 	}
 	if t.ClaimedAgentID != nil {
 		return nil, httpx.Conflict("任务已经有 Agent 接入")
@@ -522,7 +572,7 @@ func (s *Service) RunTask(ctx context.Context, taskID, userID uuid.UUID, req *Ru
 
 	input := req.Input
 	if input == nil {
-		input = map[string]interface{}{"text": t.Query}
+		input = map[string]interface{}{"text": runnableTaskText(&t, userID)}
 	}
 	metadata := map[string]interface{}{
 		"task_id": taskID.String(),
@@ -612,16 +662,26 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 		return nil, httpx.NotFound("任务不存在")
 	}
 
+	return s.detailFromTask(ctx, &t)
+}
+
+func (s *Service) detailFromTask(ctx context.Context, t *db.TaskQuery) (*DetailResponse, error) {
 	resp := &DetailResponse{
-		ID:           t.ID.String(),
-		Query:        t.Query,
-		ParsedSkills: append([]string{}, t.ParsedSkills...),
-		MCPTools:     append([]string{}, t.MCPTools...),
-		MCPToolRefs:  mcpToolRefsForNames(t.MCPTools),
-		Status:       taskStatus(&t),
-		CreatedAt:    t.CreatedAt.UTC().Format(time.RFC3339),
+		ID:            t.ID.String(),
+		Query:         t.Query,
+		Visibility:    normalizedTaskVisibility(t.Visibility),
+		PublicSummary: copyStringPtr(t.PublicSummary),
+		ParsedSkills:  append([]string{}, t.ParsedSkills...),
+		MCPTools:      append([]string{}, t.MCPTools...),
+		MCPToolRefs:   mcpToolRefsForNames(t.MCPTools),
+		Status:        taskStatus(t),
+		CreatedAt:     t.CreatedAt.UTC().Format(time.RFC3339),
 
 		Recommendations: []Recommendation{},
+	}
+	if t.PublishedAt != nil {
+		ts := t.PublishedAt.UTC().Format(time.RFC3339)
+		resp.PublishedAt = &ts
 	}
 	if t.ChosenAgentID != nil {
 		s := t.ChosenAgentID.String()
@@ -631,8 +691,8 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 		ts := t.ChosenAt.UTC().Format(time.RFC3339)
 		resp.ChosenAt = &ts
 	}
-	attachTaskWorkFields(&t, &resp.ClaimedAgentID, &resp.ClaimedByUserID, &resp.ClaimedAt, &resp.CompletionRunID, &resp.CompletedAt, &resp.CompletionSummary)
-	attachTaskDeliveryFields(&t, &resp.DeliveryStatus, &resp.DeliveryVisibility, &resp.DeliveryArtifact, &resp.AcceptedAt, &resp.RevisionRequestedAt, &resp.RevisionNote)
+	attachTaskWorkFields(t, &resp.ClaimedAgentID, &resp.ClaimedByUserID, &resp.ClaimedAt, &resp.CompletionRunID, &resp.CompletedAt, &resp.CompletionSummary)
+	attachTaskDeliveryFields(t, &resp.DeliveryStatus, &resp.DeliveryVisibility, &resp.DeliveryArtifact, &resp.AcceptedAt, &resp.RevisionRequestedAt, &resp.RevisionNote)
 
 	// 用 catalog 回填 Why 文案（与 Recommend 一致）
 	skills := s.allSkills
@@ -646,6 +706,9 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 	resp.ParsedSkillRefs = skillRefsForIDs(t.ParsedSkills, skillByID)
 
 	if len(t.RecommendedAgentIDs) == 0 {
+		if t.Visibility != taskVisibilityPublic {
+			resp.NextAction = nextActionForNeedsAgent(t.ID, "当前任务没有可直接推荐的 Agent")
+		}
 		return resp, nil
 	}
 
@@ -684,6 +747,9 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 			Why:           buildWhy(t.ParsedSkills, nameByID),
 			MatchedSkills: matchedSkills,
 		})
+	}
+	if len(resp.Recommendations) == 0 && t.Visibility != taskVisibilityPublic {
+		resp.NextAction = nextActionForNeedsAgent(t.ID, "历史候选 Agent 当前不可用")
 	}
 	return resp, nil
 }
@@ -817,6 +883,88 @@ func normalizeMCPTools(names []string) ([]string, error) {
 	return out, nil
 }
 
+func normalizePublicSummary(req *PublishRequest, query string) (string, error) {
+	summary := ""
+	if req != nil {
+		summary = strings.TrimSpace(req.PublicSummary)
+	}
+	if summary == "" {
+		summary = publicSummaryFromQuery(query)
+	}
+	summary = compactWhitespace(summary)
+	runeLen := len([]rune(summary))
+	if runeLen < 4 || runeLen > maxTaskPublicSummaryLen {
+		return "", httpx.Unprocessable("public_summary 长度需在 4-240 字符之间")
+	}
+	return summary, nil
+}
+
+func publicSummaryFromQuery(query string) string {
+	summary := compactWhitespace(query)
+	return truncateRunes(summary, maxTaskPublicSummaryLen)
+}
+
+func publicTaskSummary(t *db.TaskQuery) string {
+	if t.PublicSummary != nil && strings.TrimSpace(*t.PublicSummary) != "" {
+		return *t.PublicSummary
+	}
+	return publicSummaryFromQuery(t.Query)
+}
+
+func runnableTaskText(t *db.TaskQuery, userID uuid.UUID) string {
+	if t.UserID != userID && normalizedTaskVisibility(t.Visibility) == taskVisibilityPublic {
+		return publicTaskSummary(t)
+	}
+	return t.Query
+}
+
+func workResponseQuery(t *db.TaskQuery) string {
+	if normalizedTaskVisibility(t.Visibility) == taskVisibilityPublic {
+		return publicTaskSummary(t)
+	}
+	return t.Query
+}
+
+func normalizedTaskVisibility(raw string) string {
+	if raw == taskVisibilityPublic {
+		return taskVisibilityPublic
+	}
+	return taskVisibilityPrivate
+}
+
+func nextActionForNeedsAgent(taskID uuid.UUID, reason string) *TaskNextAction {
+	return &TaskNextAction{
+		Type:   "publish_task",
+		Label:  "发布到任务广场",
+		Hint:   "当前任务是私有推荐草稿。发布公开摘要后，创作者可以用自己的 Agent 接入并开始处理。",
+		Href:   "/tasks/" + taskID.String(),
+		Reason: reason,
+	}
+}
+
+func compactWhitespace(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func truncateRunes(value string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	return string(runes[:max])
+}
+
+func copyStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	out := *value
+	return &out
+}
+
 func mcpToolRefsForNames(names []string) []MCPToolRef {
 	byName := mcpToolCatalogByName()
 	out := make([]MCPToolRef, 0, len(names))
@@ -897,11 +1045,17 @@ func toHistoryItem(t *db.TaskQuery) HistoryItem {
 	item := HistoryItem{
 		ID:                  t.ID.String(),
 		Query:               t.Query,
+		Visibility:          normalizedTaskVisibility(t.Visibility),
+		PublicSummary:       copyStringPtr(t.PublicSummary),
 		ParsedSkills:        append([]string{}, t.ParsedSkills...),
 		MCPTools:            append([]string{}, t.MCPTools...),
 		RecommendedAgentIDs: make([]string, 0, len(t.RecommendedAgentIDs)),
 		Status:              taskStatus(t),
 		CreatedAt:           t.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if t.PublishedAt != nil {
+		ts := t.PublishedAt.UTC().Format(time.RFC3339)
+		item.PublishedAt = &ts
 	}
 	for _, id := range t.RecommendedAgentIDs {
 		item.RecommendedAgentIDs = append(item.RecommendedAgentIDs, id.String())
@@ -920,9 +1074,11 @@ func toHistoryItem(t *db.TaskQuery) HistoryItem {
 }
 
 func toPublicTaskItem(t *db.TaskQuery, skillByID map[string]db.Skill) PublicTaskItem {
+	publicSummary := publicTaskSummary(t)
 	item := PublicTaskItem{
 		ID:                    t.ID.String(),
-		Query:                 t.Query,
+		Query:                 publicSummary,
+		PublicSummary:         publicSummary,
 		ParsedSkills:          append([]string{}, t.ParsedSkills...),
 		ParsedSkillRefs:       skillRefsForIDs(t.ParsedSkills, skillByID),
 		MCPTools:              append([]string{}, t.MCPTools...),
@@ -930,6 +1086,10 @@ func toPublicTaskItem(t *db.TaskQuery, skillByID map[string]db.Skill) PublicTask
 		RecommendedAgentCount: len(t.RecommendedAgentIDs),
 		Status:                taskStatus(t),
 		CreatedAt:             t.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if t.PublishedAt != nil {
+		ts := t.PublishedAt.UTC().Format(time.RFC3339)
+		item.PublishedAt = &ts
 	}
 	if t.ClaimedAgentID != nil {
 		s := t.ClaimedAgentID.String()
@@ -1078,7 +1238,7 @@ func toWorkResponse(t *db.TaskQuery, agentID uuid.UUID) *WorkResponse {
 	resp := &WorkResponse{
 		TaskID:  t.ID.String(),
 		Status:  taskStatus(t),
-		Query:   t.Query,
+		Query:   workResponseQuery(t),
 		AgentID: agentID.String(),
 	}
 	if t.ClaimedAt != nil {

@@ -13,6 +13,7 @@ VALUES ($1, $2, $3, $4, $5)
 	          completed_at, completion_summary, completion_run_id,
 	          delivery_status, delivery_visibility, delivery_artifact,
 	          accepted_at, revision_requested_at, revision_note,
+	          visibility, public_summary, published_at,
 	          created_at;
 
 -- name: GetTaskQuery :one
@@ -23,6 +24,7 @@ VALUES ($1, $2, $3, $4, $5)
 	       completed_at, completion_summary, completion_run_id,
 	       delivery_status, delivery_visibility, delivery_artifact,
 	       accepted_at, revision_requested_at, revision_note,
+	       visibility, public_summary, published_at,
 	       created_at
 	FROM task_queries
 	WHERE id = $1;
@@ -40,7 +42,27 @@ WHERE id = $1 AND user_id = $2
 	          completed_at, completion_summary, completion_run_id,
 	          delivery_status, delivery_visibility, delivery_artifact,
 	          accepted_at, revision_requested_at, revision_note,
+	          visibility, public_summary, published_at,
 	          created_at;
+
+-- name: PublishTaskQuery :one
+-- 用户显式把推荐草稿发布到任务广场；公开列表只展示 public_summary，不暴露完整 query。
+UPDATE task_queries
+SET visibility = 'public',
+    public_summary = $3,
+    published_at = COALESCE(published_at, NOW())
+WHERE id = $1
+  AND user_id = $2
+  AND visibility = 'private'
+  AND completed_at IS NULL
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          visibility, public_summary, published_at,
+          created_at;
 
 -- name: ClaimTaskQuery :one
 -- 创作者用自己的 Agent 接入公开任务。已被用户选择 / 已被接入 / 已完成的任务不可重复接入。
@@ -49,16 +71,18 @@ SET claimed_agent_id = $3,
     claimed_by_user_id = $2,
     claimed_at = NOW()
 WHERE id = $1
+  AND visibility = 'public'
   AND claimed_agent_id IS NULL
   AND completed_at IS NULL
   AND chosen_agent_id IS NULL
 RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           chosen_agent_id, chosen_at,
           claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
-          completed_at, completion_summary, completion_run_id,
-          delivery_status, delivery_visibility, delivery_artifact,
-          accepted_at, revision_requested_at, revision_note,
-          created_at;
+	          completed_at, completion_summary, completion_run_id,
+	          delivery_status, delivery_visibility, delivery_artifact,
+	          accepted_at, revision_requested_at, revision_note,
+	          visibility, public_summary, published_at,
+	          created_at;
 
 -- name: CompleteTaskQuery :one
 -- 接单方或任务发布者把成功 run 写回任务详情，形成"任务 -> run -> 结果"闭环。
@@ -86,10 +110,11 @@ WHERE id = $1
 RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           chosen_agent_id, chosen_at,
           claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
-          completed_at, completion_summary, completion_run_id,
-          delivery_status, delivery_visibility, delivery_artifact,
-          accepted_at, revision_requested_at, revision_note,
-          created_at;
+	          completed_at, completion_summary, completion_run_id,
+	          delivery_status, delivery_visibility, delivery_artifact,
+	          accepted_at, revision_requested_at, revision_note,
+	          visibility, public_summary, published_at,
+	          created_at;
 
 -- name: AcceptTaskDelivery :one
 -- 任务发布者验收提交的结果。
@@ -102,10 +127,11 @@ WHERE id = $1
 RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           chosen_agent_id, chosen_at,
           claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
-          completed_at, completion_summary, completion_run_id,
-          delivery_status, delivery_visibility, delivery_artifact,
-          accepted_at, revision_requested_at, revision_note,
-          created_at;
+	          completed_at, completion_summary, completion_run_id,
+	          delivery_status, delivery_visibility, delivery_artifact,
+	          accepted_at, revision_requested_at, revision_note,
+	          visibility, public_summary, published_at,
+	          created_at;
 
 -- name: RequestTaskRevision :one
 -- 任务发布者要求修订，接单方可以再次 Complete 提交。
@@ -120,10 +146,11 @@ WHERE id = $1
 RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           chosen_agent_id, chosen_at,
           claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
-          completed_at, completion_summary, completion_run_id,
-          delivery_status, delivery_visibility, delivery_artifact,
-          accepted_at, revision_requested_at, revision_note,
-          created_at;
+	          completed_at, completion_summary, completion_run_id,
+	          delivery_status, delivery_visibility, delivery_artifact,
+	          accepted_at, revision_requested_at, revision_note,
+	          visibility, public_summary, published_at,
+	          created_at;
 
 -- name: ListTaskQueriesByUser :many
 -- "我的任务历史"：按 created_at 倒序最多 20 条。
@@ -133,6 +160,7 @@ RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
 	       completed_at, completion_summary, completion_run_id,
 	       delivery_status, delivery_visibility, delivery_artifact,
 	       accepted_at, revision_requested_at, revision_note,
+	       visibility, public_summary, published_at,
 	       created_at
 	FROM task_queries
 WHERE user_id = $1
@@ -140,16 +168,18 @@ ORDER BY created_at DESC
 LIMIT $2;
 
 -- name: ListPublicTaskQueries :many
--- 最近公开任务流（任务广场用）。当前 task_queries 暂无 visibility 字段；不返回用户邮箱/姓名。
+-- 最近公开任务流（任务广场用）。只返回显式发布的 public 任务；不返回用户邮箱/姓名。
 SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
        chosen_agent_id, chosen_at,
        claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
        completed_at, completion_summary, completion_run_id,
        delivery_status, delivery_visibility, delivery_artifact,
        accepted_at, revision_requested_at, revision_note,
+       visibility, public_summary, published_at,
        created_at
 FROM task_queries
-ORDER BY created_at DESC
+WHERE visibility = 'public'
+ORDER BY published_at DESC, created_at DESC
 LIMIT $1;
 
 -- name: GetAgentsByIDs :many

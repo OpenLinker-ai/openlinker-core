@@ -208,6 +208,7 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotEqual(t, uuid.Nil, resp.TaskID)
+	assert.Equal(t, "private", resp.Visibility)
 	assert.Equal(t, []string{"data/sql-query", "data/analysis"}, fake.gotSkillIDs)
 	require.Len(t, resp.ParsedSkillRefs, 2)
 	assert.Equal(t, "SQL 查询", resp.ParsedSkillRefs[0].Name)
@@ -246,8 +247,22 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 
 	board, err := svc.ListBoard(context.Background(), 20)
 	require.NoError(t, err)
+	require.Empty(t, board, "recommend should create a private draft, not a public board task")
+
+	published, err := svc.Publish(context.Background(), resp.TaskID, userID, &task.PublishRequest{
+		PublicSummary: "公开 SQL 数据分析任务",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "public", published.Visibility)
+	require.NotNil(t, published.PublicSummary)
+	assert.Equal(t, "公开 SQL 数据分析任务", *published.PublicSummary)
+
+	board, err = svc.ListBoard(context.Background(), 20)
+	require.NoError(t, err)
 	require.Len(t, board, 1)
 	assert.Equal(t, resp.TaskID.String(), board[0].ID)
+	assert.Equal(t, "公开 SQL 数据分析任务", board[0].Query)
+	assert.Equal(t, "公开 SQL 数据分析任务", board[0].PublicSummary)
 	assert.Equal(t, "open", board[0].Status)
 	assert.Equal(t, 2, board[0].RecommendedAgentCount)
 	require.Len(t, board[0].ParsedSkillRefs, 2)
@@ -281,10 +296,20 @@ func TestTaskBoardClaimAndCompleteRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	svc := task.NewService(pool, nil, &fakeSkillRecommender{skills: testSkills()})
+	_, err = svc.Claim(context.Background(), taskID, creatorID, agentID)
+	assertTaskHTTPStatus(t, err, http.StatusConflict)
+
+	published, err := svc.Publish(context.Background(), taskID, ownerID, &task.PublishRequest{
+		PublicSummary: "SQL 统计分析公开任务",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "public", published.Visibility)
+
 	claimed, err := svc.Claim(context.Background(), taskID, creatorID, agentID)
 	require.NoError(t, err)
 	assert.Equal(t, taskID.String(), claimed.TaskID)
 	assert.Equal(t, "in_progress", claimed.Status)
+	assert.Equal(t, "SQL 统计分析公开任务", claimed.Query)
 	require.NotNil(t, claimed.ClaimedAt)
 
 	board, err := svc.ListBoard(context.Background(), 20)
@@ -363,6 +388,28 @@ func TestTaskBoardClaimAndCompleteRoundTrip(t *testing.T) {
 	assert.Equal(t, "accepted", accepted.Status)
 	assert.Equal(t, "accepted", accepted.DeliveryStatus)
 	require.NotNil(t, accepted.AcceptedAt)
+}
+
+func TestRecommendWithoutMatchesReturnsPrivateDraftNextAction(t *testing.T) {
+	pool := setupTaskTestDB(t)
+	userID := insertTaskUser(t, pool)
+	svc := task.NewService(pool, nil, &fakeSkillRecommender{skills: testSkills()})
+
+	resp, err := svc.Recommend(context.Background(), userID, &task.RecommendRequest{
+		Query:    "请帮我做 SQL 查询和数据分析",
+		SkillIDs: []string{"data/sql-query"},
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, uuid.Nil, resp.TaskID)
+	assert.Equal(t, "private", resp.Visibility)
+	require.Empty(t, resp.Recommendations)
+	require.NotNil(t, resp.NextAction)
+	assert.Equal(t, "publish_task", resp.NextAction.Type)
+	assert.Contains(t, resp.NextAction.Href, resp.TaskID.String())
+
+	board, err := svc.ListBoard(context.Background(), 20)
+	require.NoError(t, err)
+	require.Empty(t, board)
 }
 
 func TestRunTaskUsesSelectedAgentAndTaskInput(t *testing.T) {

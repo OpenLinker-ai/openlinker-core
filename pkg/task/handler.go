@@ -29,6 +29,7 @@ func NewHandler(svc *Service) *Handler {
 //
 //	POST /tasks/recommend       自然语言 → 推荐 Top3 Agent
 //	POST /tasks/:id/choose      用户选定推荐里某个 Agent
+//	POST /tasks/:id/publish     显式把私有推荐草稿发布到任务广场
 //	POST /tasks/:id/claim       创作者用自己的 Agent 接入任务广场任务
 //	POST /tasks/:id/run         从任务直接启动一次 Agent 运行
 //	POST /tasks/:id/complete    把成功 run 写回任务结果
@@ -43,6 +44,7 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	g := api.Group("/tasks", jwtMiddleware)
 	g.POST("/recommend", h.Recommend)
 	g.POST("/:id/choose", h.Choose)
+	g.POST("/:id/publish", h.Publish)
 	g.POST("/:id/claim", h.Claim)
 	g.POST("/:id/run", h.Run)
 	g.POST("/:id/complete", h.Complete)
@@ -93,6 +95,30 @@ func (h *Handler) Choose(c echo.Context) error {
 		return err
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// Publish POST /tasks/:id/publish
+func (h *Handler) Publish(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	taskID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	var req PublishRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.Publish(c.Request().Context(), taskID, uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 // Claim POST /tasks/:id/claim

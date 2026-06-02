@@ -51,16 +51,28 @@ type Recommendation struct {
 	MatchedSkills []SkillRef   `json:"matched_skills"`
 }
 
+// TaskNextAction 是推荐/详情页给人类和外部 Agent 的结构化下一步。
+type TaskNextAction struct {
+	Type   string `json:"type"`
+	Label  string `json:"label"`
+	Hint   string `json:"hint"`
+	Href   string `json:"href"`
+	Reason string `json:"reason"`
+}
+
 // RecommendResponse 推荐响应。
 //
 // TaskID 用于后续 POST /tasks/:id/choose；空数组表示无匹配，前端可提示用户改写描述。
 type RecommendResponse struct {
 	TaskID          uuid.UUID        `json:"task_id"`
+	Visibility      string           `json:"visibility"`
+	PublicSummary   *string          `json:"public_summary,omitempty"`
 	ParsedSkills    []string         `json:"parsed_skills"`
 	ParsedSkillRefs []SkillRef       `json:"parsed_skill_refs"`
 	MCPTools        []string         `json:"mcp_tools"`
 	MCPToolRefs     []MCPToolRef     `json:"mcp_tool_refs"`
 	Recommendations []Recommendation `json:"recommendations"`
+	NextAction      *TaskNextAction  `json:"next_action,omitempty"`
 }
 
 // ChooseRequest 用户选定推荐里某个 Agent 的请求体。
@@ -71,6 +83,11 @@ type ChooseRequest struct {
 // ClaimRequest 创作者用自己的 Agent 接入任务广场任务。
 type ClaimRequest struct {
 	AgentID uuid.UUID `json:"agent_id" validate:"required"`
+}
+
+// PublishRequest 把私有推荐草稿显式发布到任务广场。
+type PublishRequest struct {
+	PublicSummary string `json:"public_summary,omitempty" validate:"omitempty,min=4,max=240"`
 }
 
 // CompleteRequest 把一次成功 run 写回任务。
@@ -107,6 +124,9 @@ type DeliveryArtifact map[string]interface{}
 type HistoryItem struct {
 	ID                  string   `json:"id"`
 	Query               string   `json:"query"`
+	Visibility          string   `json:"visibility"`
+	PublicSummary       *string  `json:"public_summary,omitempty"`
+	PublishedAt         *string  `json:"published_at,omitempty"`
 	ParsedSkills        []string `json:"parsed_skills"`
 	MCPTools            []string `json:"mcp_tools"`
 	RecommendedAgentIDs []string `json:"recommended_agent_ids"`
@@ -132,7 +152,9 @@ type HistoryItem struct {
 // 不包含 user_id / email / display_name；创作者只看到需求、Skill 和匹配状态。
 type PublicTaskItem struct {
 	ID                    string       `json:"id"`
-	Query                 string       `json:"query"`
+	Query                 string       `json:"query"` // public-safe summary, not the private original query
+	PublicSummary         string       `json:"public_summary"`
+	PublishedAt           *string      `json:"published_at,omitempty"`
 	ParsedSkills          []string     `json:"parsed_skills"`
 	ParsedSkillRefs       []SkillRef   `json:"parsed_skill_refs"`
 	MCPTools              []string     `json:"mcp_tools"`
@@ -154,6 +176,9 @@ type PublicTaskItem struct {
 type DetailResponse struct {
 	ID                  string           `json:"id"`
 	Query               string           `json:"query"`
+	Visibility          string           `json:"visibility"`
+	PublicSummary       *string          `json:"public_summary,omitempty"`
+	PublishedAt         *string          `json:"published_at,omitempty"`
 	ParsedSkills        []string         `json:"parsed_skills"`
 	ParsedSkillRefs     []SkillRef       `json:"parsed_skill_refs"`
 	MCPTools            []string         `json:"mcp_tools"`
@@ -175,6 +200,7 @@ type DetailResponse struct {
 	RevisionNote        *string          `json:"revision_note,omitempty"`
 	CreatedAt           string           `json:"created_at"`
 	Recommendations     []Recommendation `json:"recommendations"`
+	NextAction          *TaskNextAction  `json:"next_action,omitempty"`
 }
 
 // WorkResponse 是 claim/complete 共享返回体。

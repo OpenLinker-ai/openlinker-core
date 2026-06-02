@@ -32,7 +32,39 @@ WHERE a.visibility = 'public'
   AND a.lifecycle_status = 'active'
   AND (cardinality($1::text[]) = 0 OR a.tags && $1::text[])
   AND ($2::text = '' OR a.name ILIKE '%' || $2 || '%' OR a.description ILIKE '%' || $2 || '%')
+  AND (
+    NOT $5::bool
+    OR (
+      (
+        COALESCE(av.availability_status, 'unknown') = 'healthy'
+        OR (
+          av.last_successful_run_at IS NOT NULL
+          AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+        )
+      )
+      AND NOT (
+        a.connection_mode = 'runtime_pull'
+        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+      )
+    )
+  )
 ORDER BY CASE
+    WHEN (
+      (
+        COALESCE(av.availability_status, 'unknown') = 'healthy'
+        OR (
+          av.last_successful_run_at IS NOT NULL
+          AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+        )
+      )
+      AND NOT (
+        a.connection_mode = 'runtime_pull'
+        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+      )
+    ) THEN 0
+    ELSE 1
+END ASC,
+CASE
     WHEN a.connection_mode = 'runtime_pull'
       AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       THEN 3
@@ -47,10 +79,11 @@ END ASC,
 LIMIT $3 OFFSET $4`
 
 type ListPublicAgentsParams struct {
-	Tags    []string `db:"tags" json:"tags"`
-	Keyword string   `db:"keyword" json:"keyword"`
-	Limit   int32    `db:"limit" json:"limit"`
-	Offset  int32    `db:"offset" json:"offset"`
+	Tags         []string `db:"tags" json:"tags"`
+	Keyword      string   `db:"keyword" json:"keyword"`
+	Limit        int32    `db:"limit" json:"limit"`
+	Offset       int32    `db:"offset" json:"offset"`
+	CallableOnly bool     `db:"callable_only" json:"callable_only"`
 }
 
 type ListPublicAgentsRow struct {
@@ -65,6 +98,7 @@ func (q *Queries) ListPublicAgents(ctx context.Context, arg ListPublicAgentsPara
 		arg.Keyword,
 		arg.Limit,
 		arg.Offset,
+		arg.CallableOnly,
 	)
 	if err != nil {
 		return nil, err
@@ -110,18 +144,43 @@ func (q *Queries) ListPublicAgents(ctx context.Context, arg ListPublicAgentsPara
 const countPublicAgents = `-- name: CountPublicAgents :one
 SELECT COUNT(*)::int AS total
 FROM agents a
+LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
+LEFT JOIN LATERAL (
+    SELECT MAX(last_used_at) AS last_runtime_token_used_at
+    FROM agent_runtime_tokens
+    WHERE agent_id = a.id
+      AND revoked_at IS NULL
+      AND 'agent:pull' = ANY(scopes)
+) rt ON TRUE
 WHERE a.visibility = 'public'
   AND a.lifecycle_status = 'active'
   AND (cardinality($1::text[]) = 0 OR a.tags && $1::text[])
-  AND ($2::text = '' OR a.name ILIKE '%' || $2 || '%' OR a.description ILIKE '%' || $2 || '%')`
+  AND ($2::text = '' OR a.name ILIKE '%' || $2 || '%' OR a.description ILIKE '%' || $2 || '%')
+  AND (
+    NOT $3::bool
+    OR (
+      (
+        COALESCE(av.availability_status, 'unknown') = 'healthy'
+        OR (
+          av.last_successful_run_at IS NOT NULL
+          AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+        )
+      )
+      AND NOT (
+        a.connection_mode = 'runtime_pull'
+        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+      )
+    )
+  )`
 
 type CountPublicAgentsParams struct {
-	Tags    []string `db:"tags" json:"tags"`
-	Keyword string   `db:"keyword" json:"keyword"`
+	Tags         []string `db:"tags" json:"tags"`
+	Keyword      string   `db:"keyword" json:"keyword"`
+	CallableOnly bool     `db:"callable_only" json:"callable_only"`
 }
 
 func (q *Queries) CountPublicAgents(ctx context.Context, arg CountPublicAgentsParams) (int32, error) {
-	row := q.db.QueryRow(ctx, countPublicAgents, arg.Tags, arg.Keyword)
+	row := q.db.QueryRow(ctx, countPublicAgents, arg.Tags, arg.Keyword, arg.CallableOnly)
 	var total int32
 	err := row.Scan(&total)
 	return total, err

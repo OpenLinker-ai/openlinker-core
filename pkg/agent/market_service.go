@@ -49,7 +49,7 @@ const (
 //   - tags：空切片表示不按 tag 筛；非空时使用 Postgres 数组重叠运算（任意命中）。
 //   - keyword：空串表示不搜；非空时对 name/description 做 ILIKE。
 //   - page 从 1 开始；size 由调用方 clamp 到 [1, 50]，但这里再做一次防御。
-func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword string, page, size int32) (*MarketListResponse, error) {
+func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword string, page, size int32, callableOnlyArg ...bool) (*MarketListResponse, error) {
 	if page < 1 {
 		page = defaultPage
 	}
@@ -64,14 +64,16 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 	if tags == nil {
 		tags = []string{}
 	}
+	callableOnly := len(callableOnlyArg) > 0 && callableOnlyArg[0]
 
 	offset := (page - 1) * size
 
 	rows, err := s.queries.ListPublicAgents(ctx, db.ListPublicAgentsParams{
-		Tags:    tags,
-		Keyword: keyword,
-		Limit:   size,
-		Offset:  offset,
+		Tags:         tags,
+		Keyword:      keyword,
+		Limit:        size,
+		Offset:       offset,
+		CallableOnly: callableOnly,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("agent.MarketService.ListMarket: ListPublicAgents")
@@ -79,8 +81,9 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 	}
 
 	total, err := s.queries.CountPublicAgents(ctx, db.CountPublicAgentsParams{
-		Tags:    tags,
-		Keyword: keyword,
+		Tags:         tags,
+		Keyword:      keyword,
+		CallableOnly: callableOnly,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("agent.MarketService.ListMarket: CountPublicAgents")

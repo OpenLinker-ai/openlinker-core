@@ -347,7 +347,21 @@ func (h *Handler) PostCreateTask(c echo.Context) error {
 // assertAPIKeyAuth MCP 端点不接受网页登录会话；网页用户走 /run 即可。
 func assertAPIKeyAuth(c echo.Context) error {
 	if httpx.AuthMethodFrom(c) != "apikey" {
-		return httpx.Forbidden("MCP 端点仅接受访问令牌（ol_live_...）")
+		return &httpx.HTTPError{
+			Status:  http.StatusForbidden,
+			Code:    httpx.CodeForbidden,
+			Message: "MCP 端点仅接受访问令牌（ol_live_...）",
+			Details: map[string]interface{}{
+				"required_auth": "access_token",
+				"next_action": map[string]string{
+					"type":   "create_access_token",
+					"label":  "创建访问令牌",
+					"hint":   "在创作者中心的访问令牌页面创建 ol_live_... 令牌后，用 Authorization: Bearer 传给 MCP 客户端。",
+					"href":   "/settings/api-keys",
+					"reason": "MCP 是给外部客户端和 Agent 使用的服务端入口，不能使用浏览器 JWT 会话调用。",
+				},
+			},
+		}
 	}
 	return nil
 }
@@ -357,7 +371,21 @@ func requireAPIKeyScope(c echo.Context, scope string) error {
 		return err
 	}
 	if !httpx.HasScope(c, scope) {
-		return httpx.Forbidden("访问令牌缺少 scope: " + scope)
+		return &httpx.HTTPError{
+			Status:  http.StatusForbidden,
+			Code:    httpx.CodeForbidden,
+			Message: "访问令牌缺少 scope: " + scope,
+			Details: map[string]interface{}{
+				"required_scopes": []string{scope},
+				"next_action": map[string]string{
+					"type":   "create_access_token",
+					"label":  "创建包含所需 scope 的访问令牌",
+					"hint":   "在创作者中心的访问令牌页面选择 Agent / MCP 任务推荐模板，或手动勾选 " + scope + "。",
+					"href":   "/settings/api-keys",
+					"reason": "当前访问令牌权限不足，不能执行这个 MCP 工具调用。",
+				},
+			},
+		}
 	}
 	return nil
 }
@@ -485,6 +513,23 @@ func toolError(err error) mcpToolResult {
 	message := "tool execution failed"
 	if err != nil && err.Error() != "" {
 		message = err.Error()
+	}
+	var he *httpx.HTTPError
+	if errors.As(err, &he) {
+		return mcpToolResult{
+			Content: []mcpTextContent{{
+				Type: "text",
+				Text: he.Message,
+			}},
+			StructuredContent: map[string]interface{}{
+				"error": map[string]interface{}{
+					"code":    he.Code,
+					"message": he.Message,
+					"details": he.Details,
+				},
+			},
+			IsError: true,
+		}
 	}
 	return mcpToolResult{
 		Content: []mcpTextContent{{

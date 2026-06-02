@@ -44,11 +44,13 @@ func (h *MarketHandler) Register(api *echo.Group) {
 //	q=审计               关键词，对 name/description ILIKE
 //	page=1               1-based
 //	size=12              默认 12，max 50
+//	callable_only=true   只返回当前有可调用证据的 Agent
 func (h *MarketHandler) ListMarket(c echo.Context) error {
 	tags := parseTagsParam(c.QueryParam("tags"))
 	keyword := strings.TrimSpace(c.QueryParam("q"))
 	page := parseInt32QueryDefault(c.QueryParam("page"), defaultPage)
 	size := parseInt32QueryDefault(c.QueryParam("size"), defaultSize)
+	callableOnly := parseBoolQuery(c.QueryParam("callable_only"))
 
 	// clamp 到 [1, 50]，service 内还会再做一次防御
 	if page < 1 {
@@ -61,11 +63,20 @@ func (h *MarketHandler) ListMarket(c echo.Context) error {
 		size = maxSize
 	}
 
-	resp, err := h.svc.ListMarket(c.Request().Context(), tags, keyword, page, size)
+	resp, err := h.svc.ListMarket(c.Request().Context(), tags, keyword, page, size, callableOnly)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+func parseBoolQuery(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // GetBySlug Agent 详情。

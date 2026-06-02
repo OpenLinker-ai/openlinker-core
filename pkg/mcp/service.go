@@ -135,7 +135,7 @@ var mcpTools = []ToolDescriptor{
 	},
 	{
 		Name:        "create_task",
-		Description: "把一段自然语言任务交给 OpenLinker 的发布任务流解析。返回任务 ID、解析出的 skill 引用、Top 3 推荐 Agent 以及每个 Agent 命中的 matched_skills；调用方通常再用 run_agent 触发选定的 Agent。",
+		Description: "把一段自然语言任务交给 OpenLinker 的发布任务流解析。返回私有任务草稿 ID、解析出的 skill 引用、可用推荐 Agent；没有可推荐 Agent 时返回 next_action。",
 		InputSchema: map[string]interface{}{
 			"type":     "object",
 			"required": []string{"query"},
@@ -147,9 +147,11 @@ var mcpTools = []ToolDescriptor{
 		},
 		OutputSchema: map[string]interface{}{
 			"type":     "object",
-			"required": []string{"task_id", "parsed_skills", "parsed_skill_refs", "mcp_tools", "mcp_tool_refs", "recommendations"},
+			"required": []string{"task_id", "visibility", "parsed_skills", "parsed_skill_refs", "mcp_tools", "mcp_tool_refs", "recommendations"},
 			"properties": map[string]interface{}{
 				"task_id":           map[string]interface{}{"type": "string", "format": "uuid"},
+				"visibility":        map[string]interface{}{"type": "string", "enum": []string{"private", "public"}, "description": "create_task 默认创建 private 推荐草稿；显式 publish 后才进入任务广场。"},
+				"public_summary":    map[string]interface{}{"type": "string", "description": "任务公开摘要；未发布时通常为空。"},
 				"parsed_skills":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "关联/解析出的 skill_id 列表，按任务相关性排序"},
 				"parsed_skill_refs": skillRefsSchema(),
 				"mcp_tools":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
@@ -181,9 +183,23 @@ var mcpTools = []ToolDescriptor{
 						},
 					},
 				},
+				"next_action": taskNextActionSchema(),
 			},
 		},
 	},
+}
+
+func taskNextActionSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"type":   map[string]interface{}{"type": "string"},
+			"label":  map[string]interface{}{"type": "string"},
+			"hint":   map[string]interface{}{"type": "string"},
+			"href":   map[string]interface{}{"type": "string"},
+			"reason": map[string]interface{}{"type": "string"},
+		},
+	}
 }
 
 func mcpToolRefsSchema() map[string]interface{} {

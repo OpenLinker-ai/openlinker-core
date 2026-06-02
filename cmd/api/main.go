@@ -99,6 +99,9 @@ func main() {
 	e.GET("/healthz", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]any{"status": "ok", "env": cfg.Env})
 	})
+	e.HEAD("/healthz", func(c echo.Context) error {
+		return c.NoContent(http.StatusOK)
+	})
 	e.GET("/healthz/db", func(c echo.Context) error {
 		ctx, cancel := context.WithTimeout(c.Request().Context(), 2*time.Second)
 		defer cancel()
@@ -106,6 +109,14 @@ func main() {
 			return httpx.NewError(http.StatusServiceUnavailable, httpx.CodeServiceUnavailable, "database unavailable")
 		}
 		return c.JSON(http.StatusOK, map[string]string{"db": "ok"})
+	})
+	e.HEAD("/healthz/db", func(c echo.Context) error {
+		ctx, cancel := context.WithTimeout(c.Request().Context(), 2*time.Second)
+		defer cancel()
+		if err := pool.Ping(ctx); err != nil {
+			return httpx.NewError(http.StatusServiceUnavailable, httpx.CodeServiceUnavailable, "database unavailable")
+		}
+		return c.NoContent(http.StatusOK)
 	})
 	e.GET("/.well-known/openlinker.json", discovery.ServeOpenLinkerManifest(cfg))
 

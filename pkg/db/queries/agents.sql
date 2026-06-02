@@ -157,7 +157,7 @@ WHERE id = $1;
 
 -- name: ListPublicAgents :many
 -- 市场列表：visibility=public AND lifecycle_status=active。
--- $1 tags TEXT[]（空数组表示不筛选）；$2 keyword TEXT（空串表示不搜索）；$3 limit；$4 offset。
+-- $1 tags TEXT[]（空数组表示不筛选）；$2 keyword TEXT（空串表示不搜索）；$3 limit；$4 offset；$5 callable_only。
 SELECT a.*, u.display_name AS creator_name
 FROM agents a
 JOIN users u ON u.id = a.creator_id
@@ -173,7 +173,39 @@ WHERE a.visibility = 'public'
   AND a.lifecycle_status = 'active'
   AND (cardinality($1::text[]) = 0 OR a.tags && $1::text[])
   AND ($2::text = '' OR a.name ILIKE '%' || $2 || '%' OR a.description ILIKE '%' || $2 || '%')
+  AND (
+    NOT $5::bool
+    OR (
+      (
+        COALESCE(av.availability_status, 'unknown') = 'healthy'
+        OR (
+          av.last_successful_run_at IS NOT NULL
+          AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+        )
+      )
+      AND NOT (
+        a.connection_mode = 'runtime_pull'
+        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+      )
+    )
+  )
 ORDER BY CASE
+    WHEN (
+      (
+        COALESCE(av.availability_status, 'unknown') = 'healthy'
+        OR (
+          av.last_successful_run_at IS NOT NULL
+          AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+        )
+      )
+      AND NOT (
+        a.connection_mode = 'runtime_pull'
+        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+      )
+    ) THEN 0
+    ELSE 1
+END ASC,
+CASE
     WHEN a.connection_mode = 'runtime_pull'
       AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       THEN 3
@@ -190,10 +222,34 @@ LIMIT $3 OFFSET $4;
 -- name: CountPublicAgents :one
 SELECT COUNT(*)::int AS total
 FROM agents a
+LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
+LEFT JOIN LATERAL (
+    SELECT MAX(last_used_at) AS last_runtime_token_used_at
+    FROM agent_runtime_tokens
+    WHERE agent_id = a.id
+      AND revoked_at IS NULL
+      AND 'agent:pull' = ANY(scopes)
+) rt ON TRUE
 WHERE a.visibility = 'public'
   AND a.lifecycle_status = 'active'
   AND (cardinality($1::text[]) = 0 OR a.tags && $1::text[])
-  AND ($2::text = '' OR a.name ILIKE '%' || $2 || '%' OR a.description ILIKE '%' || $2 || '%');
+  AND ($2::text = '' OR a.name ILIKE '%' || $2 || '%' OR a.description ILIKE '%' || $2 || '%')
+  AND (
+    NOT $3::bool
+    OR (
+      (
+        COALESCE(av.availability_status, 'unknown') = 'healthy'
+        OR (
+          av.last_successful_run_at IS NOT NULL
+          AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+        )
+      )
+      AND NOT (
+        a.connection_mode = 'runtime_pull'
+        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+      )
+    )
+  );
 
 -- name: GetAgentBySlug :one
 -- 详情页：unlisted 也能按链接访问；private 拒绝；disabled 拒绝。
