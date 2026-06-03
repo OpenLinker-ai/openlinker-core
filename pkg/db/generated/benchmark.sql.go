@@ -386,10 +386,17 @@ LEFT JOIN agent_skill_scores s
 WHERE ag.skill_id = ANY($1::text[])
   AND a.visibility = 'public' AND a.lifecycle_status = 'active'
   AND (
+      COALESCE(av.availability_status, 'unknown') = 'healthy'
+      OR (
+          av.last_successful_run_at IS NOT NULL
+          AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+      )
+  )
+  AND (
       a.connection_mode <> 'runtime_pull'
       OR rt.last_runtime_token_used_at >= NOW() - INTERVAL '5 minutes'
   )
-GROUP BY a.id, a.total_calls, av.availability_status
+GROUP BY a.id, a.total_calls, av.availability_status, av.last_successful_run_at
 ORDER BY match_count DESC,
     CASE COALESCE(av.availability_status, 'unknown')
     WHEN 'healthy' THEN 0

@@ -130,6 +130,8 @@ func TestSetListAndRecommendAgentSkills(t *testing.T) {
 	// 只有 disabled 会被过滤。换成 disabled 才能保留这个负面用例。
 	pending := insertSkillAgent(t, pool, creatorID, "skill-disabled-"+uuid.NewString()[:8], "disabled", 100)
 	ctx := context.Background()
+	markSkillAgentAvailability(t, pool, best, "healthy")
+	markSkillAgentAvailability(t, pool, second, "healthy")
 
 	require.NoError(t, svc.SetAgentSkills(ctx, best, []string{
 		" data/sql-query ",
@@ -176,6 +178,8 @@ func TestRecommendAgentsBySkillsFiltersStaleRuntimePullAgents(t *testing.T) {
 	markSkillAgentAvailability(t, pool, activeRuntime, "healthy")
 	markSkillAgentAvailability(t, pool, staleRuntime, "healthy")
 	markSkillAgentAvailability(t, pool, neverHeartbeat, "healthy")
+	markSkillAgentAvailability(t, pool, betterDirect, "healthy")
+	markSkillAgentAvailability(t, pool, direct, "healthy")
 
 	require.NoError(t, svc.SetAgentSkills(ctx, betterDirect, []string{"data/sql-query", "data/analysis"}))
 	require.NoError(t, svc.SetAgentSkills(ctx, activeRuntime, []string{"data/sql-query"}))
@@ -193,6 +197,28 @@ func TestRecommendAgentsBySkillsFiltersStaleRuntimePullAgents(t *testing.T) {
 	recommendedIDs := []uuid.UUID{matches[0].AgentID, matches[1].AgentID, matches[2].AgentID}
 	assert.NotContains(t, recommendedIDs, staleRuntime)
 	assert.NotContains(t, recommendedIDs, neverHeartbeat)
+}
+
+func TestRecommendAgentsBySkillsFiltersUncallableDirectAgents(t *testing.T) {
+	pool := setupSkillTestDB(t)
+	svc := skill.NewService(pool)
+	creatorID := insertSkillCreator(t, pool)
+	ctx := context.Background()
+
+	callable := insertSkillAgent(t, pool, creatorID, "skill-callable-"+uuid.NewString()[:8], "approved", 10)
+	unknown := insertSkillAgent(t, pool, creatorID, "skill-unknown-"+uuid.NewString()[:8], "approved", 100)
+	unreachable := insertSkillAgent(t, pool, creatorID, "skill-unreachable-"+uuid.NewString()[:8], "approved", 1000)
+	markSkillAgentAvailability(t, pool, callable, "healthy")
+	markSkillAgentAvailability(t, pool, unreachable, "unreachable")
+
+	require.NoError(t, svc.SetAgentSkills(ctx, callable, []string{"data/sql-query"}))
+	require.NoError(t, svc.SetAgentSkills(ctx, unknown, []string{"data/sql-query"}))
+	require.NoError(t, svc.SetAgentSkills(ctx, unreachable, []string{"data/sql-query"}))
+
+	matches, err := svc.RecommendAgentsBySkills(ctx, []string{"data/sql-query"}, 10)
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+	assert.Equal(t, callable, matches[0].AgentID)
 }
 
 func TestSetAgentSkillsValidation(t *testing.T) {
