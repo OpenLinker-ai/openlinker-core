@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,16 +25,18 @@ const ssePollInterval = time.Second
 
 // Handler 调用执行 HTTP 入口。
 type Handler struct {
-	svc       *Service
-	validator *validator.Validate
-	cfg       *config.Config
+	svc            *Service
+	validator      *validator.Validate
+	cfg            *config.Config
+	runtimeLimiter *runtimeEndpointLimiter
 }
 
 // NewHandler 构造 Handler。cfg 可选（测试可省略）。
 func NewHandler(svc *Service, cfg ...*config.Config) *Handler {
 	h := &Handler{
-		svc:       svc,
-		validator: validator.New(validator.WithRequiredStructEnabled()),
+		svc:            svc,
+		validator:      validator.New(validator.WithRequiredStructEnabled()),
+		runtimeLimiter: newRuntimeEndpointLimiter(),
 	}
 	if len(cfg) > 0 {
 		h.cfg = cfg[0]
@@ -319,22 +323,60 @@ func (h *Handler) PostRunEvent(c echo.Context) error {
 func (h *Handler) ClaimRuntimePullRun(c echo.Context) error {
 	token, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
 	if err != nil {
+		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterIPKey(c)); retry > 0 {
+			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
+		}
 		return err
 	}
-	resp, err := h.svc.ClaimRuntimePullRun(c.Request().Context(), token)
+	wait, err := runtimePullClaimWait(c.QueryParam("wait"))
+	if err != nil {
+		return err
+	}
+	tokenKey := runtimeLimiterTokenKey(token)
+	retry, finishClaim := h.runtimeLimiter.beginClaim(tokenKey, wait)
+	if retry > 0 {
+		return runtimeRateLimitError(c, retry, "runtime_pull claim 过于频繁，请按 Retry-After 退避")
+	}
+	defer finishClaim()
+	resp, err := h.svc.ClaimRuntimePullRun(c.Request().Context(), token, RuntimePullClaimOptions{Wait: wait})
 	if err != nil {
 		return err
 	}
 	if resp == nil {
+		h.runtimeLimiter.markEmptyClaim(tokenKey, wait)
+		c.Response().Header().Set(echo.HeaderRetryAfter, strconv.Itoa(int(runtimePullEmptyClaimRetryAfter.Seconds())))
+		c.Response().Header().Set("X-OpenLinker-Max-Claim-Wait-Seconds", strconv.Itoa(int(runtimePullMaxLongPollWait.Seconds())))
 		return c.NoContent(http.StatusNoContent)
 	}
 	return c.JSON(http.StatusOK, resp)
 }
 
+func runtimePullClaimWait(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds < 0 {
+		return 0, httpx.BadRequest("wait 必须是非负秒数")
+	}
+	wait := time.Duration(seconds) * time.Second
+	if wait > runtimePullMaxLongPollWait {
+		wait = runtimePullMaxLongPollWait
+	}
+	return wait, nil
+}
+
 func (h *Handler) PostAgentHeartbeat(c echo.Context) error {
 	token, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
 	if err != nil {
+		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterIPKey(c)); retry > 0 {
+			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
+		}
 		return err
+	}
+	if retry := h.runtimeLimiter.allowHeartbeat(runtimeLimiterTokenKey(token)); retry > 0 {
+		return runtimeRateLimitError(c, retry, "runtime_pull heartbeat 过于频繁，请按 Retry-After 退避")
 	}
 	resp, err := h.svc.HeartbeatAgent(c.Request().Context(), token)
 	if err != nil {
@@ -346,6 +388,9 @@ func (h *Handler) PostAgentHeartbeat(c echo.Context) error {
 func (h *Handler) PostRuntimePullResult(c echo.Context) error {
 	token, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
 	if err != nil {
+		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterIPKey(c)); retry > 0 {
+			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
+		}
 		return err
 	}
 	runID, err := uuid.Parse(c.Param("id"))
@@ -407,6 +452,39 @@ func runtimeBearerToken(header string) (string, error) {
 		return "", httpx.Unauthorized("缺少访问令牌")
 	}
 	return strings.TrimSpace(parts[1]), nil
+}
+
+func runtimeLimiterTokenKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return "rt:" + hex.EncodeToString(sum[:8])
+}
+
+func runtimeLimiterIPKey(c echo.Context) string {
+	ip := strings.TrimSpace(c.RealIP())
+	if ip == "" {
+		ip = "unknown"
+	}
+	return "ip:" + ip
+}
+
+func runtimeRateLimitError(c echo.Context, retryAfter time.Duration, message string) error {
+	seconds := retryAfterSeconds(retryAfter)
+	c.Response().Header().Set(echo.HeaderRetryAfter, strconv.Itoa(seconds))
+	return httpx.NewError(http.StatusTooManyRequests, httpx.CodeRateLimited, message)
+}
+
+func retryAfterSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 1
+	}
+	seconds := int(d / time.Second)
+	if d%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
 }
 
 func parseOptionalInt32(raw string) (int32, error) {

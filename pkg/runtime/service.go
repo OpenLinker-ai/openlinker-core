@@ -38,6 +38,10 @@ const maxRunEventsLimit int32 = 500
 const maxAgentResponseEvents = 50
 const maxRunMessageContentLen = 10000
 const runtimePullClaimTTL = 5 * time.Minute
+const runtimePullEmptyClaimRetryAfter = 30 * time.Second
+const runtimePullHeartbeatInterval = 60 * time.Second
+const runtimePullMaxLongPollWait = 30 * time.Second
+const runtimePullLongPollTick = 5 * time.Second
 
 const (
 	connectionModeDirectHTTP  = "direct_http"
@@ -111,6 +115,12 @@ type Delegation struct {
 	ParentRunID   uuid.UUID
 	CallerAgentID uuid.UUID
 	Reason        string
+}
+
+// RuntimePullClaimOptions lets newer workers avoid tight empty polling while
+// keeping the existing GET /claim behavior compatible for older workers.
+type RuntimePullClaimOptions struct {
+	Wait time.Duration
 }
 
 // SetWebhookEnqueuer 注入 webhook 触发器（main.go 启动时调用）。
@@ -805,7 +815,7 @@ func (s *Service) ReportRunEvent(ctx context.Context, runID uuid.UUID, token str
 }
 
 // ClaimRuntimePullRun lets a private / IPv4 Agent actively pull the next pending run.
-func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string) (*RuntimePullRunResponse, error) {
+func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string, opts ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error) {
 	token, err := s.verifyRuntimeToken(ctx, plaintextToken, "agent:pull")
 	if err != nil {
 		return nil, err
@@ -820,12 +830,50 @@ func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string
 	if agent.ConnectionMode != connectionModeRuntimePull {
 		return nil, httpx.Conflict("Agent 不是 runtime_pull 接入模式")
 	}
+	claimOpts := normalizeRuntimePullClaimOptions(opts...)
+	startedWaiting := time.Now()
+	for {
+		resp, err := s.claimRuntimePullRunOnce(ctx, token)
+		if err != nil || resp != nil || claimOpts.Wait <= 0 || time.Since(startedWaiting) >= claimOpts.Wait {
+			return resp, err
+		}
+		sleepFor := runtimePullLongPollTick
+		if remaining := claimOpts.Wait - time.Since(startedWaiting); remaining < sleepFor {
+			sleepFor = remaining
+		}
+		if sleepFor <= 0 {
+			return nil, nil
+		}
+		timer := time.NewTimer(sleepFor)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func normalizeRuntimePullClaimOptions(opts ...RuntimePullClaimOptions) RuntimePullClaimOptions {
+	if len(opts) == 0 {
+		return RuntimePullClaimOptions{}
+	}
+	normalized := opts[0]
+	if normalized.Wait < 0 {
+		normalized.Wait = 0
+	}
+	if normalized.Wait > runtimePullMaxLongPollWait {
+		normalized.Wait = runtimePullMaxLongPollWait
+	}
+	return normalized
+}
+
+func (s *Service) claimRuntimePullRunOnce(ctx context.Context, token db.AgentRuntimeToken) (*RuntimePullRunResponse, error) {
 	run, err := s.queries.ClaimRuntimePullRun(ctx, db.ClaimRuntimePullRunParams{
 		AgentID:        token.AgentID,
 		RuntimeTokenID: token.ID,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		_ = s.queries.TouchAgentRuntimeToken(ctx, token.ID)
 		return nil, nil
 	}
 	if err != nil {
@@ -843,12 +891,18 @@ func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string
 		_ = json.Unmarshal(run.Input, &input)
 	}
 	return &RuntimePullRunResponse{
-		RunID:    run.ID.String(),
-		AgentID:  run.AgentID.String(),
-		Input:    input,
-		Metadata: map[string]interface{}{"claim_ttl_seconds": int(runtimePullClaimTTL.Seconds())},
-		Source:   run.Source,
-		A2A:      s.agentA2AContextForRun(ctx, run.ID),
+		RunID:   run.ID.String(),
+		AgentID: run.AgentID.String(),
+		Input:   input,
+		Metadata: map[string]interface{}{
+			"claim_ttl_seconds":                    int(runtimePullClaimTTL.Seconds()),
+			"recommended_next_claim_after_seconds": 0,
+			"recommended_heartbeat_after_seconds":  int(runtimePullHeartbeatInterval.Seconds()),
+			"max_long_poll_wait_seconds":           int(runtimePullMaxLongPollWait.Seconds()),
+			"empty_claim_retry_after_seconds":      int(runtimePullEmptyClaimRetryAfter.Seconds()),
+		},
+		Source: run.Source,
+		A2A:    s.agentA2AContextForRun(ctx, run.ID),
 	}, nil
 }
 
@@ -932,12 +986,27 @@ func (s *Service) HeartbeatAgent(ctx context.Context, plaintextToken string) (*A
 		log.Error().Err(err).Str("agent_id", token.AgentID.String()).Msg("runtime.HeartbeatAgent: MarkAgentAvailabilityHeartbeat")
 		return nil, httpx.Internal("记录 Agent heartbeat 失败")
 	}
+	pendingRunCount, err := s.queries.CountClaimableRuntimePullRuns(ctx, token.AgentID)
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", token.AgentID.String()).Msg("runtime.HeartbeatAgent: CountClaimableRuntimePullRuns")
+		return nil, httpx.Internal("查询待领取任务失败")
+	}
+	nextClaimAfterSeconds := int32(runtimePullEmptyClaimRetryAfter.Seconds())
+	claimNow := pendingRunCount > 0
+	if claimNow {
+		nextClaimAfterSeconds = 0
+	}
 	_ = s.queries.TouchAgentRuntimeToken(ctx, token.ID)
 	return &AgentHeartbeatResponse{
-		AgentID:             snapshot.AgentID.String(),
-		AvailabilityStatus:  snapshot.AvailabilityStatus,
-		LastCheckedAt:       snapshot.LastCheckedAt,
-		ConsecutiveFailures: snapshot.ConsecutiveFailures,
+		AgentID:                          snapshot.AgentID.String(),
+		AvailabilityStatus:               snapshot.AvailabilityStatus,
+		LastCheckedAt:                    snapshot.LastCheckedAt,
+		ConsecutiveFailures:              snapshot.ConsecutiveFailures,
+		PendingRunCount:                  pendingRunCount,
+		ClaimNow:                         claimNow,
+		NextClaimAfterSeconds:            nextClaimAfterSeconds,
+		RecommendedHeartbeatAfterSeconds: int32(runtimePullHeartbeatInterval.Seconds()),
+		MaxClaimWaitSeconds:              int32(runtimePullMaxLongPollWait.Seconds()),
 	}, nil
 }
 

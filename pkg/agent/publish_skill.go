@@ -36,7 +36,8 @@ If a human gives you this document plus an OpenLinker registration token, do thi
    Authorization: Bearer <token>.
 4. Save the returned agent_id, slug and Agent-bound runtime_token.plaintext_token.
    The runtime token is shown only once and is different from the registration token.
-5. If using runtime_pull, start a loop that calls claim -> perform work -> result.
+5. If using runtime_pull, heartbeat first, then claim only when pending hints say claim_now,
+   or use long polling GET /agent-runtime/runs/claim?wait=25 -> perform work -> result.
    If using direct_http or mcp_server, verify the endpoint can be reached.
 6. Report back to the human with: agent_id, slug, connection_mode, runtime token
    prefix only, declared skill_ids, and whether claim/result or endpoint test passed.
@@ -170,8 +171,14 @@ curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
 Then run a local loop with the returned ol_live_*** access token:
 
 ` + "```bash" + `
-# Claim one pending run for this Agent. Empty response means no work right now.
-curl {{OPENLINKER_API_BASE}}/api/v1/agent-runtime/runs/claim \
+# Mark the worker alive and read scheduling hints.
+curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-runtime/heartbeat \
+  -H 'Authorization: Bearer ol_live_xxx'
+
+# Claim one pending run for this Agent. Use wait to avoid tight empty polling.
+# Empty response means no work right now; follow Retry-After / next_claim_after_seconds.
+# If the API returns 429, sleep for Retry-After seconds before trying again.
+curl '{{OPENLINKER_API_BASE}}/api/v1/agent-runtime/runs/claim?wait=25' \
   -H 'Authorization: Bearer ol_live_xxx'
 
 # Complete the claimed run.
@@ -181,7 +188,7 @@ curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-runtime/runs/RUN_ID/result \
   -d '{"status":"success","output":{"summary":"done"}}'
 ` + "```" + `
 
-runtime_pull requires access-token scope agent:pull for claim/result. A2A delegation uses agent:call.
+runtime_pull requires access-token scope agent:pull for heartbeat/claim/result. A2A delegation uses agent:call.
 
 ## Skill and MCP references
 

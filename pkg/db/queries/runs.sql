@@ -87,6 +87,16 @@ RETURNING r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code
           r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
           r.started_at, r.finished_at, r.source;
 
+-- name: CountClaimableRuntimePullRuns :one
+-- 心跳只读统计：让 runtime_pull worker 先看 pending hint，再决定是否进入 claim。
+SELECT COUNT(*)::int AS total
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+WHERE r.agent_id = $1
+  AND r.status = 'running'
+  AND a.connection_mode = 'runtime_pull'
+  AND (r.claimed_at IS NULL OR r.claimed_at < NOW() - INTERVAL '5 minutes');
+
 -- name: GetRuntimePullRunState :one
 SELECT id, user_id, agent_id, status, cost_cents, creator_revenue_cents,
        started_at, claimed_by_runtime_token_id

@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"testing"
 	"time"
@@ -51,6 +52,20 @@ func insertRuntimeToken(t *testing.T, pool *pgxpool.Pool, agentID, creatorID uui
 	return plaintext
 }
 
+func readRuntimeTokenLastUsed(t *testing.T, pool *pgxpool.Pool, plaintext string) *time.Time {
+	t.Helper()
+	var lastUsed sql.NullTime
+	err := pool.QueryRow(context.Background(),
+		`SELECT last_used_at FROM agent_runtime_tokens WHERE prefix=$1`,
+		plaintext[:12],
+	).Scan(&lastUsed)
+	require.NoError(t, err)
+	if !lastUsed.Valid {
+		return nil
+	}
+	return &lastUsed.Time
+}
+
 func markRuntimePullAvailable(t *testing.T, svc *runtime.Service, token string) {
 	t.Helper()
 	_, err := svc.HeartbeatAgent(context.Background(), token)
@@ -82,6 +97,9 @@ func TestRuntimePull_ClaimAndCompleteSuccess(t *testing.T) {
 	assert.Equal(t, "from user", claimed.Input["q"])
 	assert.Equal(t, "web", claimed.Source)
 	assert.Equal(t, 300, claimed.Metadata["claim_ttl_seconds"])
+	assert.Equal(t, 0, claimed.Metadata["recommended_next_claim_after_seconds"])
+	assert.Equal(t, 60, claimed.Metadata["recommended_heartbeat_after_seconds"])
+	assert.Equal(t, 30, claimed.Metadata["max_long_poll_wait_seconds"])
 	require.NotNil(t, claimed.A2A)
 	assert.Equal(t, started.RunID, claimed.A2A.CurrentRunID)
 	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", claimed.A2A.CallAgentEndpoint)
@@ -203,6 +221,99 @@ func TestRuntimePull_RunRequiresRecentPullHeartbeat(t *testing.T) {
 	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "online"}), "")
 	require.NoError(t, err)
 	assert.Equal(t, "running", started.Status)
+}
+
+func TestRuntimePull_EmptyClaimDoesNotRefreshToken(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:pull"})
+	baseline := time.Now().Add(-2 * time.Minute).UTC().Truncate(time.Microsecond)
+	_, err := pool.Exec(ctx,
+		`UPDATE agent_runtime_tokens SET last_used_at=$2 WHERE prefix=$1`,
+		token[:12],
+		baseline,
+	)
+	require.NoError(t, err)
+
+	claimed, err := svc.ClaimRuntimePullRun(ctx, token)
+	require.NoError(t, err)
+	assert.Nil(t, claimed)
+
+	lastUsed := readRuntimeTokenLastUsed(t, pool, token)
+	require.NotNil(t, lastUsed)
+	assert.WithinDuration(t, baseline, *lastUsed, time.Millisecond)
+}
+
+func TestRuntimePull_HeartbeatReturnsClaimHints(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:pull"})
+
+	empty, err := svc.HeartbeatAgent(ctx, token)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), empty.PendingRunCount)
+	assert.False(t, empty.ClaimNow)
+	assert.Equal(t, int32(30), empty.NextClaimAfterSeconds)
+	assert.Equal(t, int32(60), empty.RecommendedHeartbeatAfterSeconds)
+	assert.Equal(t, int32(30), empty.MaxClaimWaitSeconds)
+
+	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "hint"}), "")
+	require.NoError(t, err)
+	require.Equal(t, "running", started.Status)
+
+	pending, err := svc.HeartbeatAgent(ctx, token)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), pending.PendingRunCount)
+	assert.True(t, pending.ClaimNow)
+	assert.Equal(t, int32(0), pending.NextClaimAfterSeconds)
+}
+
+func TestRuntimePull_LongPollClaimWaitsForRun(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:pull"})
+	markRuntimePullAvailable(t, svc, token)
+
+	type claimResult struct {
+		resp *runtime.RuntimePullRunResponse
+		err  error
+	}
+	resultC := make(chan claimResult, 1)
+	go func() {
+		resp, err := svc.ClaimRuntimePullRun(ctx, token, runtime.RuntimePullClaimOptions{Wait: 2 * time.Second})
+		resultC <- claimResult{resp: resp, err: err}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "long poll"}), "")
+	require.NoError(t, err)
+
+	select {
+	case result := <-resultC:
+		require.NoError(t, result.err)
+		require.NotNil(t, result.resp)
+		assert.Equal(t, started.RunID, result.resp.RunID)
+		assert.Equal(t, "long poll", result.resp.Input["q"])
+	case <-time.After(3 * time.Second):
+		t.Fatal("long-poll claim did not return the run before timeout")
+	}
 }
 
 func TestAgentHeartbeat_MarksAgentHealthy(t *testing.T) {

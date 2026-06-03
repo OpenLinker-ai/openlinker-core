@@ -111,10 +111,15 @@ type RunMessageResponse struct {
 
 // AgentHeartbeatResponse confirms that an Agent-bound access token owner is alive.
 type AgentHeartbeatResponse struct {
-	AgentID             string     `json:"agent_id"`
-	AvailabilityStatus  string     `json:"availability_status"`
-	LastCheckedAt       *time.Time `json:"last_checked_at,omitempty"`
-	ConsecutiveFailures int32      `json:"consecutive_failures"`
+	AgentID                          string     `json:"agent_id"`
+	AvailabilityStatus               string     `json:"availability_status"`
+	LastCheckedAt                    *time.Time `json:"last_checked_at,omitempty"`
+	ConsecutiveFailures              int32      `json:"consecutive_failures"`
+	PendingRunCount                  int32      `json:"pending_run_count"`
+	ClaimNow                         bool       `json:"claim_now"`
+	NextClaimAfterSeconds            int32      `json:"next_claim_after_seconds"`
+	RecommendedHeartbeatAfterSeconds int32      `json:"recommended_heartbeat_after_seconds"`
+	MaxClaimWaitSeconds              int32      `json:"max_claim_wait_seconds"`
 }
 
 // AgentRequest 平台 → 创作者 endpoint 的请求体。
