@@ -10,7 +10,6 @@ const runtimeLimiterPurgeInterval = time.Minute
 const runtimeMalformedAuthRetryAfter = 5 * time.Second
 const runtimeMalformedAuthMinInterval = time.Second
 const runtimePullHeartbeatMinInterval = 10 * time.Second
-const runtimePullClaimMinInterval = 2 * time.Second
 const runtimePullConcurrentClaimRetryAfter = 5 * time.Second
 
 type runtimeEndpointLimiter struct {
@@ -24,7 +23,6 @@ type runtimeEndpointLimitState struct {
 	lastSeen            time.Time
 	malformedAllowedAt  time.Time
 	heartbeatAllowedAt  time.Time
-	claimAllowedAt      time.Time
 	emptyClaimAllowedAt time.Time
 	activeLongPollClaim bool
 }
@@ -60,10 +58,6 @@ func (l *runtimeEndpointLimiter) beginClaim(key string, wait time.Duration) (tim
 	if wait > 0 && state.activeLongPollClaim {
 		return runtimePullConcurrentClaimRetryAfter, func() {}
 	}
-	if now.Before(state.claimAllowedAt) {
-		return state.claimAllowedAt.Sub(now), func() {}
-	}
-	state.claimAllowedAt = now.Add(runtimePullClaimMinInterval)
 	if wait <= 0 {
 		return 0, func() {}
 	}

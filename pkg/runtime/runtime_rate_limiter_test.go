@@ -73,6 +73,20 @@ func TestAgentRuntimeRateLimiter_EmptyClaimStartsCooldown(t *testing.T) {
 	assert.Contains(t, string(body), "RATE_LIMITED")
 }
 
+func TestAgentRuntimeRateLimiter_SuccessfulClaimCanImmediatelyCheckForMoreWork(t *testing.T) {
+	e, pool := setupAgentRuntimeHandlerTest(t)
+	agentID, token := insertRuntimePullAgentWithToken(t, pool)
+	userID := insertUserWithBalance(t, pool, 1000)
+	insertRunningRun(t, pool, userID, agentID)
+
+	first, _ := doRequest(t, e, http.MethodGet, "/api/v1/agent-runtime/runs/claim", nil, runtimeAuthHeader(token))
+	require.Equal(t, http.StatusOK, first.Code)
+
+	second, _ := doRequest(t, e, http.MethodGet, "/api/v1/agent-runtime/runs/claim", nil, runtimeAuthHeader(token))
+	assert.Equal(t, http.StatusNoContent, second.Code)
+	assert.Equal(t, "30", second.Header().Get(echo.HeaderRetryAfter))
+}
+
 func TestAgentRuntimeRateLimiter_RejectsConcurrentLongPollClaim(t *testing.T) {
 	e, pool := setupAgentRuntimeHandlerTest(t)
 	_, token := insertRuntimePullAgentWithToken(t, pool)
