@@ -30,6 +30,12 @@ LEFT JOIN LATERAL (
 ) rt ON TRUE
 WHERE a.visibility = 'public'
   AND a.lifecycle_status = 'active'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM unnest(a.tags) AS tag
+    WHERE lower(tag) IN ('internal', 'test', 'validation')
+       OR tag IN ('内部', '测试', '验收')
+  )
   AND (cardinality($1::text[]) = 0 OR a.tags && $1::text[])
   AND ($2::text = '' OR a.name ILIKE '%' || $2 || '%' OR a.description ILIKE '%' || $2 || '%')
   AND (
@@ -154,6 +160,12 @@ LEFT JOIN LATERAL (
 ) rt ON TRUE
 WHERE a.visibility = 'public'
   AND a.lifecycle_status = 'active'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM unnest(a.tags) AS tag
+    WHERE lower(tag) IN ('internal', 'test', 'validation')
+       OR tag IN ('内部', '测试', '验收')
+  )
   AND (cardinality($1::text[]) = 0 OR a.tags && $1::text[])
   AND ($2::text = '' OR a.name ILIKE '%' || $2 || '%' OR a.description ILIKE '%' || $2 || '%')
   AND (

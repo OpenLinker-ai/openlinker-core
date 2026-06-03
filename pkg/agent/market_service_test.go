@@ -149,6 +149,44 @@ func TestListMarket_CallableOnlyFiltersUncallable(t *testing.T) {
 	assert.Equal(t, int32(1), resp.Total)
 }
 
+func TestListMarket_FiltersInternalValidationAndTestAgents(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := agent.NewMarketService(pool)
+	creatorID, _ := setupTestData(t, pool)
+	ctx := context.Background()
+
+	publicID := createApprovedAgent(t, pool, creatorID, "public-callable")
+	internalID := createApprovedAgent(t, pool, creatorID, "internal-callable", WithTags([]string{"internal"}))
+	validationID := createApprovedAgent(t, pool, creatorID, "validation-callable", WithTags([]string{"validation"}))
+	testID := createApprovedAgent(t, pool, creatorID, "test-callable", WithTags([]string{"测试"}))
+
+	_, err := pool.Exec(ctx,
+		`INSERT INTO agent_availability_snapshots (
+			agent_id, availability_status, last_checked_at, consecutive_failures
+		) VALUES
+			($1, 'healthy', NOW(), 0),
+			($2, 'healthy', NOW(), 0),
+			($3, 'healthy', NOW(), 0),
+			($4, 'healthy', NOW(), 0)`,
+		publicID,
+		internalID,
+		validationID,
+		testID,
+	)
+	require.NoError(t, err)
+
+	resp, err := svc.ListMarket(ctx, nil, "", 1, 12, true)
+	require.NoError(t, err)
+	require.Len(t, resp.Items, 1)
+	assert.Equal(t, "public-callable", resp.Items[0].Slug)
+	assert.Equal(t, int32(1), resp.Total)
+
+	resp, err = svc.ListMarket(ctx, []string{"validation"}, "", 1, 12)
+	require.NoError(t, err)
+	assert.Empty(t, resp.Items, "reserved validation/test/internal tags must not leak through tag search")
+	assert.Equal(t, int32(0), resp.Total)
+}
+
 func TestListMarket_RuntimePullWithoutRecentWorkerShownUnreachable(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := agent.NewMarketService(pool)
