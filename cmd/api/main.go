@@ -171,6 +171,14 @@ func main() {
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
 	runtimeHandler.RegisterAgentRuntime(api)
 	agentSvc.SetDryRunner(runtimeSvc)
+	if cfg.RuntimePullRunWorkerEnabled {
+		go runtime.StartRuntimePullRunWorker(rootCtx, runtimeSvc, runtime.RuntimePullRunWorkerConfig{
+			Interval:        time.Duration(cfg.RuntimePullRunWorkerIntervalSeconds) * time.Second,
+			DispatchTimeout: time.Duration(cfg.RuntimePullDispatchTimeoutSeconds) * time.Second,
+			ResultTimeout:   time.Duration(cfg.RuntimePullResultTimeoutSeconds) * time.Second,
+			BatchSize:       int32(cfg.RuntimePullRunWorkerTimeoutBatchSize),
+		})
+	}
 	if cfg.AvailabilityMonitorEnabled {
 		agent.StartAvailabilityMonitor(rootCtx, agentSvc, agent.AvailabilityMonitorConfig{
 			Interval:     time.Duration(cfg.AvailabilityMonitorIntervalSeconds) * time.Second,

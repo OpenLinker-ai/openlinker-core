@@ -253,3 +253,70 @@ func (q *Queries) GetRuntimePullRunState(ctx context.Context, id uuid.UUID) (Run
 	)
 	return r, err
 }
+
+const listStaleRuntimePullRuns = `-- name: ListStaleRuntimePullRuns :many
+SELECT r.id, r.user_id, r.agent_id, r.cost_cents, r.started_at,
+       CASE
+           WHEN r.claimed_at IS NULL THEN 'RUNTIME_PULL_NOT_CLAIMED'
+           ELSE 'RUNTIME_PULL_RESULT_TIMEOUT'
+       END::text AS error_code,
+       CASE
+           WHEN r.claimed_at IS NULL THEN '任务未被 Agent runtime 领取，请确认本地进程正在心跳并使用 GET /agent-runtime/runs/claim?wait=25 拉取任务。'
+           ELSE 'Agent runtime 已领取任务，但未在超时时间内回传结果。'
+       END::text AS error_message
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+WHERE r.status = 'running'
+  AND a.connection_mode = 'runtime_pull'
+  AND (
+    (r.claimed_at IS NULL AND r.started_at < $1)
+    OR (r.claimed_at IS NOT NULL AND r.claimed_at < $2)
+  )
+ORDER BY r.started_at ASC
+LIMIT $3
+FOR UPDATE SKIP LOCKED`
+
+type ListStaleRuntimePullRunsParams struct {
+	DispatchStaleBefore time.Time `db:"dispatch_stale_before" json:"dispatch_stale_before"`
+	ResultStaleBefore   time.Time `db:"result_stale_before" json:"result_stale_before"`
+	Limit               int32     `db:"limit" json:"limit"`
+}
+
+type ListStaleRuntimePullRunsRow struct {
+	ID           uuid.UUID `db:"id" json:"id"`
+	UserID       uuid.UUID `db:"user_id" json:"user_id"`
+	AgentID      uuid.UUID `db:"agent_id" json:"agent_id"`
+	CostCents    int32     `db:"cost_cents" json:"cost_cents"`
+	StartedAt    time.Time `db:"started_at" json:"started_at"`
+	ErrorCode    string    `db:"error_code" json:"error_code"`
+	ErrorMessage string    `db:"error_message" json:"error_message"`
+}
+
+func (q *Queries) ListStaleRuntimePullRuns(ctx context.Context, arg ListStaleRuntimePullRunsParams) ([]ListStaleRuntimePullRunsRow, error) {
+	rows, err := q.db.Query(ctx, listStaleRuntimePullRuns, arg.DispatchStaleBefore, arg.ResultStaleBefore, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []ListStaleRuntimePullRunsRow
+	for rows.Next() {
+		var item ListStaleRuntimePullRunsRow
+		if err := rows.Scan(
+			&item.ID,
+			&item.UserID,
+			&item.AgentID,
+			&item.CostCents,
+			&item.StartedAt,
+			&item.ErrorCode,
+			&item.ErrorMessage,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

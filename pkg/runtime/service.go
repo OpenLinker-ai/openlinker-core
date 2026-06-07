@@ -123,6 +123,14 @@ type RuntimePullClaimOptions struct {
 	Wait time.Duration
 }
 
+// RuntimePullRunTimeoutConfig controls how long runtime_pull runs may stay
+// pending or claimed before the platform converts them to a terminal timeout.
+type RuntimePullRunTimeoutConfig struct {
+	DispatchTimeout time.Duration
+	ResultTimeout   time.Duration
+	BatchSize       int32
+}
+
 // SetWebhookEnqueuer 注入 webhook 触发器（main.go 启动时调用）。
 //
 // 用 setter 而非 NewService 参数，避免 runtime ↔ webhook 循环依赖
@@ -962,6 +970,99 @@ func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken str
 	s.decorateDelegationCompletion(ctx, runID, token.AgentID, resp)
 	s.attachRunRequirementEvidence(ctx, runID, resp)
 	return resp, nil
+}
+
+// TimeoutStaleRuntimePullRuns converts abandoned runtime_pull runs into timeout
+// terminal states so users and upstream callers never wait forever.
+func (s *Service) TimeoutStaleRuntimePullRuns(ctx context.Context, cfg RuntimePullRunTimeoutConfig) (int32, error) {
+	cfg = normalizeRuntimePullRunTimeoutConfig(cfg)
+	now := time.Now()
+	var staleRuns []db.ListStaleRuntimePullRunsRow
+
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		q := s.queries.WithTx(tx)
+		rows, err := q.ListStaleRuntimePullRuns(ctx, db.ListStaleRuntimePullRunsParams{
+			DispatchStaleBefore: now.Add(-cfg.DispatchTimeout),
+			ResultStaleBefore:   now.Add(-cfg.ResultTimeout),
+			Limit:               cfg.BatchSize,
+		})
+		if err != nil {
+			return err
+		}
+		staleRuns = rows
+		for _, run := range rows {
+			code := run.ErrorCode
+			message := run.ErrorMessage
+			duration := int32(now.Sub(run.StartedAt).Milliseconds())
+			if duration < 0 {
+				duration = 0
+			}
+			if err := q.MarkRunFailed(ctx, db.MarkRunFailedParams{
+				ID:           run.ID,
+				Status:       "timeout",
+				ErrorCode:    &code,
+				ErrorMessage: &message,
+				DurationMs:   duration,
+			}); err != nil {
+				return err
+			}
+			if s.walletCharger != nil && run.CostCents > 0 {
+				if err := s.walletCharger.Refund(ctx, tx, run.UserID, int64(run.CostCents)); err != nil {
+					return err
+				}
+			}
+			if _, err := q.MarkAgentAvailabilityFailure(ctx, run.AgentID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("runtime.TimeoutStaleRuntimePullRuns")
+		return 0, err
+	}
+
+	for _, run := range staleRuns {
+		duration := int32(now.Sub(run.StartedAt).Milliseconds())
+		if duration < 0 {
+			duration = 0
+		}
+		s.recordRunEventBestEffort(ctx, run.ID, "run.failed", map[string]interface{}{
+			"status":        "timeout",
+			"error_code":    run.ErrorCode,
+			"error_message": run.ErrorMessage,
+			"duration_ms":   duration,
+		})
+		resp := &RunResponse{
+			RunID:      run.ID.String(),
+			Status:     "timeout",
+			ErrorCode:  run.ErrorCode,
+			ErrorMsg:   run.ErrorMessage,
+			DurationMs: duration,
+		}
+		s.decorateDelegationCompletion(ctx, run.ID, run.AgentID, resp)
+		if s.shouldTriggerExternalDelivery(ctx, run.ID) {
+			s.triggerWebhookByRun(run.ID)
+			s.triggerDelivery(run.ID)
+		}
+	}
+	return int32(len(staleRuns)), nil
+}
+
+func normalizeRuntimePullRunTimeoutConfig(cfg RuntimePullRunTimeoutConfig) RuntimePullRunTimeoutConfig {
+	if cfg.DispatchTimeout <= 0 {
+		cfg.DispatchTimeout = 2 * time.Minute
+	}
+	if cfg.ResultTimeout <= 0 {
+		cfg.ResultTimeout = 15 * time.Minute
+	}
+	if cfg.ResultTimeout < runtimePullClaimTTL {
+		cfg.ResultTimeout = runtimePullClaimTTL
+	}
+	if cfg.BatchSize <= 0 {
+		cfg.BatchSize = 50
+	}
+	return cfg
 }
 
 // HeartbeatAgent lets an Agent proactively mark its bound access-token owner alive.

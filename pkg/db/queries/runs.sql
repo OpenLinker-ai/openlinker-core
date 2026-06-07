@@ -103,6 +103,30 @@ SELECT id, user_id, agent_id, status, cost_cents, creator_revenue_cents,
 FROM runs
 WHERE id = $1;
 
+-- name: ListStaleRuntimePullRuns :many
+-- runtime_pull 任务如果长时间未被领取或已领取但未回传终态，需要自动收敛为 timeout，
+-- 避免用户侧永久看到 running。
+SELECT r.id, r.user_id, r.agent_id, r.cost_cents, r.started_at,
+       CASE
+           WHEN r.claimed_at IS NULL THEN 'RUNTIME_PULL_NOT_CLAIMED'
+           ELSE 'RUNTIME_PULL_RESULT_TIMEOUT'
+       END::text AS error_code,
+       CASE
+           WHEN r.claimed_at IS NULL THEN '任务未被 Agent runtime 领取，请确认本地进程正在心跳并使用 GET /agent-runtime/runs/claim?wait=25 拉取任务。'
+           ELSE 'Agent runtime 已领取任务，但未在超时时间内回传结果。'
+       END::text AS error_message
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+WHERE r.status = 'running'
+  AND a.connection_mode = 'runtime_pull'
+  AND (
+    (r.claimed_at IS NULL AND r.started_at < $1)
+    OR (r.claimed_at IS NOT NULL AND r.claimed_at < $2)
+  )
+ORDER BY r.started_at ASC
+LIMIT $3
+FOR UPDATE SKIP LOCKED;
+
 -- name: CreateRunEvent :one
 -- 追加 run event；锁 run 行来保证同一个 run 内 sequence 单调递增。
 WITH locked_run AS (

@@ -386,3 +386,102 @@ func TestRuntimePull_ReclaimsStaleClaim(t *testing.T) {
 	})
 	assertHTTPStatus(t, err, 409)
 }
+
+func TestRuntimePull_TimeoutsUnclaimedRun(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:pull"})
+	markRuntimePullAvailable(t, svc, token)
+
+	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "nobody claims"}), "")
+	require.NoError(t, err)
+	runID := mustParseUUID(t, started.RunID)
+	_, err = pool.Exec(ctx,
+		`UPDATE runs SET started_at=$2 WHERE id=$1`,
+		runID,
+		time.Now().Add(-3*time.Minute),
+	)
+	require.NoError(t, err)
+
+	timedOut, err := svc.TimeoutStaleRuntimePullRuns(ctx, runtime.RuntimePullRunTimeoutConfig{
+		DispatchTimeout: time.Minute,
+		ResultTimeout:   10 * time.Minute,
+		BatchSize:       10,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), timedOut)
+
+	reloaded, err := svc.GetRun(ctx, userID, runID)
+	require.NoError(t, err)
+	assert.Equal(t, "timeout", reloaded.Status)
+	assert.Equal(t, "RUNTIME_PULL_NOT_CLAIMED", reloaded.ErrorCode)
+	assert.Contains(t, reloaded.ErrorMsg, "未被 Agent runtime 领取")
+
+	claimed, err := svc.ClaimRuntimePullRun(ctx, token)
+	require.NoError(t, err)
+	assert.Nil(t, claimed)
+
+	availability := readAgentAvailability(t, pool, agentID)
+	assert.Equal(t, "degraded", availability.Status)
+
+	events := readRunEvents(t, pool, runID)
+	var eventTypes []string
+	for _, event := range events {
+		eventTypes = append(eventTypes, event.EventType)
+	}
+	assert.Contains(t, eventTypes, "run.failed")
+}
+
+func TestRuntimePull_TimeoutsClaimedRunWithoutResult(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:pull"})
+	markRuntimePullAvailable(t, svc, token)
+
+	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "claimed but no result"}), "")
+	require.NoError(t, err)
+	runID := mustParseUUID(t, started.RunID)
+	claimed, err := svc.ClaimRuntimePullRun(ctx, token)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+
+	_, err = pool.Exec(ctx,
+		`UPDATE runs SET started_at=$2, claimed_at=$3 WHERE id=$1`,
+		runID,
+		time.Now().Add(-12*time.Minute),
+		time.Now().Add(-11*time.Minute),
+	)
+	require.NoError(t, err)
+
+	timedOut, err := svc.TimeoutStaleRuntimePullRuns(ctx, runtime.RuntimePullRunTimeoutConfig{
+		DispatchTimeout: time.Minute,
+		ResultTimeout:   10 * time.Minute,
+		BatchSize:       10,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), timedOut)
+
+	reloaded, err := svc.GetRun(ctx, userID, runID)
+	require.NoError(t, err)
+	assert.Equal(t, "timeout", reloaded.Status)
+	assert.Equal(t, "RUNTIME_PULL_RESULT_TIMEOUT", reloaded.ErrorCode)
+	assert.Contains(t, reloaded.ErrorMsg, "未在超时时间内回传结果")
+
+	_, err = svc.CompleteRuntimePullRun(ctx, token, runID, &runtime.RuntimePullResultRequest{
+		Status: "success",
+		Output: map[string]interface{}{"answer": "late"},
+	})
+	assertHTTPStatus(t, err, 409)
+}
