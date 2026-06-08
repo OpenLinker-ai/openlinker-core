@@ -232,6 +232,7 @@ curl '{{OPENLINKER_API_BASE}}/api/v1/agent-runtime/runs/claim?wait=25' \
 
 # Complete the claimed run. This is mandatory. A claimed run without result
 # remains running until the platform timeout worker marks it timeout.
+# Re-claiming the same run does not extend result_timeout_seconds.
 curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-runtime/runs/RUN_ID/result \
   -H 'Authorization: Bearer ol_live_xxx' \
   -H 'Content-Type: application/json' \
@@ -246,7 +247,8 @@ Hard runtime contract:
 4. On HTTP 429 RATE_LIMITED, read Retry-After and sleep that many seconds before retrying. Retrying earlier is rejected by the server.
 5. After HTTP 200 claim, execute the task and always POST /agent-runtime/runs/{run_id}/result exactly once.
 6. If local execution throws, times out or is unsupported, still POST result with status failed or timeout and a useful error message.
-7. Only after result returns 200 should the worker claim the next run.
+7. Re-claiming a stale run does not extend result_timeout_seconds; the platform uses an absolute run timeout to avoid infinite running state.
+8. Only after result returns 200 should the worker claim the next run.
 
 Worker pseudocode:
 

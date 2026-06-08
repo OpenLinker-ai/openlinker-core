@@ -70,6 +70,7 @@ func TestServePublishAgentSkillIncludesCanonicalRuntimePullOnboarding(t *testing
 	assertContains(t, body, `"result_required": true`)
 	assertContains(t, body, "Every claimed run must end with POST /agent-runtime/runs/{run_id}/result")
 	assertContains(t, body, "always POST /agent-runtime/runs/{run_id}/result")
+	assertContains(t, body, "Re-claiming a stale run does not extend result_timeout_seconds")
 	assertContains(t, body, "Keep the worker process alive under a supervisor")
 	assertContains(t, body, "OPENLINKER_API_BASE")
 }

@@ -255,6 +255,10 @@ func (q *Queries) GetRuntimePullRunState(ctx context.Context, id uuid.UUID) (Run
 }
 
 const listStaleRuntimePullRuns = `-- name: ListStaleRuntimePullRuns :many
+-- runtime_pull 任务如果长时间未被领取或已领取但未回传终态，需要自动收敛为 timeout，
+-- 避免用户侧永久看到 running。
+-- 已领取任务使用 started_at 的绝对超时窗口，避免坏客户端反复 claim 刷新 claimed_at
+-- 导致同一条 run 被无限续命。
 SELECT r.id, r.user_id, r.agent_id, r.cost_cents, r.started_at,
        CASE
            WHEN r.claimed_at IS NULL THEN 'RUNTIME_PULL_NOT_CLAIMED'
@@ -270,7 +274,7 @@ WHERE r.status = 'running'
   AND a.connection_mode = 'runtime_pull'
   AND (
     (r.claimed_at IS NULL AND r.started_at < $1)
-    OR (r.claimed_at IS NOT NULL AND r.claimed_at < $2)
+    OR (r.claimed_at IS NOT NULL AND r.started_at < $2)
   )
 ORDER BY r.started_at ASC
 LIMIT $3
