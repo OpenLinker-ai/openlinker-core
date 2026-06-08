@@ -73,9 +73,6 @@ func (l *runtimeEndpointLimiter) beginClaim(key string, wait time.Duration) (tim
 }
 
 func (l *runtimeEndpointLimiter) markEmptyClaim(key string, wait time.Duration) {
-	if wait > 0 {
-		return
-	}
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()

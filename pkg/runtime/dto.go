@@ -180,12 +180,15 @@ type AgentError struct {
 
 // RuntimePullRunResponse 是内网 / IPv4 / NAT Agent 主动拉任务时拿到的 payload。
 type RuntimePullRunResponse struct {
-	RunID    string                 `json:"run_id"`
-	AgentID  string                 `json:"agent_id"`
-	Input    map[string]interface{} `json:"input"`
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
-	Source   string                 `json:"source"`
-	A2A      *AgentA2AContext       `json:"a2a,omitempty"`
+	RunID          string                 `json:"run_id"`
+	AgentID        string                 `json:"agent_id"`
+	Input          map[string]interface{} `json:"input"`
+	Metadata       map[string]interface{} `json:"metadata,omitempty"`
+	Source         string                 `json:"source"`
+	ResultEndpoint string                 `json:"result_endpoint"`
+	ResultMethod   string                 `json:"result_method"`
+	ResultRequired bool                   `json:"result_required"`
+	A2A            *AgentA2AContext       `json:"a2a,omitempty"`
 }
 
 // RuntimePullResultRequest 是 runtime_pull Agent 执行完任务后回传的结果。

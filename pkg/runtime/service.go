@@ -899,15 +899,21 @@ func (s *Service) claimRuntimePullRunOnce(ctx context.Context, token db.AgentRun
 		_ = json.Unmarshal(run.Input, &input)
 	}
 	return &RuntimePullRunResponse{
-		RunID:   run.ID.String(),
-		AgentID: run.AgentID.String(),
-		Input:   input,
+		RunID:          run.ID.String(),
+		AgentID:        run.AgentID.String(),
+		Input:          input,
+		ResultEndpoint: "/api/v1/agent-runtime/runs/" + run.ID.String() + "/result",
+		ResultMethod:   "POST",
+		ResultRequired: true,
 		Metadata: map[string]interface{}{
 			"claim_ttl_seconds":                    int(runtimePullClaimTTL.Seconds()),
 			"recommended_next_claim_after_seconds": 0,
 			"recommended_heartbeat_after_seconds":  int(runtimePullHeartbeatInterval.Seconds()),
 			"max_long_poll_wait_seconds":           int(runtimePullMaxLongPollWait.Seconds()),
 			"empty_claim_retry_after_seconds":      int(runtimePullEmptyClaimRetryAfter.Seconds()),
+			"result_required":                      true,
+			"result_status_values":                 []string{"success", "failed", "timeout"},
+			"result_timeout_seconds":               int(defaultRuntimePullResultTimeout.Seconds()),
 		},
 		Source: run.Source,
 		A2A:    s.agentA2AContextForRun(ctx, run.ID),

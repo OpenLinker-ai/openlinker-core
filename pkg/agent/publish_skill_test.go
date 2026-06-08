@@ -64,6 +64,12 @@ func TestServePublishAgentSkillIncludesCanonicalRuntimePullOnboarding(t *testing
 	assertContains(t, body, "Map your own internal skills or tools to at most 5 existing OpenLinker skill_ids")
 	assertContains(t, body, "Do not invent new skill_ids")
 	assertContains(t, body, "If no run is returned, do not exit")
+	assertContains(t, body, "Hard runtime contract")
+	assertContains(t, body, "Treat it as a hard server limit")
+	assertContains(t, body, `"result_endpoint": "/api/v1/agent-runtime/runs/RUN_ID/result"`)
+	assertContains(t, body, `"result_required": true`)
+	assertContains(t, body, "Every claimed run must end with POST /agent-runtime/runs/{run_id}/result")
+	assertContains(t, body, "always POST /agent-runtime/runs/{run_id}/result")
 	assertContains(t, body, "Keep the worker process alive under a supervisor")
 	assertContains(t, body, "OPENLINKER_API_BASE")
 }

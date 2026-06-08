@@ -113,3 +113,17 @@ func TestAgentRuntimeRateLimiter_RejectsConcurrentLongPollClaim(t *testing.T) {
 		t.Fatal("first long-poll claim did not finish")
 	}
 }
+
+func TestAgentRuntimeRateLimiter_LongPollEmptyClaimStartsCooldown(t *testing.T) {
+	e, pool := setupAgentRuntimeHandlerTest(t)
+	_, token := insertRuntimePullAgentWithToken(t, pool)
+
+	first, _ := doRequest(t, e, http.MethodGet, "/api/v1/agent-runtime/runs/claim?wait=1", nil, runtimeAuthHeader(token))
+	require.Equal(t, http.StatusNoContent, first.Code)
+	assert.Equal(t, "30", first.Header().Get(echo.HeaderRetryAfter))
+
+	second, body := doRequest(t, e, http.MethodGet, "/api/v1/agent-runtime/runs/claim?wait=1", nil, runtimeAuthHeader(token))
+	assert.Equal(t, http.StatusTooManyRequests, second.Code)
+	assert.Equal(t, "30", second.Header().Get(echo.HeaderRetryAfter))
+	assert.Contains(t, string(body), "RATE_LIMITED")
+}
