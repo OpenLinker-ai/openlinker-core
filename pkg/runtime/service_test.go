@@ -28,7 +28,7 @@
 //
 // 错误：service 层返回 *httpx.HTTPError，
 //   - agent 不存在 -> 404
-//   - agent 已下架或 private -> 403；认证状态不阻塞公开调用
+//   - agent 已下架 -> 403；private 仅 creator owner 可自测调用；认证状态不阻塞公开调用
 //   - 当前免费阶段不要求余额
 //
 // 平台抽成：cfg.PlatformFeeRate=0.25 → 平台 25%, creator 75%, floor 取整。
@@ -794,6 +794,28 @@ func TestRun_CertificationPendingStillCallable(t *testing.T) {
 	resp, err := svc.Run(ctx, userID, makeRunReq(agentID, nil), "")
 	require.NoError(t, err)
 	assert.Equal(t, "success", resp.Status)
+}
+
+func TestRun_PrivateAgentCallableByOwnerOnly(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	creatorID := insertCreator(t, pool)
+	otherUserID := insertUserWithBalance(t, pool, 1000)
+	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"owner ok"}}`))
+	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
+	_, err := pool.Exec(ctx, `UPDATE agents SET visibility='private' WHERE id=$1`, agentID)
+	require.NoError(t, err)
+
+	_, err = svc.Run(ctx, otherUserID, makeRunReq(agentID, nil), "")
+	assertHTTPStatus(t, err, http.StatusForbidden)
+
+	resp, err := svc.Run(ctx, creatorID, makeRunReq(agentID, nil), "")
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "success", resp.Status)
+	assert.Equal(t, "owner ok", resp.Output["text"])
 }
 
 // ────────────────────────────────────────────────────────────
