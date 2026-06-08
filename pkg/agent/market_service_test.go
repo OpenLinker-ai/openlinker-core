@@ -57,6 +57,46 @@ func assertHTTPStatus(t *testing.T, err error, want int) {
 	assert.Equal(t, want, he.Status)
 }
 
+func TestAgentCardOpenLinkerExtSerializesReadinessAvailabilityAndRuntime(t *testing.T) {
+	ext := agent.AgentCardOpenLinkerExt{
+		AgentID:            uuid.NewString(),
+		Slug:               "native-a2a",
+		AvailabilityStatus: "healthy",
+		Readiness: agent.Readiness{
+			Listed:             true,
+			Discoverable:       true,
+			Callable:           true,
+			AvailabilityStatus: "healthy",
+		},
+		Availability: agent.Availability{
+			Status: "healthy",
+			Label:  "可用",
+			Hint:   "最近一次真实调用成功，当前可用性良好。",
+		},
+		Runtime: agent.AgentCardRuntimeExt{
+			Adapter:        "openlinker_a2a_proxy",
+			ConnectionMode: "runtime_pull",
+			OnlineSignal:   "runtime_pull_heartbeat_claim_result",
+			TaskLifecycle:  "openlinker_run_task_lifecycle",
+		},
+	}
+
+	raw, err := json.Marshal(ext)
+	require.NoError(t, err)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	require.Contains(t, decoded, "readiness")
+	require.Contains(t, decoded, "availability")
+	require.Contains(t, decoded, "runtime")
+
+	runtimeContract := decoded["runtime"].(map[string]any)
+	assert.Equal(t, "openlinker_a2a_proxy", runtimeContract["adapter"])
+	assert.Equal(t, "runtime_pull", runtimeContract["connection_mode"])
+	assert.Equal(t, "runtime_pull_heartbeat_claim_result", runtimeContract["online_signal"])
+	assert.Equal(t, "openlinker_run_task_lifecycle", runtimeContract["task_lifecycle"])
+}
+
 // ─────────────────────────────────────────────────────────
 // ListMarket
 // ─────────────────────────────────────────────────────────

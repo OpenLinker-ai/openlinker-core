@@ -168,24 +168,36 @@ type AgentCardAuth struct {
 }
 
 type AgentCardOpenLinkerExt struct {
-	AgentID                string   `json:"agent_id"`
-	Slug                   string   `json:"slug"`
-	CardVariant            string   `json:"card_variant"`
-	ExtendedCardEndpoint   string   `json:"extended_card_endpoint"`
-	ConnectionMode         string   `json:"connection_mode"`
-	MCPToolName            *string  `json:"mcp_tool_name,omitempty"`
-	AvailabilityStatus     string   `json:"availability_status"`
-	CertificationStatus    string   `json:"certification_status"`
-	VerifiedSkillCount     int32    `json:"verified_skill_count"`
-	LatestBenchmarkBatchID *string  `json:"latest_benchmark_batch_id,omitempty"`
-	CapabilityDeclared     bool     `json:"capability_declared"`
-	ExampleCount           int32    `json:"example_count"`
-	InvocationEndpoint     string   `json:"invocation_endpoint"`
-	StreamEndpoint         string   `json:"stream_endpoint"`
-	RunLookupEndpoint      string   `json:"run_lookup_endpoint"`
-	TaskLookupEndpoint     string   `json:"task_lookup_endpoint"`
-	TaskSubscribeEndpoint  string   `json:"task_subscribe_endpoint"`
-	SkillIDs               []string `json:"skill_ids"`
+	AgentID                string              `json:"agent_id"`
+	Slug                   string              `json:"slug"`
+	CardVariant            string              `json:"card_variant"`
+	ExtendedCardEndpoint   string              `json:"extended_card_endpoint"`
+	ConnectionMode         string              `json:"connection_mode"`
+	MCPToolName            *string             `json:"mcp_tool_name,omitempty"`
+	AvailabilityStatus     string              `json:"availability_status"`
+	Readiness              Readiness           `json:"readiness"`
+	Availability           Availability        `json:"availability"`
+	Runtime                AgentCardRuntimeExt `json:"runtime"`
+	CertificationStatus    string              `json:"certification_status"`
+	VerifiedSkillCount     int32               `json:"verified_skill_count"`
+	LatestBenchmarkBatchID *string             `json:"latest_benchmark_batch_id,omitempty"`
+	CapabilityDeclared     bool                `json:"capability_declared"`
+	ExampleCount           int32               `json:"example_count"`
+	InvocationEndpoint     string              `json:"invocation_endpoint"`
+	StreamEndpoint         string              `json:"stream_endpoint"`
+	RunLookupEndpoint      string              `json:"run_lookup_endpoint"`
+	TaskLookupEndpoint     string              `json:"task_lookup_endpoint"`
+	TaskSubscribeEndpoint  string              `json:"task_subscribe_endpoint"`
+	SkillIDs               []string            `json:"skill_ids"`
+}
+
+// AgentCardRuntimeExt explains how OpenLinker maps the native A2A surface to
+// the concrete runtime adapter behind this Agent.
+type AgentCardRuntimeExt struct {
+	Adapter        string `json:"adapter"`
+	ConnectionMode string `json:"connection_mode"`
+	OnlineSignal   string `json:"online_signal"`
+	TaskLifecycle  string `json:"task_lifecycle"`
 }
 
 type AgentCardSignature struct {

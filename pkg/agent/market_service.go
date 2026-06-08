@@ -335,6 +335,9 @@ func (s *MarketService) getAgentCardBySlug(ctx context.Context, slug string, ext
 			ConnectionMode:         detail.ConnectionMode,
 			MCPToolName:            detail.MCPToolName,
 			AvailabilityStatus:     detail.Availability.Status,
+			Readiness:              detail.Readiness,
+			Availability:           detail.Availability,
+			Runtime:                agentCardRuntimeExt(detail.ConnectionMode),
 			CertificationStatus:    detail.CertificationStatus,
 			VerifiedSkillCount:     detail.VerifiedSkillCount,
 			LatestBenchmarkBatchID: detail.LatestBenchmarkID,
@@ -354,6 +357,22 @@ func (s *MarketService) getAgentCardBySlug(ctx context.Context, slug string, ext
 	}
 	signAgentCard(card)
 	return card, nil
+}
+
+func agentCardRuntimeExt(connectionMode string) AgentCardRuntimeExt {
+	onlineSignal := "direct_endpoint_probe_and_run_result"
+	switch connectionMode {
+	case runtimePullConnectionMode:
+		onlineSignal = "runtime_pull_heartbeat_claim_result"
+	case "mcp_server":
+		onlineSignal = "mcp_tool_call_and_run_result"
+	}
+	return AgentCardRuntimeExt{
+		Adapter:        "openlinker_a2a_proxy",
+		ConnectionMode: connectionMode,
+		OnlineSignal:   onlineSignal,
+		TaskLifecycle:  "openlinker_run_task_lifecycle",
+	}
 }
 
 func signAgentCard(card *AgentCardResponse) {
