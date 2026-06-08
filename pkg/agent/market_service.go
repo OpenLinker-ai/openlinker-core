@@ -144,6 +144,40 @@ func (s *MarketService) GetBySlug(ctx context.Context, slug string) (*AgentDetai
 		return nil, httpx.Internal("查询 Agent 详情失败")
 	}
 
+	return s.detailResponseFromSlugRow(ctx, db.GetAgentBySlugRow{
+		Agent:       r.Agent,
+		CreatorName: r.CreatorName,
+	})
+}
+
+// GetBySlugForOwner 按 slug 查询当前创作者自己的 Agent 详情。
+//
+// 仅用于创作者自测入口：private 也允许 owner 访问；非 owner / disabled 仍返回 404。
+// endpoint_auth_header 永不暴露给前端。
+func (s *MarketService) GetBySlugForOwner(ctx context.Context, slug string, creatorID uuid.UUID) (*AgentDetailResponse, error) {
+	if slug == "" {
+		return nil, httpx.NotFound("Agent 不存在")
+	}
+
+	r, err := s.queries.GetAgentBySlugForOwner(ctx, db.GetAgentBySlugForOwnerParams{
+		Slug:      slug,
+		CreatorID: creatorID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("Agent 不存在")
+		}
+		log.Error().Err(err).Str("slug", slug).Str("creator_id", creatorID.String()).Msg("agent.MarketService.GetBySlugForOwner")
+		return nil, httpx.Internal("查询 Agent 详情失败")
+	}
+
+	return s.detailResponseFromSlugRow(ctx, db.GetAgentBySlugRow{
+		Agent:       r.Agent,
+		CreatorName: r.CreatorName,
+	})
+}
+
+func (s *MarketService) detailResponseFromSlugRow(ctx context.Context, r db.GetAgentBySlugRow) (*AgentDetailResponse, error) {
 	resp := &AgentDetailResponse{
 		ID:                r.ID.String(),
 		Slug:              r.Slug,
@@ -200,18 +234,18 @@ func (s *MarketService) GetBySlug(ctx context.Context, slug string) (*AgentDetai
 	}
 
 	resp.Examples = []ExampleResponse{}
-	cap, err := s.queries.GetAgentCapabilityBySlug(ctx, slug)
+	cap, err := s.queries.GetAgentCapabilityBySlug(ctx, r.Slug)
 	if err == nil {
 		c := toCapabilityResponse(&cap)
 		resp.Capability = &c
 	} else if !errors.Is(err, pgx.ErrNoRows) {
-		log.Error().Err(err).Str("slug", slug).Msg("agent.MarketService.GetBySlug: GetAgentCapabilityBySlug")
+		log.Error().Err(err).Str("slug", r.Slug).Msg("agent.MarketService.GetBySlug: GetAgentCapabilityBySlug")
 		return nil, httpx.Internal("查询 Agent 能力声明失败")
 	}
 
-	examples, err := s.queries.ListAgentExamplesBySlug(ctx, slug)
+	examples, err := s.queries.ListAgentExamplesBySlug(ctx, r.Slug)
 	if err != nil {
-		log.Error().Err(err).Str("slug", slug).Msg("agent.MarketService.GetBySlug: ListAgentExamplesBySlug")
+		log.Error().Err(err).Str("slug", r.Slug).Msg("agent.MarketService.GetBySlug: ListAgentExamplesBySlug")
 		return nil, httpx.Internal("查询 Agent 示例失败")
 	}
 	for i := range examples {

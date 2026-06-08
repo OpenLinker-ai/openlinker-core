@@ -543,6 +543,30 @@ func TestGetBySlug_NotFound(t *testing.T) {
 	assertHTTPStatus(t, err, http.StatusNotFound)
 }
 
+func TestGetBySlugForOwner_ReturnsPrivateOwnedAgent(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := agent.NewMarketService(pool)
+	creatorID, _ := setupTestData(t, pool)
+	otherCreatorID := insertCreatorUser(t, pool, "Other Creator")
+	ctx := context.Background()
+
+	agentID := createApprovedAgent(t, pool, creatorID, "owner-private")
+	_, err := pool.Exec(ctx, `UPDATE agents SET visibility='private' WHERE id=$1`, agentID)
+	require.NoError(t, err)
+
+	_, err = svc.GetBySlug(ctx, "owner-private")
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	detail, err := svc.GetBySlugForOwner(ctx, "owner-private", creatorID)
+	require.NoError(t, err)
+	require.NotNil(t, detail)
+	assert.Equal(t, "owner-private", detail.Slug)
+	assert.Equal(t, "private", detail.Visibility)
+
+	_, err = svc.GetBySlugForOwner(ctx, "owner-private", otherCreatorID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+}
+
 func TestGetBySlug_DisabledNotReturned(t *testing.T) {
 	// Phase 2 缺口 2 后：pending/rejected 仍能按 slug 访问（与市场列表一致），
 	// 详情页拒绝的是 disabled (lifecycle) 与 private (visibility)。unlisted 凭直链可访问。

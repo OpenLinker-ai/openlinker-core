@@ -9,6 +9,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/google/uuid"
 )
 
 const listPublicAgents = `-- name: ListPublicAgents :many
@@ -220,6 +222,60 @@ type GetAgentBySlugRow struct {
 func (q *Queries) GetAgentBySlug(ctx context.Context, slug string) (GetAgentBySlugRow, error) {
 	row := q.db.QueryRow(ctx, getAgentBySlug, slug)
 	var r GetAgentBySlugRow
+	err := row.Scan(
+		&r.ID,
+		&r.CreatorID,
+		&r.Slug,
+		&r.Name,
+		&r.Description,
+		&r.EndpointURL,
+		&r.EndpointAuthHeader,
+		&r.PricePerCallCents,
+		&r.Tags,
+		&r.LifecycleStatus,
+		&r.Visibility,
+		&r.CertificationStatus,
+		&r.RejectionReason,
+		&r.CertifiedAt,
+		&r.TotalCalls,
+		&r.TotalRevenueCents,
+		&r.WebhookURL,
+		&r.ConnectionMode,
+		&r.MCPToolName,
+		&r.CreatedAt,
+		&r.UpdatedAt,
+		&r.CreatorName,
+	)
+	return r, err
+}
+
+const getAgentBySlugForOwner = `-- name: GetAgentBySlugForOwner :one
+SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
+       a.endpoint_auth_header, a.price_per_call_cents, a.tags,
+       a.lifecycle_status, a.visibility, a.certification_status,
+       a.rejection_reason, a.certified_at, a.total_calls, a.total_revenue_cents,
+       a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
+       u.display_name AS creator_name
+FROM agents a
+JOIN users u ON u.id = a.creator_id
+WHERE a.slug = $1
+  AND a.creator_id = $2
+  AND a.lifecycle_status = 'active'`
+
+type GetAgentBySlugForOwnerParams struct {
+	Slug      string    `db:"slug" json:"slug"`
+	CreatorID uuid.UUID `db:"creator_id" json:"creator_id"`
+}
+
+type GetAgentBySlugForOwnerRow struct {
+	Agent
+	CreatorName string `db:"creator_name" json:"creator_name"`
+}
+
+// GetAgentBySlugForOwner 创作者自测详情。owner 可按 slug 访问自己的 private/unlisted/public active Agent。
+func (q *Queries) GetAgentBySlugForOwner(ctx context.Context, arg GetAgentBySlugForOwnerParams) (GetAgentBySlugForOwnerRow, error) {
+	row := q.db.QueryRow(ctx, getAgentBySlugForOwner, arg.Slug, arg.CreatorID)
+	var r GetAgentBySlugForOwnerRow
 	err := row.Scan(
 		&r.ID,
 		&r.CreatorID,

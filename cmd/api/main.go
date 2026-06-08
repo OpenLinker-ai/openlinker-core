@@ -132,6 +132,7 @@ func main() {
 	agentMarketSvc := agent.NewMarketService(pool)
 	agentMarketHandler := agent.NewMarketHandler(agentMarketSvc)
 	agentMarketHandler.Register(api)
+	agentMarketHandler.RegisterProtected(api, jwtMiddleware)
 
 	agentSvc := agent.NewService(pool, cfg)
 	agentHandler := agent.NewHandler(agentSvc, cfg)

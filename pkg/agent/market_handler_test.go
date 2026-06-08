@@ -40,6 +40,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/kinzhi/openlinker-core/pkg/agent"
+	"github.com/kinzhi/openlinker-core/pkg/auth"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
@@ -61,6 +62,31 @@ func setupTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
 
 	api := e.Group("/api/v1")
 	h.Register(api)
+
+	srv := httptest.NewServer(e)
+	t.Cleanup(func() { srv.Close() })
+	return srv, pool
+}
+
+func setupProtectedMarketTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
+	t.Helper()
+	pool := setupTestDB(t)
+
+	svc := agent.NewMarketService(pool)
+	h := agent.NewMarketHandler(svc)
+
+	e := echo.New()
+	e.HTTPErrorHandler = func(err error, c echo.Context) {
+		if c.Response().Committed {
+			return
+		}
+		_ = httpx.SendError(c, err)
+	}
+
+	api := e.Group("/api/v1")
+	jwtMW := auth.JWTMiddleware(testHandlerSecret)
+	h.Register(api)
+	h.RegisterProtected(api, jwtMW)
 
 	srv := httptest.NewServer(e)
 	t.Cleanup(func() { srv.Close() })
@@ -233,6 +259,38 @@ func TestGetBySlug_HandlerNotFound(t *testing.T) {
 
 	resp, raw := getJSON(t, srv.URL, "/api/v1/agents/no-such-slug-xx", nil)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "body=%s", string(raw))
+}
+
+func TestGetBySlugForOwner_HandlerReturnsPrivateOwnedAgent(t *testing.T) {
+	srv, pool := setupProtectedMarketTestServer(t)
+	creatorID, _ := setupTestData(t, pool)
+	otherCreatorID := insertCreatorUser(t, pool, "Other Creator")
+	ctx := context.Background()
+
+	agentID := createApprovedAgent(t, pool, creatorID, "handler-owner-private")
+	_, err := pool.Exec(ctx, `UPDATE agents SET visibility='private' WHERE id=$1`, agentID)
+	require.NoError(t, err)
+
+	publicResp, publicRaw := getJSON(t, srv.URL, "/api/v1/agents/handler-owner-private", nil)
+	assert.Equal(t, http.StatusNotFound, publicResp.StatusCode, "body=%s", string(publicRaw))
+
+	ownerResp, ownerRaw := getJSON(t, srv.URL,
+		"/api/v1/creator/agents/by-slug/handler-owner-private",
+		map[string]string{"Authorization": signJWT(t, creatorID)},
+	)
+	assert.Equal(t, http.StatusOK, ownerResp.StatusCode, "body=%s", string(ownerRaw))
+	assert.NotContains(t, string(ownerRaw), "endpoint_auth_header")
+
+	var detail map[string]any
+	require.NoError(t, json.Unmarshal(ownerRaw, &detail), "raw=%s", string(ownerRaw))
+	assert.Equal(t, "handler-owner-private", detail["slug"])
+	assert.Equal(t, "private", detail["visibility"])
+
+	otherResp, otherRaw := getJSON(t, srv.URL,
+		"/api/v1/creator/agents/by-slug/handler-owner-private",
+		map[string]string{"Authorization": signJWT(t, otherCreatorID)},
+	)
+	assert.Equal(t, http.StatusNotFound, otherResp.StatusCode, "body=%s", string(otherRaw))
 }
 
 func TestGetAgentCard_HandlerHappyPath(t *testing.T) {

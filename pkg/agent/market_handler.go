@@ -10,7 +10,7 @@ import (
 
 // MarketHandler 市场（用户侧只读）HTTP 入口。
 //
-// 所有端点公开，无需 JWT。
+// 公开市场端点无需 JWT；创作者自测端点通过 RegisterProtected 另挂 JWT。
 type MarketHandler struct {
 	svc *MarketService
 }
@@ -34,6 +34,14 @@ func (h *MarketHandler) Register(api *echo.Group) {
 	api.GET("/agents/:slug/agent-card.json", h.GetAgentCard)
 	api.GET("/agents/:slug/agent-card.extended.json", h.GetExtendedAgentCard)
 	api.GET("/agents/:slug", h.GetBySlug)
+}
+
+// RegisterProtected 注册创作者侧只读路由。
+//
+//	GET /creator/agents/by-slug/:slug  当前创作者自测详情（允许自己的 private Agent）
+func (h *MarketHandler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
+	creator := api.Group("/creator", jwtMiddleware)
+	creator.GET("/agents/by-slug/:slug", h.GetBySlugForOwner)
 }
 
 // ListMarket 市场列表。
@@ -85,6 +93,22 @@ func parseBoolQuery(raw string) bool {
 func (h *MarketHandler) GetBySlug(c echo.Context) error {
 	slug := strings.TrimSpace(c.Param("slug"))
 	resp, err := h.svc.GetBySlug(c.Request().Context(), slug)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// GetBySlugForOwner Agent 创作者自测详情。
+//
+// 非 owner / 不存在 / 已下架统一 404；private 仅 owner 可见。
+func (h *MarketHandler) GetBySlugForOwner(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	slug := strings.TrimSpace(c.Param("slug"))
+	resp, err := h.svc.GetBySlugForOwner(c.Request().Context(), slug, uid)
 	if err != nil {
 		return err
 	}
