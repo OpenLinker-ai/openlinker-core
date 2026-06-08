@@ -106,6 +106,36 @@ func insertParentRun(t *testing.T, pool *pgxpool.Pool, userID, callerAgentID uui
 	return id
 }
 
+func makeRuntimePullAgent(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		`UPDATE agents
+		    SET connection_mode='runtime_pull',
+		        endpoint_url='openlinker-runtime-pull://' || slug
+		  WHERE id=$1`,
+		agentID)
+	require.NoError(t, err)
+}
+
+func TestCreateRuntimeToken_RuntimePullAgentCanClaimPendingRun(t *testing.T) {
+	pool, svc, runtimeSvc := setupService(t)
+	ownerID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, ownerID, "https://example.com/runtime")
+	makeRuntimePullAgent(t, pool, agentID)
+	runID := insertParentRun(t, pool, ownerID, agentID)
+
+	token, err := svc.CreateRuntimeToken(context.Background(), ownerID, agentID, &a2a.CreateRuntimeTokenRequest{Name: "runtime-worker"})
+	require.NoError(t, err)
+	require.NotEmpty(t, token.PlaintextToken)
+	assert.Contains(t, token.Scopes, "agent:call")
+	assert.Contains(t, token.Scopes, "agent:pull")
+
+	claimed, err := runtimeSvc.ClaimRuntimePullRun(context.Background(), token.PlaintextToken)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	assert.Equal(t, runID.String(), claimed.RunID)
+}
+
 func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	pool, svc, runtimeSvc := setupService(t)
 	callerOwner := insertCreator(t, pool)

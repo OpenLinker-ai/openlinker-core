@@ -37,7 +37,8 @@ func NewService(pool *pgxpool.Pool, runtimeSvc *runtime.Service) *Service {
 }
 
 func (s *Service) CreateRuntimeToken(ctx context.Context, userID, agentID uuid.UUID, req *CreateRuntimeTokenRequest) (*RuntimeTokenResponse, error) {
-	if _, err := s.ownerAgent(ctx, userID, agentID); err != nil {
+	agent, err := s.ownerAgent(ctx, userID, agentID)
+	if err != nil {
 		return nil, err
 	}
 	count, err := s.queries.CountActiveAgentRuntimeTokens(ctx, agentID)
@@ -63,7 +64,7 @@ func (s *Service) CreateRuntimeToken(ctx context.Context, userID, agentID uuid.U
 		Name:            strings.TrimSpace(req.Name),
 		Prefix:          prefix,
 		TokenHash:       string(hash),
-		Scopes:          []string{"agent:call"},
+		Scopes:          runtimeTokenScopesForAgent(agent),
 	})
 	if err != nil {
 		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("a2a.CreateRuntimeToken: insert")
@@ -72,6 +73,14 @@ func (s *Service) CreateRuntimeToken(ctx context.Context, userID, agentID uuid.U
 	resp := tokenResponse(token)
 	resp.PlaintextToken = plaintext
 	return &resp, nil
+}
+
+func runtimeTokenScopesForAgent(agent db.Agent) []string {
+	scopes := []string{"agent:call"}
+	if agent.ConnectionMode == "runtime_pull" {
+		scopes = append(scopes, "agent:pull")
+	}
+	return scopes
 }
 
 func (s *Service) ListRuntimeTokens(ctx context.Context, userID, agentID uuid.UUID) ([]RuntimeTokenResponse, error) {
