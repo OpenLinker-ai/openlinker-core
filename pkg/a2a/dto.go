@@ -29,6 +29,56 @@ type CallPolicyResponse struct {
 	UpdatedAt  string `json:"updated_at,omitempty"`
 }
 
+type RuntimeWorkbenchResponse struct {
+	Agent       RuntimeWorkbenchAgent        `json:"agent"`
+	Runtime     RuntimeWorkbenchRuntime      `json:"runtime"`
+	Tokens      []RuntimeTokenResponse       `json:"tokens"`
+	RecentRuns  []RuntimeWorkbenchRun        `json:"recent_runs"`
+	Diagnostics []RuntimeWorkbenchDiagnostic `json:"diagnostics"`
+}
+
+type RuntimeWorkbenchAgent struct {
+	ID                  string `json:"id"`
+	Slug                string `json:"slug"`
+	Name                string `json:"name"`
+	ConnectionMode      string `json:"connection_mode"`
+	LifecycleStatus     string `json:"lifecycle_status"`
+	Visibility          string `json:"visibility"`
+	CertificationStatus string `json:"certification_status"`
+	ReadinessCallable   bool   `json:"readiness_callable"`
+	AvailabilityStatus  string `json:"availability_status"`
+}
+
+type RuntimeWorkbenchRuntime struct {
+	ActiveTokenCount                 int32   `json:"active_token_count"`
+	PendingRunCount                  int32   `json:"pending_run_count"`
+	ClaimNow                         bool    `json:"claim_now"`
+	LastRuntimeActivityAt            *string `json:"last_runtime_activity_at,omitempty"`
+	LastClaimedAt                    *string `json:"last_claimed_at,omitempty"`
+	LastResultAt                     *string `json:"last_result_at,omitempty"`
+	RecommendedHeartbeatAfterSeconds int32   `json:"recommended_heartbeat_after_seconds"`
+	MaxClaimWaitSeconds              int32   `json:"max_claim_wait_seconds"`
+}
+
+type RuntimeWorkbenchRun struct {
+	RunID        string  `json:"run_id"`
+	Status       string  `json:"status"`
+	Source       string  `json:"source"`
+	StartedAt    string  `json:"started_at"`
+	ClaimedAt    *string `json:"claimed_at,omitempty"`
+	FinishedAt   *string `json:"finished_at,omitempty"`
+	ErrorCode    *string `json:"error_code,omitempty"`
+	ErrorMessage *string `json:"error_message,omitempty"`
+	DetailURL    string  `json:"detail_url"`
+}
+
+type RuntimeWorkbenchDiagnostic struct {
+	Code       string `json:"code"`
+	Severity   string `json:"severity"`
+	Message    string `json:"message"`
+	NextAction string `json:"next_action"`
+}
+
 // CallAgentRequest is sent by Agent A using its runtime token.
 type CallAgentRequest struct {
 	ParentRunID   string                 `json:"parent_run_id,omitempty" validate:"omitempty,uuid"`

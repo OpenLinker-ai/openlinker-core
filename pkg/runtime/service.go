@@ -100,14 +100,21 @@ type Service struct {
 }
 
 type runInvocation struct {
-	runID      uuid.UUID
-	userID     uuid.UUID
-	agent      db.Agent
-	cost       int32
-	revenue    int32
-	req        *RunRequest
-	settle     bool
-	delegation *Delegation
+	runID                uuid.UUID
+	userID               uuid.UUID
+	agent                db.Agent
+	cost                 int32
+	revenue              int32
+	req                  *RunRequest
+	settle               bool
+	delegation           *Delegation
+	runtimePullAvailable bool
+}
+
+type createRunOptions struct {
+	delegation                   *Delegation
+	settle                       bool
+	allowOfflineRuntimePullQueue bool
 }
 
 // Delegation describes an Agent-mediated child run executed within an active parent run.
@@ -239,7 +246,9 @@ func agentA2AContextMap(ctx *AgentA2AContext) map[string]interface{} {
 // source 标记调用来源：'web' / 'mcp' / 'api'，写入 runs.source 以便 /usage 分类显示。
 // 传空字符串时默认 'web'，便于旧调用方零修改。
 func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
-	invocation, resp, err := s.createRunningRun(ctx, userID, req, source, nil, s.walletCharger != nil)
+	invocation, resp, err := s.createRunningRun(ctx, userID, req, source, createRunOptions{
+		settle: s.walletCharger != nil,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -255,15 +264,29 @@ func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, so
 
 // StartRun 创建 running run 并在后台执行；调用方可用 GetRun/ListRunEvents/SSE 查询进度。
 func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
-	invocation, resp, err := s.createRunningRun(ctx, userID, req, source, nil, s.walletCharger != nil)
+	invocation, resp, err := s.createRunningRun(ctx, userID, req, source, createRunOptions{
+		settle:                       s.walletCharger != nil,
+		allowOfflineRuntimePullQueue: true,
+	})
 	if err != nil {
 		return nil, err
 	}
 	if s.isRuntimePull(invocation) {
-		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
-			"connection_mode": connectionModeRuntimePull,
-			"agent_id":        invocation.agent.ID.String(),
-		})
+		if invocation.runtimePullAvailable {
+			s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
+				"connection_mode": connectionModeRuntimePull,
+				"agent_id":        invocation.agent.ID.String(),
+			})
+		} else {
+			resp.NextAction = runtimePullWaitingNextAction(resp.RunID, invocation.agent.ID)
+			s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.waiting_runtime", map[string]interface{}{
+				"connection_mode":    connectionModeRuntimePull,
+				"agent_id":           invocation.agent.ID.String(),
+				"reason":             "runtime_offline",
+				"recommended_action": "start_worker",
+				"next_action":        resp.NextAction,
+			})
+		}
 		return resp, nil
 	}
 	s.executeRunAsync(invocation)
@@ -273,7 +296,10 @@ func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunReques
 // RunDelegated lets an authenticated Agent call another Agent through the platform.
 // Delegated runs are free until explicit user-approved billing exists.
 func (s *Service) RunDelegated(ctx context.Context, userID uuid.UUID, delegation Delegation, req *RunRequest) (*RunResponse, error) {
-	invocation, resp, err := s.createRunningRun(ctx, userID, req, "api", &delegation, false)
+	invocation, resp, err := s.createRunningRun(ctx, userID, req, "api", createRunOptions{
+		delegation: &delegation,
+		settle:     false,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -296,8 +322,7 @@ func (s *Service) createRunningRun(
 	userID uuid.UUID,
 	req *RunRequest,
 	source string,
-	delegation *Delegation,
-	settle bool,
+	opts createRunOptions,
 ) (*runInvocation, *RunResponse, error) {
 	if source == "" {
 		source = "web"
@@ -328,6 +353,7 @@ func (s *Service) createRunningRun(
 	if agent.ConnectionMode == "" {
 		agent.ConnectionMode = connectionModeDirectHTTP
 	}
+	runtimePullAvailable := true
 	if agent.ConnectionMode != connectionModeRuntimePull {
 		if err := endpointurl.Validate(agent.EndpointURL, s.cfg.AllowLocalHTTPEndpoints); err != nil {
 			log.Warn().Err(err).Str("agent_id", agent.ID.String()).Msg("runtime.Run: endpoint policy rejected")
@@ -339,9 +365,10 @@ func (s *Service) createRunningRun(
 			log.Error().Err(checkErr).Str("agent_id", agent.ID.String()).Msg("runtime.Run: HasRecentRuntimePullToken")
 			return nil, nil, httpx.Internal("检查 Agent runtime 状态失败")
 		}
-		if !available {
+		if !available && !opts.allowOfflineRuntimePullQueue {
 			return nil, nil, httpx.Conflict("Agent runtime 当前离线，请稍后再试")
 		}
+		runtimePullAvailable = available
 	}
 	if agent.ConnectionMode == connectionModeMCPServer && (agent.MCPToolName == nil || strings.TrimSpace(*agent.MCPToolName) == "") {
 		log.Warn().Str("agent_id", agent.ID.String()).Msg("runtime.Run: missing mcp tool")
@@ -362,7 +389,7 @@ func (s *Service) createRunningRun(
 		fee = cost
 	}
 	revenue := cost - fee
-	if !settle {
+	if !opts.settle {
 		cost = 0
 		fee = 0
 		revenue = 0
@@ -379,7 +406,7 @@ func (s *Service) createRunningRun(
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
-		if settle && s.walletCharger != nil {
+		if opts.settle && s.walletCharger != nil {
 			ok, chargeErr := s.walletCharger.Charge(ctx, tx, userID, int64(cost))
 			if chargeErr != nil {
 				return chargeErr
@@ -403,21 +430,21 @@ func (s *Service) createRunningRun(
 		}
 		runID = run.ID
 		var parentRunID *uuid.UUID
-		if delegation != nil {
-			parentRunID = &delegation.ParentRunID
+		if opts.delegation != nil {
+			parentRunID = &opts.delegation.ParentRunID
 			if _, createErr = q.CreateRunDelegation(ctx, db.CreateRunDelegationParams{
 				ChildRunID:    runID,
-				ParentRunID:   delegation.ParentRunID,
-				CallerAgentID: delegation.CallerAgentID,
-				Reason:        delegation.Reason,
+				ParentRunID:   opts.delegation.ParentRunID,
+				CallerAgentID: opts.delegation.CallerAgentID,
+				Reason:        opts.delegation.Reason,
 			}); createErr != nil {
 				return createErr
 			}
-			if eventErr := createRunEvent(ctx, q, delegation.ParentRunID, nil, "run.child.created", map[string]interface{}{
+			if eventErr := createRunEvent(ctx, q, opts.delegation.ParentRunID, nil, "run.child.created", map[string]interface{}{
 				"child_run_id":    runID.String(),
-				"caller_agent_id": delegation.CallerAgentID.String(),
+				"caller_agent_id": opts.delegation.CallerAgentID.String(),
 				"target_agent_id": agentID.String(),
-				"reason":          delegation.Reason,
+				"reason":          opts.delegation.Reason,
 				"billing_mode":    "free_delegation",
 			}); eventErr != nil {
 				return eventErr
@@ -429,8 +456,8 @@ func (s *Service) createRunningRun(
 			"status":     "running",
 			"cost_cents": cost,
 		}
-		if delegation != nil {
-			payload["caller_agent_id"] = delegation.CallerAgentID.String()
+		if opts.delegation != nil {
+			payload["caller_agent_id"] = opts.delegation.CallerAgentID.String()
 			payload["billing_mode"] = "free_delegation"
 		}
 		if eventErr := createRunEvent(ctx, q, runID, parentRunID, "run.created", payload); eventErr != nil {
@@ -467,14 +494,15 @@ func (s *Service) createRunningRun(
 	}
 
 	invocation := &runInvocation{
-		runID:      runID,
-		userID:     userID,
-		agent:      agent,
-		cost:       cost,
-		revenue:    revenue,
-		req:        req,
-		settle:     settle,
-		delegation: delegation,
+		runID:                runID,
+		userID:               userID,
+		agent:                agent,
+		cost:                 cost,
+		revenue:              revenue,
+		req:                  req,
+		settle:               opts.settle,
+		delegation:           opts.delegation,
+		runtimePullAvailable: runtimePullAvailable,
 	}
 	resp := &RunResponse{
 		RunID:     runID.String(),
@@ -482,9 +510,9 @@ func (s *Service) createRunningRun(
 		CostCents: cost,
 		Source:    source,
 	}
-	if delegation != nil {
-		resp.ParentRunID = delegation.ParentRunID.String()
-		resp.CallerAgentID = delegation.CallerAgentID.String()
+	if opts.delegation != nil {
+		resp.ParentRunID = opts.delegation.ParentRunID.String()
+		resp.CallerAgentID = opts.delegation.CallerAgentID.String()
 		resp.BillingMode = "free_delegation"
 	}
 	s.attachRunRequirementEvidence(ctx, runID, resp)
@@ -588,12 +616,14 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 	}
 	resp := runToResponse(&r)
 	s.attachRunRequirementEvidence(ctx, runID, resp)
+	s.attachRunEvidenceSummary(ctx, runID, resp)
 	delegation, err := s.queries.GetRunDelegationByChild(ctx, runID)
 	if err == nil {
 		resp.ParentRunID = delegation.ParentRunID.String()
 		resp.CallerAgentID = delegation.CallerAgentID.String()
 		resp.BillingMode = "free_delegation"
 		decorateNextAction(resp)
+		s.attachRunEvidenceSummary(ctx, runID, resp)
 		return resp, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -601,6 +631,41 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 		return nil, httpx.Internal("查询调用关系失败")
 	}
 	return resp, nil
+}
+
+func (s *Service) attachRunEvidenceSummary(ctx context.Context, runID uuid.UUID, resp *RunResponse) {
+	if resp == nil {
+		return
+	}
+	summary := &RunEvidenceSummary{
+		Status:         resp.Status,
+		CoverageStatus: "none",
+		PublicSafe:     false,
+		EvidenceURL:    "/run/" + runID.String(),
+	}
+	if resp.RequirementEvidence != nil {
+		summary.CoverageStatus = resp.RequirementEvidence.CoverageStatus
+		summary.MatchedSkillCount = len(resp.RequirementEvidence.MatchedSkillIDs)
+		summary.MissingSkillCount = len(resp.RequirementEvidence.MissingSkillIDs) + len(resp.RequirementEvidence.MissingMCPTools)
+		summary.UsedMCPToolCount = len(resp.RequirementEvidence.UsedMCPTools)
+	}
+	if artifacts, err := s.queries.ListRunArtifactsByRun(ctx, runID); err == nil {
+		summary.ArtifactCount = len(artifacts)
+		for _, artifact := range artifacts {
+			if artifact.Visibility == "public_example" {
+				summary.PublicSafe = true
+				break
+			}
+		}
+	} else {
+		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.attachRunEvidenceSummary: ListRunArtifactsByRun")
+	}
+	if messages, err := s.queries.ListRunMessagesByRun(ctx, runID); err == nil {
+		summary.MessageCount = len(messages)
+	} else {
+		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.attachRunEvidenceSummary: ListRunMessagesByRun")
+	}
+	resp.EvidenceSummary = summary
 }
 
 // CancelRun marks a running run as canceled. Only the run owner can cancel it.
@@ -2382,6 +2447,22 @@ func decorateNextAction(resp *RunResponse) {
 		}
 	default:
 		resp.NextAction = nil
+	}
+}
+
+func runtimePullWaitingNextAction(runID string, agentID uuid.UUID) *RunNextAction {
+	return &RunNextAction{
+		Type:          "start_runtime_worker",
+		Label:         "启动 Agent runtime",
+		Hint:          "运行已进入 runtime_pull 队列，但当前没有在线 worker。请启动本地 worker 并保持 heartbeat/claim 循环。",
+		Href:          "/hub/agents/" + agentID.String() + "/onboarding",
+		ResourceType:  "run",
+		ResourceID:    runID,
+		Source:        "runtime_pull",
+		RequiresHuman: true,
+		AdditionalProps: map[string]interface{}{
+			"agent_id": agentID.String(),
+		},
 	}
 }
 

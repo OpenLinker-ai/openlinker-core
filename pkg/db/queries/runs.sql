@@ -184,7 +184,7 @@ LIMIT $2 OFFSET $3;
 SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
        r.error_code, r.error_message, r.cost_cents, r.platform_fee_cents,
        r.creator_revenue_cents, r.duration_ms, r.started_at, r.finished_at,
-       r.source,
+       r.source, r.claimed_by_runtime_token_id, r.claimed_at,
        a.slug AS agent_slug, a.name AS agent_name
 FROM runs r
 JOIN agents a ON a.id = r.agent_id

@@ -11,9 +11,10 @@ import (
 
 // RecommendRequest 推荐请求体。Query 长度由 schema CHECK 与 validator 双重保障。
 type RecommendRequest struct {
-	Query    string   `json:"query" validate:"required,min=4,max=500"`
-	SkillIDs []string `json:"skill_ids,omitempty" validate:"omitempty,max=5,dive,min=1,max=80"`
-	MCPTools []string `json:"mcp_tools,omitempty" validate:"omitempty,max=5,dive,min=1,max=80"`
+	Query      string   `json:"query" validate:"required,min=4,max=500"`
+	TemplateID string   `json:"template_id,omitempty" validate:"omitempty,min=2,max=80"`
+	SkillIDs   []string `json:"skill_ids,omitempty" validate:"omitempty,max=5,dive,min=1,max=80"`
+	MCPTools   []string `json:"mcp_tools,omitempty" validate:"omitempty,max=5,dive,min=1,max=80"`
 }
 
 // AgentSummary 推荐返回的 Agent 简要信息（不含 endpoint / 鉴权头）。
@@ -41,6 +42,23 @@ type SkillRef struct {
 type MCPToolRef struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+}
+
+// TaskTemplateResponse is the public catalog item that lowers the first-run
+// burden without exposing or publishing a user's private task input.
+type TaskTemplateResponse struct {
+	ID                    string       `json:"id"`
+	Slug                  string       `json:"slug"`
+	Title                 string       `json:"title"`
+	Category              string       `json:"category"`
+	Summary               string       `json:"summary"`
+	RequiredSkillIDs      []string     `json:"required_skill_ids"`
+	RequiredSkillRefs     []SkillRef   `json:"required_skill_refs"`
+	RequiredMCPTools      []string     `json:"required_mcp_tools"`
+	RequiredMCPToolRefs   []MCPToolRef `json:"required_mcp_tool_refs"`
+	ExampleQuery          string       `json:"example_query"`
+	ExpectedArtifactTypes []string     `json:"expected_artifact_types"`
+	DefaultVisibility     string       `json:"default_visibility"`
 }
 
 // Recommendation 单条推荐：Agent + 匹配分 + 解释。

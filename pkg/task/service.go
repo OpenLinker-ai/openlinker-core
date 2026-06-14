@@ -100,6 +100,21 @@ func (s *Service) SetRunStarter(runner RuntimeStarter) {
 	s.runner = runner
 }
 
+func (s *Service) skills(ctx context.Context) ([]db.Skill, error) {
+	skills := s.allSkills
+	if len(skills) > 0 {
+		return skills, nil
+	}
+	var err error
+	skills, err = s.skillSvc.ListAll(ctx)
+	if err != nil {
+		log.Error().Err(err).Msg("task.skills: ListAll")
+		return nil, httpx.Internal("加载 skill 列表失败")
+	}
+	s.allSkills = skills
+	return skills, nil
+}
+
 // Recommend 主流程：解析 → 推荐 → 回填 → 持久化。
 func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *RecommendRequest) (*RecommendResponse, error) {
 	if req == nil {
@@ -111,16 +126,15 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 		return nil, httpx.Unprocessable("query 长度需在 4-500 字符之间")
 	}
 
+	tmpl, err := s.taskTemplateByID(ctx, req.TemplateID)
+	if err != nil {
+		return nil, err
+	}
+
 	// 0. 兜底刷新 catalog（启动时 warmup 失败的场景）
-	skills := s.allSkills
-	if len(skills) == 0 {
-		var err error
-		skills, err = s.skillSvc.ListAll(ctx)
-		if err != nil {
-			log.Error().Err(err).Msg("task.Recommend: ListAll")
-			return nil, httpx.Internal("加载 skill 列表失败")
-		}
-		s.allSkills = skills
+	skills, err := s.skills(ctx)
+	if err != nil {
+		return nil, err
 	}
 	skillByID := skillCatalogByID(skills)
 
@@ -128,10 +142,12 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 	if err != nil {
 		return nil, err
 	}
+	explicitSkills = mergeTemplateSkillIDs(tmpl, explicitSkills)
 	mcpTools, err := normalizeMCPTools(req.MCPTools)
 	if err != nil {
 		return nil, err
 	}
+	mcpTools = mergeTemplateMCPTools(tmpl, mcpTools)
 
 	// 1. 解析 skill：优先 LLM；失败/未配置 → 规则
 	var parsed []string

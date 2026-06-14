@@ -26,6 +26,7 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.
 	creator := api.Group("/creator/agents/:id", jwtMiddleware)
 	creator.POST("/runtime-tokens", h.CreateRuntimeToken)
 	creator.GET("/runtime-tokens", h.ListRuntimeTokens)
+	creator.GET("/runtime-workbench", h.GetRuntimeWorkbench)
 	creator.GET("/a2a-policy", h.GetCallPolicy)
 	creator.PUT("/a2a-policy", h.UpdateCallPolicy)
 
@@ -104,6 +105,22 @@ func (h *Handler) RevokeRuntimeToken(c echo.Context) error {
 		return err
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+func (h *Handler) GetRuntimeWorkbench(c echo.Context) error {
+	userID, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	agentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	resp, err := h.svc.GetRuntimeWorkbench(c.Request().Context(), userID, agentID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 func (h *Handler) GetCallPolicy(c echo.Context) error {

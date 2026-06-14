@@ -31,7 +31,23 @@ type RunResponse struct {
 	CallerAgentID       string                          `json:"caller_agent_id,omitempty"`
 	BillingMode         string                          `json:"billing_mode,omitempty"`
 	RequirementEvidence *RunRequirementEvidenceResponse `json:"requirement_evidence,omitempty"`
+	EvidenceSummary     *RunEvidenceSummary             `json:"evidence_summary,omitempty"`
 	NextAction          *RunNextAction                  `json:"next_action,omitempty"`
+}
+
+// RunEvidenceSummary gives UI and external clients a compact view of why a run
+// is trustworthy without forcing them to stitch together multiple endpoints.
+type RunEvidenceSummary struct {
+	Status            string  `json:"status"`
+	CoverageStatus    string  `json:"coverage_status"`
+	MatchedSkillCount int     `json:"matched_skill_count"`
+	MissingSkillCount int     `json:"missing_skill_count"`
+	UsedMCPToolCount  int     `json:"used_mcp_tool_count"`
+	ArtifactCount     int     `json:"artifact_count"`
+	MessageCount      int     `json:"message_count"`
+	DeliveryStatus    *string `json:"delivery_status,omitempty"`
+	PublicSafe        bool    `json:"public_safe"`
+	EvidenceURL       string  `json:"evidence_url"`
 }
 
 // RunRequirementEvidenceResponse proves which task Skill/MCP requirements were

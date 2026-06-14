@@ -101,6 +101,106 @@ func (s *Service) ListRuntimeTokens(ctx context.Context, userID, agentID uuid.UU
 	return items, nil
 }
 
+func (s *Service) GetRuntimeWorkbench(ctx context.Context, userID, agentID uuid.UUID) (*RuntimeWorkbenchResponse, error) {
+	agent, err := s.ownerAgent(ctx, userID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	tokens, err := s.ListRuntimeTokens(ctx, userID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	pendingCount := int32(0)
+	if agent.ConnectionMode == "runtime_pull" {
+		count, countErr := s.queries.CountClaimableRuntimePullRuns(ctx, agentID)
+		if countErr != nil {
+			log.Warn().Err(countErr).Str("agent_id", agentID.String()).Msg("a2a.GetRuntimeWorkbench: CountClaimableRuntimePullRuns")
+		} else {
+			pendingCount = count
+		}
+	}
+	runs, err := s.queries.ListRunsByCreatorAgentWithAgent(ctx, db.ListRunsByCreatorAgentWithAgentParams{
+		CreatorID: userID,
+		AgentID:   agentID,
+		Limit:     10,
+		Offset:    0,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("a2a.GetRuntimeWorkbench: ListRunsByCreatorAgentWithAgent")
+		return nil, httpx.Internal("查询 Agent 运行记录失败")
+	}
+
+	recentRuns := make([]RuntimeWorkbenchRun, 0, len(runs))
+	var lastClaimedAt *string
+	var lastResultAt *string
+	for _, run := range runs {
+		item := RuntimeWorkbenchRun{
+			RunID:        run.ID.String(),
+			Status:       run.Status,
+			Source:       run.Source,
+			StartedAt:    run.StartedAt.UTC().Format(time.RFC3339),
+			ErrorCode:    run.ErrorCode,
+			ErrorMessage: run.ErrorMessage,
+			DetailURL:    "/run/" + run.ID.String(),
+		}
+		if run.ClaimedAt != nil {
+			value := run.ClaimedAt.UTC().Format(time.RFC3339)
+			item.ClaimedAt = &value
+			if lastClaimedAt == nil {
+				lastClaimedAt = &value
+			}
+		}
+		if run.FinishedAt != nil {
+			value := run.FinishedAt.UTC().Format(time.RFC3339)
+			item.FinishedAt = &value
+			if lastResultAt == nil {
+				lastResultAt = &value
+			}
+		}
+		recentRuns = append(recentRuns, item)
+	}
+
+	var lastActivity *string
+	for _, token := range tokens {
+		if token.RevokedAt != nil || token.LastUsedAt == nil {
+			continue
+		}
+		if lastActivity == nil || *token.LastUsedAt > *lastActivity {
+			value := *token.LastUsedAt
+			lastActivity = &value
+		}
+	}
+
+	availability := runtimeWorkbenchAvailability(agent, tokens, recentRuns)
+	resp := &RuntimeWorkbenchResponse{
+		Agent: RuntimeWorkbenchAgent{
+			ID:                  agent.ID.String(),
+			Slug:                agent.Slug,
+			Name:                agent.Name,
+			ConnectionMode:      agent.ConnectionMode,
+			LifecycleStatus:     agent.LifecycleStatus,
+			Visibility:          agent.Visibility,
+			CertificationStatus: agent.CertificationStatus,
+			ReadinessCallable:   availability == "healthy",
+			AvailabilityStatus:  availability,
+		},
+		Runtime: RuntimeWorkbenchRuntime{
+			ActiveTokenCount:                 activeRuntimeTokenCount(tokens),
+			PendingRunCount:                  pendingCount,
+			ClaimNow:                         pendingCount > 0,
+			LastRuntimeActivityAt:            lastActivity,
+			LastClaimedAt:                    lastClaimedAt,
+			LastResultAt:                     lastResultAt,
+			RecommendedHeartbeatAfterSeconds: 60,
+			MaxClaimWaitSeconds:              30,
+		},
+		Tokens:      tokens,
+		RecentRuns:  recentRuns,
+		Diagnostics: runtimeWorkbenchDiagnostics(agent, tokens, pendingCount, recentRuns, lastActivity),
+	}
+	return resp, nil
+}
+
 func (s *Service) RevokeRuntimeToken(ctx context.Context, userID, tokenID uuid.UUID) error {
 	affected, err := s.queries.RevokeAgentRuntimeTokenForOwner(ctx, db.RevokeAgentRuntimeTokenForOwnerParams{
 		ID: tokenID, UserID: userID,
@@ -112,6 +212,123 @@ func (s *Service) RevokeRuntimeToken(ctx context.Context, userID, tokenID uuid.U
 		return httpx.NotFound("访问令牌不存在或已撤销")
 	}
 	return nil
+}
+
+func activeRuntimeTokenCount(tokens []RuntimeTokenResponse) int32 {
+	var count int32
+	for _, token := range tokens {
+		if token.RevokedAt == nil {
+			count++
+		}
+	}
+	return count
+}
+
+func runtimeWorkbenchAvailability(agent db.Agent, tokens []RuntimeTokenResponse, runs []RuntimeWorkbenchRun) string {
+	if agent.LifecycleStatus != "active" {
+		return "disabled"
+	}
+	for _, run := range runs {
+		if run.Status == "success" {
+			return "healthy"
+		}
+	}
+	for _, token := range tokens {
+		if token.RevokedAt == nil && token.LastUsedAt != nil &&
+			(agent.ConnectionMode != "runtime_pull" || hasScope(token.Scopes, "agent:pull")) {
+			return "active"
+		}
+	}
+	return "unknown"
+}
+
+func runtimeWorkbenchDiagnostics(
+	agent db.Agent,
+	tokens []RuntimeTokenResponse,
+	pendingCount int32,
+	runs []RuntimeWorkbenchRun,
+	lastActivity *string,
+) []RuntimeWorkbenchDiagnostic {
+	diagnostics := []RuntimeWorkbenchDiagnostic{}
+	if agent.ConnectionMode != "runtime_pull" {
+		return append(diagnostics, RuntimeWorkbenchDiagnostic{
+			Code:       "not_runtime_pull",
+			Severity:   "info",
+			Message:    "Agent 不是 runtime_pull 接入模式，使用 endpoint 或 MCP 健康检查维护可用性。",
+			NextAction: "run_health_check",
+		})
+	}
+	if activeRuntimeTokenCount(tokens) == 0 {
+		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
+			Code:       "no_runtime_token",
+			Severity:   "warning",
+			Message:    "当前没有可用的 Agent runtime token，worker 无法 heartbeat、claim 或 result。",
+			NextAction: "create_runtime_token",
+		})
+	}
+	if activeRuntimeTokenCount(tokens) > 0 && !hasActiveRuntimePullToken(tokens) {
+		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
+			Code:       "scope_missing",
+			Severity:   "error",
+			Message:    "当前 active runtime token 缺少 agent:pull scope，worker 无法领取任务。",
+			NextAction: "create_runtime_token",
+		})
+	}
+	if lastActivity == nil {
+		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
+			Code:       "no_recent_runtime_activity",
+			Severity:   "warning",
+			Message:    "还没有看到 runtime token 活动。启动 worker 后应先 heartbeat。",
+			NextAction: "start_worker",
+		})
+	}
+	if pendingCount > 0 {
+		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
+			Code:       "pending_claimable_runs",
+			Severity:   "warning",
+			Message:    "存在待领取 run。确认 worker 正在使用 claim?wait=25 长轮询。",
+			NextAction: "check_claim_loop",
+		})
+	}
+	for _, run := range runs {
+		if run.ErrorCode == nil {
+			continue
+		}
+		switch *run.ErrorCode {
+		case "RUNTIME_PULL_NOT_CLAIMED":
+			diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
+				Code:       "pending_not_claimed",
+				Severity:   "error",
+				Message:    "最近有 runtime_pull run 超时未被领取。",
+				NextAction: "start_worker",
+			})
+		case "RUNTIME_PULL_RESULT_TIMEOUT":
+			diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
+				Code:       "result_timeout",
+				Severity:   "error",
+				Message:    "最近有 run 已领取但未在超时时间内回传结果。",
+				NextAction: "inspect_worker_result",
+			})
+		}
+	}
+	if len(diagnostics) == 0 {
+		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
+			Code:       "runtime_ready",
+			Severity:   "success",
+			Message:    "runtime_pull 供给当前没有明显阻断项。",
+			NextAction: "keep_worker_supervised",
+		})
+	}
+	return diagnostics
+}
+
+func hasActiveRuntimePullToken(tokens []RuntimeTokenResponse) bool {
+	for _, token := range tokens {
+		if token.RevokedAt == nil && hasScope(token.Scopes, "agent:pull") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) GetCallPolicy(ctx context.Context, userID, agentID uuid.UUID) (*CallPolicyResponse, error) {

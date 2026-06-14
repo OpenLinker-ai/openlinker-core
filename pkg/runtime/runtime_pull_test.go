@@ -228,6 +228,46 @@ func TestRuntimePull_RunRequiresRecentPullHeartbeat(t *testing.T) {
 	assert.Equal(t, "running", started.Status)
 }
 
+func TestRuntimePull_StartRunQueuesWhenWorkerOffline(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:pull"})
+
+	started, err := svc.StartRun(ctx, userID, makeRunReq(agentID, map[string]any{"q": "queue while offline"}), "api")
+	require.NoError(t, err)
+	assert.Equal(t, "running", started.Status)
+	require.NotNil(t, started.NextAction)
+	assert.Equal(t, "start_runtime_worker", started.NextAction.Type)
+	runID := mustParseUUID(t, started.RunID)
+
+	events := readRunEvents(t, pool, runID)
+	var dispatchEvent *runEventRow
+	var eventTypes []string
+	for i := range events {
+		eventTypes = append(eventTypes, events[i].EventType)
+		if events[i].EventType == "run.dispatch.waiting_runtime" {
+			dispatchEvent = &events[i]
+		}
+	}
+	assert.Contains(t, eventTypes, "run.created")
+	assert.Contains(t, eventTypes, "run.started")
+	require.NotNil(t, dispatchEvent)
+	assert.Equal(t, "runtime_pull", dispatchEvent.Payload["connection_mode"])
+	assert.Equal(t, "runtime_offline", dispatchEvent.Payload["reason"])
+
+	claimed, err := svc.ClaimRuntimePullRun(ctx, token)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	assert.Equal(t, started.RunID, claimed.RunID)
+	assert.Equal(t, "queue while offline", claimed.Input["q"])
+}
+
 func TestRuntimePull_EmptyClaimDoesNotRefreshToken(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)

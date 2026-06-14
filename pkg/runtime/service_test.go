@@ -227,6 +227,69 @@ func readWallet(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID) walletRow {
 	return w
 }
 
+func TestGetRunIncludesEvidenceSummary(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	userID := insertUserWithBalance(t, pool, 0)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/agent", 0, "approved")
+	runID := uuid.New()
+	taskID := uuid.New()
+
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO task_queries (id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids)
+		 VALUES ($1, $2, '分析客服对话', '{content/summarization,content/structured-data}', '{run_agent}', $3)`,
+		taskID, userID, []uuid.UUID{agentID})
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(),
+		`INSERT INTO runs (
+			id, user_id, agent_id, input, output, status,
+			cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms, source, finished_at
+		) VALUES (
+			$1, $2, $3, '{"query":"x"}'::jsonb, '{"summary":"ok"}'::jsonb, 'success',
+			0, 0, 0, 18, 'web', NOW()
+		)`,
+		runID, userID, agentID)
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(),
+		`INSERT INTO run_requirement_evidence (
+				run_id, task_id, agent_id, user_id, required_skill_ids, required_mcp_tools,
+				agent_skill_ids, matched_skill_ids, missing_skill_ids, used_mcp_tools,
+				missing_mcp_tools, coverage_status, evidence_source
+			) VALUES (
+				$1, $2, $3, $4,
+				'{content/summarization,content/structured-data}', '{run_agent}',
+				'{content/summarization,content/structured-data}',
+				'{content/summarization,content/structured-data}', '{}', '{run_agent}',
+				'{}', 'covered', 'web'
+			)`,
+		runID, taskID, agentID, userID)
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(),
+		`INSERT INTO run_artifacts (run_id, artifact_type, title, content, visibility)
+		 VALUES ($1, 'json', 'Evidence artifact', '{"ok":true}'::jsonb, 'public_example')`,
+		runID)
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(),
+		`INSERT INTO run_messages (run_id, role, content, payload)
+		 VALUES ($1, 'agent', 'done', '{"text":"done"}'::jsonb)`,
+		runID)
+	require.NoError(t, err)
+
+	resp, err := svc.GetRun(context.Background(), userID, runID)
+	require.NoError(t, err)
+	require.NotNil(t, resp.EvidenceSummary)
+	assert.Equal(t, "success", resp.EvidenceSummary.Status)
+	assert.Equal(t, "covered", resp.EvidenceSummary.CoverageStatus)
+	assert.Equal(t, 2, resp.EvidenceSummary.MatchedSkillCount)
+	assert.Equal(t, 0, resp.EvidenceSummary.MissingSkillCount)
+	assert.Equal(t, 1, resp.EvidenceSummary.UsedMCPToolCount)
+	assert.Equal(t, 1, resp.EvidenceSummary.ArtifactCount)
+	assert.Equal(t, 1, resp.EvidenceSummary.MessageCount)
+	assert.True(t, resp.EvidenceSummary.PublicSafe)
+	assert.Equal(t, "/run/"+runID.String(), resp.EvidenceSummary.EvidenceURL)
+}
+
 type runRow struct {
 	Status              string
 	CostCents           int32

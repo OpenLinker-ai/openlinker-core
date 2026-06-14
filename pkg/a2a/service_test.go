@@ -136,6 +136,65 @@ func TestCreateRuntimeToken_RuntimePullAgentCanClaimPendingRun(t *testing.T) {
 	assert.Equal(t, runID.String(), claimed.RunID)
 }
 
+func TestRuntimeWorkbenchShowsPendingRuntimePullDiagnostics(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	ownerID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, ownerID, "https://example.com/runtime")
+	makeRuntimePullAgent(t, pool, agentID)
+	runID := insertParentRun(t, pool, ownerID, agentID)
+
+	token, err := svc.CreateRuntimeToken(context.Background(), ownerID, agentID, &a2a.CreateRuntimeTokenRequest{Name: "runtime-worker"})
+	require.NoError(t, err)
+	require.NotEmpty(t, token.PlaintextToken)
+
+	workbench, err := svc.GetRuntimeWorkbench(context.Background(), ownerID, agentID)
+	require.NoError(t, err)
+	assert.Equal(t, agentID.String(), workbench.Agent.ID)
+	assert.Equal(t, "runtime_pull", workbench.Agent.ConnectionMode)
+	assert.Equal(t, int32(1), workbench.Runtime.ActiveTokenCount)
+	assert.Equal(t, int32(1), workbench.Runtime.PendingRunCount)
+	assert.True(t, workbench.Runtime.ClaimNow)
+	require.Len(t, workbench.Tokens, 1)
+	assert.Equal(t, []string{"agent:call", "agent:pull"}, workbench.Tokens[0].Scopes)
+	require.NotEmpty(t, workbench.RecentRuns)
+	assert.Equal(t, runID.String(), workbench.RecentRuns[0].RunID)
+	assert.Equal(t, "running", workbench.RecentRuns[0].Status)
+
+	var codes []string
+	for _, item := range workbench.Diagnostics {
+		codes = append(codes, item.Code)
+	}
+	assert.Contains(t, codes, "no_recent_runtime_activity")
+	assert.Contains(t, codes, "pending_claimable_runs")
+}
+
+func TestRuntimeWorkbenchFlagsRuntimePullTokenScopeMissing(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	ownerID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, ownerID, "https://example.com/runtime")
+	makeRuntimePullAgent(t, pool, agentID)
+
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO agent_runtime_tokens (
+			agent_id, created_by_user_id, name, prefix, token_hash, scopes
+		) VALUES ($1, $2, 'call-only', $3, 'hash', $4)`,
+		agentID,
+		ownerID,
+		"ol_live_abcd",
+		[]string{"agent:call"},
+	)
+	require.NoError(t, err)
+
+	workbench, err := svc.GetRuntimeWorkbench(context.Background(), ownerID, agentID)
+	require.NoError(t, err)
+
+	var codes []string
+	for _, item := range workbench.Diagnostics {
+		codes = append(codes, item.Code)
+	}
+	assert.Contains(t, codes, "scope_missing")
+}
+
 func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	pool, svc, runtimeSvc := setupService(t)
 	callerOwner := insertCreator(t, pool)

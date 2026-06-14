@@ -81,6 +81,22 @@ func testSkills() []db.Skill {
 	now := time.Now()
 	return []db.Skill{
 		{
+			ID:          "content/summarization",
+			Category:    "content",
+			Name:        "摘要",
+			Description: "长文压缩、要点提取、会议纪要生成",
+			SortOrder:   1,
+			CreatedAt:   now,
+		},
+		{
+			ID:          "content/structured-data",
+			Category:    "content",
+			Name:        "结构化抽取",
+			Description: "从非结构化文本中抽取字段",
+			SortOrder:   2,
+			CreatedAt:   now,
+		},
+		{
 			ID:          "data/sql-query",
 			Category:    "data",
 			Name:        "SQL 查询",
@@ -93,6 +109,30 @@ func testSkills() []db.Skill {
 			Category:    "data",
 			Name:        "数据分析",
 			Description: "统计、趋势、同比环比、生成洞察文字",
+			SortOrder:   2,
+			CreatedAt:   now,
+		},
+		{
+			ID:          "dev/code-review",
+			Category:    "dev",
+			Name:        "代码审查",
+			Description: "PR 评审、风格检查、潜在 bug 提示",
+			SortOrder:   1,
+			CreatedAt:   now,
+		},
+		{
+			ID:          "ops/web-scraping",
+			Category:    "ops",
+			Name:        "网页抓取",
+			Description: "抓取站点 / API / 监控 / 价格追踪",
+			SortOrder:   1,
+			CreatedAt:   now,
+		},
+		{
+			ID:          "ops/document-generate",
+			Category:    "ops",
+			Name:        "文档生成",
+			Description: "PDF / Word / 报告 / 合同 / 简历",
 			SortOrder:   2,
 			CreatedAt:   now,
 		},
@@ -209,15 +249,16 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, uuid.Nil, resp.TaskID)
 	assert.Equal(t, "private", resp.Visibility)
-	assert.Equal(t, []string{"data/sql-query", "data/analysis"}, fake.gotSkillIDs)
-	require.Len(t, resp.ParsedSkillRefs, 2)
+	require.GreaterOrEqual(t, len(fake.gotSkillIDs), 2)
+	assert.Equal(t, []string{"data/sql-query", "data/analysis"}, fake.gotSkillIDs[:2])
+	require.Len(t, resp.ParsedSkillRefs, len(fake.gotSkillIDs))
 	assert.Equal(t, "SQL 查询", resp.ParsedSkillRefs[0].Name)
 	assert.Equal(t, []string{"create_task", "run_agent"}, resp.MCPTools)
 	require.Len(t, resp.MCPToolRefs, 2)
 	assert.Equal(t, "create_task", resp.MCPToolRefs[0].Name)
 	require.Len(t, resp.Recommendations, 2)
 	assert.Equal(t, firstAgent.String(), resp.Recommendations[0].Agent.ID)
-	assert.Equal(t, float32(1), resp.Recommendations[0].MatchScore)
+	assert.InDelta(t, float32(2)/float32(len(fake.gotSkillIDs)), resp.Recommendations[0].MatchScore, 0.001)
 	assert.Equal(t, []string{"data"}, resp.Recommendations[0].Agent.Tags)
 	require.Len(t, resp.Recommendations[0].MatchedSkills, 2)
 	assert.Equal(t, "data/sql-query", resp.Recommendations[0].MatchedSkills[0].ID)
@@ -236,7 +277,7 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 
 	detail, err := svc.GetByID(context.Background(), resp.TaskID, userID)
 	require.NoError(t, err)
-	require.Len(t, detail.ParsedSkillRefs, 2)
+	require.Len(t, detail.ParsedSkillRefs, len(fake.gotSkillIDs))
 	assert.Equal(t, []string{"create_task", "run_agent"}, detail.MCPTools)
 	require.Len(t, detail.MCPToolRefs, 2)
 	require.Len(t, detail.Recommendations, 2)
@@ -265,7 +306,7 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	assert.Equal(t, "公开 SQL 数据分析任务", board[0].PublicSummary)
 	assert.Equal(t, "open", board[0].Status)
 	assert.Equal(t, 2, board[0].RecommendedAgentCount)
-	require.Len(t, board[0].ParsedSkillRefs, 2)
+	require.Len(t, board[0].ParsedSkillRefs, len(fake.gotSkillIDs))
 	assert.Equal(t, "数据分析", board[0].ParsedSkillRefs[1].Name)
 	assert.Equal(t, []string{"create_task", "run_agent"}, board[0].MCPTools)
 	require.Len(t, board[0].MCPToolRefs, 2)
@@ -278,6 +319,41 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	assert.Equal(t, secondAgent.String(), *history[0].ChosenAgentID)
 	assert.Equal(t, "matched", history[0].Status)
 	assert.Equal(t, []string{"create_task", "run_agent"}, history[0].MCPTools)
+}
+
+func TestTaskTemplatesAndTemplateIDDriveRecommendationSkills(t *testing.T) {
+	pool := setupTaskTestDB(t)
+	userID := insertTaskUser(t, pool)
+	creatorID := insertTaskCreator(t, pool)
+	agentID := insertTaskAgent(t, pool, creatorID, "task-support-"+uuid.NewString()[:8], "approved")
+	insertTaskAgentSkills(t, pool, agentID, "content/summarization", "content/structured-data")
+
+	fake := &fakeSkillRecommender{
+		skills:  testSkills(),
+		matches: []task.AgentMatch{{AgentID: agentID, MatchCount: 2}},
+	}
+	svc := task.NewService(pool, nil, fake)
+
+	templates, err := svc.ListTaskTemplates(context.Background())
+	require.NoError(t, err)
+	require.Len(t, templates, 5)
+	assert.Equal(t, "support-review", templates[0].ID)
+	assert.Equal(t, "private", templates[0].DefaultVisibility)
+	assert.Equal(t, []string{"content/summarization", "content/structured-data"}, templates[0].RequiredSkillIDs)
+	require.Len(t, templates[0].RequiredSkillRefs, 2)
+	assert.Equal(t, "摘要", templates[0].RequiredSkillRefs[0].Name)
+
+	resp, err := svc.Recommend(context.Background(), userID, &task.RecommendRequest{
+		TemplateID: "support-review",
+		Query:      "请复盘这段客服对话，输出问题分类和下一步动作",
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(fake.gotSkillIDs), 2)
+	assert.Equal(t, []string{"content/summarization", "content/structured-data"}, fake.gotSkillIDs[:2])
+	require.Len(t, resp.Recommendations, 1)
+	assert.Equal(t, agentID.String(), resp.Recommendations[0].Agent.ID)
+	require.Len(t, resp.ParsedSkillRefs, len(fake.gotSkillIDs))
+	assert.Equal(t, "结构化抽取", resp.ParsedSkillRefs[1].Name)
 }
 
 func TestTaskBoardClaimAndCompleteRoundTrip(t *testing.T) {

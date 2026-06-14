@@ -40,6 +40,7 @@ func NewHandler(svc *Service) *Handler {
 //	GET  /tasks/:id             单个任务详情（含推荐卡回填）
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
 	api.GET("/tasks/board", h.ListBoard)
+	api.GET("/task-templates", h.ListTaskTemplates)
 
 	g := api.Group("/tasks", jwtMiddleware)
 	g.POST("/recommend", h.Recommend)
@@ -52,6 +53,15 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	g.POST("/:id/revision", h.RequestRevision)
 	g.GET("/me", h.ListMine)
 	g.GET("/:id", h.GetByID)
+}
+
+// ListTaskTemplates GET /task-templates
+func (h *Handler) ListTaskTemplates(c echo.Context) error {
+	items, err := h.svc.ListTaskTemplates(c.Request().Context())
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]any{"items": items})
 }
 
 // Recommend POST /tasks/recommend
