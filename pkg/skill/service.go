@@ -95,7 +95,7 @@ func (s *Service) SetAgentSkills(ctx context.Context, agentID uuid.UUID, skillID
 //
 // runtime_pull Agent 复用市场 readiness，并把最近 token 使用作为 fresh 在线信号：
 // 只有 healthy、成功运行或近期 runtime token 证据的 Agent 才进入候选，避免推荐到无人领取或已不可达的运行时。
-// 排序：match_count desc → availability → verified_count desc → total_calls desc → agent_id（稳定）。
+// 排序：match_count desc → availability → recent online/success evidence → verified_count desc → total_calls desc → agent_id（稳定）。
 // verified_count 来自 agent_skill_scores（模块 B 写入），把 verified 过的命中数当作信任加权。
 func (s *Service) RecommendAgentsBySkills(ctx context.Context, skillIDs []string, limit int) ([]AgentMatch, error) {
 	cleaned := dedupNonEmpty(skillIDs)

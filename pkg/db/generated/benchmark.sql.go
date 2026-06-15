@@ -402,6 +402,10 @@ ORDER BY match_count DESC,
     WHEN 'degraded' THEN 2
     ELSE 3
 END ASC,
+    GREATEST(
+        COALESCE(av.last_successful_run_at, TIMESTAMPTZ 'epoch'),
+        COALESCE(rt.last_runtime_token_used_at, TIMESTAMPTZ 'epoch')
+    ) DESC,
     verified_count DESC, a.total_calls DESC, a.id`
 
 // AgentSkillMatchVerified 推荐结果行（带 verified 加权）。
