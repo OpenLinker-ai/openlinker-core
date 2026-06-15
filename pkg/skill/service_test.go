@@ -162,7 +162,7 @@ func TestSetListAndRecommendAgentSkills(t *testing.T) {
 	assert.Equal(t, best, limited[0].AgentID)
 }
 
-func TestRecommendAgentsBySkillsFiltersStaleRuntimePullAgents(t *testing.T) {
+func TestRecommendAgentsBySkillsUsesReadinessForRuntimePullAgents(t *testing.T) {
 	pool := setupSkillTestDB(t)
 	svc := skill.NewService(pool)
 	creatorID := insertSkillCreator(t, pool)
@@ -173,11 +173,12 @@ func TestRecommendAgentsBySkillsFiltersStaleRuntimePullAgents(t *testing.T) {
 	activeRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-active-"+uuid.NewString()[:8], 100, &recent)
 	staleRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-stale-"+uuid.NewString()[:8], 1000, &stale)
 	neverHeartbeat := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-never-"+uuid.NewString()[:8], 1000, nil)
+	unreachableRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-down-"+uuid.NewString()[:8], 2000, &recent)
 	betterDirect := insertSkillAgent(t, pool, creatorID, "skill-direct-better-"+uuid.NewString()[:8], "approved", 1)
 	direct := insertSkillAgent(t, pool, creatorID, "skill-direct-"+uuid.NewString()[:8], "approved", 1)
 	markSkillAgentAvailability(t, pool, activeRuntime, "healthy")
 	markSkillAgentAvailability(t, pool, staleRuntime, "healthy")
-	markSkillAgentAvailability(t, pool, neverHeartbeat, "healthy")
+	markSkillAgentAvailability(t, pool, unreachableRuntime, "unreachable")
 	markSkillAgentAvailability(t, pool, betterDirect, "healthy")
 	markSkillAgentAvailability(t, pool, direct, "healthy")
 
@@ -185,18 +186,20 @@ func TestRecommendAgentsBySkillsFiltersStaleRuntimePullAgents(t *testing.T) {
 	require.NoError(t, svc.SetAgentSkills(ctx, activeRuntime, []string{"data/sql-query"}))
 	require.NoError(t, svc.SetAgentSkills(ctx, staleRuntime, []string{"data/sql-query"}))
 	require.NoError(t, svc.SetAgentSkills(ctx, neverHeartbeat, []string{"data/sql-query"}))
+	require.NoError(t, svc.SetAgentSkills(ctx, unreachableRuntime, []string{"data/sql-query"}))
 	require.NoError(t, svc.SetAgentSkills(ctx, direct, []string{"data/sql-query"}))
 
 	matches, err := svc.RecommendAgentsBySkills(ctx, []string{"data/sql-query", "data/analysis"}, 10)
 	require.NoError(t, err)
-	require.Len(t, matches, 3)
+	require.Len(t, matches, 4)
 	assert.Equal(t, betterDirect, matches[0].AgentID)
 	assert.Equal(t, int32(2), matches[0].MatchCount)
-	assert.Equal(t, activeRuntime, matches[1].AgentID)
-	assert.Equal(t, direct, matches[2].AgentID)
-	recommendedIDs := []uuid.UUID{matches[0].AgentID, matches[1].AgentID, matches[2].AgentID}
-	assert.NotContains(t, recommendedIDs, staleRuntime)
+	assert.Equal(t, staleRuntime, matches[1].AgentID)
+	assert.Equal(t, activeRuntime, matches[2].AgentID)
+	assert.Equal(t, direct, matches[3].AgentID)
+	recommendedIDs := []uuid.UUID{matches[0].AgentID, matches[1].AgentID, matches[2].AgentID, matches[3].AgentID}
 	assert.NotContains(t, recommendedIDs, neverHeartbeat)
+	assert.NotContains(t, recommendedIDs, unreachableRuntime)
 }
 
 func TestRecommendAgentsBySkillsFiltersUncallableDirectAgents(t *testing.T) {
