@@ -374,20 +374,27 @@ SELECT a.id AS agent_id,
 FROM agent_skills ag
 JOIN agents a ON a.id = ag.agent_id
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
+LEFT JOIN LATERAL (
+    SELECT MAX(last_used_at) AS last_runtime_token_used_at
+    FROM agent_runtime_tokens
+    WHERE agent_id = a.id AND revoked_at IS NULL
+) rt ON TRUE
 LEFT JOIN agent_skill_scores s
        ON s.agent_id = ag.agent_id
       AND s.skill_id = ag.skill_id
       AND s.skill_id = ANY($1::text[])
 WHERE ag.skill_id = ANY($1::text[])
   AND a.visibility = 'public' AND a.lifecycle_status = 'active'
+  AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
   AND (
       COALESCE(av.availability_status, 'unknown') = 'healthy'
+      OR av.last_successful_run_at IS NOT NULL
       OR (
-          av.last_successful_run_at IS NOT NULL
-          AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+          a.connection_mode = 'runtime_pull'
+          AND rt.last_runtime_token_used_at >= NOW() - INTERVAL '5 minutes'
       )
   )
-GROUP BY a.id, a.total_calls, av.availability_status, av.last_successful_run_at
+GROUP BY a.id, a.total_calls, av.availability_status, av.last_successful_run_at, rt.last_runtime_token_used_at
 ORDER BY match_count DESC,
     CASE COALESCE(av.availability_status, 'unknown')
     WHEN 'healthy' THEN 0
