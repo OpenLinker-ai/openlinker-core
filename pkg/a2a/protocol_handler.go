@@ -327,6 +327,9 @@ func (h *Handler) StreamMessageHTTP(c echo.Context) error {
 
 // GetTaskHTTP handles the A2A HTTP+JSON alias GET /tasks/:taskID.
 func (h *Handler) GetTaskHTTP(c echo.Context) error {
+	if taskID := strings.TrimSpace(c.Param("taskID")); strings.HasSuffix(taskID, ":subscribe") {
+		return h.SubscribeTaskHTTP(c)
+	}
 	protocolVersion, err := a2aVersionFromRequest(c)
 	if err != nil {
 		return err

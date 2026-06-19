@@ -2,8 +2,10 @@ package a2a
 
 import (
 	"encoding/json"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -74,4 +76,60 @@ func TestNormalizeA2AJSONRPCMethodAcceptsStandardAliases(t *testing.T) {
 	assert.Equal(t, "tasks/cancel", normalizeA2AJSONRPCMethod("CancelTask"))
 	assert.Equal(t, "tasks/resubscribe", normalizeA2AJSONRPCMethod("SubscribeToTask"))
 	assert.Equal(t, "tasks/pushNotificationConfig/list", normalizeA2AJSONRPCMethod("ListTaskPushNotificationConfigs"))
+}
+
+func TestAfterSequenceFromA2ASSEUsesQueryBeforeLastEventID(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest("GET", "/stream?after_sequence=7", nil)
+	req.Header.Set("Last-Event-ID", "3")
+	ctx := e.NewContext(req, httptest.NewRecorder())
+
+	seq, err := afterSequenceFromA2ASSE(ctx)
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(7), seq)
+}
+
+func TestAfterSequenceFromA2ASSEUsesLastEventID(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest("GET", "/stream", nil)
+	req.Header.Set("Last-Event-ID", "9")
+	ctx := e.NewContext(req, httptest.NewRecorder())
+
+	seq, err := afterSequenceFromA2ASSE(ctx)
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(9), seq)
+}
+
+func TestWriteA2ASSEPayloadWritesResumableEventID(t *testing.T) {
+	rec := httptest.NewRecorder()
+	event := &A2ATaskStatusUpdateEvent{
+		TaskID:    "task-1",
+		ContextID: "ctx-1",
+		Status: A2ATaskStatus{
+			State: "working",
+		},
+		Metadata: map[string]interface{}{"openlinker_sequence": int32(42)},
+	}
+
+	require.NoError(t, writeA2ASSEPayload(rec, 42, nil, event, false, a2aProtocolVersionCurrent))
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "id: 42\n")
+	assert.Contains(t, body, "event: status-update\n")
+	assert.Contains(t, body, "TASK_STATE_WORKING")
+}
+
+func TestTaskIDFromActionRequestStripsColonActionFromTaskParam(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest("GET", "/tasks/task-1:subscribe", nil)
+	ctx := e.NewContext(req, httptest.NewRecorder())
+	ctx.SetParamNames("taskID")
+	ctx.SetParamValues("task-1:subscribe")
+
+	taskID, err := taskIDFromSubscribeRequest(ctx)
+
+	require.NoError(t, err)
+	assert.Equal(t, "task-1", taskID)
 }
