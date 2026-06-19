@@ -179,6 +179,30 @@ WHERE r.user_id = $1
 ORDER BY r.started_at DESC
 LIMIT $2 OFFSET $3;
 
+-- name: ListRunsByUserAndAgent :many
+-- A2A ListTasks: owner-scoped keyset page for one public Agent.
+SELECT id, user_id, agent_id, input, output, status, error_code, error_message,
+       cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
+       started_at, finished_at, source
+FROM runs
+WHERE user_id = $1
+  AND agent_id = $2
+  AND ($3::bool OR (started_at, id) < ($4::timestamptz, $5::uuid))
+  AND ($6::bool OR status = ANY($7::text[]))
+  AND ($8::bool OR COALESCE(finished_at, started_at) >= $9::timestamptz)
+  AND ($10::text = '' OR input->>'a2a_context_id' = $10 OR id::text = $10)
+ORDER BY started_at DESC, id DESC
+LIMIT $11;
+
+-- name: CountRunsByUserAndAgent :one
+SELECT COUNT(*)::int AS total
+FROM runs
+WHERE user_id = $1
+  AND agent_id = $2
+  AND ($3::bool OR status = ANY($4::text[]))
+  AND ($5::bool OR COALESCE(finished_at, started_at) >= $6::timestamptz)
+  AND ($7::text = '' OR input->>'a2a_context_id' = $7 OR id::text = $7);
+
 -- name: ListRunsByCreatorAgentWithAgent :many
 -- 创作者查看某个自己 Agent 的被调用历史。
 SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,

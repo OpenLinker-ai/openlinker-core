@@ -2,6 +2,8 @@ package a2a
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -13,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog/log"
 
+	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 	"github.com/kinzhi/openlinker-core/pkg/runtime"
 )
@@ -24,6 +27,16 @@ const (
 	a2aTaskStateCanceled  = "canceled"
 	a2aTaskStateFailed    = "failed"
 )
+
+const (
+	defaultA2AListTasksPageSize = 50
+	maxA2AListTasksPageSize     = 100
+)
+
+type a2aTaskCursor struct {
+	StartedAt string `json:"started_at"`
+	ID        string `json:"id"`
+}
 
 // SendProtocolMessage accepts an external A2A message/send request and runs the target Agent.
 func (s *Service) SendProtocolMessage(ctx context.Context, userID uuid.UUID, slug string, params *A2AMessageSendParams) (*A2ATask, error) {
@@ -98,12 +111,19 @@ func (s *Service) StartProtocolMessage(ctx context.Context, userID uuid.UUID, sl
 }
 
 func (s *Service) createInlinePushConfig(ctx context.Context, userID uuid.UUID, slug, taskID string, params *A2AMessageSendParams) error {
-	if params == nil || params.Configuration == nil || params.Configuration.PushNotificationConfig == nil {
+	if params == nil || params.Configuration == nil {
+		return nil
+	}
+	cfg := params.Configuration.PushNotificationConfig
+	if cfg == nil && params.Configuration.TaskPushNotificationConfig != nil {
+		cfg = &params.Configuration.TaskPushNotificationConfig.PushNotificationConfig
+	}
+	if cfg == nil {
 		return nil
 	}
 	_, err := s.SetPushNotificationConfig(ctx, userID, slug, &A2ATaskPushConfigParams{
 		ID:                     taskID,
-		PushNotificationConfig: *params.Configuration.PushNotificationConfig,
+		PushNotificationConfig: *cfg,
 	})
 	return err
 }
@@ -154,12 +174,123 @@ func (s *Service) GetProtocolTask(ctx context.Context, userID uuid.UUID, slug, t
 			messages = messages[len(messages)-*historyLength:]
 		}
 	}
-	return taskFromRun(resp, "", artifacts, messages), nil
+	return taskFromRun(resp, a2aContextIDFromRunInput(runRow.Input), artifacts, messages), nil
+}
+
+func (s *Service) ListProtocolTasks(ctx context.Context, userID uuid.UUID, slug string, params *A2ATaskListParams) (*A2ATaskListResponse, error) {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return nil, httpx.BadRequest("缺少 Agent slug")
+	}
+	if params == nil {
+		params = &A2ATaskListParams{}
+	}
+	agent, err := s.queries.GetAgentBySlug(ctx, slug)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("Agent 不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("slug", slug).Msg("a2a.ListProtocolTasks: GetAgentBySlug")
+		return nil, httpx.Internal("查询 Agent 失败")
+	}
+
+	pageSize, err := normalizeA2AListTasksPageSize(params.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	noCursor := true
+	var cursorStartedAt time.Time
+	var cursorID uuid.UUID
+	if strings.TrimSpace(params.PageToken) != "" {
+		cursor, err := decodeA2ATaskCursor(params.PageToken)
+		if err != nil {
+			return nil, err
+		}
+		noCursor = false
+		cursorStartedAt = cursor.StartedAt
+		cursorID = cursor.ID
+	}
+	statuses, err := runStatusesFromA2ATaskState(params.Status)
+	if err != nil {
+		return nil, err
+	}
+	noStatusFilter := len(statuses) == 0
+	since, noSinceFilter, err := parseA2AStatusTimestampAfter(params.StatusTimestampAfter)
+	if err != nil {
+		return nil, err
+	}
+
+	queryParams := db.ListRunsByUserAndAgentParams{
+		UserID:          userID,
+		AgentID:         agent.ID,
+		NoCursor:        noCursor,
+		CursorStartedAt: cursorStartedAt,
+		CursorID:        cursorID,
+		NoStatusFilter:  noStatusFilter,
+		Statuses:        statuses,
+		NoSinceFilter:   noSinceFilter,
+		Since:           since,
+		ContextID:       strings.TrimSpace(params.ContextID),
+		Limit:           pageSize + 1,
+	}
+	rows, err := s.queries.ListRunsByUserAndAgent(ctx, queryParams)
+	if err != nil {
+		log.Error().Err(err).Str("slug", slug).Str("user_id", userID.String()).Msg("a2a.ListProtocolTasks: ListRunsByUserAndAgent")
+		return nil, httpx.Internal("查询 A2A 任务失败")
+	}
+	total, err := s.queries.CountRunsByUserAndAgent(ctx, db.CountRunsByUserAndAgentParams{
+		UserID:         userID,
+		AgentID:        agent.ID,
+		NoStatusFilter: noStatusFilter,
+		Statuses:       statuses,
+		NoSinceFilter:  noSinceFilter,
+		Since:          since,
+		ContextID:      strings.TrimSpace(params.ContextID),
+	})
+	if err != nil {
+		log.Error().Err(err).Str("slug", slug).Str("user_id", userID.String()).Msg("a2a.ListProtocolTasks: CountRunsByUserAndAgent")
+		return nil, httpx.Internal("统计 A2A 任务失败")
+	}
+
+	nextPageToken := ""
+	if int32(len(rows)) > pageSize {
+		next := rows[int(pageSize)-1]
+		nextPageToken = encodeA2ATaskCursor(next.StartedAt, next.ID)
+		rows = rows[:int(pageSize)]
+	}
+	includeArtifacts := params.IncludeArtifacts != nil && *params.IncludeArtifacts
+	tasks := make([]A2ATask, 0, len(rows))
+	for _, row := range rows {
+		var artifacts []runtime.RunArtifactResponse
+		if includeArtifacts {
+			artifacts, err = s.runtime.ListRunArtifacts(ctx, userID, row.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		var messages []runtime.RunMessageResponse
+		if params.HistoryLength != nil && *params.HistoryLength > 0 {
+			messages, err = s.runtime.ListRunMessages(ctx, userID, row.ID)
+			if err != nil {
+				return nil, err
+			}
+			if len(messages) > *params.HistoryLength {
+				messages = messages[len(messages)-*params.HistoryLength:]
+			}
+		}
+		tasks = append(tasks, *taskFromDBRun(row, includeArtifacts, artifacts, messages))
+	}
+	return &A2ATaskListResponse{
+		Tasks:         tasks,
+		NextPageToken: nextPageToken,
+		PageSize:      pageSize,
+		TotalSize:     total,
+	}, nil
 }
 
 // CancelProtocolTask maps A2A tasks/cancel onto a real OpenLinker run cancellation.
 func (s *Service) CancelProtocolTask(ctx context.Context, userID uuid.UUID, slug, taskID string) (*A2ATask, error) {
-	runID, err := s.ensureProtocolRun(ctx, userID, slug, taskID)
+	runID, contextID, err := s.ensureProtocolRunContext(ctx, userID, slug, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -167,11 +298,11 @@ func (s *Service) CancelProtocolTask(ctx context.Context, userID uuid.UUID, slug
 	if err != nil {
 		return nil, err
 	}
-	return taskFromRun(resp, "", nil, nil), nil
+	return taskFromRun(resp, contextID, nil, nil), nil
 }
 
 func (s *Service) ListProtocolTaskEvents(ctx context.Context, userID uuid.UUID, slug, taskID string, afterSequence int32) ([]interface{}, bool, int32, error) {
-	runID, err := s.ensureProtocolRun(ctx, userID, slug, taskID)
+	runID, contextID, err := s.ensureProtocolRunContext(ctx, userID, slug, taskID)
 	if err != nil {
 		return nil, false, afterSequence, err
 	}
@@ -183,7 +314,7 @@ func (s *Service) ListProtocolTaskEvents(ctx context.Context, userID uuid.UUID, 
 	terminal := false
 	nextSequence := afterSequence
 	for _, event := range events {
-		mapped := streamEventFromRunEvent(taskID, taskID, event)
+		mapped := streamEventFromRunEvent(taskID, contextID, event)
 		if mapped != nil {
 			out = append(out, mapped)
 		}
@@ -196,27 +327,162 @@ func (s *Service) ListProtocolTaskEvents(ctx context.Context, userID uuid.UUID, 
 }
 
 func (s *Service) ensureProtocolRun(ctx context.Context, userID uuid.UUID, slug, taskID string) (uuid.UUID, error) {
+	runID, _, err := s.ensureProtocolRunContext(ctx, userID, slug, taskID)
+	return runID, err
+}
+
+func (s *Service) ensureProtocolRunContext(ctx context.Context, userID uuid.UUID, slug, taskID string) (uuid.UUID, string, error) {
 	runID, err := uuid.Parse(strings.TrimSpace(taskID))
 	if err != nil {
-		return uuid.Nil, httpx.BadRequest("task id 不是合法 uuid")
+		return uuid.Nil, "", httpx.BadRequest("task id 不是合法 uuid")
 	}
 	agent, err := s.queries.GetAgentBySlug(ctx, strings.TrimSpace(slug))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, httpx.NotFound("Agent 不存在")
+		return uuid.Nil, "", httpx.NotFound("Agent 不存在")
 	}
 	if err != nil {
 		log.Error().Err(err).Str("slug", slug).Msg("a2a.ensureProtocolRun: GetAgentBySlug")
-		return uuid.Nil, httpx.Internal("查询 Agent 失败")
+		return uuid.Nil, "", httpx.Internal("查询 Agent 失败")
 	}
 	runRow, err := s.queries.GetRunByID(ctx, runID)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (runRow.UserID != userID || runRow.AgentID != agent.ID)) {
-		return uuid.Nil, httpx.NotFound("任务不存在")
+		return uuid.Nil, "", httpx.NotFound("任务不存在")
 	}
 	if err != nil {
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("a2a.ensureProtocolRun: GetRunByID")
-		return uuid.Nil, httpx.Internal("查询任务失败")
+		return uuid.Nil, "", httpx.Internal("查询任务失败")
 	}
-	return runID, nil
+	return runID, a2aContextIDFromRunInput(runRow.Input), nil
+}
+
+func normalizeA2AListTasksPageSize(raw *int) (int32, error) {
+	if raw == nil || *raw == 0 {
+		return defaultA2AListTasksPageSize, nil
+	}
+	if *raw < 1 {
+		return 0, httpx.BadRequest("pageSize 必须大于 0")
+	}
+	if *raw > maxA2AListTasksPageSize {
+		return maxA2AListTasksPageSize, nil
+	}
+	return int32(*raw), nil
+}
+
+func decodeA2ATaskCursor(raw string) (*struct {
+	StartedAt time.Time
+	ID        uuid.UUID
+}, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, httpx.BadRequest("pageToken 不是合法游标")
+	}
+	var cursor a2aTaskCursor
+	if err := json.Unmarshal(decoded, &cursor); err != nil {
+		return nil, httpx.BadRequest("pageToken 不是合法游标")
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, cursor.StartedAt)
+	if err != nil {
+		return nil, httpx.BadRequest("pageToken 不是合法游标")
+	}
+	id, err := uuid.Parse(cursor.ID)
+	if err != nil {
+		return nil, httpx.BadRequest("pageToken 不是合法游标")
+	}
+	return &struct {
+		StartedAt time.Time
+		ID        uuid.UUID
+	}{StartedAt: startedAt, ID: id}, nil
+}
+
+func encodeA2ATaskCursor(startedAt time.Time, id uuid.UUID) string {
+	raw, err := json.Marshal(a2aTaskCursor{
+		StartedAt: startedAt.UTC().Format(time.RFC3339Nano),
+		ID:        id.String(),
+	})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func runStatusesFromA2ATaskState(raw string) ([]string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "task_state_unspecified", "unspecified", "unknown":
+		return nil, nil
+	case "task_state_submitted", "submitted", a2aTaskStateWorking, "task_state_working":
+		return []string{"running"}, nil
+	case "task_state_completed", a2aTaskStateCompleted:
+		return []string{"success"}, nil
+	case "task_state_failed", a2aTaskStateFailed:
+		return []string{"failed", "timeout"}, nil
+	case "task_state_canceled", a2aTaskStateCanceled:
+		return []string{"canceled"}, nil
+	case "task_state_rejected", "rejected", "task_state_input_required", "input-required", "input_required", "task_state_auth_required", "auth-required", "auth_required":
+		return []string{"__none__"}, nil
+	default:
+		return nil, httpx.BadRequest("不支持的 task status: " + raw)
+	}
+}
+
+func parseA2AStatusTimestampAfter(raw string) (time.Time, bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return time.Time{}, true, nil
+	}
+	value, err := time.Parse(time.RFC3339, strings.TrimSpace(raw))
+	if err != nil {
+		value, err = time.Parse(time.RFC3339Nano, strings.TrimSpace(raw))
+	}
+	if err != nil {
+		return time.Time{}, true, httpx.BadRequest("statusTimestampAfter 必须是 ISO 8601/RFC3339 时间")
+	}
+	return value, false, nil
+}
+
+func taskFromDBRun(run db.Run, includeArtifacts bool, artifacts []runtime.RunArtifactResponse, messages []runtime.RunMessageResponse) *A2ATask {
+	resp := &runtime.RunResponse{
+		RunID:     run.ID.String(),
+		Status:    run.Status,
+		CostCents: run.CostCents,
+		Source:    run.Source,
+	}
+	if run.DurationMs != nil {
+		resp.DurationMs = *run.DurationMs
+	}
+	if run.ErrorCode != nil {
+		resp.ErrorCode = *run.ErrorCode
+	}
+	if run.ErrorMessage != nil {
+		resp.ErrorMsg = *run.ErrorMessage
+	}
+	if includeArtifacts && run.Status == "success" && len(run.Output) > 0 {
+		var out map[string]interface{}
+		if err := json.Unmarshal(run.Output, &out); err == nil {
+			resp.Output = out
+		}
+	}
+	task := taskFromRun(resp, a2aContextIDFromRunInput(run.Input), artifacts, messages)
+	statusAt := run.StartedAt
+	if run.FinishedAt != nil {
+		statusAt = *run.FinishedAt
+	}
+	task.Status.Timestamp = statusAt.UTC().Format(time.RFC3339)
+	return task
+}
+
+func a2aContextIDFromRunInput(input []byte) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(input, &body); err != nil {
+		return ""
+	}
+	for _, key := range []string{"a2a_context_id", "contextId", "context_id"} {
+		if value, ok := body[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func inputFromA2AMessage(message A2AMessage) (map[string]interface{}, error) {

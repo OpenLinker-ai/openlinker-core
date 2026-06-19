@@ -297,19 +297,26 @@ func (s *MarketService) getAgentCardBySlug(ctx context.Context, slug string, ext
 		cardVariant = "extended"
 	}
 	card := &AgentCardResponse{
-		Name:             detail.Name,
-		Description:      detail.Description,
-		URL:              a2aEndpoint,
-		Version:          "v1",
-		ProtocolVersion:  "1.0",
-		ProtocolVersions: []string{"0.3", "1.0"},
+		Name:               detail.Name,
+		Description:        detail.Description,
+		URL:                a2aEndpoint,
+		Version:            "v1",
+		ProtocolVersion:    "1.0",
+		ProtocolVersions:   []string{"0.3", "1.0"},
+		PreferredTransport: "JSONRPC",
+		AdditionalInterfaces: []AgentCardTransport{
+			{URL: a2aEndpoint, Transport: "JSONRPC"},
+			{URL: a2aEndpoint, Transport: "HTTP+JSON"},
+		},
 		SupportedInterfaces: []AgentCardInterface{
 			{URL: a2aEndpoint, ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0"},
 			{URL: a2aEndpoint, ProtocolBinding: "HTTP+JSON", ProtocolVersion: "1.0"},
 			{URL: a2aEndpoint, ProtocolBinding: "JSONRPC", ProtocolVersion: "0.3"},
 		},
+		SupportsAuthenticatedExtendedCard: true,
 		Provider: AgentCardProvider{
 			Organization: detail.Creator.DisplayName,
+			URL:          "https://openlinker.ai",
 		},
 		Capabilities: AgentCardCapabilities{
 			Streaming:               true,
@@ -323,6 +330,20 @@ func (s *MarketService) getAgentCardBySlug(ctx context.Context, slug string, ext
 		DefaultInputModesCurrent:  []string{"application/json", "text/plain"},
 		DefaultOutputModesCurrent: []string{"application/json", "text/plain"},
 		Skills:                    cardSkills,
+		SecuritySchemes: map[string]interface{}{
+			"openlinker_bearer": map[string]interface{}{
+				"type":         "http",
+				"scheme":       "bearer",
+				"bearerFormat": "JWT or OpenLinker access token",
+				"description":  "Use Authorization: Bearer <token> with agents:run and runs:read scopes.",
+			},
+		},
+		Security: []map[string][]string{
+			{"openlinker_bearer": []string{"agents:run", "runs:read"}},
+		},
+		SecurityRequirements: []map[string][]string{
+			{"openlinker_bearer": []string{"agents:run", "runs:read"}},
+		},
 		Authentication: AgentCardAuth{
 			Schemes: []string{"Bearer"},
 			Scopes:  []string{"agents:run", "runs:read"},

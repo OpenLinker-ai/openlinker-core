@@ -87,6 +87,21 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
 		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, task, protocolVersion))
+	case "tasks/list":
+		if err := requireScope(c, "runs:read"); err != nil {
+			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
+		}
+		var params A2ATaskListParams
+		if len(req.Params) > 0 && string(req.Params) != "null" {
+			if err := decodeJSONRPCParams(req.Params, &params); err != nil {
+				return c.JSON(http.StatusOK, jsonRPCError(req.ID, jsonRPCInvalidParams, err.Error(), nil))
+			}
+		}
+		resp, err := h.svc.ListProtocolTasks(c.Request().Context(), userID, c.Param("slug"), &params)
+		if err != nil {
+			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
+		}
+		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, resp, protocolVersion))
 	case "tasks/cancel":
 		if err := requireScope(c, "agents:run"); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
@@ -163,10 +178,56 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		if err := h.svc.DeletePushNotificationConfig(c.Request().Context(), userID, c.Param("slug"), &params); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
-		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, map[string]interface{}{"deleted": true}, protocolVersion))
+		return c.JSON(http.StatusOK, jsonRPCNullResult(req.ID))
+	case "agent/getExtendedCard":
+		if err := requireScope(c, "runs:read"); err != nil {
+			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
+		}
+		card, err := h.extendedAgentCard(c)
+		if err != nil {
+			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
+		}
+		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, card, protocolVersion))
 	default:
 		return c.JSON(http.StatusOK, jsonRPCError(req.ID, jsonRPCMethodNotFound, "不支持的 A2A 方法: "+req.Method, nil))
 	}
+}
+
+// GetPublicAgentCardHTTP exposes the A2A well-known Agent Card beneath the
+// agent's protocol base URL while keeping the existing marketplace card URL.
+func (h *Handler) GetPublicAgentCardHTTP(c echo.Context) error {
+	if h.cardProvider == nil {
+		return httpx.ServiceUnavailable("A2A Agent Card 服务未启用")
+	}
+	card, err := h.cardProvider.GetAgentCardBySlug(c.Request().Context(), c.Param("slug"))
+	if err != nil {
+		return err
+	}
+	c.Response().Header().Set(echo.HeaderCacheControl, "public, max-age=300")
+	return c.JSON(http.StatusOK, card)
+}
+
+func (h *Handler) GetExtendedAgentCardHTTP(c echo.Context) error {
+	protocolVersion, err := a2aVersionFromRequest(c)
+	if err != nil {
+		return err
+	}
+	setA2AVersionHeader(c, protocolVersion)
+	if err := requireScope(c, "runs:read"); err != nil {
+		return err
+	}
+	card, err := h.extendedAgentCard(c)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, normalizeA2AResultForVersion(card, protocolVersion))
+}
+
+func (h *Handler) extendedAgentCard(c echo.Context) (interface{}, error) {
+	if h.cardProvider == nil {
+		return nil, httpx.ServiceUnavailable("A2A Extended Agent Card 服务未启用")
+	}
+	return h.cardProvider.GetExtendedAgentCardBySlug(c.Request().Context(), c.Param("slug"))
 }
 
 // SendMessageHTTP handles the A2A HTTP+JSON alias POST /message:send.
@@ -193,6 +254,30 @@ func (h *Handler) SendMessageHTTP(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusOK, normalizeA2AResultForVersion(task, protocolVersion))
+}
+
+func (h *Handler) ListTasksHTTP(c echo.Context) error {
+	protocolVersion, err := a2aVersionFromRequest(c)
+	if err != nil {
+		return err
+	}
+	setA2AVersionHeader(c, protocolVersion)
+	if err := requireScope(c, "runs:read"); err != nil {
+		return err
+	}
+	userID, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	params, err := a2aTaskListParamsFromQuery(c)
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.ListProtocolTasks(c.Request().Context(), userID, c.Param("slug"), params)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, normalizeA2AResultForVersion(resp, protocolVersion))
 }
 
 // MessageHTTP dispatches literal A2A colon actions such as /message:send and /message:stream.
@@ -426,6 +511,8 @@ func normalizeA2AJSONRPCMethod(method string) string {
 		return "message/stream"
 	case "tasks/get", "GetTask":
 		return "tasks/get"
+	case "tasks/list", "ListTasks":
+		return "tasks/list"
 	case "tasks/cancel", "CancelTask":
 		return "tasks/cancel"
 	case "tasks/resubscribe", "SubscribeToTask":
@@ -438,6 +525,8 @@ func normalizeA2AJSONRPCMethod(method string) string {
 		return "tasks/pushNotificationConfig/list"
 	case "tasks/pushNotificationConfig/delete", "DeleteTaskPushNotificationConfig":
 		return "tasks/pushNotificationConfig/delete"
+	case "agent/getExtendedCard", "GetExtendedAgentCard":
+		return "agent/getExtendedCard"
 	default:
 		return strings.TrimSpace(method)
 	}
@@ -465,6 +554,10 @@ func decodeJSONRPCParams(raw json.RawMessage, target interface{}) error {
 
 func jsonRPCResult(id json.RawMessage, result interface{}) JSONRPCResponse {
 	return JSONRPCResponse{JSONRPC: "2.0", ID: normalizeJSONRPCID(id), Result: result}
+}
+
+func jsonRPCNullResult(id json.RawMessage) JSONRPCResponse {
+	return JSONRPCResponse{JSONRPC: "2.0", ID: normalizeJSONRPCID(id), Result: json.RawMessage("null")}
 }
 
 func jsonRPCError(id json.RawMessage, code int, message string, data interface{}) JSONRPCResponse {
@@ -522,6 +615,55 @@ func optionalIntQuery(raw string) (*int, error) {
 		return nil, httpx.BadRequest("historyLength 必须是非负整数")
 	}
 	return &value, nil
+}
+
+func a2aTaskListParamsFromQuery(c echo.Context) (*A2ATaskListParams, error) {
+	pageSize, err := optionalIntQuery(firstQueryParam(c, "pageSize", "page_size"))
+	if err != nil {
+		return nil, err
+	}
+	historyLength, err := optionalIntQuery(firstQueryParam(c, "historyLength", "history_length"))
+	if err != nil {
+		return nil, err
+	}
+	includeArtifacts, err := optionalBoolQuery(firstQueryParam(c, "includeArtifacts", "include_artifacts"))
+	if err != nil {
+		return nil, err
+	}
+	return &A2ATaskListParams{
+		ContextID:            firstQueryParam(c, "contextId", "context_id"),
+		Status:               firstQueryParam(c, "status"),
+		PageSize:             pageSize,
+		PageToken:            firstQueryParam(c, "pageToken", "page_token"),
+		HistoryLength:        historyLength,
+		StatusTimestampAfter: firstQueryParam(c, "statusTimestampAfter", "status_timestamp_after"),
+		IncludeArtifacts:     includeArtifacts,
+	}, nil
+}
+
+func firstQueryParam(c echo.Context, names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(c.QueryParam(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func optionalBoolQuery(raw string) (*bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "y", "on":
+		value := true
+		return &value, nil
+	case "0", "false", "no", "n", "off":
+		value := false
+		return &value, nil
+	default:
+		return nil, httpx.BadRequest("布尔查询参数必须是 true 或 false")
+	}
 }
 
 func (h *Handler) streamProtocolTask(c echo.Context, userID uuid.UUID, slug, taskID string, requestID json.RawMessage, jsonRPC bool, initialTask *A2ATask, protocolVersion string) error {

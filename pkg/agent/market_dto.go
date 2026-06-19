@@ -116,29 +116,36 @@ type AgentDetailResponse struct {
 // It intentionally points clients at OpenLinker platform invocation endpoints
 // instead of exposing private endpoint secrets.
 type AgentCardResponse struct {
-	Name                      string                 `json:"name"`
-	Description               string                 `json:"description"`
-	URL                       string                 `json:"url"`
-	Version                   string                 `json:"version"`
-	ProtocolVersion           string                 `json:"protocolVersion,omitempty"`
-	ProtocolVersions          []string               `json:"protocolVersions,omitempty"`
-	SupportedInterfaces       []AgentCardInterface   `json:"supportedInterfaces,omitempty"`
-	Provider                  AgentCardProvider      `json:"provider"`
-	Capabilities              AgentCardCapabilities  `json:"capabilities"`
-	DefaultInputModes         []string               `json:"default_input_modes"`
-	DefaultOutputModes        []string               `json:"default_output_modes"`
-	DefaultInputModesCurrent  []string               `json:"defaultInputModes,omitempty"`
-	DefaultOutputModesCurrent []string               `json:"defaultOutputModes,omitempty"`
-	Skills                    []AgentCardSkill       `json:"skills"`
-	Authentication            AgentCardAuth          `json:"authentication"`
-	OpenLinker                AgentCardOpenLinkerExt `json:"openlinker"`
-	Capability                *CapabilityResponse    `json:"capability,omitempty"`
-	Examples                  []ExampleResponse      `json:"examples,omitempty"`
-	Signature                 *AgentCardSignature    `json:"signature,omitempty"`
+	Name                              string                 `json:"name"`
+	Description                       string                 `json:"description"`
+	URL                               string                 `json:"url"`
+	Version                           string                 `json:"version"`
+	ProtocolVersion                   string                 `json:"protocolVersion,omitempty"`
+	ProtocolVersions                  []string               `json:"protocolVersions,omitempty"`
+	PreferredTransport                string                 `json:"preferredTransport,omitempty"`
+	AdditionalInterfaces              []AgentCardTransport   `json:"additionalInterfaces,omitempty"`
+	SupportedInterfaces               []AgentCardInterface   `json:"supportedInterfaces,omitempty"`
+	SupportsAuthenticatedExtendedCard bool                   `json:"supportsAuthenticatedExtendedCard,omitempty"`
+	Provider                          AgentCardProvider      `json:"provider"`
+	Capabilities                      AgentCardCapabilities  `json:"capabilities"`
+	DefaultInputModes                 []string               `json:"default_input_modes"`
+	DefaultOutputModes                []string               `json:"default_output_modes"`
+	DefaultInputModesCurrent          []string               `json:"defaultInputModes,omitempty"`
+	DefaultOutputModesCurrent         []string               `json:"defaultOutputModes,omitempty"`
+	Skills                            []AgentCardSkill       `json:"skills"`
+	SecuritySchemes                   map[string]interface{} `json:"securitySchemes,omitempty"`
+	Security                          []map[string][]string  `json:"security,omitempty"`
+	SecurityRequirements              []map[string][]string  `json:"securityRequirements,omitempty"`
+	Authentication                    AgentCardAuth          `json:"authentication"`
+	OpenLinker                        AgentCardOpenLinkerExt `json:"openlinker"`
+	Capability                        *CapabilityResponse    `json:"capability,omitempty"`
+	Examples                          []ExampleResponse      `json:"examples,omitempty"`
+	Signature                         *AgentCardSignature    `json:"signature,omitempty"`
 }
 
 type AgentCardProvider struct {
 	Organization string `json:"organization"`
+	URL          string `json:"url,omitempty"`
 }
 
 type AgentCardCapabilities struct {
@@ -153,6 +160,11 @@ type AgentCardInterface struct {
 	URL             string `json:"url"`
 	ProtocolBinding string `json:"protocolBinding"`
 	ProtocolVersion string `json:"protocolVersion"`
+}
+
+type AgentCardTransport struct {
+	URL       string `json:"url"`
+	Transport string `json:"transport"`
 }
 
 type AgentCardSkill struct {

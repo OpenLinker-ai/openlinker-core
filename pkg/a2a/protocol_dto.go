@@ -31,10 +31,11 @@ type A2AMessageSendParams struct {
 }
 
 type A2ASendConfiguration struct {
-	AcceptedOutputModes    []string                   `json:"acceptedOutputModes,omitempty"`
-	Blocking               *bool                      `json:"blocking,omitempty"`
-	PushNotificationConfig *A2APushNotificationConfig `json:"pushNotificationConfig,omitempty"`
-	HistoryLength          *int                       `json:"historyLength,omitempty"`
+	AcceptedOutputModes        []string                       `json:"acceptedOutputModes,omitempty"`
+	Blocking                   *bool                          `json:"blocking,omitempty"`
+	PushNotificationConfig     *A2APushNotificationConfig     `json:"pushNotificationConfig,omitempty"`
+	TaskPushNotificationConfig *A2ATaskPushNotificationConfig `json:"taskPushNotificationConfig,omitempty"`
+	HistoryLength              *int                           `json:"historyLength,omitempty"`
 }
 
 type A2APushNotificationConfig struct {
@@ -70,6 +71,23 @@ type A2ATaskPushConfigList struct {
 type A2ATaskQueryParams struct {
 	ID            string `json:"id"`
 	HistoryLength *int   `json:"historyLength,omitempty"`
+}
+
+type A2ATaskListParams struct {
+	ContextID            string `json:"contextId,omitempty"`
+	Status               string `json:"status,omitempty"`
+	PageSize             *int   `json:"pageSize,omitempty"`
+	PageToken            string `json:"pageToken,omitempty"`
+	HistoryLength        *int   `json:"historyLength,omitempty"`
+	StatusTimestampAfter string `json:"statusTimestampAfter,omitempty"`
+	IncludeArtifacts     *bool  `json:"includeArtifacts,omitempty"`
+}
+
+type A2ATaskListResponse struct {
+	Tasks         []A2ATask `json:"tasks"`
+	NextPageToken string    `json:"nextPageToken"`
+	PageSize      int32     `json:"pageSize"`
+	TotalSize     int32     `json:"totalSize"`
 }
 
 type A2AMessage struct {

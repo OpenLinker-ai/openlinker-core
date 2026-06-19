@@ -1,6 +1,7 @@
 package a2a
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,16 +10,27 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	"github.com/kinzhi/openlinker-core/pkg/agent"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
 type Handler struct {
-	svc       *Service
-	validator *validator.Validate
+	svc          *Service
+	cardProvider AgentCardProvider
+	validator    *validator.Validate
 }
 
 func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc, validator: validator.New(validator.WithRequiredStructEnabled())}
+}
+
+type AgentCardProvider interface {
+	GetAgentCardBySlug(ctx context.Context, slug string) (*agent.AgentCardResponse, error)
+	GetExtendedAgentCardBySlug(ctx context.Context, slug string) (*agent.AgentCardResponse, error)
+}
+
+func (h *Handler) SetAgentCardProvider(provider AgentCardProvider) {
+	h.cardProvider = provider
 }
 
 // Register mounts creator controls, runtime-token invocation and user-visible trace lookup.
@@ -33,9 +45,13 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.
 	api.DELETE("/creator/runtime-tokens/:tokenID", h.RevokeRuntimeToken, jwtMiddleware)
 	api.POST("/agent-runtime/call-agent", h.CallAgent)
 	api.GET("/a2a/parents", h.ListParentRuns, queryMiddleware)
+	publicProtocol := api.Group("/a2a/agents/:slug")
+	publicProtocol.GET("/.well-known/agent-card.json", h.GetPublicAgentCardHTTP)
 	protocol := api.Group("/a2a/agents/:slug", queryMiddleware)
 	protocol.POST("", h.JSONRPC)
+	protocol.GET("/extendedAgentCard", h.GetExtendedAgentCardHTTP)
 	protocol.POST("/message:action", h.MessageHTTP)
+	protocol.GET("/tasks", h.ListTasksHTTP)
 	protocol.GET("/tasks/:taskID", h.GetTaskHTTP)
 	protocol.POST("/tasks/:taskID/cancel", h.CancelTaskHTTP)
 	protocol.POST("/tasks/:taskID/pushNotificationConfig", h.SetTaskPushNotificationHTTP)

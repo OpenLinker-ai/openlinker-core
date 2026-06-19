@@ -114,12 +114,40 @@ func normalizeA2AValueForCurrent(value interface{}) interface{} {
 			}
 			typed[key] = normalizeA2AValueForCurrent(raw)
 		}
+		if state, ok := typed["state"].(string); ok {
+			typed["state"] = normalizeA2ATaskStateForCurrent(state)
+		}
 		if shouldDropA2AKind(typed) {
 			delete(typed, "kind")
 		}
 		return typed
 	default:
 		return value
+	}
+}
+
+func normalizeA2ATaskStateForCurrent(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "submitted", "task_state_submitted":
+		return "TASK_STATE_SUBMITTED"
+	case "working", "task_state_working":
+		return "TASK_STATE_WORKING"
+	case "completed", "task_state_completed":
+		return "TASK_STATE_COMPLETED"
+	case "canceled", "cancelled", "task_state_canceled", "task_state_cancelled":
+		return "TASK_STATE_CANCELED"
+	case "failed", "task_state_failed":
+		return "TASK_STATE_FAILED"
+	case "rejected", "task_state_rejected":
+		return "TASK_STATE_REJECTED"
+	case "input-required", "input_required", "task_state_input_required":
+		return "TASK_STATE_INPUT_REQUIRED"
+	case "auth-required", "auth_required", "task_state_auth_required":
+		return "TASK_STATE_AUTH_REQUIRED"
+	case "unknown", "unspecified", "task_state_unspecified":
+		return "TASK_STATE_UNSPECIFIED"
+	default:
+		return state
 	}
 }
 

@@ -8,6 +8,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -141,6 +142,82 @@ func (q *Queries) ListRunsByUserWithAgent(ctx context.Context, arg ListRunsByUse
 		return nil, err
 	}
 	return items, nil
+}
+
+const listRunsByUserAndAgent = `-- name: ListRunsByUserAndAgent :many
+SELECT id, user_id, agent_id, input, output, status, error_code, error_message,
+       cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
+       started_at, finished_at, source
+FROM runs
+WHERE user_id = $1
+  AND agent_id = $2
+  AND ($3::bool OR (started_at, id) < ($4::timestamptz, $5::uuid))
+  AND ($6::bool OR status = ANY($7::text[]))
+  AND ($8::bool OR COALESCE(finished_at, started_at) >= $9::timestamptz)
+  AND ($10::text = '' OR input->>'a2a_context_id' = $10 OR id::text = $10)
+ORDER BY started_at DESC, id DESC
+LIMIT $11`
+
+// ListRunsByUserAndAgentParams 入参。
+type ListRunsByUserAndAgentParams struct {
+	UserID          uuid.UUID `db:"user_id" json:"user_id"`
+	AgentID         uuid.UUID `db:"agent_id" json:"agent_id"`
+	NoCursor        bool      `db:"no_cursor" json:"no_cursor"`
+	CursorStartedAt time.Time `db:"cursor_started_at" json:"cursor_started_at"`
+	CursorID        uuid.UUID `db:"cursor_id" json:"cursor_id"`
+	NoStatusFilter  bool      `db:"no_status_filter" json:"no_status_filter"`
+	Statuses        []string  `db:"statuses" json:"statuses"`
+	NoSinceFilter   bool      `db:"no_since_filter" json:"no_since_filter"`
+	Since           time.Time `db:"since" json:"since"`
+	ContextID       string    `db:"context_id" json:"context_id"`
+	Limit           int32     `db:"limit" json:"limit"`
+}
+
+// ListRunsByUserAndAgent returns one user's A2A-visible tasks for one Agent.
+func (q *Queries) ListRunsByUserAndAgent(ctx context.Context, arg ListRunsByUserAndAgentParams) ([]Run, error) {
+	rows, err := q.db.Query(ctx, listRunsByUserAndAgent, arg.UserID, arg.AgentID, arg.NoCursor, arg.CursorStartedAt, arg.CursorID, arg.NoStatusFilter, arg.Statuses, arg.NoSinceFilter, arg.Since, arg.ContextID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Run
+	for rows.Next() {
+		var r Run
+		if err := scanRun(rows, &r); err != nil {
+			return nil, err
+		}
+		items = append(items, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const countRunsByUserAndAgent = `-- name: CountRunsByUserAndAgent :one
+SELECT COUNT(*)::int AS total
+FROM runs
+WHERE user_id = $1
+  AND agent_id = $2
+  AND ($3::bool OR status = ANY($4::text[]))
+  AND ($5::bool OR COALESCE(finished_at, started_at) >= $6::timestamptz)
+  AND ($7::text = '' OR input->>'a2a_context_id' = $7 OR id::text = $7)`
+
+type CountRunsByUserAndAgentParams struct {
+	UserID         uuid.UUID `db:"user_id" json:"user_id"`
+	AgentID        uuid.UUID `db:"agent_id" json:"agent_id"`
+	NoStatusFilter bool      `db:"no_status_filter" json:"no_status_filter"`
+	Statuses       []string  `db:"statuses" json:"statuses"`
+	NoSinceFilter  bool      `db:"no_since_filter" json:"no_since_filter"`
+	Since          time.Time `db:"since" json:"since"`
+	ContextID      string    `db:"context_id" json:"context_id"`
+}
+
+func (q *Queries) CountRunsByUserAndAgent(ctx context.Context, arg CountRunsByUserAndAgentParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countRunsByUserAndAgent, arg.UserID, arg.AgentID, arg.NoStatusFilter, arg.Statuses, arg.NoSinceFilter, arg.Since, arg.ContextID)
+	var total int32
+	err := row.Scan(&total)
+	return total, err
 }
 
 const listRunsByCreatorAgentWithAgent = `-- name: ListRunsByCreatorAgentWithAgent :many

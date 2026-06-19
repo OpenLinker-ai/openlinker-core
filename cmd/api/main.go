@@ -199,6 +199,7 @@ func main() {
 	a2aSvc := a2a.NewService(pool, runtimeSvc)
 	a2aSvc.SetRunPushManager(webhookSvc)
 	a2aHandler := a2a.NewHandler(a2aSvc)
+	a2aHandler.SetAgentCardProvider(agentMarketSvc)
 	a2aHandler.Register(api, jwtMiddleware, hybridMw)
 
 	workflowSvc := workflow.NewService(pool, runtimeSvc)
