@@ -10,12 +10,16 @@ func TestValidate(t *testing.T) {
 		wantErr    bool
 	}{
 		{name: "https is always accepted", url: "https://agent.example.com/invoke"},
+		{name: "https scheme is case insensitive", url: "HTTPS://agent.example.com/invoke"},
 		{name: "local http is opt in", url: "http://127.0.0.1:9191/invoke", allowLocal: true},
 		{name: "localhost is opt in", url: "http://localhost:9191/invoke", allowLocal: true},
 		{name: "ipv6 loopback is opt in", url: "http://[::1]:9191/invoke", allowLocal: true},
 		{name: "local http disabled by default", url: "http://127.0.0.1:9191/invoke", wantErr: true},
 		{name: "remote http remains forbidden", url: "http://agent.example.com/invoke", allowLocal: true, wantErr: true},
 		{name: "lookalike hostname remains forbidden", url: "http://localhost.example.com/invoke", allowLocal: true, wantErr: true},
+		{name: "userinfo is forbidden", url: "https://user:pass@agent.example.com/invoke", wantErr: true},
+		{name: "empty url is forbidden", url: " ", wantErr: true},
+		{name: "relative url is forbidden", url: "/invoke", wantErr: true},
 	}
 
 	for _, tt := range tests {
