@@ -38,11 +38,12 @@ func NewHandler(svc *Service) *Handler {
 //	POST /registry-peers/federation-invitations create a one-time peer exchange token
 //	POST /registry-peers/federation-invitations/exchange consume a one-time peer exchange token
 //	POST /registry-peers/federation-exchanges exchange a remote invitation into a local peer
-//	POST /cloud/listings           explicitly expose an Agent through a node
-//	GET  /cloud/listings           list current user's explicit listing links
-//	PATCH /cloud/listings/:id/status
-//	POST /cloud/listings/:id/sync
-//	POST /proxy/runs               create a pending run for a Cloud Listing
+//	POST /registry/listings        explicitly expose an Agent through a node
+//	GET  /registry/listings        list current user's explicit listing links
+//	PATCH /registry/listings/:id/status
+//	POST /registry/listings/:id/sync
+//	POST /cloud/listings           legacy alias for /registry/listings
+//	POST /proxy/runs               create a pending run for a Registry Listing
 //	POST /proxy/remote-runs        route to another OpenLinker Registry API
 //	GET  /proxy/runs/:id           inspect a requester-owned Proxy Run
 //	GET  /proxy/runs/:id/artifacts inspect requester-owned Proxy Run artifacts
@@ -70,11 +71,17 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	publicPeers := api.Group("/registry-peers")
 	publicPeers.POST("/federation-invitations/exchange", h.ConsumeRegistryFederationInvite)
 
-	cloud := api.Group("/cloud", jwtMiddleware)
-	cloud.POST("/listings", h.CreateCloudListing)
-	cloud.GET("/listings", h.ListCloudListings)
-	cloud.PATCH("/listings/:id/status", h.UpdateCloudListingStatus)
-	cloud.POST("/listings/:id/sync", h.SyncCloudListingMetadata)
+	listings := api.Group("/registry/listings", jwtMiddleware)
+	listings.POST("", h.CreateCloudListing)
+	listings.GET("", h.ListCloudListings)
+	listings.PATCH("/:id/status", h.UpdateCloudListingStatus)
+	listings.POST("/:id/sync", h.SyncCloudListingMetadata)
+
+	legacyCloud := api.Group("/cloud", jwtMiddleware)
+	legacyCloud.POST("/listings", h.CreateCloudListing)
+	legacyCloud.GET("/listings", h.ListCloudListings)
+	legacyCloud.PATCH("/listings/:id/status", h.UpdateCloudListingStatus)
+	legacyCloud.POST("/listings/:id/sync", h.SyncCloudListingMetadata)
 
 	proxy := api.Group("/proxy")
 	proxy.GET("/runs/claim", h.ClaimProxyRun)

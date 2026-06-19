@@ -56,7 +56,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
 	require.NoError(t, err)
 	require.NoError(t, pool.Ping(ctx))
 
-	_, err = pool.Exec(ctx, "TRUNCATE wallets, runs, charges, withdrawals, agents, users RESTART IDENTITY CASCADE")
+	_, err = pool.Exec(ctx, "TRUNCATE users RESTART IDENTITY CASCADE")
 	require.NoError(t, err)
 
 	svc := NewService(pool, testHandlerSecret, 1*time.Hour)
@@ -85,7 +85,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
 		srv.Close()
 		clean, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, _ = pool.Exec(clean, "TRUNCATE wallets, runs, charges, withdrawals, agents, users RESTART IDENTITY CASCADE")
+		_, _ = pool.Exec(clean, "TRUNCATE users RESTART IDENTITY CASCADE")
 		pool.Close()
 	})
 	return srv, pool

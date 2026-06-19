@@ -14,10 +14,6 @@ RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
           avatar_url, is_creator, creator_verified, is_admin,
           created_at, updated_at, deleted_at;
 
--- name: CreateWallet :exec
--- 注册时一并创建钱包行（balance=0）
-INSERT INTO wallets (user_id) VALUES ($1);
-
 -- name: GetUserByEmail :one
 -- 按 email 查活跃用户
 SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,

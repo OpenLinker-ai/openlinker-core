@@ -63,15 +63,6 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 	return u, err
 }
 
-const createWallet = `-- name: CreateWallet :exec
-INSERT INTO wallets (user_id) VALUES ($1)`
-
-// CreateWallet 创建钱包行（注册流程中调用）。
-func (q *Queries) CreateWallet(ctx context.Context, userID uuid.UUID) error {
-	_, err := q.db.Exec(ctx, createWallet, userID)
-	return err
-}
-
 const getUserByEmail = `-- name: GetUserByEmail :one
 SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,
        avatar_url, is_creator, creator_verified, is_admin,

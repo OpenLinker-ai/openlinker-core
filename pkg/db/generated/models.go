@@ -27,43 +27,6 @@ type User struct {
 	DeletedAt       *time.Time `db:"deleted_at" json:"deleted_at"`
 }
 
-// Wallet 对应 wallets 表。
-// 所有金额单位为 cents（int64）。
-type Wallet struct {
-	UserID              uuid.UUID `db:"user_id" json:"user_id"`
-	BalanceCents        int64     `db:"balance_cents" json:"balance_cents"`
-	EarningsCents       int64     `db:"earnings_cents" json:"earnings_cents"`
-	TotalChargedCents   int64     `db:"total_charged_cents" json:"total_charged_cents"`
-	TotalSpentCents     int64     `db:"total_spent_cents" json:"total_spent_cents"`
-	TotalEarnedCents    int64     `db:"total_earned_cents" json:"total_earned_cents"`
-	TotalWithdrawnCents int64     `db:"total_withdrawn_cents" json:"total_withdrawn_cents"`
-	UpdatedAt           time.Time `db:"updated_at" json:"updated_at"`
-}
-
-// Charge 对应 charges 表（充值记录）。
-type Charge struct {
-	ID                    uuid.UUID  `db:"id" json:"id"`
-	UserID                uuid.UUID  `db:"user_id" json:"user_id"`
-	AmountCents           int32      `db:"amount_cents" json:"amount_cents"`
-	Currency              string     `db:"currency" json:"currency"`
-	StripePaymentIntentID *string    `db:"stripe_payment_intent_id" json:"stripe_payment_intent_id"`
-	Status                string     `db:"status" json:"status"`
-	FailureMessage        *string    `db:"failure_message" json:"failure_message"`
-	CreatedAt             time.Time  `db:"created_at" json:"created_at"`
-	SucceededAt           *time.Time `db:"succeeded_at" json:"succeeded_at"`
-}
-
-// Withdrawal 对应 withdrawals 表（提现记录）。
-type Withdrawal struct {
-	ID          uuid.UUID  `db:"id" json:"id"`
-	CreatorID   uuid.UUID  `db:"creator_id" json:"creator_id"`
-	AmountCents int32      `db:"amount_cents" json:"amount_cents"`
-	Status      string     `db:"status" json:"status"`
-	Notes       *string    `db:"notes" json:"notes"`
-	CreatedAt   time.Time  `db:"created_at" json:"created_at"`
-	PaidAt      *time.Time `db:"paid_at" json:"paid_at"`
-}
-
 // Agent 对应 agents 表（Phase 2 缺口 2 后的三维状态机模型）。
 //
 // lifecycle_status     active | disabled                              （docs/29 §三）
@@ -413,22 +376,6 @@ type RunDelegation struct {
 	CallerAgentID uuid.UUID `db:"caller_agent_id" json:"caller_agent_id"`
 	Reason        string    `db:"reason" json:"reason"`
 	CreatedAt     time.Time `db:"created_at" json:"created_at"`
-}
-
-// ApiKey 对应 api_keys 表。
-//
-// 子轮 2.1（Phase 2）引入，给开发者用 cURL 调 API 用。
-// key_hash = bcrypt(完整明文 sk_live_xxx)；明文仅创建时返回一次。
-type ApiKey struct {
-	ID         uuid.UUID  `db:"id" json:"id"`
-	UserID     uuid.UUID  `db:"user_id" json:"user_id"`
-	Name       string     `db:"name" json:"name"`
-	Prefix     string     `db:"prefix" json:"prefix"` // sk_live_abcd 前缀（UI 展示）
-	KeyHash    string     `db:"key_hash" json:"-"`    // 不暴露
-	Scopes     []string   `db:"scopes" json:"scopes"`
-	LastUsedAt *time.Time `db:"last_used_at" json:"last_used_at"`
-	RevokedAt  *time.Time `db:"revoked_at" json:"revoked_at"`
-	CreatedAt  time.Time  `db:"created_at" json:"created_at"`
 }
 
 // Skill 对应 skills 表（平台维护的 30 个核心 skill）。

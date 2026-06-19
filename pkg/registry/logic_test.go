@@ -425,6 +425,7 @@ func TestRegistryHandlersValidateBeforeServiceDispatch(t *testing.T) {
 		"POST /api/v1/registry-node/heartbeat",
 		"POST /api/v1/registry-peers/federation-invitations",
 		"POST /api/v1/registry-peers/federation-invitations/exchange",
+		"POST /api/v1/registry/listings",
 		"POST /api/v1/cloud/listings",
 		"GET /api/v1/proxy/runs/claim",
 		"GET /api/v1/proxy/runs/:id/artifacts/:artifactID/download",

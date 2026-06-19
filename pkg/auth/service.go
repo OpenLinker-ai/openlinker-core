@@ -20,12 +20,20 @@ import (
 // bcryptCost = 12（生产配置；测试环境若想加速可单独覆盖）。
 const bcryptCost = 12
 
+// UserProvisioner 是用户创建后的可选扩展点。
+//
+// core 单独部署时不注入任何实现；cloud 可在同一事务内创建 wallet 等商业化行。
+type UserProvisioner interface {
+	ProvisionUser(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error
+}
+
 // Service 认证业务逻辑层。
 type Service struct {
-	queries   *db.Queries
-	pool      *pgxpool.Pool
-	jwtSecret string
-	jwtExpire time.Duration
+	queries         *db.Queries
+	pool            *pgxpool.Pool
+	jwtSecret       string
+	jwtExpire       time.Duration
+	userProvisioner UserProvisioner
 }
 
 // NewService 构造 Service。jwtTTL 是 token 有效期（time.Duration）。
@@ -38,12 +46,17 @@ func NewService(pool *pgxpool.Pool, jwtSecret string, jwtTTL time.Duration) *Ser
 	}
 }
 
+// SetUserProvisioner 注入用户创建后的扩展逻辑。传 nil 表示不做额外初始化。
+func (s *Service) SetUserProvisioner(provisioner UserProvisioner) {
+	s.userProvisioner = provisioner
+}
+
 // Register 邮箱密码注册。
 //
 // 流程：
 //  1. email 已存在 -> Conflict
 //  2. bcrypt(cost=12) 哈希密码
-//  3. 事务内 CreateUser + CreateWallet
+//  3. 事务内 CreateUser，并执行可选 UserProvisioner
 //  4. 签 JWT 返回
 func (s *Service) Register(ctx context.Context, req *RegisterRequest) (*AuthResponse, error) {
 	email := strings.ToLower(strings.TrimSpace(req.Email))
@@ -63,7 +76,7 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest) (*AuthResp
 	}
 	hashStr := string(hashed)
 
-	user, err := s.createUserWithWallet(ctx, db.CreateUserParams{
+	user, err := s.createUser(ctx, db.CreateUserParams{
 		Email:        email,
 		PasswordHash: &hashStr,
 		DisplayName:  strings.TrimSpace(req.DisplayName),
@@ -73,7 +86,7 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest) (*AuthResp
 		if isUniqueViolation(err) {
 			return nil, httpx.Conflict("邮箱已注册")
 		}
-		log.Error().Err(err).Msg("auth.Register: createUserWithWallet")
+		log.Error().Err(err).Msg("auth.Register: createUser")
 		return nil, httpx.Internal("创建用户失败")
 	}
 
@@ -161,7 +174,7 @@ func (s *Service) FindOrCreateOAuthUser(
 		}
 	}
 
-	// 3. 创建新 OAuth 用户 + wallet
+	// 3. 创建新 OAuth 用户，并执行可选用户初始化
 	if displayName == "" {
 		// 邮箱前缀兜底 / 不行就 "user"
 		if at := strings.IndexByte(email, '@'); at > 0 {
@@ -174,7 +187,7 @@ func (s *Service) FindOrCreateOAuthUser(
 	if avatarURL != "" {
 		avatarPtr = &avatarURL
 	}
-	created, err := s.createUserWithWallet(ctx, db.CreateUserParams{
+	created, err := s.createUser(ctx, db.CreateUserParams{
 		Email:         email,
 		OauthProvider: &prov,
 		OauthID:       &oid,
@@ -185,7 +198,7 @@ func (s *Service) FindOrCreateOAuthUser(
 		if isUniqueViolation(err) {
 			return nil, httpx.Conflict("OAuth 账号或邮箱已被使用")
 		}
-		log.Error().Err(err).Msg("auth.OAuth: createUserWithWallet")
+		log.Error().Err(err).Msg("auth.OAuth: createUser")
 		return nil, httpx.Internal("创建 OAuth 用户失败")
 	}
 	return s.respondWithToken(&created)
@@ -277,8 +290,8 @@ WHERE id = $1 AND deleted_at IS NULL
 	return nil
 }
 
-// createUserWithWallet 事务内同时创建 user 行和 wallet 行。
-func (s *Service) createUserWithWallet(ctx context.Context, params db.CreateUserParams) (db.User, error) {
+// createUser 事务内创建 user 行，并调用可选 UserProvisioner。
+func (s *Service) createUser(ctx context.Context, params db.CreateUserParams) (db.User, error) {
 	var created db.User
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -291,8 +304,10 @@ func (s *Service) createUserWithWallet(ctx context.Context, params db.CreateUser
 	if err != nil {
 		return created, fmt.Errorf("create user: %w", err)
 	}
-	if err := q.CreateWallet(ctx, created.ID); err != nil {
-		return created, fmt.Errorf("create wallet: %w", err)
+	if s.userProvisioner != nil {
+		if err := s.userProvisioner.ProvisionUser(ctx, tx, created.ID); err != nil {
+			return created, fmt.Errorf("provision user: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return created, fmt.Errorf("commit: %w", err)

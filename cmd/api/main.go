@@ -21,33 +21,15 @@ import (
 	migratecmd "github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
-	"github.com/gorilla/sessions"
 	"github.com/labstack/echo/v4"
 	emw "github.com/labstack/echo/v4/middleware"
-	"github.com/markbates/goth"
-	"github.com/markbates/goth/gothic"
-	gothgithub "github.com/markbates/goth/providers/github"
-	gothgoogle "github.com/markbates/goth/providers/google"
 	"github.com/rs/zerolog/log"
 
-	"github.com/kinzhi/openlinker-core/pkg/a2a"
-	"github.com/kinzhi/openlinker-core/pkg/agent"
-	"github.com/kinzhi/openlinker-core/pkg/auth"
 	"github.com/kinzhi/openlinker-core/pkg/config"
+	"github.com/kinzhi/openlinker-core/pkg/coreapi"
 	"github.com/kinzhi/openlinker-core/pkg/db"
-	dbgen "github.com/kinzhi/openlinker-core/pkg/db/generated"
-	"github.com/kinzhi/openlinker-core/pkg/delivery"
-	"github.com/kinzhi/openlinker-core/pkg/discovery"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
-	corellm "github.com/kinzhi/openlinker-core/pkg/llm"
 	openlinkerlog "github.com/kinzhi/openlinker-core/pkg/log"
-	"github.com/kinzhi/openlinker-core/pkg/mcp"
-	"github.com/kinzhi/openlinker-core/pkg/registry"
-	"github.com/kinzhi/openlinker-core/pkg/runtime"
-	"github.com/kinzhi/openlinker-core/pkg/skill"
-	"github.com/kinzhi/openlinker-core/pkg/task"
-	"github.com/kinzhi/openlinker-core/pkg/webhook"
-	"github.com/kinzhi/openlinker-core/pkg/workflow"
 )
 
 func main() {
@@ -118,132 +100,7 @@ func main() {
 		}
 		return c.NoContent(http.StatusOK)
 	})
-	e.GET("/.well-known/openlinker.json", discovery.ServeOpenLinkerManifest(cfg))
-
-	api := e.Group("/api/v1")
-
-	configureGoth(cfg)
-	authSvc := auth.NewService(pool, cfg.JWTSecret, time.Duration(cfg.JWTExpireHours)*time.Hour)
-	authHandler := auth.NewHandler(authSvc, cfg)
-	jwtMiddleware := auth.JWTMiddleware(cfg.JWTSecret)
-	authHandler.Register(api)
-	authHandler.RegisterProtected(api, jwtMiddleware)
-
-	agentMarketSvc := agent.NewMarketService(pool)
-	agentMarketHandler := agent.NewMarketHandler(agentMarketSvc)
-	agentMarketHandler.Register(api)
-	agentMarketHandler.RegisterProtected(api, jwtMiddleware)
-
-	agentSvc := agent.NewService(pool, cfg)
-	agentHandler := agent.NewHandler(agentSvc, cfg)
-	agentHandler.Register(api)
-	agentHandler.RegisterProtected(api, jwtMiddleware)
-
-	registrationSvc := agent.NewRegistrationService(pool, cfg)
-	registrationHandler := agent.NewRegistrationHandler(registrationSvc)
-	registrationHandler.RegisterProtected(api, jwtMiddleware)
-	registrationHandler.RegisterPublic(api)
-
-	approvalSvc := agent.NewApprovalService(pool, cfg)
-	approvalHandler := agent.NewApprovalHandler(approvalSvc)
-	approvalHandler.RegisterProtected(api, jwtMiddleware)
-
-	metricSvc := agent.NewMetricService(pool)
-	metricHandler := agent.NewMetricHandler(metricSvc)
-	metricHandler.Register(api)
-	agent.StartMetricWorker(rootCtx, metricSvc, approvalSvc)
-
-	e.GET("/skill/publish-agent", agent.ServePublishAgentSkill)
-	e.GET("/skill/consume-agent", agent.ServeConsumeAgentSkill)
-
-	skillSvc := skill.NewService(pool)
-	skillHandler := skill.NewHandler(skillSvc, pool)
-	skillHandler.Register(api)
-	skillHandler.RegisterProtected(api, jwtMiddleware)
-
-	// core 单独部署:HybridAuthMiddleware 传 nil verifier,访问令牌直接 401。
-	// 只接受 JWT(浏览器登录),所有访问令牌请求被拒。
-	hybridMw := auth.HybridAuthMiddleware(cfg.JWTSecret, nil)
-
-	// core 部署:不注入 WalletCharger,扣费跳过(余额无限),
-	// 只写 runs.cost_cents 做账面记录。
-	runtimeSvc := runtime.NewService(pool, cfg)
-	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
-	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
-	runtimeHandler.RegisterAgentRuntime(api)
-	agentSvc.SetDryRunner(runtimeSvc)
-	if cfg.RuntimePullRunWorkerEnabled {
-		go runtime.StartRuntimePullRunWorker(rootCtx, runtimeSvc, runtime.RuntimePullRunWorkerConfig{
-			Interval:        time.Duration(cfg.RuntimePullRunWorkerIntervalSeconds) * time.Second,
-			DispatchTimeout: time.Duration(cfg.RuntimePullDispatchTimeoutSeconds) * time.Second,
-			ResultTimeout:   time.Duration(cfg.RuntimePullResultTimeoutSeconds) * time.Second,
-			BatchSize:       int32(cfg.RuntimePullRunWorkerTimeoutBatchSize),
-		})
-	}
-	if cfg.AvailabilityMonitorEnabled {
-		agent.StartAvailabilityMonitor(rootCtx, agentSvc, agent.AvailabilityMonitorConfig{
-			Interval:     time.Duration(cfg.AvailabilityMonitorIntervalSeconds) * time.Second,
-			InitialDelay: time.Duration(cfg.AvailabilityMonitorInitialDelaySeconds) * time.Second,
-			StaleAfter:   time.Duration(cfg.AvailabilityMonitorStaleSeconds) * time.Second,
-			BatchSize:    int32(cfg.AvailabilityMonitorBatchSize),
-		})
-	}
-
-	webhookSvc := webhook.NewService(pool, cfg)
-	webhookHandler := webhook.NewHandler(webhookSvc, cfg)
-	webhookHandler.RegisterProtected(api, jwtMiddleware)
-	runtimeSvc.SetWebhookEnqueuer(webhookSvc)
-	runtimeSvc.SetRunWebhookEnqueuer(webhookSvc)
-	go webhook.StartWorker(rootCtx, webhookSvc)
-
-	a2aSvc := a2a.NewService(pool, runtimeSvc)
-	a2aSvc.SetRunPushManager(webhookSvc)
-	a2aHandler := a2a.NewHandler(a2aSvc)
-	a2aHandler.SetAgentCardProvider(agentMarketSvc)
-	a2aHandler.Register(api, jwtMiddleware, hybridMw)
-
-	workflowSvc := workflow.NewService(pool, runtimeSvc)
-	workflowHandler := workflow.NewHandler(workflowSvc)
-	workflowHandler.RegisterProtected(api, jwtMiddleware)
-	if cfg.WorkflowRunWorkerEnabled {
-		go workflow.StartRunWorker(rootCtx, workflowSvc, workflow.RunWorkerConfig{
-			Interval:   time.Duration(cfg.WorkflowRunWorkerIntervalSeconds) * time.Second,
-			StaleAfter: time.Duration(cfg.WorkflowRunStaleSeconds) * time.Second,
-			ClaimBurst: cfg.WorkflowRunClaimBurst,
-		})
-	}
-
-	registrySvc := registry.NewService(pool)
-	registryHandler := registry.NewHandler(registrySvc)
-	registryHandler.RegisterProtected(api, jwtMiddleware)
-	if cfg.RegistryProxyRunWorkerEnabled {
-		go registry.StartProxyRunWorker(rootCtx, registrySvc, registry.ProxyRunWorkerConfig{
-			Interval: time.Duration(cfg.RegistryProxyRunWorkerIntervalSeconds) * time.Second,
-			Timeout:  time.Duration(cfg.RegistryProxyRunTimeoutSeconds) * time.Second,
-		})
-	}
-
-	// core 部署:LLM client 注入 nil,task / benchmark 自动 fallback 到规则匹配 / 503。
-	var llmClient corellm.Client
-	benchmarkSvc := skill.NewBenchmarkService(skillSvc, runtimeSvc, llmClient)
-	benchmarkHandler := skill.NewBenchmarkHandler(benchmarkSvc)
-	benchmarkHandler.Register(api)
-	benchmarkHandler.RegisterProtected(api, jwtMiddleware)
-
-	taskSvc := task.NewService(pool, llmClient, skillAdapter{inner: skillSvc})
-	taskSvc.SetRunStarter(runtimeSvc)
-	taskHandler := task.NewHandler(taskSvc)
-	taskHandler.RegisterProtected(api, jwtMiddleware)
-
-	mcpSvc := mcp.NewService(agentMarketSvc, runtimeSvc, taskSvc)
-	mcpHandler := mcp.NewHandler(mcpSvc)
-	mcpHandler.Register(api, hybridMw)
-
-	deliverySvc := delivery.NewService(pool, cfg)
-	deliveryHandler := delivery.NewHandler(deliverySvc)
-	deliveryHandler.RegisterProtected(api, jwtMiddleware)
-	runtimeSvc.SetDeliveryEnqueuer(deliverySvc)
-	go delivery.StartWorker(rootCtx, deliverySvc)
+	coreapi.Register(rootCtx, e, pool, cfg, coreapi.Options{})
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
@@ -267,48 +124,6 @@ func main() {
 		log.Error().Err(err).Msg("shutdown failed")
 	}
 	log.Info().Msg("bye")
-}
-
-func configureGoth(cfg *config.Config) {
-	store := sessions.NewCookieStore([]byte(cfg.JWTSecret))
-	store.Options.HttpOnly = true
-	store.Options.Secure = cfg.IsProduction()
-	store.Options.SameSite = http.SameSiteLaxMode
-	store.Options.Path = "/"
-	store.MaxAge(600)
-	gothic.Store = store
-
-	if cfg.GoogleClientID != "" && cfg.GoogleClientSecret != "" {
-		callback := cfg.APIURL + "/api/v1/auth/google/callback"
-		goth.UseProviders(gothgoogle.New(cfg.GoogleClientID, cfg.GoogleClientSecret, callback, "email", "profile"))
-		log.Info().Str("callback", callback).Msg("google oauth configured")
-	}
-	if cfg.GithubClientID != "" && cfg.GithubClientSecret != "" {
-		callback := cfg.APIURL + "/api/v1/auth/github/callback"
-		goth.UseProviders(gothgithub.New(cfg.GithubClientID, cfg.GithubClientSecret, callback, "user:email"))
-		log.Info().Str("callback", callback).Msg("github oauth configured")
-	}
-}
-
-// skillAdapter 把 skill.Service 包装成 task.SkillRecommender,避免 task → skill 反向 import。
-type skillAdapter struct {
-	inner *skill.Service
-}
-
-func (a skillAdapter) ListAll(ctx context.Context) ([]dbgen.Skill, error) {
-	return a.inner.ListAll(ctx)
-}
-
-func (a skillAdapter) RecommendAgentsBySkills(ctx context.Context, skillIDs []string, limit int) ([]task.AgentMatch, error) {
-	matches, err := a.inner.RecommendAgentsBySkills(ctx, skillIDs, limit)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]task.AgentMatch, len(matches))
-	for i := range matches {
-		out[i] = task.AgentMatch{AgentID: matches[i].AgentID, MatchCount: matches[i].MatchCount}
-	}
-	return out, nil
 }
 
 func requestLogger() echo.MiddlewareFunc {

@@ -2,7 +2,7 @@
 // TODO: 由 sqlc 生成（基于 pkg/db/queries/webhooks.sql）。
 //
 // 子轮 2.1（Phase 2）：webhook 投递相关 query。
-// 风格参考 wallets.sql.go：const + 方法，逐字段 Scan，避免与其它 subagent 冲突。
+// 风格参考手写 sqlc 占位文件：const + 方法，逐字段 Scan，避免与其它 subagent 冲突。
 
 package db
 

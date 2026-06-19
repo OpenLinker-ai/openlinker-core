@@ -83,8 +83,8 @@ type DeliveryEnqueuer interface {
 // 关键时序约束（见 docs/13 模块 4 / docs/10 章四）：
 //  1. 事务 A：可选扣余额 + INSERT runs(status=running)
 //  2. 事务外：HTTP POST 创作者 endpoint（60s 超时）
-//  3. 事务 B：成功 → MarkRunSuccess + 可选 AddCreatorEarnings + IncrementAgentStats
-//     失败 → MarkRunFailed + 可选 RefundUserBalance
+//  3. 事务 B：成功 → MarkRunSuccess + 可选创作者入账 + IncrementAgentStats
+//     失败 → MarkRunFailed + 可选退款
 //  4. 事务外：异步触发 webhook 投递（不阻塞响应）
 //
 // HTTP 调用必须在事务外，否则会长时间锁住 wallets 行。
@@ -1474,7 +1474,7 @@ func (s *Service) DryRun(
 	return output, ""
 }
 
-// handleSuccess 成功路径：MarkRunSuccess + AddCreatorEarnings + IncrementAgentStats（一个事务）。
+// handleSuccess 成功路径：MarkRunSuccess + 可选创作者入账 + IncrementAgentStats（一个事务）。
 //
 // 即使事务失败也不影响返回结果（用户已收到 output；对账系统补救）。
 func (s *Service) handleSuccess(
@@ -1503,11 +1503,8 @@ func (s *Service) handleSuccess(
 		}); e != nil {
 			return e
 		}
-		if settle {
-			if e := q.AddCreatorEarnings(ctx, db.AddCreatorEarningsParams{
-				UserID:        creatorID,
-				EarningsCents: int64(revenue),
-			}); e != nil {
+		if settle && s.walletCharger != nil {
+			if e := s.walletCharger.CreditCreator(ctx, tx, creatorID, int64(revenue)); e != nil {
 				return e
 			}
 		}
@@ -1555,7 +1552,7 @@ func (s *Service) handleSuccess(
 	}
 }
 
-// handleFailure 失败路径：MarkRunFailed + RefundUserBalance（一个事务）。
+// handleFailure 失败路径：MarkRunFailed + 可选退款（一个事务）。
 //
 // 错误分类：
 //   - context.DeadlineExceeded → 'timeout' / TIMEOUT

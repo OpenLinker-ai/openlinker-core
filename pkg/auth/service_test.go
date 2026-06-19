@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,7 +42,7 @@ import (
 const testServiceSecret = "test-secret-32-chars-aaaaaaaaaaaa"
 const testServiceTTL = 1 * time.Hour
 
-// setupTestDB 拿到一个 pool，并清理 users / wallets 表保证测试隔离。
+// setupTestDB 拿到一个 pool，并清理 users 表保证测试隔离。
 // 若 TEST_DATABASE_URL 未设置则 skip。
 func setupTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -58,14 +59,13 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err, "connect test db")
 	require.NoError(t, pool.Ping(ctx), "ping test db")
 
-	// 清理顺序：从依赖最多的表先删，CASCADE 兜底
-	_, err = pool.Exec(ctx, "TRUNCATE wallets, runs, charges, withdrawals, agents, users RESTART IDENTITY CASCADE")
+	_, err = pool.Exec(ctx, "TRUNCATE users RESTART IDENTITY CASCADE")
 	require.NoError(t, err, "truncate test tables")
 
 	t.Cleanup(func() {
 		cleanCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, _ = pool.Exec(cleanCtx, "TRUNCATE wallets, runs, charges, withdrawals, agents, users RESTART IDENTITY CASCADE")
+		_, _ = pool.Exec(cleanCtx, "TRUNCATE users RESTART IDENTITY CASCADE")
 		pool.Close()
 	})
 	return pool
@@ -78,6 +78,15 @@ func newTestService(t *testing.T, pool *pgxpool.Pool) *Service {
 
 func uniqueEmail(prefix string) string {
 	return prefix + "-" + uuid.NewString()[:8] + "@example.com"
+}
+
+type recordingProvisioner struct {
+	userIDs []uuid.UUID
+}
+
+func (p *recordingProvisioner) ProvisionUser(_ context.Context, _ pgx.Tx, userID uuid.UUID) error {
+	p.userIDs = append(p.userIDs, userID)
+	return nil
 }
 
 // assertHTTPStatus 把一个 error 当成 *httpx.HTTPError 取 status 码断言。
@@ -111,19 +120,27 @@ func TestRegister_HappyPath(t *testing.T) {
 	assert.Equal(t, req.Email, resp.Email)
 	assert.Equal(t, req.DisplayName, resp.DisplayName)
 
-	// 验证 wallet 已创建
-	uid, err := uuid.Parse(resp.UserID)
-	require.NoError(t, err)
-	var count int
-	err = pool.QueryRow(ctx,
-		"SELECT COUNT(*) FROM wallets WHERE user_id = $1", uid).Scan(&count)
-	require.NoError(t, err)
-	assert.Equal(t, 1, count, "wallet must be created on register")
-
 	// 验证 JWT 能解析回同一 user_id
 	parsed, err := ParseToken(resp.JWT, testServiceSecret)
 	require.NoError(t, err)
 	assert.Equal(t, resp.UserID, parsed)
+}
+
+func TestRegister_UserProvisionerCalled(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	provisioner := &recordingProvisioner{}
+	svc.SetUserProvisioner(provisioner)
+	ctx := context.Background()
+
+	resp, err := svc.Register(ctx, &RegisterRequest{
+		Email:       uniqueEmail("reg-provisioner"),
+		Password:    "supersecret123",
+		DisplayName: "Provisioned",
+	})
+	require.NoError(t, err)
+	require.Len(t, provisioner.userIDs, 1)
+	assert.Equal(t, resp.UserID, provisioner.userIDs[0].String())
 }
 
 func TestRegister_DuplicateEmail(t *testing.T) {
@@ -268,13 +285,6 @@ func TestFindOrCreateOAuthUser_NewUser(t *testing.T) {
 	assert.NotEmpty(t, resp.UserID)
 	assert.Equal(t, email, resp.Email)
 
-	uid, err := uuid.Parse(resp.UserID)
-	require.NoError(t, err)
-	var count int
-	err = pool.QueryRow(ctx,
-		"SELECT COUNT(*) FROM wallets WHERE user_id = $1", uid).Scan(&count)
-	require.NoError(t, err)
-	assert.Equal(t, 1, count, "wallet must be created for new oauth user")
 }
 
 func TestFindOrCreateOAuthUser_ExistingOAuthUser(t *testing.T) {

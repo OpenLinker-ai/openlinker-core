@@ -112,6 +112,7 @@ type RegistryFederationExchangeResponse struct {
 }
 
 type CreateCloudListingRequest struct {
+	RegistryListingID    string   `json:"registry_listing_id,omitempty" validate:"omitempty,uuid"`
 	CloudListingID       string   `json:"cloud_listing_id,omitempty" validate:"omitempty,uuid"`
 	RegistryNodeID       string   `json:"registry_node_id" validate:"required,uuid"`
 	AgentID              string   `json:"agent_id" validate:"required,uuid"`
@@ -122,6 +123,7 @@ type CreateCloudListingRequest struct {
 
 type CloudListingLinkResponse struct {
 	ID                   string   `json:"id"`
+	RegistryListingID    string   `json:"registry_listing_id"`
 	CloudListingID       string   `json:"cloud_listing_id"`
 	RegistryNodeID       string   `json:"registry_node_id"`
 	NodeName             string   `json:"node_name"`
@@ -151,20 +153,22 @@ type UpdateCloudListingStatusRequest struct {
 }
 
 type CreateProxyRunRequest struct {
-	CloudListingID string         `json:"cloud_listing_id" validate:"required,uuid"`
-	IdempotencyKey string         `json:"idempotency_key,omitempty" validate:"omitempty,min=8,max=160"`
-	Input          map[string]any `json:"input,omitempty"`
-	InputSummary   string         `json:"input_summary,omitempty" validate:"omitempty,max=500"`
+	RegistryListingID string         `json:"registry_listing_id,omitempty" validate:"required_without=CloudListingID,omitempty,uuid"`
+	CloudListingID    string         `json:"cloud_listing_id,omitempty" validate:"required_without=RegistryListingID,omitempty,uuid"`
+	IdempotencyKey    string         `json:"idempotency_key,omitempty" validate:"omitempty,min=8,max=160"`
+	Input             map[string]any `json:"input,omitempty"`
+	InputSummary      string         `json:"input_summary,omitempty" validate:"omitempty,max=500"`
 }
 
 type CreateRemoteProxyRunRequest struct {
-	RegistryPeerID       string         `json:"registry_peer_id,omitempty" validate:"omitempty,uuid"`
-	RemoteAPIBaseURL     string         `json:"remote_api_base_url,omitempty" validate:"omitempty,url,max=500"`
-	RemoteBearerToken    string         `json:"remote_bearer_token,omitempty" validate:"omitempty,min=8,max=4096"`
-	RemoteCloudListingID string         `json:"remote_cloud_listing_id" validate:"required,uuid"`
-	IdempotencyKey       string         `json:"idempotency_key,omitempty" validate:"omitempty,min=8,max=160"`
-	Input                map[string]any `json:"input,omitempty"`
-	InputSummary         string         `json:"input_summary,omitempty" validate:"omitempty,max=500"`
+	RegistryPeerID          string         `json:"registry_peer_id,omitempty" validate:"omitempty,uuid"`
+	RemoteAPIBaseURL        string         `json:"remote_api_base_url,omitempty" validate:"omitempty,url,max=500"`
+	RemoteBearerToken       string         `json:"remote_bearer_token,omitempty" validate:"omitempty,min=8,max=4096"`
+	RemoteRegistryListingID string         `json:"remote_registry_listing_id,omitempty" validate:"required_without=RemoteCloudListingID,omitempty,uuid"`
+	RemoteCloudListingID    string         `json:"remote_cloud_listing_id,omitempty" validate:"required_without=RemoteRegistryListingID,omitempty,uuid"`
+	IdempotencyKey          string         `json:"idempotency_key,omitempty" validate:"omitempty,min=8,max=160"`
+	Input                   map[string]any `json:"input,omitempty"`
+	InputSummary            string         `json:"input_summary,omitempty" validate:"omitempty,max=500"`
 }
 
 type CompleteProxyRunRequest struct {
@@ -178,29 +182,31 @@ type CompleteProxyRunRequest struct {
 }
 
 type ProxyRunResponse struct {
-	ID                 string         `json:"id"`
-	CloudRunID         string         `json:"cloud_run_id"`
-	CloudListingLinkID string         `json:"cloud_listing_link_id"`
-	CloudListingID     string         `json:"cloud_listing_id"`
-	RegistryNodeID     string         `json:"registry_node_id"`
-	LocalAgentID       string         `json:"local_agent_id"`
-	RequestingUserID   string         `json:"requesting_user_id"`
-	IdempotencyKey     string         `json:"idempotency_key"`
-	Status             string         `json:"status"`
-	PayloadPolicy      string         `json:"payload_policy"`
-	Input              map[string]any `json:"input,omitempty"`
-	InputSummary       string         `json:"input_summary,omitempty"`
-	Output             map[string]any `json:"output,omitempty"`
-	OutputSummary      string         `json:"output_summary,omitempty"`
-	ErrorCode          string         `json:"error_code,omitempty"`
-	ErrorMessage       string         `json:"error_message,omitempty"`
-	AttemptCount       int32          `json:"attempt_count"`
-	MaxAttempts        int32          `json:"max_attempts"`
-	NextRetryAt        string         `json:"next_retry_at,omitempty"`
-	ClaimedAt          string         `json:"claimed_at,omitempty"`
-	FinishedAt         string         `json:"finished_at,omitempty"`
-	CreatedAt          string         `json:"created_at"`
-	UpdatedAt          string         `json:"updated_at"`
+	ID                    string         `json:"id"`
+	CloudRunID            string         `json:"cloud_run_id"`
+	RegistryListingLinkID string         `json:"registry_listing_link_id"`
+	CloudListingLinkID    string         `json:"cloud_listing_link_id"`
+	RegistryListingID     string         `json:"registry_listing_id"`
+	CloudListingID        string         `json:"cloud_listing_id"`
+	RegistryNodeID        string         `json:"registry_node_id"`
+	LocalAgentID          string         `json:"local_agent_id"`
+	RequestingUserID      string         `json:"requesting_user_id"`
+	IdempotencyKey        string         `json:"idempotency_key"`
+	Status                string         `json:"status"`
+	PayloadPolicy         string         `json:"payload_policy"`
+	Input                 map[string]any `json:"input,omitempty"`
+	InputSummary          string         `json:"input_summary,omitempty"`
+	Output                map[string]any `json:"output,omitempty"`
+	OutputSummary         string         `json:"output_summary,omitempty"`
+	ErrorCode             string         `json:"error_code,omitempty"`
+	ErrorMessage          string         `json:"error_message,omitempty"`
+	AttemptCount          int32          `json:"attempt_count"`
+	MaxAttempts           int32          `json:"max_attempts"`
+	NextRetryAt           string         `json:"next_retry_at,omitempty"`
+	ClaimedAt             string         `json:"claimed_at,omitempty"`
+	FinishedAt            string         `json:"finished_at,omitempty"`
+	CreatedAt             string         `json:"created_at"`
+	UpdatedAt             string         `json:"updated_at"`
 }
 
 type RemoteProxyRunResponse struct {
