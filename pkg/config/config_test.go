@@ -1,6 +1,24 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
+
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	original, ok := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if ok {
+			_ = os.Setenv(key, original)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
+}
 
 func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://dev:dev@localhost/openlinker_test")
@@ -31,8 +49,8 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 }
 
 func TestLoadRequiresDatabaseURLAndJWTSecret(t *testing.T) {
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("JWT_SECRET", "")
+	unsetEnv(t, "DATABASE_URL")
+	unsetEnv(t, "JWT_SECRET")
 
 	if _, err := Load(); err == nil {
 		t.Fatalf("Load should fail when required env is missing")
