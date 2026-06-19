@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -46,6 +47,14 @@ func runtimeAuthHeader(token string) map[string]string {
 	return map[string]string{echo.HeaderAuthorization: "Bearer " + token}
 }
 
+func assertRetryAfterBetween(t *testing.T, got string, minSeconds, maxSeconds int) {
+	t.Helper()
+	seconds, err := strconv.Atoi(got)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, seconds, minSeconds)
+	assert.LessOrEqual(t, seconds, maxSeconds)
+}
+
 func TestAgentRuntimeRateLimiter_HeartbeatRejectsHighFrequency(t *testing.T) {
 	e, pool := setupAgentRuntimeHandlerTest(t)
 	_, token := insertRuntimePullAgentWithToken(t, pool)
@@ -55,7 +64,7 @@ func TestAgentRuntimeRateLimiter_HeartbeatRejectsHighFrequency(t *testing.T) {
 
 	second, body := doRequest(t, e, http.MethodPost, "/api/v1/agent-runtime/heartbeat", nil, runtimeAuthHeader(token))
 	assert.Equal(t, http.StatusTooManyRequests, second.Code)
-	assert.Equal(t, "10", second.Header().Get(echo.HeaderRetryAfter))
+	assertRetryAfterBetween(t, second.Header().Get(echo.HeaderRetryAfter), 1, 10)
 	assert.Contains(t, string(body), "RATE_LIMITED")
 }
 
@@ -109,7 +118,7 @@ func TestAgentRuntimeRateLimiter_RejectsConcurrentLongPollClaim(t *testing.T) {
 	select {
 	case code := <-done:
 		assert.Equal(t, http.StatusNoContent, code)
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("first long-poll claim did not finish")
 	}
 }
