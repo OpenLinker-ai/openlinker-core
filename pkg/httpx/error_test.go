@@ -71,14 +71,32 @@ func TestSendErrorHandlesEchoAndUnknownErrors(t *testing.T) {
 }
 
 func TestHelpersAndContextAccessors(t *testing.T) {
+	if NewError(http.StatusTeapot, CodeInternal, "short").Error() != "short" {
+		t.Fatalf("HTTPError.Error should return the message")
+	}
+	if BadRequest("bad").Code != CodeBadRequest {
+		t.Fatalf("BadRequest should set bad request code")
+	}
 	if Unauthorized("").Message != "认证失败" {
 		t.Fatalf("Unauthorized should use default message")
+	}
+	if Forbidden("no").Status != http.StatusForbidden {
+		t.Fatalf("Forbidden should set forbidden status")
 	}
 	if NotFound("").Message != "资源不存在" {
 		t.Fatalf("NotFound should use default message")
 	}
+	if Conflict("busy").Code != CodeConflict {
+		t.Fatalf("Conflict should set conflict code")
+	}
+	if Unprocessable("invalid").Status != http.StatusUnprocessableEntity {
+		t.Fatalf("Unprocessable should set validation status")
+	}
 	if PaymentRequired("").Code != CodePaymentRequired {
 		t.Fatalf("PaymentRequired should set payment code")
+	}
+	if Internal("boom").Code != CodeInternal {
+		t.Fatalf("Internal should set internal code")
 	}
 	if ServiceUnavailable("").Message != "服务暂不可用" {
 		t.Fatalf("ServiceUnavailable should use default message")
@@ -94,5 +112,13 @@ func TestHelpersAndContextAccessors(t *testing.T) {
 	}
 	if !HasScope(c, "agent:pull") || HasScope(c, "missing") {
 		t.Fatalf("scope lookup returned unexpected result")
+	}
+
+	c.Set(string(CtxKeyUserID), 42)
+	c.Set(string(CtxKeyAdmin), "yes")
+	c.Set(string(CtxKeyAuthMethod), 42)
+	c.Set(string(CtxKeyAuthScopes), []interface{}{"agent:pull"})
+	if UserIDFrom(c) != "" || IsAdmin(c) || AuthMethodFrom(c) != "" || HasScope(c, "agent:pull") {
+		t.Fatalf("context accessors should ignore values with unexpected types")
 	}
 }
