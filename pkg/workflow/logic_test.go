@@ -217,6 +217,99 @@ func TestWorkflowResponseAndDataHelpers(t *testing.T) {
 	}
 }
 
+func TestWorkflowComparisonAndRerunHelpers(t *testing.T) {
+	graph := &workflowGraph{
+		Children: map[string][]string{
+			"extract":   {"review"},
+			"review":    {"publish"},
+			"publish":   {},
+			"unrelated": {},
+		},
+	}
+	affected := workflowAffectedNodeKeys(graph, "review")
+	if _, ok := affected["review"]; !ok {
+		t.Fatalf("rerun root should be affected: %#v", affected)
+	}
+	if _, ok := affected["publish"]; !ok {
+		t.Fatalf("downstream child should be affected: %#v", affected)
+	}
+	if _, ok := affected["extract"]; ok {
+		t.Fatalf("upstream parent should not be affected: %#v", affected)
+	}
+
+	first := db.WorkflowRunStep{NodeKey: "extract", Status: "running"}
+	second := db.WorkflowRunStep{NodeKey: "extract", Status: "success"}
+	if got := latestWorkflowStepByNodeKey([]db.WorkflowRunStep{first, second})["extract"]; got.Status != "success" {
+		t.Fatalf("latestWorkflowStepByNodeKey should keep the latest step, got %#v", got)
+	}
+
+	if !reflect.DeepEqual(orderedWorkflowStepKeys(
+		[]db.WorkflowRunStep{{NodeKey: "extract"}, {NodeKey: "review"}},
+		[]db.WorkflowRunStep{{NodeKey: "review"}, {NodeKey: "publish"}},
+	), []string{"extract", "review", "publish"}) {
+		t.Fatalf("orderedWorkflowStepKeys did not preserve base then candidate order")
+	}
+
+	if !jsonBytesEqual([]byte(`{"a":1,"b":2}`), []byte(`{"b":2,"a":1}`)) {
+		t.Fatalf("jsonBytesEqual should compare decoded JSON values")
+	}
+	if jsonBytesEqual([]byte(`not-json`), []byte(`{"raw":"not-json"}`)) {
+		t.Fatalf("invalid JSON should compare as raw text")
+	}
+
+	workflowID := uuid.New()
+	baseRunID := uuid.New()
+	candidateRunID := uuid.New()
+	baseChildRunID := uuid.New()
+	candidateChildRunID := uuid.New()
+	errMsg := "needs revision"
+	baseRun := db.WorkflowRun{
+		ID:         baseRunID,
+		WorkflowID: workflowID,
+		Status:     "success",
+		Output:     []byte(`{"summary":"done","count":2}`),
+	}
+	candidateRun := db.WorkflowRun{
+		ID:         candidateRunID,
+		WorkflowID: workflowID,
+		Status:     "success",
+		Output:     []byte(`{"count":2,"summary":"done"}`),
+	}
+	baseSteps := []db.WorkflowRunStep{
+		{NodeKey: "extract", Status: "success", RunID: &baseChildRunID, Output: []byte(`{"text":"same"}`)},
+		{NodeKey: "review", Status: "failed", RunID: &baseChildRunID, Output: []byte(`{"approved":false}`), ErrorMessage: &errMsg},
+	}
+	candidateSteps := []db.WorkflowRunStep{
+		{NodeKey: "extract", Status: "success", RunID: &baseChildRunID, Output: []byte(`{"text":"same"}`)},
+		{NodeKey: "review", Status: "success", RunID: &candidateChildRunID, Output: []byte(`{"approved":true}`)},
+		{NodeKey: "publish", Status: "success", RunID: &candidateChildRunID, Output: []byte(`{"posted":true}`)},
+	}
+
+	comparison := compareWorkflowRuns(baseRun, candidateRun, baseSteps, candidateSteps)
+	if comparison.BaseRunID != baseRunID.String() || comparison.CandidateRunID != candidateRunID.String() || comparison.WorkflowID != workflowID.String() {
+		t.Fatalf("comparison identifiers = %+v", comparison)
+	}
+	if comparison.OutputChanged || comparison.StatusChanged {
+		t.Fatalf("equivalent run outputs/status should not be marked changed: %+v", comparison)
+	}
+	if !reflect.DeepEqual(comparison.ChangedNodeKeys, []string{"review", "publish"}) {
+		t.Fatalf("changed nodes = %#v", comparison.ChangedNodeKeys)
+	}
+	if len(comparison.Steps) != 3 || comparison.Steps[0].Changed || !comparison.Steps[1].StatusChanged || !comparison.Steps[1].RunChanged || !comparison.Steps[1].OutputChanged || !comparison.Steps[1].ErrorChanged || !comparison.Steps[2].Changed {
+		t.Fatalf("unexpected step comparison = %+v", comparison.Steps)
+	}
+
+	if workflowRunIDString(nil) != "" || workflowRunIDString(&baseChildRunID) != baseChildRunID.String() {
+		t.Fatalf("workflowRunIDString failed")
+	}
+	if stringPtrValue(nil) != "" || stringPtrValue(&errMsg) != errMsg {
+		t.Fatalf("stringPtrValue failed")
+	}
+	if truncate("abcdef", 3) != "abc" || truncate("abc", 3) != "abc" {
+		t.Fatalf("truncate failed")
+	}
+}
+
 func TestWorkflowHandlerValidationAndRoutes(t *testing.T) {
 	h := NewHandler(&Service{})
 	userID := uuid.NewString()
