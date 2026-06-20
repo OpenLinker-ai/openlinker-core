@@ -83,10 +83,40 @@ func nextRetryDelay(attempt int) time.Duration {
 //   - 失败按 1min / 5min / 30min 三次重试，第 3 次失败终态 failed
 //   - 签名 HMAC-SHA256，header X-OpenLinker-Signature: sha256=<hex>
 type Service struct {
-	queries        *db.Queries
+	queries        webhookQueries
 	pool           *pgxpool.Pool
 	httpClient     *http.Client
 	allowLocalHTTP bool
+}
+
+type webhookQueries interface {
+	SetAgentWebhook(context.Context, db.SetAgentWebhookParams) (int64, error)
+	ClearAgentWebhook(context.Context, db.ClearAgentWebhookParams) (int64, error)
+	GetAgentWebhookConfig(context.Context, uuid.UUID) (db.GetAgentWebhookConfigRow, error)
+	CreateWebhookDelivery(context.Context, db.CreateWebhookDeliveryParams) (db.WebhookDelivery, error)
+	GetWebhookDeliveryByID(context.Context, uuid.UUID) (db.GetWebhookDeliveryRow, error)
+	MarkDeliverySuccess(context.Context, db.MarkDeliverySuccessParams) error
+	MarkDeliveryFailedRetry(context.Context, db.MarkDeliveryFailedRetryParams) error
+	MarkDeliveryFailedFinal(context.Context, db.MarkDeliveryFailedFinalParams) error
+	ListDeliveriesByAgent(context.Context, db.ListDeliveriesByAgentParams) ([]db.WebhookDelivery, error)
+	ListPendingDeliveries(context.Context) ([]db.WebhookDelivery, error)
+	GetRunByID(context.Context, uuid.UUID) (db.Run, error)
+	CreateRunWebhookSubscription(context.Context, db.CreateRunWebhookSubscriptionParams) (db.RunWebhookSubscription, error)
+	GetLatestRunEventForTypes(context.Context, db.GetLatestRunEventForTypesParams) (db.RunEvent, error)
+	ListRunWebhookSubscriptionsByRun(context.Context, db.ListRunWebhookSubscriptionsByRunParams) ([]db.RunWebhookSubscription, error)
+	ListRunWebhookSubscriptionsByOwner(context.Context, db.ListRunWebhookSubscriptionsByOwnerParams) ([]db.RunWebhookSubscription, error)
+	BatchUpdateRunWebhookSubscriptionsForOwner(context.Context, db.BatchUpdateRunWebhookSubscriptionsForOwnerParams) ([]db.RunWebhookSubscription, error)
+	UpdateRunWebhookSubscriptionStatusForOwner(context.Context, db.UpdateRunWebhookSubscriptionStatusForOwnerParams) (db.RunWebhookSubscription, error)
+	DeleteRunWebhookSubscriptionForOwner(context.Context, db.DeleteRunWebhookSubscriptionForOwnerParams) (int64, error)
+	ListActiveRunWebhookSubscriptionsForEvent(context.Context, db.ListActiveRunWebhookSubscriptionsForEventParams) ([]db.RunWebhookSubscription, error)
+	CreateRunWebhookDelivery(context.Context, db.CreateRunWebhookDeliveryParams) (db.RunWebhookDelivery, error)
+	GetRunWebhookDeliveryByID(context.Context, uuid.UUID) (db.GetRunWebhookDeliveryByIDRow, error)
+	MarkRunWebhookDeliverySuccess(context.Context, db.MarkRunWebhookDeliverySuccessParams) error
+	MarkRunWebhookDeliveryFailedRetry(context.Context, db.MarkRunWebhookDeliveryFailedRetryParams) error
+	MarkRunWebhookDeliveryFailedFinal(context.Context, db.MarkRunWebhookDeliveryFailedFinalParams) error
+	IncrementRunWebhookSubscriptionFailure(context.Context, uuid.UUID) error
+	ResetRunWebhookSubscriptionFailures(context.Context, uuid.UUID) error
+	ListPendingRunWebhookDeliveries(context.Context) ([]db.RunWebhookDelivery, error)
 }
 
 // NewService 构造 Service。
