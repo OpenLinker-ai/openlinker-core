@@ -813,6 +813,337 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	}
 }
 
+func TestCapabilityMessageArtifactQueriesScanRowsAndArgs(t *testing.T) {
+	creatorID := uuid.New()
+	agentID := uuid.New()
+	capabilityID := uuid.New()
+	exampleID := uuid.New()
+	runID := uuid.New()
+	messageID := uuid.New()
+	artifactID := uuid.New()
+	chunkID := uuid.New()
+	now := time.Date(2026, 6, 20, 20, 0, 0, 0, time.UTC)
+	dryRunErr := "schema mismatch"
+	dryRunAt := now.Add(time.Minute)
+	eventSequence := int32(7)
+	sourceArtifactID := "report-1"
+	mimeType := "application/json"
+	fileURI := "https://files.example/run-report.json"
+	fileName := "run-report.json"
+	fileSHA := strings.Repeat("a", 64)
+	fileSize := int64(128)
+	partsSHA := strings.Repeat("b", 64)
+	payloadSHA := strings.Repeat("c", 64)
+	declaredSHA := strings.Repeat("d", 64)
+	inputSchema := []byte(`{"type":"object","required":["prompt"]}`)
+	outputSchema := []byte(`{"type":"object","required":["answer"]}`)
+	exampleInput := []byte(`{"prompt":"hi"}`)
+	exampleOutput := []byte(`{"answer":"ok"}`)
+	messagePayload := []byte(`{"tool":"writer"}`)
+	artifactContent := []byte(`{"answer":"ok"}`)
+	chunkParts := []byte(`[{"text":"ok"}]`)
+	chunkPayload := []byte(`{"delta":"ok"}`)
+
+	capabilityValues := agentCapabilityRow(capabilityID, agentID, now, inputSchema, outputSchema)
+	exampleValues := agentExampleRow(exampleID, agentID, now, exampleInput, exampleOutput)
+	onboardingValues := agentOnboardingStatusRow(agentID, now, &dryRunErr, &dryRunAt)
+	messageValues := runMessageRow(messageID, runID, &eventSequence, messagePayload, now)
+	artifactValues := runArtifactRow(
+		artifactID,
+		runID,
+		now,
+		artifactContent,
+		&sourceArtifactID,
+		&mimeType,
+		&fileURI,
+		&fileName,
+		&fileSHA,
+		&fileSize,
+	)
+	chunkValues := runArtifactChunkRow(
+		chunkID,
+		runID,
+		artifactID,
+		now,
+		sourceArtifactID,
+		&eventSequence,
+		chunkParts,
+		chunkPayload,
+		&partsSHA,
+		&payloadSHA,
+		&declaredSHA,
+	)
+	dbtx := &fakeDBTX{
+		row:     fakeRow{values: capabilityValues},
+		execTag: pgconn.NewCommandTag("UPDATE 9"),
+	}
+	q := New(dbtx)
+
+	capability, err := q.UpsertAgentCapability(context.Background(), UpsertAgentCapabilityParams{
+		AgentID:      agentID,
+		CreatorID:    creatorID,
+		InputSchema:  inputSchema,
+		OutputSchema: outputSchema,
+		Summary:      "A2A output contract",
+	})
+	if err != nil {
+		t.Fatalf("UpsertAgentCapability error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpsertAgentCapability")
+	if capability.ID != capabilityID || capability.Version != 3 || string(capability.InputSchema) == "" {
+		t.Fatalf("UpsertAgentCapability scan = %#v", capability)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, creatorID, inputSchema, outputSchema, "A2A output contract"}) {
+		t.Fatalf("UpsertAgentCapability args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: capabilityValues}
+	if got, err := q.GetAgentCapabilityByAgentID(context.Background(), agentID); err != nil || got.ID != capabilityID {
+		t.Fatalf("GetAgentCapabilityByAgentID = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentCapabilityByAgentID")
+
+	dbtx.row = fakeRow{values: capabilityValues}
+	if got, err := q.GetAgentCapabilityBySlug(context.Background(), "agent-one"); err != nil || got.AgentID != agentID {
+		t.Fatalf("GetAgentCapabilityBySlug = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentCapabilityBySlug")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{"agent-one"}) {
+		t.Fatalf("GetAgentCapabilityBySlug args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: exampleValues}
+	example, err := q.CreateAgentExample(context.Background(), CreateAgentExampleParams{
+		AgentID:            agentID,
+		CreatorID:          creatorID,
+		Title:              "happy path",
+		InputJSON:          exampleInput,
+		ExpectedOutputJSON: exampleOutput,
+		SortOrder:          4,
+	})
+	if err != nil {
+		t.Fatalf("CreateAgentExample error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateAgentExample")
+	if example.ID != exampleID || example.SortOrder != 4 || string(example.ExpectedOutputJSON) == "" {
+		t.Fatalf("CreateAgentExample scan = %#v", example)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, creatorID, "happy path", exampleInput, exampleOutput, int32(4)}) {
+		t.Fatalf("CreateAgentExample args = %#v", dbtx.queryRowArgs)
+	}
+
+	exampleRows := &fakeRows{rows: [][]any{exampleValues}}
+	dbtx.queryRows = exampleRows
+	examples, err := q.ListAgentExamplesByAgentID(context.Background(), agentID)
+	if err != nil {
+		t.Fatalf("ListAgentExamplesByAgentID error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentExamplesByAgentID")
+	if !exampleRows.closed || len(examples) != 1 || examples[0].ID != exampleID {
+		t.Fatalf("ListAgentExamplesByAgentID scan = %#v closed=%v", examples, exampleRows.closed)
+	}
+
+	slugRows := &fakeRows{rows: [][]any{exampleValues}}
+	dbtx.queryRows = slugRows
+	examplesBySlug, err := q.ListAgentExamplesBySlug(context.Background(), "agent-one")
+	if err != nil {
+		t.Fatalf("ListAgentExamplesBySlug error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentExamplesBySlug")
+	if !slugRows.closed || len(examplesBySlug) != 1 || examplesBySlug[0].AgentID != agentID {
+		t.Fatalf("ListAgentExamplesBySlug scan = %#v closed=%v", examplesBySlug, slugRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(2)}}
+	count, err := q.CountAgentExamplesByAgentID(context.Background(), agentID)
+	if err != nil || count != 2 {
+		t.Fatalf("CountAgentExamplesByAgentID = %d, %v", count, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountAgentExamplesByAgentID")
+
+	dbtx.row = fakeRow{values: []any{exampleInput}}
+	firstInput, err := q.GetFirstExampleInputByAgentID(context.Background(), agentID)
+	if err != nil || string(firstInput) != string(exampleInput) {
+		t.Fatalf("GetFirstExampleInputByAgentID = %s, %v", firstInput, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetFirstExampleInputByAgentID")
+
+	if rows, err := q.DeleteAgentExampleForOwner(context.Background(), DeleteAgentExampleForOwnerParams{ID: exampleID, AgentID: agentID, CreatorID: creatorID}); err != nil || rows != 9 {
+		t.Fatalf("DeleteAgentExampleForOwner = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "DeleteAgentExampleForOwner")
+
+	if err := q.EnsureOnboardingStatus(context.Background(), agentID); err != nil {
+		t.Fatalf("EnsureOnboardingStatus error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "EnsureOnboardingStatus")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{agentID}) {
+		t.Fatalf("EnsureOnboardingStatus args = %#v", dbtx.execArgs)
+	}
+
+	dbtx.row = fakeRow{values: onboardingValues}
+	onboarding, err := q.GetOnboardingStatusForOwner(context.Background(), GetOnboardingStatusForOwnerParams{AgentID: agentID, CreatorID: creatorID})
+	if err != nil {
+		t.Fatalf("GetOnboardingStatusForOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetOnboardingStatusForOwner")
+	if onboarding.AgentID != agentID || onboarding.DryRunError == nil || *onboarding.DryRunError != dryRunErr {
+		t.Fatalf("GetOnboardingStatusForOwner scan = %#v", onboarding)
+	}
+
+	if rows, err := q.MarkCapabilitiesSet(context.Background(), agentID); err != nil || rows != 9 {
+		t.Fatalf("MarkCapabilitiesSet = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkCapabilitiesSet")
+
+	if rows, err := q.MarkExamplesSet(context.Background(), MarkExamplesSetParams{AgentID: agentID, ExamplesSet: true}); err != nil || rows != 9 {
+		t.Fatalf("MarkExamplesSet = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkExamplesSet")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{agentID, true}) {
+		t.Fatalf("MarkExamplesSet args = %#v", dbtx.execArgs)
+	}
+
+	if rows, err := q.UpdateDryRunResult(context.Background(), UpdateDryRunResultParams{AgentID: agentID, Result: "fail", Error: &dryRunErr}); err != nil || rows != 9 {
+		t.Fatalf("UpdateDryRunResult = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "UpdateDryRunResult")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{agentID, "fail", &dryRunErr}) {
+		t.Fatalf("UpdateDryRunResult args = %#v", dbtx.execArgs)
+	}
+
+	dbtx.row = fakeRow{values: messageValues}
+	message, err := q.CreateRunMessage(context.Background(), CreateRunMessageParams{
+		RunID:         runID,
+		EventSequence: &eventSequence,
+		Role:          "agent",
+		Content:       "done",
+		Payload:       messagePayload,
+	})
+	if err != nil {
+		t.Fatalf("CreateRunMessage error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateRunMessage")
+	if message.ID != messageID || message.EventSequence == nil || *message.EventSequence != eventSequence {
+		t.Fatalf("CreateRunMessage scan = %#v", message)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID, &eventSequence, "agent", "done", messagePayload}) {
+		t.Fatalf("CreateRunMessage args = %#v", dbtx.queryRowArgs)
+	}
+
+	messageRows := &fakeRows{rows: [][]any{messageValues}}
+	dbtx.queryRows = messageRows
+	messages, err := q.ListRunMessagesByRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("ListRunMessagesByRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRunMessagesByRun")
+	if !messageRows.closed || len(messages) != 1 || messages[0].ID != messageID {
+		t.Fatalf("ListRunMessagesByRun scan = %#v closed=%v", messages, messageRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: artifactValues}
+	artifact, err := q.CreateRunArtifact(context.Background(), CreateRunArtifactParams{
+		RunID:            runID,
+		ArtifactType:     "json",
+		Title:            "Run report",
+		Content:          artifactContent,
+		Visibility:       "shared",
+		SourceArtifactID: &sourceArtifactID,
+		MimeType:         &mimeType,
+		FileUri:          &fileURI,
+		FileName:         &fileName,
+		FileSha256:       &fileSHA,
+		FileSizeBytes:    &fileSize,
+	})
+	if err != nil {
+		t.Fatalf("CreateRunArtifact error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateRunArtifact")
+	if artifact.ID != artifactID || artifact.FileSha256 == nil || *artifact.FileSha256 != fileSHA {
+		t.Fatalf("CreateRunArtifact scan = %#v", artifact)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID, "json", "Run report", artifactContent, "shared", &sourceArtifactID, &mimeType, &fileURI, &fileName, &fileSHA, &fileSize}) {
+		t.Fatalf("CreateRunArtifact args = %#v", dbtx.queryRowArgs)
+	}
+
+	artifactRows := &fakeRows{rows: [][]any{artifactValues}}
+	dbtx.queryRows = artifactRows
+	artifacts, err := q.ListRunArtifactsByRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("ListRunArtifactsByRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRunArtifactsByRun")
+	if !artifactRows.closed || len(artifacts) != 1 || artifacts[0].ID != artifactID {
+		t.Fatalf("ListRunArtifactsByRun scan = %#v closed=%v", artifacts, artifactRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: artifactValues}
+	if got, err := q.GetRunArtifactBySourceID(context.Background(), GetRunArtifactBySourceIDParams{RunID: runID, SourceArtifactID: sourceArtifactID}); err != nil || got.ID != artifactID {
+		t.Fatalf("GetRunArtifactBySourceID = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetRunArtifactBySourceID")
+
+	dbtx.row = fakeRow{values: artifactValues}
+	updatedArtifact, err := q.UpdateRunArtifactContent(context.Background(), UpdateRunArtifactContentParams{
+		ID:            artifactID,
+		RunID:         runID,
+		ArtifactType:  "json",
+		Title:         "Run report",
+		Content:       artifactContent,
+		Visibility:    "shared",
+		MimeType:      &mimeType,
+		FileUri:       &fileURI,
+		FileName:      &fileName,
+		FileSha256:    &fileSHA,
+		FileSizeBytes: &fileSize,
+	})
+	if err != nil {
+		t.Fatalf("UpdateRunArtifactContent error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpdateRunArtifactContent")
+	if updatedArtifact.ID != artifactID || updatedArtifact.SourceArtifactID == nil {
+		t.Fatalf("UpdateRunArtifactContent scan = %#v", updatedArtifact)
+	}
+
+	dbtx.row = fakeRow{values: chunkValues}
+	chunk, err := q.CreateRunArtifactChunk(context.Background(), CreateRunArtifactChunkParams{
+		RunID:            runID,
+		RunArtifactID:    artifactID,
+		SourceArtifactID: sourceArtifactID,
+		EventSequence:    &eventSequence,
+		Append:           true,
+		LastChunk:        false,
+		Parts:            chunkParts,
+		Payload:          chunkPayload,
+		PartsSha256:      &partsSHA,
+		PayloadSha256:    &payloadSHA,
+		DeclaredSha256:   &declaredSHA,
+		ChecksumStatus:   "verified",
+	})
+	if err != nil {
+		t.Fatalf("CreateRunArtifactChunk error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateRunArtifactChunk")
+	if chunk.ID != chunkID || chunk.ChunkIndex != 1 || chunk.ChecksumStatus != "verified" {
+		t.Fatalf("CreateRunArtifactChunk scan = %#v", chunk)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID, artifactID, sourceArtifactID, &eventSequence, true, false, chunkParts, chunkPayload, &partsSHA, &payloadSHA, &declaredSHA, "verified"}) {
+		t.Fatalf("CreateRunArtifactChunk args = %#v", dbtx.queryRowArgs)
+	}
+
+	chunkRows := &fakeRows{rows: [][]any{chunkValues}}
+	dbtx.queryRows = chunkRows
+	chunks, err := q.ListRunArtifactChunksByRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("ListRunArtifactChunksByRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRunArtifactChunksByRun")
+	if !chunkRows.closed || len(chunks) != 1 || chunks[0].ID != chunkID {
+		t.Fatalf("ListRunArtifactChunksByRun scan = %#v closed=%v", chunks, chunkRows.closed)
+	}
+}
+
 func userRow(id uuid.UUID, now time.Time, passwordHash, provider, oauthID, avatar *string, deletedAt *time.Time) []any {
 	return []any{
 		id,
@@ -1042,6 +1373,73 @@ func workflowRunRow(id, workflowID, userID uuid.UUID, now time.Time, finishedAt,
 		nextRetry,
 		claimedAt,
 		lastWorkerError,
+	}
+}
+
+func agentCapabilityRow(id, agentID uuid.UUID, now time.Time, inputSchema, outputSchema []byte) []any {
+	return []any{id, agentID, inputSchema, outputSchema, "A2A output contract", int32(3), now, now.Add(time.Minute)}
+}
+
+func agentExampleRow(id, agentID uuid.UUID, now time.Time, input, expectedOutput []byte) []any {
+	return []any{id, agentID, "happy path", input, expectedOutput, int32(4), now, now.Add(time.Minute)}
+}
+
+func agentOnboardingStatusRow(agentID uuid.UUID, now time.Time, dryRunErr *string, dryRunAt *time.Time) []any {
+	return []any{agentID, true, true, true, false, "fail", dryRunErr, dryRunAt, now.Add(time.Minute)}
+}
+
+func runMessageRow(id, runID uuid.UUID, eventSequence *int32, payload []byte, createdAt time.Time) []any {
+	return []any{id, runID, eventSequence, "agent", "done", payload, createdAt}
+}
+
+func runArtifactRow(
+	id, runID uuid.UUID,
+	createdAt time.Time,
+	content []byte,
+	sourceArtifactID, mimeType, fileURI, fileName, fileSHA *string,
+	fileSize *int64,
+) []any {
+	return []any{
+		id,
+		runID,
+		"json",
+		"Run report",
+		content,
+		"shared",
+		sourceArtifactID,
+		mimeType,
+		fileURI,
+		fileName,
+		fileSHA,
+		fileSize,
+		createdAt,
+	}
+}
+
+func runArtifactChunkRow(
+	id, runID, artifactID uuid.UUID,
+	createdAt time.Time,
+	sourceArtifactID string,
+	eventSequence *int32,
+	parts, payload []byte,
+	partsSHA, payloadSHA, declaredSHA *string,
+) []any {
+	return []any{
+		id,
+		runID,
+		artifactID,
+		sourceArtifactID,
+		eventSequence,
+		int32(1),
+		true,
+		false,
+		parts,
+		payload,
+		partsSHA,
+		payloadSHA,
+		declaredSHA,
+		"verified",
+		createdAt,
 	}
 }
 
