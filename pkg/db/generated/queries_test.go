@@ -134,6 +134,199 @@ func TestRuntimePullCountQueryScansScalar(t *testing.T) {
 	}
 }
 
+func TestAgentQueriesScanRowsAndAffectedRows(t *testing.T) {
+	creatorID := uuid.New()
+	agentID := uuid.New()
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	authHeader := "Bearer secret"
+	webhookURL := "https://example.com/hook"
+	toolName := "search"
+	agentValues := agentRow(agentID, creatorID, now, &authHeader, &webhookURL, &toolName)
+	rows := &fakeRows{rows: [][]any{agentValues}}
+	dbtx := &fakeDBTX{
+		row:       fakeRow{values: agentValues},
+		queryRows: rows,
+		execTag:   pgconn.NewCommandTag("UPDATE 3"),
+	}
+	q := New(dbtx)
+
+	created, err := q.CreateAgent(context.Background(), CreateAgentParams{
+		CreatorID:          creatorID,
+		Slug:               "agent-one",
+		Name:               "Agent One",
+		Description:        "does work",
+		EndpointURL:        "https://example.com/agent",
+		EndpointAuthHeader: &authHeader,
+		PricePerCallCents:  12,
+		Tags:               []string{"data"},
+		Visibility:         "public",
+		ConnectionMode:     "mcp_server",
+		MCPToolName:        &toolName,
+	})
+	if err != nil {
+		t.Fatalf("CreateAgent error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateAgent")
+	if created.ID != agentID || created.EndpointAuthHeader == nil || *created.MCPToolName != toolName || created.WebhookURL == nil {
+		t.Fatalf("CreateAgent scan = %#v", created)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{creatorID, "agent-one", "Agent One", "does work", "https://example.com/agent", &authHeader, int32(12), []string{"data"}, "public", "mcp_server", &toolName}) {
+		t.Fatalf("CreateAgent args = %#v", dbtx.queryRowArgs)
+	}
+
+	listed, err := q.ListAgentsByCreator(context.Background(), creatorID)
+	if err != nil {
+		t.Fatalf("ListAgentsByCreator error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentsByCreator")
+	if !rows.closed {
+		t.Fatalf("ListAgentsByCreator should close rows")
+	}
+	if len(listed) != 1 || listed[0].ID != agentID || listed[0].Tags[0] != "data" {
+		t.Fatalf("ListAgentsByCreator scan = %#v", listed)
+	}
+
+	affected, err := q.DisableAgent(context.Background(), DisableAgentParams{ID: agentID, CreatorID: creatorID})
+	if err != nil || affected != 3 {
+		t.Fatalf("DisableAgent = %d, %v", affected, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "DisableAgent")
+}
+
+func TestSkillQueriesScanRowsAndMatches(t *testing.T) {
+	agentID := uuid.New()
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	skillRows := &fakeRows{rows: [][]any{skillRow("data/sql-query", "data", "SQL", "query data", 7, now)}}
+	dbtx := &fakeDBTX{
+		row:       fakeRow{values: skillRow("data/sql-query", "data", "SQL", "query data", 7, now)},
+		queryRows: skillRows,
+	}
+	q := New(dbtx)
+
+	skill, err := q.GetSkill(context.Background(), "data/sql-query")
+	if err != nil {
+		t.Fatalf("GetSkill error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetSkill")
+	if skill.ID != "data/sql-query" || skill.SortOrder != 7 || !skill.CreatedAt.Equal(now) {
+		t.Fatalf("GetSkill scan = %#v", skill)
+	}
+
+	listed, err := q.ListSkills(context.Background())
+	if err != nil {
+		t.Fatalf("ListSkills error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListSkills")
+	if len(listed) != 1 || listed[0].Name != "SQL" {
+		t.Fatalf("ListSkills scan = %#v", listed)
+	}
+
+	matchRows := &fakeRows{rows: [][]any{{agentID, int32(2), int32(99)}}}
+	matchDB := &fakeDBTX{queryRows: matchRows}
+	matches, err := New(matchDB).ListAgentsBySkills(context.Background(), []string{"data/sql-query", "data/analysis"})
+	if err != nil {
+		t.Fatalf("ListAgentsBySkills error = %v", err)
+	}
+	requireSQLName(t, matchDB.querySQL, "ListAgentsBySkills")
+	if len(matches) != 1 || matches[0].AgentID != agentID || matches[0].MatchCount != 2 || matches[0].TotalCalls != 99 {
+		t.Fatalf("ListAgentsBySkills scan = %#v", matches)
+	}
+}
+
+func TestAgentRegistrationTokenQueriesScanRowsAndAffectedRows(t *testing.T) {
+	creatorID := uuid.New()
+	tokenID := uuid.New()
+	expiresAt := time.Date(2026, 6, 20, 13, 0, 0, 0, time.UTC)
+	revokedAt := expiresAt.Add(time.Minute)
+	lastUsedAt := expiresAt.Add(2 * time.Minute)
+	createdAt := expiresAt.Add(-time.Hour)
+	tokenValues := registrationTokenRow(tokenID, creatorID, expiresAt, &revokedAt, &lastUsedAt, createdAt)
+	rows := &fakeRows{rows: [][]any{tokenValues}}
+	dbtx := &fakeDBTX{
+		row:       fakeRow{values: tokenValues},
+		queryRows: rows,
+		execTag:   pgconn.NewCommandTag("UPDATE 1"),
+	}
+	q := New(dbtx)
+
+	token, err := q.CreateAgentRegistrationToken(context.Background(), CreateAgentRegistrationTokenParams{
+		CreatorUserID: creatorID,
+		Label:         "bootstrap",
+		Prefix:        "rt_live_abcd",
+		TokenHash:     "hash",
+		MaxAgents:     3,
+		ExpiresAt:     expiresAt,
+	})
+	if err != nil {
+		t.Fatalf("CreateAgentRegistrationToken error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateAgentRegistrationToken")
+	if token.ID != tokenID || token.RevokedAt == nil || token.LastUsedAt == nil {
+		t.Fatalf("CreateAgentRegistrationToken scan = %#v", token)
+	}
+
+	listed, err := q.ListAgentRegistrationTokensByCreator(context.Background(), creatorID)
+	if err != nil {
+		t.Fatalf("ListAgentRegistrationTokensByCreator error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentRegistrationTokensByCreator")
+	if len(listed) != 1 || listed[0].TokenHash != "hash" {
+		t.Fatalf("ListAgentRegistrationTokensByCreator scan = %#v", listed)
+	}
+
+	affected, err := q.RevokeAgentRegistrationTokenForCreator(context.Background(), RevokeAgentRegistrationTokenForCreatorParams{ID: tokenID, CreatorUserID: creatorID})
+	if err != nil || affected != 1 {
+		t.Fatalf("RevokeAgentRegistrationTokenForCreator = %d, %v", affected, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "RevokeAgentRegistrationTokenForCreator")
+
+	consumed, err := q.ConsumeAgentRegistrationToken(context.Background(), tokenID)
+	if err != nil {
+		t.Fatalf("ConsumeAgentRegistrationToken error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "ConsumeAgentRegistrationToken")
+	if consumed.ID != tokenID || consumed.UsedCount != 1 {
+		t.Fatalf("ConsumeAgentRegistrationToken scan = %#v", consumed)
+	}
+}
+
+func TestRunEventQueriesScanRows(t *testing.T) {
+	runID := uuid.New()
+	parentID := uuid.New()
+	eventID := uuid.New()
+	createdAt := time.Date(2026, 6, 20, 14, 0, 0, 0, time.UTC)
+	eventValues := runEventRow(eventID, runID, &parentID, 7, "run.message.delta", []byte(`{"text":"hi"}`), createdAt)
+	rows := &fakeRows{rows: [][]any{eventValues}}
+	dbtx := &fakeDBTX{
+		row:       fakeRow{values: eventValues},
+		queryRows: rows,
+	}
+	q := New(dbtx)
+
+	event, err := q.CreateRunEvent(context.Background(), CreateRunEventParams{
+		RunID:       runID,
+		ParentRunID: &parentID,
+		EventType:   "run.message.delta",
+		Payload:     []byte(`{"text":"hi"}`),
+	})
+	if err != nil {
+		t.Fatalf("CreateRunEvent error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateRunEvent")
+	if event.ID != eventID || event.ParentRunID == nil || event.Sequence != 7 || string(event.Payload) != `{"text":"hi"}` {
+		t.Fatalf("CreateRunEvent scan = %#v", event)
+	}
+
+	listed, err := q.ListRunEventsByRun(context.Background(), ListRunEventsByRunParams{RunID: runID, AfterSequence: 3, Limit: 20})
+	if err != nil {
+		t.Fatalf("ListRunEventsByRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRunEventsByRun")
+	if len(listed) != 1 || listed[0].EventType != "run.message.delta" || !listed[0].CreatedAt.Equal(createdAt) {
+		t.Fatalf("ListRunEventsByRun scan = %#v", listed)
+	}
+}
+
 func userRow(id uuid.UUID, now time.Time, passwordHash, provider, oauthID, avatar *string, deletedAt *time.Time) []any {
 	return []any{
 		id,
@@ -180,6 +373,44 @@ func runRow(
 		finished,
 		source,
 	}
+}
+
+func agentRow(id, creatorID uuid.UUID, now time.Time, authHeader, webhookURL, toolName *string) []any {
+	return []any{
+		id,
+		creatorID,
+		"agent-one",
+		"Agent One",
+		"does work",
+		"https://example.com/agent",
+		authHeader,
+		int32(12),
+		[]string{"data"},
+		"active",
+		"public",
+		"certified",
+		nil,
+		&now,
+		int32(9),
+		int64(1234),
+		webhookURL,
+		"mcp_server",
+		toolName,
+		now,
+		now.Add(time.Minute),
+	}
+}
+
+func skillRow(id, category, name, description string, sortOrder int32, createdAt time.Time) []any {
+	return []any{id, category, name, description, sortOrder, createdAt}
+}
+
+func registrationTokenRow(id, creatorID uuid.UUID, expiresAt time.Time, revokedAt, lastUsedAt *time.Time, createdAt time.Time) []any {
+	return []any{id, creatorID, "bootstrap", "rt_live_abcd", "hash", int32(3), int32(1), expiresAt, revokedAt, lastUsedAt, createdAt}
+}
+
+func runEventRow(id, runID uuid.UUID, parentRunID *uuid.UUID, sequence int32, eventType string, payload []byte, createdAt time.Time) []any {
+	return []any{id, runID, parentRunID, sequence, eventType, payload, createdAt}
 }
 
 type fakeDBTX struct {
