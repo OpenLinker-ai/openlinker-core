@@ -327,6 +327,281 @@ func TestRunEventQueriesScanRows(t *testing.T) {
 	}
 }
 
+func TestDeliveryQueriesScanRowsAndAffectedRows(t *testing.T) {
+	userID := uuid.New()
+	targetID := uuid.New()
+	runID := uuid.New()
+	deliveryID := uuid.New()
+	now := time.Date(2026, 6, 20, 15, 0, 0, 0, time.UTC)
+	nextRetry := now.Add(time.Minute)
+	status := int32(503)
+	body := "temporarily unavailable"
+	errMsg := "HTTP 503"
+	targetValues := deliveryTargetRow(targetID, userID, now)
+	runDeliveryValues := runDeliveryRow(deliveryID, runID, targetID, userID, now, &status, &body, &errMsg, &nextRetry)
+	dbtx := &fakeDBTX{
+		row:       fakeRow{values: targetValues},
+		queryRows: &fakeRows{rows: [][]any{targetValues}},
+		execTag:   pgconn.NewCommandTag("UPDATE 2"),
+	}
+	q := New(dbtx)
+
+	target, err := q.CreateDeliveryTarget(context.Background(), CreateDeliveryTargetParams{
+		UserID:    userID,
+		Name:      "Primary Hook",
+		Type:      "webhook",
+		Config:    []byte(`{"url":"https://example.com/hook"}`),
+		Secret:    "secret",
+		IsDefault: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateDeliveryTarget error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateDeliveryTarget")
+	if target.ID != targetID || target.UserID != userID || !target.IsDefault {
+		t.Fatalf("CreateDeliveryTarget scan = %#v", target)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{userID, "Primary Hook", "webhook", []byte(`{"url":"https://example.com/hook"}`), "secret", true}) {
+		t.Fatalf("CreateDeliveryTarget args = %#v", dbtx.queryRowArgs)
+	}
+
+	listed, err := q.ListDeliveryTargetsByUser(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("ListDeliveryTargetsByUser error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListDeliveryTargetsByUser")
+	if len(listed) != 1 || listed[0].Secret != "secret" || !dbtx.queryRows.(*fakeRows).closed {
+		t.Fatalf("ListDeliveryTargetsByUser scan = %#v", listed)
+	}
+
+	dbtx.row = fakeRow{values: runDeliveryValues}
+	createdDelivery, err := q.CreateRunDelivery(context.Background(), CreateRunDeliveryParams{
+		RunID:      runID,
+		TargetID:   targetID,
+		UserID:     userID,
+		TargetType: "webhook",
+		TargetURL:  "https://example.com/hook",
+		Payload:    []byte(`{"event":"run.completed"}`),
+	})
+	if err != nil {
+		t.Fatalf("CreateRunDelivery error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateRunDelivery")
+	if createdDelivery.ID != deliveryID || createdDelivery.ResponseStatus == nil || *createdDelivery.ResponseStatus != status {
+		t.Fatalf("CreateRunDelivery scan = %#v", createdDelivery)
+	}
+
+	targetSecret := "secret"
+	targetConfig := []byte(`{"url":"https://example.com/hook"}`)
+	dbtx.row = fakeRow{values: append(append([]any{}, runDeliveryValues...), &targetSecret, targetConfig)}
+	gotDelivery, err := q.GetRunDeliveryByID(context.Background(), deliveryID)
+	if err != nil {
+		t.Fatalf("GetRunDeliveryByID error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetRunDeliveryByID")
+	if gotDelivery.ID != deliveryID || gotDelivery.TargetSecret == nil || *gotDelivery.TargetSecret != targetSecret || string(gotDelivery.TargetConfig) != string(targetConfig) {
+		t.Fatalf("GetRunDeliveryByID scan = %#v", gotDelivery)
+	}
+
+	dbtx.queryRows = &fakeRows{rows: [][]any{runDeliveryValues}}
+	pending, err := q.ListPendingRunDeliveries(context.Background())
+	if err != nil {
+		t.Fatalf("ListPendingRunDeliveries error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListPendingRunDeliveries")
+	if len(pending) != 1 || pending[0].ID != deliveryID {
+		t.Fatalf("ListPendingRunDeliveries scan = %#v", pending)
+	}
+
+	if rows, err := q.DeleteDeliveryTarget(context.Background(), DeleteDeliveryTargetParams{ID: targetID, UserID: userID}); err != nil || rows != 2 {
+		t.Fatalf("DeleteDeliveryTarget = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "DeleteDeliveryTarget")
+	if rows, err := q.ResetRunDeliveryForRetry(context.Background(), ResetRunDeliveryForRetryParams{ID: deliveryID, UserID: userID}); err != nil || rows != 2 {
+		t.Fatalf("ResetRunDeliveryForRetry = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "ResetRunDeliveryForRetry")
+
+	if err := q.MarkRunDeliveryFailedRetry(context.Background(), MarkRunDeliveryFailedRetryParams{
+		ID:             deliveryID,
+		ResponseStatus: &status,
+		ResponseBody:   &body,
+		ErrorMessage:   &errMsg,
+		NextRetryAt:    nextRetry,
+	}); err != nil {
+		t.Fatalf("MarkRunDeliveryFailedRetry error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkRunDeliveryFailedRetry")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{deliveryID, &status, &body, &errMsg, nextRetry}) {
+		t.Fatalf("MarkRunDeliveryFailedRetry args = %#v", dbtx.execArgs)
+	}
+}
+
+func TestWebhookQueriesScanRowsAndAffectedRows(t *testing.T) {
+	creatorID := uuid.New()
+	agentID := uuid.New()
+	runID := uuid.New()
+	deliveryID := uuid.New()
+	now := time.Date(2026, 6, 20, 16, 0, 0, 0, time.UTC)
+	nextRetry := now.Add(5 * time.Minute)
+	status := int32(202)
+	body := "accepted"
+	errMsg := "retry later"
+	url := "https://example.com/webhook"
+	secret := "webhook-secret"
+	deliveryValues := webhookDeliveryRow(deliveryID, agentID, runID, now, &status, &body, &errMsg, &nextRetry)
+	dbtx := &fakeDBTX{
+		row:       fakeRow{values: []any{agentID, creatorID, "agent-one", &url, &secret}},
+		queryRows: &fakeRows{rows: [][]any{deliveryValues}},
+		execTag:   pgconn.NewCommandTag("UPDATE 4"),
+	}
+	q := New(dbtx)
+
+	if rows, err := q.SetAgentWebhook(context.Background(), SetAgentWebhookParams{ID: agentID, WebhookURL: &url, WebhookSecret: &secret, CreatorID: creatorID}); err != nil || rows != 4 {
+		t.Fatalf("SetAgentWebhook = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "SetAgentWebhook")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{agentID, &url, &secret, creatorID}) {
+		t.Fatalf("SetAgentWebhook args = %#v", dbtx.execArgs)
+	}
+
+	cfg, err := q.GetAgentWebhookConfig(context.Background(), agentID)
+	if err != nil {
+		t.Fatalf("GetAgentWebhookConfig error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentWebhookConfig")
+	if cfg.ID != agentID || cfg.WebhookURL == nil || *cfg.WebhookSecret != secret {
+		t.Fatalf("GetAgentWebhookConfig scan = %#v", cfg)
+	}
+
+	dbtx.row = fakeRow{values: deliveryValues}
+	created, err := q.CreateWebhookDelivery(context.Background(), CreateWebhookDeliveryParams{
+		AgentID: agentID,
+		RunID:   runID,
+		URL:     url,
+		Payload: []byte(`{"event":"run.completed"}`),
+	})
+	if err != nil {
+		t.Fatalf("CreateWebhookDelivery error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateWebhookDelivery")
+	if created.ID != deliveryID || created.ResponseBody == nil || *created.ResponseBody != body {
+		t.Fatalf("CreateWebhookDelivery scan = %#v", created)
+	}
+
+	dbtx.row = fakeRow{values: append(append([]any{}, deliveryValues...), &secret)}
+	got, err := q.GetWebhookDeliveryByID(context.Background(), deliveryID)
+	if err != nil {
+		t.Fatalf("GetWebhookDeliveryByID error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetWebhookDeliveryByID")
+	if got.ID != deliveryID || got.WebhookSecret == nil || *got.WebhookSecret != secret {
+		t.Fatalf("GetWebhookDeliveryByID scan = %#v", got)
+	}
+
+	pending, err := q.ListPendingDeliveries(context.Background())
+	if err != nil {
+		t.Fatalf("ListPendingDeliveries error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListPendingDeliveries")
+	if len(pending) != 1 || pending[0].ID != deliveryID {
+		t.Fatalf("ListPendingDeliveries scan = %#v", pending)
+	}
+
+	if err := q.MarkDeliveryFailedFinal(context.Background(), MarkDeliveryFailedFinalParams{ID: deliveryID, ResponseStatus: &status, ResponseBody: &body, ErrorMessage: &errMsg}); err != nil {
+		t.Fatalf("MarkDeliveryFailedFinal error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkDeliveryFailedFinal")
+	if err := q.MarkDeliveryFailedRetry(context.Background(), MarkDeliveryFailedRetryParams{ID: deliveryID, ResponseStatus: &status, ResponseBody: &body, ErrorMessage: &errMsg, NextRetryAt: nextRetry}); err != nil {
+		t.Fatalf("MarkDeliveryFailedRetry error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkDeliveryFailedRetry")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{deliveryID, &status, &body, &errMsg, nextRetry}) {
+		t.Fatalf("MarkDeliveryFailedRetry args = %#v", dbtx.execArgs)
+	}
+}
+
+func TestRegistryBridgeQueriesScanRowsAndScalars(t *testing.T) {
+	ownerID := uuid.New()
+	nodeID := uuid.New()
+	listingID := uuid.New()
+	agentID := uuid.New()
+	linkID := uuid.New()
+	now := time.Date(2026, 6, 20, 17, 0, 0, 0, time.UTC)
+	baseURL := "https://node.example"
+	nodeValues := registryNodeRow(nodeID, ownerID, now, &baseURL)
+	linkValues := cloudListingLinkRow(linkID, listingID, nodeID, agentID, now)
+	linkRowValues := cloudListingLinkOwnerRow(linkID, listingID, nodeID, agentID, now)
+	dbtx := &fakeDBTX{
+		row:       fakeRow{values: nodeValues},
+		queryRows: &fakeRows{rows: [][]any{nodeValues}},
+	}
+	q := New(dbtx)
+
+	node, err := q.CreateRegistryNode(context.Background(), CreateRegistryNodeParams{
+		OwnerUserID:  ownerID,
+		NodeName:     "edge-one",
+		NodeType:     "bridge_proxy",
+		BaseURL:      &baseURL,
+		SecretPrefix: "rn_live_abcd",
+		SecretHash:   "hash",
+		Scopes:       []string{"heartbeat", "proxy:pull"},
+	})
+	if err != nil {
+		t.Fatalf("CreateRegistryNode error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateRegistryNode")
+	if node.ID != nodeID || node.BaseURL == nil || len(node.Scopes) != 2 {
+		t.Fatalf("CreateRegistryNode scan = %#v", node)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{ownerID, "edge-one", "bridge_proxy", &baseURL, "rn_live_abcd", "hash", []string{"heartbeat", "proxy:pull"}}) {
+		t.Fatalf("CreateRegistryNode args = %#v", dbtx.queryRowArgs)
+	}
+
+	nodes, err := q.ListRegistryNodesByOwner(context.Background(), ownerID)
+	if err != nil {
+		t.Fatalf("ListRegistryNodesByOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRegistryNodesByOwner")
+	if len(nodes) != 1 || nodes[0].ID != nodeID {
+		t.Fatalf("ListRegistryNodesByOwner scan = %#v", nodes)
+	}
+
+	dbtx.row = fakeRow{values: linkValues}
+	link, err := q.UpsertCloudListingLink(context.Background(), UpsertCloudListingLinkParams{
+		CloudListingID:       listingID,
+		RegistryNodeID:       nodeID,
+		LocalAgentID:         agentID,
+		RoutingMode:          "pull_proxy",
+		PayloadPolicy:        "metadata_only",
+		PayloadRedactionKeys: []string{"secret"},
+	})
+	if err != nil {
+		t.Fatalf("UpsertCloudListingLink error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpsertCloudListingLink")
+	if link.ID != linkID || link.SyncStatus != "linked" || link.MetadataSyncedAt == nil {
+		t.Fatalf("UpsertCloudListingLink scan = %#v", link)
+	}
+
+	dbtx.queryRows = &fakeRows{rows: [][]any{linkRowValues}}
+	links, err := q.ListCloudListingLinksByOwner(context.Background(), ownerID)
+	if err != nil {
+		t.Fatalf("ListCloudListingLinksByOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListCloudListingLinksByOwner")
+	if len(links) != 1 || links[0].NodeName != "edge-one" || links[0].AgentSlug != "local-agent" {
+		t.Fatalf("ListCloudListingLinksByOwner scan = %#v", links)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(6)}}
+	count, err := q.CountPendingProxyRunsByNode(context.Background(), nodeID)
+	if err != nil || count != 6 {
+		t.Fatalf("CountPendingProxyRunsByNode = %d, %v", count, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountPendingProxyRunsByNode")
+}
+
 func userRow(id uuid.UUID, now time.Time, passwordHash, provider, oauthID, avatar *string, deletedAt *time.Time) []any {
 	return []any{
 		id,
@@ -411,6 +686,115 @@ func registrationTokenRow(id, creatorID uuid.UUID, expiresAt time.Time, revokedA
 
 func runEventRow(id, runID uuid.UUID, parentRunID *uuid.UUID, sequence int32, eventType string, payload []byte, createdAt time.Time) []any {
 	return []any{id, runID, parentRunID, sequence, eventType, payload, createdAt}
+}
+
+func deliveryTargetRow(id, userID uuid.UUID, now time.Time) []any {
+	return []any{id, userID, "Primary Hook", "webhook", []byte(`{"url":"https://example.com/hook"}`), "secret", true, now, now.Add(time.Minute)}
+}
+
+func runDeliveryRow(id, runID, targetID, userID uuid.UUID, now time.Time, status *int32, body, errMsg *string, nextRetry *time.Time) []any {
+	return []any{
+		id,
+		runID,
+		targetID,
+		userID,
+		"webhook",
+		"https://example.com/hook",
+		[]byte(`{"event":"run.completed"}`),
+		"pending",
+		status,
+		body,
+		errMsg,
+		int32(1),
+		nextRetry,
+		now,
+		now.Add(time.Minute),
+	}
+}
+
+func webhookDeliveryRow(id, agentID, runID uuid.UUID, now time.Time, status *int32, body, errMsg *string, nextRetry *time.Time) []any {
+	return []any{
+		id,
+		agentID,
+		runID,
+		"https://example.com/webhook",
+		[]byte(`{"event":"run.completed"}`),
+		"pending",
+		status,
+		body,
+		errMsg,
+		int32(1),
+		nextRetry,
+		now,
+		now.Add(time.Minute),
+	}
+}
+
+func registryNodeRow(id, ownerID uuid.UUID, now time.Time, baseURL *string) []any {
+	return []any{
+		id,
+		ownerID,
+		"edge-one",
+		"bridge_proxy",
+		baseURL,
+		"rn_live_abcd",
+		"hash",
+		[]string{"heartbeat", "proxy:pull"},
+		"healthy",
+		&now,
+		nil,
+		now,
+		now.Add(time.Minute),
+	}
+}
+
+func cloudListingLinkRow(id, listingID, nodeID, agentID uuid.UUID, now time.Time) []any {
+	syncedAt := now.Add(30 * time.Second)
+	return []any{
+		id,
+		listingID,
+		nodeID,
+		agentID,
+		"pull_proxy",
+		"metadata_only",
+		[]string{"secret"},
+		"linked",
+		"local-agent",
+		"Local Agent",
+		"does local work",
+		[]string{"data"},
+		"healthy",
+		&syncedAt,
+		nil,
+		now,
+		now,
+		now.Add(time.Minute),
+	}
+}
+
+func cloudListingLinkOwnerRow(id, listingID, nodeID, agentID uuid.UUID, now time.Time) []any {
+	link := cloudListingLinkRow(id, listingID, nodeID, agentID, now)
+	return []any{
+		link[0],
+		link[1],
+		link[2],
+		"edge-one",
+		link[3],
+		"local-agent",
+		"Local Agent",
+		link[4],
+		link[5],
+		link[6],
+		link[7],
+		"does local work",
+		[]string{"data"},
+		"healthy",
+		link[13],
+		link[14],
+		link[15],
+		link[16],
+		link[17],
+	}
 }
 
 type fakeDBTX struct {
