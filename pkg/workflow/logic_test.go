@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,11 @@ import (
 func TestWorkflowGraphAndEdgeHelpers(t *testing.T) {
 	if got := normalizeRunStatus(" Success "); got != "success" {
 		t.Fatalf("normalizeRunStatus = %q", got)
+	}
+
+	emptyEdges, err := normalizeWorkflowEdges([]string{"extract"}, nil)
+	if err != nil || len(emptyEdges) != 0 {
+		t.Fatalf("normalizeWorkflowEdges empty = %#v %v", emptyEdges, err)
 	}
 
 	edges, err := normalizeWorkflowEdges([]string{"extract", "summarize"}, []map[string]interface{}{
@@ -120,6 +126,57 @@ func TestWorkflowGraphAndEdgeHelpers(t *testing.T) {
 	}
 	if _, err := workflowGraphFromDefinition(db.Workflow{Edges: []byte(`[{"from":"collect","to":"missing"}]`)}, dagNodes); err == nil {
 		t.Fatalf("stored workflow edges with unknown endpoint should fail")
+	}
+}
+
+func TestWorkflowCreateValidatesBeforePersistence(t *testing.T) {
+	svc := &Service{}
+	userID := uuid.New()
+	validAgentID := uuid.New()
+	validNode := WorkflowNodeRequest{Key: "extract", AgentID: validAgentID}
+
+	for _, tc := range []struct {
+		name string
+		req  *CreateWorkflowRequest
+		want int
+	}{
+		{name: "nil request", req: nil, want: http.StatusBadRequest},
+		{name: "missing nodes", req: &CreateWorkflowRequest{Name: "Draft"}, want: http.StatusBadRequest},
+		{name: "too many nodes", req: &CreateWorkflowRequest{Name: "Draft", Nodes: []WorkflowNodeRequest{
+			{Key: "n0", AgentID: validAgentID},
+			{Key: "n1", AgentID: validAgentID},
+			{Key: "n2", AgentID: validAgentID},
+			{Key: "n3", AgentID: validAgentID},
+			{Key: "n4", AgentID: validAgentID},
+			{Key: "n5", AgentID: validAgentID},
+			{Key: "n6", AgentID: validAgentID},
+			{Key: "n7", AgentID: validAgentID},
+			{Key: "n8", AgentID: validAgentID},
+			{Key: "n9", AgentID: validAgentID},
+			{Key: "n10", AgentID: validAgentID},
+		}}, want: http.StatusBadRequest},
+		{name: "blank name", req: &CreateWorkflowRequest{Name: "   ", Nodes: []WorkflowNodeRequest{validNode}}, want: http.StatusBadRequest},
+		{name: "bad edge", req: &CreateWorkflowRequest{
+			Name:  "Draft",
+			Nodes: []WorkflowNodeRequest{validNode, {Key: "review", AgentID: validAgentID}},
+			Edges: []map[string]interface{}{{"from": "extract", "to": "missing"}},
+		}, want: http.StatusBadRequest},
+		{name: "cyclic graph", req: &CreateWorkflowRequest{
+			Name: "Draft",
+			Nodes: []WorkflowNodeRequest{
+				{Key: "extract", AgentID: validAgentID},
+				{Key: "review", AgentID: validAgentID},
+			},
+			Edges: []map[string]interface{}{
+				{"from": "extract", "to": "review"},
+				{"from": "review", "to": "extract"},
+			},
+		}, want: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := svc.CreateWorkflow(context.Background(), userID, tc.req)
+			requireWorkflowHTTPStatus(t, err, tc.want)
+		})
 	}
 }
 
@@ -231,6 +288,10 @@ func TestWorkflowResponseAndDataHelpers(t *testing.T) {
 	if err != nil || stepOutput["ok"] != true {
 		t.Fatalf("workflowStepOutputMap = %#v %v", stepOutput, err)
 	}
+	emptyStepOutput, err := workflowStepOutputMap(db.WorkflowRunStep{NodeKey: "empty"})
+	if err != nil || len(emptyStepOutput) != 0 {
+		t.Fatalf("empty workflowStepOutputMap = %#v %v", emptyStepOutput, err)
+	}
 	if _, err := workflowStepOutputMap(db.WorkflowRunStep{NodeKey: "extract", Output: []byte(`bad`)}); err == nil {
 		t.Fatalf("invalid step output should fail")
 	}
@@ -255,6 +316,10 @@ func TestWorkflowComparisonAndRerunHelpers(t *testing.T) {
 	if _, ok := affected["extract"]; ok {
 		t.Fatalf("upstream parent should not be affected: %#v", affected)
 	}
+	dupChildAffected := workflowAffectedNodeKeys(&workflowGraph{Children: map[string][]string{"root": {"child", "child"}, "child": {}}}, "root")
+	if len(dupChildAffected) != 2 {
+		t.Fatalf("duplicate child should be visited once: %#v", dupChildAffected)
+	}
 
 	first := db.WorkflowRunStep{NodeKey: "extract", Status: "running"}
 	second := db.WorkflowRunStep{NodeKey: "extract", Status: "success"}
@@ -274,6 +339,9 @@ func TestWorkflowComparisonAndRerunHelpers(t *testing.T) {
 	}
 	if jsonBytesEqual([]byte(`not-json`), []byte(`{"raw":"not-json"}`)) {
 		t.Fatalf("invalid JSON should compare as raw text")
+	}
+	if !jsonBytesEqual(nil, []byte(`{}`)) {
+		t.Fatalf("empty JSON bytes should compare as empty object")
 	}
 
 	workflowID := uuid.New()
