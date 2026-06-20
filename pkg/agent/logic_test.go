@@ -350,9 +350,24 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 	if private.Listed || private.Discoverable || !private.Callable || private.AgentCardURL != "" || private.A2AEndpoint != "" {
 		t.Fatalf("unexpected private readiness: %#v", private)
 	}
+	unlisted := readinessForAgent("quiet-agent", "active", "unlisted", "certified", availabilityResponse("unknown", nil, nil, nil, 0), 0, nil)
+	if unlisted.Listed || !unlisted.Discoverable || unlisted.Callable || !unlisted.Certified {
+		t.Fatalf("unexpected unlisted readiness: %#v", unlisted)
+	}
+	if unlisted.AgentCardURL != "/api/v1/agents/quiet-agent/agent-card.json" || unlisted.A2AEndpoint != "/api/v1/a2a/agents/quiet-agent" {
+		t.Fatalf("unexpected unlisted machine endpoints: %#v", unlisted)
+	}
 	unreachable := readinessForAgent("down", "active", "public", "unreviewed", availabilityResponse("unreachable", &runAt, nil, nil, 3), 0, nil)
 	if unreachable.Callable {
 		t.Fatalf("unreachable agent with old success should not be callable: %#v", unreachable)
+	}
+	degraded := availabilityResponse("degraded", nil, &runAt, &runAt, 2)
+	if degraded.Status != "degraded" || degraded.Label != "不稳定" || degraded.LastFailedRunAt == nil || degraded.LastCheckedAt == nil || degraded.ConsecutiveFailures != 2 {
+		t.Fatalf("unexpected degraded availability: %#v", degraded)
+	}
+	unreachableAvailability := availabilityResponse("unreachable", nil, &runAt, nil, 5)
+	if unreachableAvailability.Status != "unreachable" || unreachableAvailability.Label != "不可达" || unreachableAvailability.LastSuccessfulRunAt != nil {
+		t.Fatalf("unexpected unreachable availability: %#v", unreachableAvailability)
 	}
 
 	for _, tc := range []struct {
