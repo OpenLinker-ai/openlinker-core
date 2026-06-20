@@ -16,6 +16,7 @@ import (
 
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/kinzhi/openlinker-core/pkg/runtime"
 )
 
 func TestTokenizeAndRuleParse(t *testing.T) {
@@ -51,9 +52,20 @@ func TestLLMParsingBuildsPromptFiltersAndLimits(t *testing.T) {
 	ids, err := parseLLMResp("prefix ```json\n{\"skills\":[\"known-1\",\"known-2\"]}\n``` suffix")
 	require.NoError(t, err)
 	require.Equal(t, []string{"known-1", "known-2"}, ids)
+	ids, err = parseLLMResp("```json\n{\"skills\":[\"known-3\"]}\n```")
+	require.NoError(t, err)
+	require.Equal(t, []string{"known-3"}, ids)
+	ids, err = parseLLMResp("```\n{\"skills\":[\"known-4\"]}\n```")
+	require.NoError(t, err)
+	require.Equal(t, []string{"known-4"}, ids)
+	ids, err = parseLLMResp(`{"other":[]}`)
+	require.NoError(t, err)
+	require.Empty(t, ids)
 	_, err = parseLLMResp("no json here")
 	require.Error(t, err)
 	_, err = parseLLMResp(`{"skills":`)
+	require.Error(t, err)
+	_, err = parseLLMResp(`{"skills":[}`)
 	require.Error(t, err)
 
 	client := &fakeLLMClient{response: `{"skills":["known-1","unknown","known-2","known-3","known-4"]}`}
@@ -128,6 +140,8 @@ func TestPublicSummaryVisibilityAndTemplateHelpers(t *testing.T) {
 	require.Equal(t, "公开摘要", workResponseQuery(&task))
 	task.PublicSummary = nil
 	require.Equal(t, "private query", publicTaskSummary(&task))
+	task.Visibility = taskVisibilityPrivate
+	require.Equal(t, "private query", workResponseQuery(&task))
 	require.Equal(t, taskVisibilityPrivate, normalizedTaskVisibility(""))
 	require.Equal(t, taskVisibilityPublic, normalizedTaskVisibility(taskVisibilityPublic))
 
@@ -142,6 +156,14 @@ func TestPublicSummaryVisibilityAndTemplateHelpers(t *testing.T) {
 	require.Equal(t, mergeSkillIDs(tmpl.RequiredSkillIDs, []string{"extra"}, maxTaskSkillRefs), mergeTemplateSkillIDs(tmpl, []string{"extra"}))
 	require.Equal(t, []string{"extra"}, mergeTemplateSkillIDs(nil, []string{"extra"}))
 	require.Equal(t, []string{"run_agent"}, mergeTemplateMCPTools(&taskTemplate{RequiredMCPTools: []string{"run_agent"}}, nil))
+	require.Equal(t, []string{"get_agent"}, mergeTemplateMCPTools(nil, []string{"get_agent"}))
+	require.Equal(t,
+		[]string{"run_agent", "search_agents", "get_agent", "create_task", "get_run"},
+		mergeTemplateMCPTools(
+			&taskTemplate{RequiredMCPTools: []string{"run_agent", "search_agents"}},
+			[]string{"run_agent", "get_agent", "create_task", "get_run", "ignored"},
+		),
+	)
 	empty, err := svc.taskTemplateByID(context.Background(), " ")
 	require.NoError(t, err)
 	require.Nil(t, empty)
@@ -197,6 +219,8 @@ func TestTaskDTOHelpers(t *testing.T) {
 	require.Equal(t, "shared", normalizeDeliveryVisibility(" shared "))
 	require.Equal(t, "public_example", normalizeDeliveryVisibility("public_example"))
 	require.Equal(t, []string{"run_agent"}, taskRunUsedMCPTools([]string{"search_agents", "run_agent", "run_agent"}))
+	require.Empty(t, taskRunUsedMCPTools([]string{" search_agents ", " get_run "}))
+	require.Nil(t, deliveryArtifact(nil))
 	require.Nil(t, deliveryArtifact([]byte(`not-json`)))
 	require.Equal(t, DeliveryArtifact{"answer": float64(42)}, deliveryArtifact(artifact))
 
@@ -259,6 +283,39 @@ func TestTaskDTOHelpers(t *testing.T) {
 	require.Equal(t, "", buildWhy(nil, nil))
 	require.Equal(t, map[string]string{"data/sql": "SQL"}, skillNameByID([]db.Skill{{ID: "data/sql", Name: "SQL"}}))
 	require.Equal(t, []SkillRef{{ID: "missing", Name: "missing"}}, skillRefsForIDs([]string{"missing"}, nil))
+}
+
+func TestTaskServiceConstructionAndSkillLoading(t *testing.T) {
+	svc := NewService(nil, nil, nil)
+	require.NotNil(t, svc)
+	require.NotNil(t, svc.queries)
+	require.Nil(t, svc.runner)
+
+	runner := &fakeTaskRuntimeStarter{}
+	svc.SetRunStarter(runner)
+	require.Same(t, runner, svc.runner)
+
+	cachedSkill := db.Skill{ID: "cached", Name: "Cached"}
+	svc.allSkills = []db.Skill{cachedSkill}
+	got, err := svc.skills(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []db.Skill{cachedSkill}, got)
+
+	loadedSkill := db.Skill{ID: "loaded", Name: "Loaded"}
+	recommender := &fakeTaskSkillRecommender{skills: []db.Skill{loadedSkill}}
+	svc = &Service{skillSvc: recommender}
+	got, err = svc.skills(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []db.Skill{loadedSkill}, got)
+	require.Equal(t, 1, recommender.listCalls)
+	require.Equal(t, []db.Skill{loadedSkill}, svc.allSkills)
+
+	svc = &Service{skillSvc: &fakeTaskSkillRecommender{err: errors.New("offline")}}
+	_, err = svc.skills(context.Background())
+	require.Error(t, err)
+	var httpErr *httpx.HTTPError
+	require.True(t, errors.As(err, &httpErr))
+	require.Equal(t, http.StatusInternalServerError, httpErr.Status)
 }
 
 func TestTaskUserIDFromCtx(t *testing.T) {
@@ -388,4 +445,28 @@ func (f *fakeLLMClient) Complete(_ context.Context, system, user string) (string
 	f.system = system
 	f.user = user
 	return f.response, f.err
+}
+
+type fakeTaskSkillRecommender struct {
+	skills    []db.Skill
+	err       error
+	listCalls int
+}
+
+func (f *fakeTaskSkillRecommender) ListAll(context.Context) ([]db.Skill, error) {
+	f.listCalls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return append([]db.Skill{}, f.skills...), nil
+}
+
+func (f *fakeTaskSkillRecommender) RecommendAgentsBySkills(context.Context, []string, int) ([]AgentMatch, error) {
+	return nil, nil
+}
+
+type fakeTaskRuntimeStarter struct{}
+
+func (f *fakeTaskRuntimeStarter) StartRun(context.Context, uuid.UUID, *runtime.RunRequest, string) (*runtime.RunResponse, error) {
+	return nil, nil
 }
