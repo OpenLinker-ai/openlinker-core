@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 )
@@ -247,4 +249,494 @@ func TestDeliverSlackRejectsInvalidPayloadAndTruncate(t *testing.T) {
 	if got := truncate("abc", 3); got != "abc" {
 		t.Fatalf("truncate exact = %q", got)
 	}
+}
+
+func TestDeliveryServiceTargetCRUDAndHistory(t *testing.T) {
+	userID := uuid.New()
+	targetID := uuid.New()
+	runID := uuid.New()
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	target := db.DeliveryTarget{
+		ID:        targetID,
+		UserID:    userID,
+		Name:      "Webhook",
+		Type:      targetTypeWebhook,
+		Config:    []byte(`{"url":"https://example.com/hook"}`),
+		Secret:    "secret",
+		IsDefault: true,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	queries := &fakeDeliveryQueries{
+		targets:      []db.DeliveryTarget{target},
+		createTarget: target,
+		deleteRows:   1,
+		defaultRows:  1,
+		run:          db.Run{ID: runID, UserID: userID, Status: "success"},
+		deliveries: []db.RunDelivery{
+			{ID: uuid.New(), RunID: runID, TargetID: targetID, UserID: userID, TargetType: targetTypeWebhook, TargetURL: "https://example.com/hook", Status: "success", CreatedAt: now, UpdatedAt: now},
+		},
+	}
+	svc := &Service{queries: queries}
+
+	created, err := svc.CreateTarget(context.Background(), userID, &CreateTargetRequest{
+		Name:      "Webhook",
+		Type:      targetTypeWebhook,
+		URL:       "https://example.com/hook",
+		IsDefault: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateTarget error = %v", err)
+	}
+	if created.ID != targetID.String() || created.Secret != "secret" || !queries.clearDefaultCalled {
+		t.Fatalf("created target/clear default = %#v/%v", created, queries.clearDefaultCalled)
+	}
+	if queries.createTargetArg.UserID != userID || queries.createTargetArg.Name != "Webhook" || queries.createTargetArg.Type != targetTypeWebhook || queries.createTargetArg.Secret == "" {
+		t.Fatalf("create target arg = %#v", queries.createTargetArg)
+	}
+
+	listed, err := svc.ListTargets(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("ListTargets error = %v", err)
+	}
+	if len(listed) != 1 || listed[0].Secret != "" || listed[0].URL != "https://example.com/hook" {
+		t.Fatalf("listed targets = %#v", listed)
+	}
+
+	if err := svc.DeleteTarget(context.Background(), targetID, userID); err != nil {
+		t.Fatalf("DeleteTarget error = %v", err)
+	}
+	if queries.deleteArg.ID != targetID || queries.deleteArg.UserID != userID {
+		t.Fatalf("delete arg = %#v", queries.deleteArg)
+	}
+
+	if err := svc.SetDefault(context.Background(), targetID, userID); err != nil {
+		t.Fatalf("SetDefault error = %v", err)
+	}
+	if queries.defaultArg.ID != targetID || queries.defaultArg.UserID != userID {
+		t.Fatalf("default arg = %#v", queries.defaultArg)
+	}
+
+	history, err := svc.ListByRun(context.Background(), runID, userID)
+	if err != nil {
+		t.Fatalf("ListByRun error = %v", err)
+	}
+	if len(history) != 1 || history[0].RunID != runID.String() {
+		t.Fatalf("history = %#v", history)
+	}
+}
+
+func TestDeliveryServiceEnqueueAndAttemptDelivery(t *testing.T) {
+	userID := uuid.New()
+	runID := uuid.New()
+	agentID := uuid.New()
+	targetID := uuid.New()
+	deliveryID := uuid.New()
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	run := db.Run{
+		ID:        runID,
+		UserID:    userID,
+		AgentID:   agentID,
+		Input:     []byte(`{"prompt":"hello"}`),
+		Output:    []byte(`{"answer":"world"}`),
+		Status:    "success",
+		CostCents: 25,
+		StartedAt: now,
+	}
+	target := db.DeliveryTarget{
+		ID:     targetID,
+		UserID: userID,
+		Type:   targetTypeWebhook,
+		Config: []byte(`{"url":"https://example.com/hook"}`),
+		Secret: "secret",
+	}
+	queries := &fakeDeliveryQueries{
+		agent: db.Agent{ID: agentID, Slug: "helper", Name: "Helper"},
+		createDelivery: db.RunDelivery{
+			ID:         deliveryID,
+			RunID:      runID,
+			TargetID:   targetID,
+			UserID:     userID,
+			TargetType: targetTypeWebhook,
+			TargetURL:  "https://example.com/hook",
+			Status:     "pending",
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		},
+	}
+	svc := &Service{queries: queries}
+	enqueued, err := svc.enqueue(context.Background(), userID, &run, target)
+	if err != nil {
+		t.Fatalf("enqueue error = %v", err)
+	}
+	if enqueued.ID != deliveryID || queries.createDeliveryArg.RunID != runID || queries.createDeliveryArg.TargetID != targetID {
+		t.Fatalf("enqueue/create arg = %#v/%#v", enqueued, queries.createDeliveryArg)
+	}
+	var payload DeliveryPayload
+	if err := json.Unmarshal(queries.createDeliveryArg.Payload, &payload); err != nil {
+		t.Fatalf("payload decode: %v", err)
+	}
+	if payload.AgentSlug != "helper" || payload.Input["prompt"] != "hello" || payload.Output["answer"] != "world" {
+		t.Fatalf("payload = %#v", payload)
+	}
+
+	secret := "webhook-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-OpenLinker-Signature") != "sha256="+signPayload([]byte(`{"event":"run.completed"}`), secret) {
+			t.Fatalf("signature = %q", r.Header.Get("X-OpenLinker-Signature"))
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("accepted"))
+	}))
+	defer server.Close()
+
+	successQueries := &fakeDeliveryQueries{
+		runDeliveryRow: db.GetRunDeliveryRow{
+			RunDelivery: db.RunDelivery{
+				ID:         deliveryID,
+				TargetType: targetTypeWebhook,
+				TargetURL:  server.URL,
+				Payload:    []byte(`{"event":"run.completed"}`),
+				Status:     "pending",
+			},
+			TargetSecret: &secret,
+		},
+	}
+	svc = &Service{queries: successQueries, httpClient: server.Client()}
+	if err := svc.AttemptDelivery(context.Background(), deliveryID); err != nil {
+		t.Fatalf("AttemptDelivery success error = %v", err)
+	}
+	if successQueries.successArg.ID != deliveryID || successQueries.successArg.ResponseStatus == nil || *successQueries.successArg.ResponseStatus != http.StatusAccepted {
+		t.Fatalf("success arg = %#v", successQueries.successArg)
+	}
+	if successQueries.successArg.ResponseBody == nil || *successQueries.successArg.ResponseBody != "accepted" {
+		t.Fatalf("success body = %#v", successQueries.successArg.ResponseBody)
+	}
+
+	failingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("temporary"))
+	}))
+	defer failingServer.Close()
+	retryQueries := &fakeDeliveryQueries{
+		runDeliveryRow: db.GetRunDeliveryRow{
+			RunDelivery: db.RunDelivery{
+				ID:           deliveryID,
+				TargetType:   targetTypeWebhook,
+				TargetURL:    failingServer.URL,
+				Payload:      []byte(`{"event":"run.completed"}`),
+				Status:       "pending",
+				AttemptCount: 0,
+			},
+			TargetSecret: &secret,
+		},
+	}
+	svc = &Service{queries: retryQueries, httpClient: failingServer.Client()}
+	if err := svc.AttemptDelivery(context.Background(), deliveryID); err != nil {
+		t.Fatalf("AttemptDelivery retry error = %v", err)
+	}
+	if retryQueries.retryArg.ID != deliveryID || retryQueries.retryArg.ResponseStatus == nil || *retryQueries.retryArg.ResponseStatus != http.StatusInternalServerError {
+		t.Fatalf("retry arg = %#v", retryQueries.retryArg)
+	}
+	if retryQueries.retryArg.ErrorMessage == nil || *retryQueries.retryArg.ErrorMessage != "HTTP 500" {
+		t.Fatalf("retry error message = %#v", retryQueries.retryArg.ErrorMessage)
+	}
+	if retryQueries.retryArg.NextRetryAt.IsZero() {
+		t.Fatalf("retry next_retry_at was not set")
+	}
+
+	deletedTargetQueries := &fakeDeliveryQueries{
+		runDeliveryRow: db.GetRunDeliveryRow{
+			RunDelivery: db.RunDelivery{ID: deliveryID, Status: "pending"},
+		},
+	}
+	svc = &Service{queries: deletedTargetQueries, httpClient: http.DefaultClient}
+	if err := svc.AttemptDelivery(context.Background(), deliveryID); err != nil {
+		t.Fatalf("AttemptDelivery deleted target error = %v", err)
+	}
+	if deletedTargetQueries.finalArg.ErrorMessage == nil || *deletedTargetQueries.finalArg.ErrorMessage != "投递目标已被删除" {
+		t.Fatalf("deleted target final arg = %#v", deletedTargetQueries.finalArg)
+	}
+}
+
+func TestDeliveryServiceErrors(t *testing.T) {
+	userID := uuid.New()
+	runID := uuid.New()
+	targetID := uuid.New()
+	deliveryID := uuid.New()
+	sentinel := errors.New("database stopped")
+
+	for _, tc := range []struct {
+		name string
+		call func(*Service) error
+		q    *fakeDeliveryQueries
+		want int
+	}{
+		{
+			name: "create target list error",
+			call: func(s *Service) error {
+				_, err := s.CreateTarget(context.Background(), userID, &CreateTargetRequest{Name: "Webhook", Type: targetTypeWebhook, URL: "https://example.com/hook"})
+				return err
+			},
+			q:    &fakeDeliveryQueries{listTargetsErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
+		{
+			name: "create target limit",
+			call: func(s *Service) error {
+				_, err := s.CreateTarget(context.Background(), userID, &CreateTargetRequest{Name: "Webhook", Type: targetTypeWebhook, URL: "https://example.com/hook"})
+				return err
+			},
+			q:    &fakeDeliveryQueries{targets: make([]db.DeliveryTarget, maxTargetsPerUser)},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "delete missing target",
+			call: func(s *Service) error {
+				return s.DeleteTarget(context.Background(), targetID, userID)
+			},
+			q:    &fakeDeliveryQueries{},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "default update missing target",
+			call: func(s *Service) error {
+				return s.SetDefault(context.Background(), targetID, userID)
+			},
+			q:    &fakeDeliveryQueries{},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "deliver missing run",
+			call: func(s *Service) error {
+				_, err := s.DeliverRun(context.Background(), userID, runID, nil)
+				return err
+			},
+			q:    &fakeDeliveryQueries{runErr: pgx.ErrNoRows},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "deliver running run",
+			call: func(s *Service) error {
+				_, err := s.DeliverRun(context.Background(), userID, runID, nil)
+				return err
+			},
+			q:    &fakeDeliveryQueries{run: db.Run{ID: runID, UserID: userID, Status: "running"}},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "deliver default target missing",
+			call: func(s *Service) error {
+				_, err := s.DeliverRun(context.Background(), userID, runID, nil)
+				return err
+			},
+			q:    &fakeDeliveryQueries{run: db.Run{ID: runID, UserID: userID, Status: "success"}, defaultErr: pgx.ErrNoRows},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "list by run wrong owner",
+			call: func(s *Service) error {
+				_, err := s.ListByRun(context.Background(), runID, userID)
+				return err
+			},
+			q:    &fakeDeliveryQueries{run: db.Run{ID: runID, UserID: uuid.New(), Status: "success"}},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "retry missing delivery",
+			call: func(s *Service) error {
+				return s.RetryDelivery(context.Background(), deliveryID, userID)
+			},
+			q:    &fakeDeliveryQueries{},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "enqueue missing agent",
+			call: func(s *Service) error {
+				_, err := s.enqueue(context.Background(), userID, &db.Run{ID: runID, AgentID: uuid.New()}, db.DeliveryTarget{ID: targetID, Config: []byte(`{"url":"https://example.com/hook"}`)})
+				return err
+			},
+			q:    &fakeDeliveryQueries{agentErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
+		{
+			name: "enqueue empty target url",
+			call: func(s *Service) error {
+				_, err := s.enqueue(context.Background(), userID, &db.Run{ID: runID, AgentID: uuid.New()}, db.DeliveryTarget{ID: targetID, Config: []byte(`{}`)})
+				return err
+			},
+			q:    &fakeDeliveryQueries{agent: db.Agent{ID: uuid.New(), Slug: "helper", Name: "Helper"}},
+			want: http.StatusBadRequest,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireDeliveryHTTPStatus(t, tc.call(&Service{queries: tc.q, httpClient: http.DefaultClient}), tc.want)
+		})
+	}
+}
+
+type fakeDeliveryQueries struct {
+	targets        []db.DeliveryTarget
+	listTargetsErr error
+
+	clearDefaultCalled bool
+	clearDefaultErr    error
+
+	createTargetArg db.CreateDeliveryTargetParams
+	createTarget    db.DeliveryTarget
+	createTargetErr error
+
+	deleteArg  db.DeleteDeliveryTargetParams
+	deleteRows int64
+	deleteErr  error
+
+	defaultArg  db.SetDeliveryTargetDefaultParams
+	defaultRows int64
+	defaultErr  error
+
+	run    db.Run
+	runErr error
+
+	target    db.DeliveryTarget
+	targetErr error
+
+	defaultTarget db.DeliveryTarget
+	defaultGetErr error
+
+	agent    db.Agent
+	agentErr error
+
+	createDeliveryArg db.CreateRunDeliveryParams
+	createDelivery    db.RunDelivery
+	createDeliveryErr error
+
+	deliveries    []db.RunDelivery
+	deliveriesErr error
+
+	resetArg  db.ResetRunDeliveryForRetryParams
+	resetRows int64
+	resetErr  error
+
+	runDeliveryRow db.GetRunDeliveryRow
+	runDeliveryErr error
+
+	successArg db.MarkRunDeliverySuccessParams
+	successErr error
+
+	retryArg db.MarkRunDeliveryFailedRetryParams
+	retryErr error
+
+	finalArg db.MarkRunDeliveryFailedFinalParams
+	finalErr error
+
+	pending    []db.RunDelivery
+	pendingErr error
+}
+
+func (q *fakeDeliveryQueries) ListDeliveryTargetsByUser(context.Context, uuid.UUID) ([]db.DeliveryTarget, error) {
+	return q.targets, q.listTargetsErr
+}
+
+func (q *fakeDeliveryQueries) ClearDefaultDeliveryTarget(context.Context, uuid.UUID) error {
+	q.clearDefaultCalled = true
+	return q.clearDefaultErr
+}
+
+func (q *fakeDeliveryQueries) CreateDeliveryTarget(_ context.Context, arg db.CreateDeliveryTargetParams) (db.DeliveryTarget, error) {
+	q.createTargetArg = arg
+	if q.createTarget.ID == uuid.Nil {
+		q.createTarget = db.DeliveryTarget{
+			ID:        uuid.New(),
+			UserID:    arg.UserID,
+			Name:      arg.Name,
+			Type:      arg.Type,
+			Config:    arg.Config,
+			Secret:    arg.Secret,
+			IsDefault: arg.IsDefault,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+	}
+	return q.createTarget, q.createTargetErr
+}
+
+func (q *fakeDeliveryQueries) DeleteDeliveryTarget(_ context.Context, arg db.DeleteDeliveryTargetParams) (int64, error) {
+	q.deleteArg = arg
+	return q.deleteRows, q.deleteErr
+}
+
+func (q *fakeDeliveryQueries) SetDeliveryTargetDefault(_ context.Context, arg db.SetDeliveryTargetDefaultParams) (int64, error) {
+	q.defaultArg = arg
+	return q.defaultRows, q.defaultErr
+}
+
+func (q *fakeDeliveryQueries) GetRunByID(context.Context, uuid.UUID) (db.Run, error) {
+	return q.run, q.runErr
+}
+
+func (q *fakeDeliveryQueries) GetDeliveryTargetByID(context.Context, uuid.UUID) (db.DeliveryTarget, error) {
+	return q.target, q.targetErr
+}
+
+func (q *fakeDeliveryQueries) GetDefaultDeliveryTarget(context.Context, uuid.UUID) (db.DeliveryTarget, error) {
+	if q.defaultGetErr != nil {
+		return db.DeliveryTarget{}, q.defaultGetErr
+	}
+	return q.defaultTarget, q.defaultErr
+}
+
+func (q *fakeDeliveryQueries) GetAgentByID(context.Context, uuid.UUID) (db.Agent, error) {
+	return q.agent, q.agentErr
+}
+
+func (q *fakeDeliveryQueries) CreateRunDelivery(_ context.Context, arg db.CreateRunDeliveryParams) (db.RunDelivery, error) {
+	q.createDeliveryArg = arg
+	if q.createDelivery.ID == uuid.Nil {
+		q.createDelivery = db.RunDelivery{
+			ID:         uuid.New(),
+			RunID:      arg.RunID,
+			TargetID:   arg.TargetID,
+			UserID:     arg.UserID,
+			TargetType: arg.TargetType,
+			TargetURL:  arg.TargetURL,
+			Payload:    arg.Payload,
+			Status:     "pending",
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+		}
+	}
+	return q.createDelivery, q.createDeliveryErr
+}
+
+func (q *fakeDeliveryQueries) ListRunDeliveriesByRun(context.Context, uuid.UUID) ([]db.RunDelivery, error) {
+	return q.deliveries, q.deliveriesErr
+}
+
+func (q *fakeDeliveryQueries) ResetRunDeliveryForRetry(_ context.Context, arg db.ResetRunDeliveryForRetryParams) (int64, error) {
+	q.resetArg = arg
+	return q.resetRows, q.resetErr
+}
+
+func (q *fakeDeliveryQueries) GetRunDeliveryByID(context.Context, uuid.UUID) (db.GetRunDeliveryRow, error) {
+	return q.runDeliveryRow, q.runDeliveryErr
+}
+
+func (q *fakeDeliveryQueries) MarkRunDeliverySuccess(_ context.Context, arg db.MarkRunDeliverySuccessParams) error {
+	q.successArg = arg
+	return q.successErr
+}
+
+func (q *fakeDeliveryQueries) MarkRunDeliveryFailedRetry(_ context.Context, arg db.MarkRunDeliveryFailedRetryParams) error {
+	q.retryArg = arg
+	return q.retryErr
+}
+
+func (q *fakeDeliveryQueries) MarkRunDeliveryFailedFinal(_ context.Context, arg db.MarkRunDeliveryFailedFinalParams) error {
+	q.finalArg = arg
+	return q.finalErr
+}
+
+func (q *fakeDeliveryQueries) ListPendingRunDeliveries(context.Context) ([]db.RunDelivery, error) {
+	return q.pending, q.pendingErr
 }

@@ -63,10 +63,30 @@ func nextRetryDelay(attempt int) time.Duration {
 // CRUD delivery_targets + 创建/重试 run_deliveries。
 // HMAC 签名（webhook）/ Slack incoming webhook（slack）。
 type Service struct {
-	queries        *db.Queries
+	queries        deliveryQueries
 	pool           *pgxpool.Pool
 	httpClient     *http.Client
 	allowLocalHTTP bool
+}
+
+type deliveryQueries interface {
+	ListDeliveryTargetsByUser(context.Context, uuid.UUID) ([]db.DeliveryTarget, error)
+	ClearDefaultDeliveryTarget(context.Context, uuid.UUID) error
+	CreateDeliveryTarget(context.Context, db.CreateDeliveryTargetParams) (db.DeliveryTarget, error)
+	DeleteDeliveryTarget(context.Context, db.DeleteDeliveryTargetParams) (int64, error)
+	SetDeliveryTargetDefault(context.Context, db.SetDeliveryTargetDefaultParams) (int64, error)
+	GetRunByID(context.Context, uuid.UUID) (db.Run, error)
+	GetDeliveryTargetByID(context.Context, uuid.UUID) (db.DeliveryTarget, error)
+	GetDefaultDeliveryTarget(context.Context, uuid.UUID) (db.DeliveryTarget, error)
+	GetAgentByID(context.Context, uuid.UUID) (db.Agent, error)
+	CreateRunDelivery(context.Context, db.CreateRunDeliveryParams) (db.RunDelivery, error)
+	ListRunDeliveriesByRun(context.Context, uuid.UUID) ([]db.RunDelivery, error)
+	ResetRunDeliveryForRetry(context.Context, db.ResetRunDeliveryForRetryParams) (int64, error)
+	GetRunDeliveryByID(context.Context, uuid.UUID) (db.GetRunDeliveryRow, error)
+	MarkRunDeliverySuccess(context.Context, db.MarkRunDeliverySuccessParams) error
+	MarkRunDeliveryFailedRetry(context.Context, db.MarkRunDeliveryFailedRetryParams) error
+	MarkRunDeliveryFailedFinal(context.Context, db.MarkRunDeliveryFailedFinalParams) error
+	ListPendingRunDeliveries(context.Context) ([]db.RunDelivery, error)
 }
 
 func NewService(pool *pgxpool.Pool, cfg ...*config.Config) *Service {
