@@ -1,6 +1,7 @@
 package cloudbridge
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 
@@ -11,10 +12,17 @@ import (
 )
 
 type Handler struct {
-	svc *Service
+	svc cloudBridgeService
 }
 
-func NewHandler(svc *Service) *Handler {
+type cloudBridgeService interface {
+	ListUserRuns(context.Context, uuid.UUID, int32, int32) (*RunListResponse, error)
+	ListCreatorAgentRuns(context.Context, uuid.UUID, uuid.UUID, int32, int32) (*RunListResponse, error)
+	GetUserDashboard(context.Context, uuid.UUID) (*UserDashboardResponse, error)
+	GetCreatorDashboard(context.Context, uuid.UUID) (*CreatorDashboardResponse, error)
+}
+
+func NewHandler(svc cloudBridgeService) *Handler {
 	return &Handler{svc: svc}
 }
 
