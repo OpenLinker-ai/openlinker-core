@@ -1802,6 +1802,222 @@ func TestDashboardRunQueriesScanRowsAndScalars(t *testing.T) {
 	}
 }
 
+func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
+	userID := uuid.New()
+	creatorID := uuid.New()
+	agentID := uuid.New()
+	runID := uuid.New()
+	runtimeTokenID := uuid.New()
+	now := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	authHeader := "Bearer secret"
+	webhookURL := "https://example.com/hook"
+	mcpTool := "search"
+	avatar := "https://cdn.example/avatar.png"
+	provider := "github"
+	oauthID := "gh-1"
+	rejectionReason := "missing dry run"
+	duration := int32(42)
+	finishedAt := now.Add(time.Minute)
+	runValues := runRow(runID, userID, agentID, []byte(`{"prompt":"hi"}`), []byte(`{"ok":true}`), "running", nil, nil, 100, 25, 75, &duration, now, &finishedAt, "api")
+	agentValues := agentRow(agentID, creatorID, now, &authHeader, &webhookURL, &mcpTool)
+	agentMarketValues := append(append([]any{}, agentValues...), "Creator Name")
+	pendingAgentValues := append(append([]any{}, agentValues...), "creator@example.com", "Creator Name")
+	userValues := userRow(userID, now, nil, &provider, &oauthID, &avatar, nil)
+	dbtx := &fakeDBTX{
+		row:       fakeRow{values: []any{int32(11)}},
+		queryRows: &fakeRows{rows: [][]any{agentMarketValues}},
+		execTag:   pgconn.NewCommandTag("UPDATE 4"),
+	}
+	q := New(dbtx)
+
+	dbtx.row = fakeRow{values: []any{int32(11)}}
+	agentCount, err := q.AgentsCount(context.Background())
+	if err != nil || agentCount != 11 {
+		t.Fatalf("AgentsCount = %d, %v", agentCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "AgentsCount")
+
+	dbtx.row = fakeRow{values: agentValues}
+	updatedAgent, err := q.UpdateAgentDraft(context.Background(), UpdateAgentDraftParams{
+		ID:                 agentID,
+		Name:               "Agent One",
+		Description:        "does work",
+		EndpointURL:        "https://example.com/agent",
+		EndpointAuthHeader: &authHeader,
+		PricePerCallCents:  12,
+		Tags:               []string{"data"},
+		CreatorID:          creatorID,
+		Visibility:         "public",
+		ConnectionMode:     "mcp_server",
+		MCPToolName:        &mcpTool,
+	})
+	if err != nil {
+		t.Fatalf("UpdateAgentDraft error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpdateAgentDraft")
+	if updatedAgent.ID != agentID || updatedAgent.ConnectionMode != "mcp_server" {
+		t.Fatalf("UpdateAgentDraft scan = %#v", updatedAgent)
+	}
+
+	if err := q.SetAgentVisibilityForOwner(context.Background(), SetAgentVisibilityForOwnerParams{ID: agentID, CreatorID: creatorID, Visibility: "unlisted"}); err != nil {
+		t.Fatalf("SetAgentVisibilityForOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "SetAgentVisibilityForOwner")
+
+	dbtx.row = fakeRow{values: agentValues}
+	if got, err := q.GetAgentByIDForOwner(context.Background(), GetAgentByIDForOwnerParams{ID: agentID, CreatorID: creatorID}); err != nil || got.ID != agentID {
+		t.Fatalf("GetAgentByIDForOwner = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentByIDForOwner")
+
+	dbtx.row = fakeRow{values: agentValues}
+	if got, err := q.GetAgentByID(context.Background(), agentID); err != nil || got.CreatorID != creatorID {
+		t.Fatalf("GetAgentByID = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentByID")
+
+	if rows, err := q.RequestCertification(context.Background(), RequestCertificationParams{ID: agentID, CreatorID: creatorID}); err != nil || rows != 4 {
+		t.Fatalf("RequestCertification = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "RequestCertification")
+
+	if rows, err := q.CertifyAgent(context.Background(), agentID); err != nil || rows != 4 {
+		t.Fatalf("CertifyAgent = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "CertifyAgent")
+
+	if rows, err := q.RejectCertification(context.Background(), RejectCertificationParams{ID: agentID, RejectionReason: rejectionReason}); err != nil || rows != 4 {
+		t.Fatalf("RejectCertification = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "RejectCertification")
+
+	dbtx.row = fakeRow{values: []any{true}}
+	available, err := q.CheckSlugAvailable(context.Background(), "agent-one")
+	if err != nil || !available {
+		t.Fatalf("CheckSlugAvailable = %v, %v", available, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CheckSlugAvailable")
+
+	pendingRows := &fakeRows{rows: [][]any{pendingAgentValues}}
+	dbtx.queryRows = pendingRows
+	pendingAgents, err := q.ListPendingAgents(context.Background())
+	if err != nil {
+		t.Fatalf("ListPendingAgents error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListPendingAgents")
+	if !pendingRows.closed || len(pendingAgents) != 1 || pendingAgents[0].CreatorEmail != "creator@example.com" {
+		t.Fatalf("ListPendingAgents scan = %#v closed=%v", pendingAgents, pendingRows.closed)
+	}
+
+	if err := q.IncrementAgentStats(context.Background(), IncrementAgentStatsParams{ID: agentID, RevenueCents: 75}); err != nil {
+		t.Fatalf("IncrementAgentStats error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "IncrementAgentStats")
+
+	publicRows := &fakeRows{rows: [][]any{agentMarketValues}}
+	dbtx.queryRows = publicRows
+	publicAgents, err := q.ListPublicAgents(context.Background(), ListPublicAgentsParams{
+		Tags:         []string{"data"},
+		Keyword:      "agent",
+		Limit:        20,
+		Offset:       5,
+		CallableOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("ListPublicAgents error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListPublicAgents")
+	if !publicRows.closed || len(publicAgents) != 1 || publicAgents[0].CreatorName != "Creator Name" {
+		t.Fatalf("ListPublicAgents scan = %#v closed=%v", publicAgents, publicRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(6)}}
+	publicCount, err := q.CountPublicAgents(context.Background(), CountPublicAgentsParams{Tags: []string{"data"}, Keyword: "agent", CallableOnly: true})
+	if err != nil || publicCount != 6 {
+		t.Fatalf("CountPublicAgents = %d, %v", publicCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountPublicAgents")
+
+	dbtx.row = fakeRow{values: agentMarketValues}
+	if got, err := q.GetAgentBySlug(context.Background(), "agent-one"); err != nil || got.CreatorName != "Creator Name" {
+		t.Fatalf("GetAgentBySlug = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentBySlug")
+
+	dbtx.row = fakeRow{values: agentMarketValues}
+	if got, err := q.GetAgentBySlugForOwner(context.Background(), GetAgentBySlugForOwnerParams{Slug: "agent-one", CreatorID: creatorID}); err != nil || got.ID != agentID {
+		t.Fatalf("GetAgentBySlugForOwner = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentBySlugForOwner")
+
+	dbtx.row = fakeRow{values: userValues}
+	if got, err := q.GetUserByEmail(context.Background(), "user@example.com"); err != nil || got.ID != userID {
+		t.Fatalf("GetUserByEmail = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetUserByEmail")
+
+	dbtx.row = fakeRow{values: userValues}
+	if got, err := q.GetUserByOAuth(context.Background(), GetUserByOAuthParams{OauthProvider: &provider, OauthID: &oauthID}); err != nil || got.OauthID == nil {
+		t.Fatalf("GetUserByOAuth = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetUserByOAuth")
+
+	if err := q.UpdateUserOAuth(context.Background(), UpdateUserOAuthParams{ID: userID, OauthProvider: &provider, OauthID: &oauthID, AvatarURL: avatar}); err != nil {
+		t.Fatalf("UpdateUserOAuth error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "UpdateUserOAuth")
+
+	dbtx.row = fakeRow{values: []any{int32(12)}}
+	runCount, err := q.RunsCount(context.Background())
+	if err != nil || runCount != 12 {
+		t.Fatalf("RunsCount = %d, %v", runCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "RunsCount")
+
+	dbtx.row = fakeRow{values: runValues}
+	if got, err := q.CancelRun(context.Background(), CancelRunParams{ID: runID, UserID: userID, ErrorMessage: "user canceled"}); err != nil || got.ID != runID {
+		t.Fatalf("CancelRun = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CancelRun")
+
+	dbtx.row = fakeRow{values: runValues}
+	if got, err := q.GetRunByID(context.Background(), runID); err != nil || got.UserID != userID {
+		t.Fatalf("GetRunByID = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetRunByID")
+
+	dbtx.row = fakeRow{values: runValues}
+	if got, err := q.ClaimRuntimePullRun(context.Background(), ClaimRuntimePullRunParams{AgentID: agentID, RuntimeTokenID: runtimeTokenID}); err != nil || got.AgentID != agentID {
+		t.Fatalf("ClaimRuntimePullRun = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "ClaimRuntimePullRun")
+
+	dbtx.row = fakeRow{values: []any{runID, userID, agentID, "running", int32(100), int32(75), now, &runtimeTokenID}}
+	runState, err := q.GetRuntimePullRunState(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("GetRuntimePullRunState error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetRuntimePullRunState")
+	if runState.ID != runID || runState.ClaimedByRuntimeTokenID == nil {
+		t.Fatalf("GetRuntimePullRunState scan = %#v", runState)
+	}
+
+	staleRows := &fakeRows{rows: [][]any{{runID, userID, agentID, int32(100), now, "RUNTIME_PULL_RESULT_TIMEOUT", "Agent runtime timed out"}}}
+	dbtx.queryRows = staleRows
+	staleRuns, err := q.ListStaleRuntimePullRuns(context.Background(), ListStaleRuntimePullRunsParams{
+		DispatchStaleBefore: now.Add(-time.Hour),
+		ResultStaleBefore:   now.Add(-30 * time.Minute),
+		Limit:               25,
+	})
+	if err != nil {
+		t.Fatalf("ListStaleRuntimePullRuns error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListStaleRuntimePullRuns")
+	if !staleRows.closed || len(staleRuns) != 1 || staleRuns[0].ErrorCode != "RUNTIME_PULL_RESULT_TIMEOUT" {
+		t.Fatalf("ListStaleRuntimePullRuns scan = %#v closed=%v", staleRuns, staleRows.closed)
+	}
+}
+
 func userRow(id uuid.UUID, now time.Time, passwordHash, provider, oauthID, avatar *string, deletedAt *time.Time) []any {
 	return []any{
 		id,
