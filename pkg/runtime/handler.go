@@ -25,14 +25,27 @@ const ssePollInterval = time.Second
 
 // Handler 调用执行 HTTP 入口。
 type Handler struct {
-	svc            *Service
+	svc            runtimeService
 	validator      *validator.Validate
 	cfg            *config.Config
 	runtimeLimiter *runtimeEndpointLimiter
 }
 
+type runtimeService interface {
+	Run(context.Context, uuid.UUID, *RunRequest, string) (*RunResponse, error)
+	StartRun(context.Context, uuid.UUID, *RunRequest, string) (*RunResponse, error)
+	GetRun(context.Context, uuid.UUID, uuid.UUID) (*RunResponse, error)
+	ListRunEvents(context.Context, uuid.UUID, uuid.UUID, int32, int32) ([]RunEventResponse, error)
+	ListRunArtifacts(context.Context, uuid.UUID, uuid.UUID) ([]RunArtifactResponse, error)
+	ListRunMessages(context.Context, uuid.UUID, uuid.UUID) ([]RunMessageResponse, error)
+	ReportRunEvent(context.Context, uuid.UUID, string, *ReportRunEventRequest) (*RunEventResponse, error)
+	ClaimRuntimePullRun(context.Context, string, ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error)
+	HeartbeatAgent(context.Context, string) (*AgentHeartbeatResponse, error)
+	CompleteRuntimePullRun(context.Context, string, uuid.UUID, *RuntimePullResultRequest) (*RunResponse, error)
+}
+
 // NewHandler 构造 Handler。cfg 可选（测试可省略）。
-func NewHandler(svc *Service, cfg ...*config.Config) *Handler {
+func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 	h := &Handler{
 		svc:            svc,
 		validator:      validator.New(validator.WithRequiredStructEnabled()),
