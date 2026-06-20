@@ -17,6 +17,7 @@ import (
 	"github.com/kinzhi/openlinker-core/pkg/a2a"
 	"github.com/kinzhi/openlinker-core/pkg/agent"
 	"github.com/kinzhi/openlinker-core/pkg/auth"
+	"github.com/kinzhi/openlinker-core/pkg/cloudbridge"
 	"github.com/kinzhi/openlinker-core/pkg/config"
 	"github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/delivery"
@@ -67,6 +68,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	jwtMiddleware := auth.JWTMiddleware(cfg.JWTSecret)
 	authHandler.Register(api)
 	authHandler.RegisterProtected(api, jwtMiddleware)
+	cloudbridge.NewHandler(cloudbridge.NewService(pool)).Register(e, jwtMiddleware)
 
 	agentMarketSvc := agent.NewMarketService(pool)
 	agentMarketHandler := agent.NewMarketHandler(agentMarketSvc)
