@@ -138,9 +138,21 @@ func TestRegistryPayloadPolicyAndArtifactHelpers(t *testing.T) {
 	if string(stored) != "{}" || storedSummary != nil {
 		t.Fatalf("metadata input policy = %s %#v", stored, storedSummary)
 	}
+	stored, storedSummary = applyOutputPayloadPolicy(payloadPolicyStoreFullPayload, raw, &summary, "success", []string{"token"})
+	if !strings.Contains(string(stored), "[redacted]") || storedSummary == nil || *storedSummary != "summary" {
+		t.Fatalf("full output policy = %s %#v", stored, storedSummary)
+	}
+	stored, storedSummary = applyOutputPayloadPolicy(payloadPolicyStoreRunSummary, raw, &summary, "success", nil)
+	if string(stored) != "{}" || storedSummary == nil || *storedSummary != "summary" {
+		t.Fatalf("summary output policy = %s %#v", stored, storedSummary)
+	}
 	stored, storedSummary = applyOutputPayloadPolicy(payloadPolicyMetadataOnly, raw, &summary, "failed", nil)
 	if string(stored) != "{}" || storedSummary == nil {
 		t.Fatalf("failed metadata output should preserve summary: %s %#v", stored, storedSummary)
+	}
+	stored, storedSummary = applyOutputPayloadPolicy(payloadPolicyMetadataOnly, raw, &summary, "timeout", nil)
+	if string(stored) != "{}" || storedSummary == nil {
+		t.Fatalf("timeout metadata output should preserve summary: %s %#v", stored, storedSummary)
 	}
 	stored, storedSummary = applyOutputPayloadPolicy(payloadPolicyMetadataOnly, raw, &summary, "success", nil)
 	if string(stored) != "{}" || storedSummary != nil {
@@ -187,8 +199,26 @@ func TestRegistryPayloadPolicyAndArtifactHelpers(t *testing.T) {
 	if meta.MimeType != "text/plain" || meta.FileURI != "https://files.example/a.txt" || meta.FileName != "a.txt" || meta.FileSHA256 != strings.Repeat("b", 64) || meta.FileSizeBytes == nil || *meta.FileSizeBytes != 12 {
 		t.Fatalf("artifact metadata = %#v", meta)
 	}
-	if got, ok := firstInt64(map[string]interface{}{"bad": -1, "size": int32(5)}, "bad", "size"); !ok || got != 5 {
-		t.Fatalf("firstInt64 = %d %v", got, ok)
+	for _, tc := range []struct {
+		name string
+		raw  map[string]interface{}
+		want int64
+		ok   bool
+	}{
+		{name: "int64", raw: map[string]interface{}{"size": int64(7)}, want: 7, ok: true},
+		{name: "int", raw: map[string]interface{}{"size": int(8)}, want: 8, ok: true},
+		{name: "int32 after negative", raw: map[string]interface{}{"bad": -1, "size": int32(5)}, want: 5, ok: true},
+		{name: "float64", raw: map[string]interface{}{"size": float64(12.9)}, want: 12, ok: true},
+		{name: "float32", raw: map[string]interface{}{"size": float32(13.1)}, want: 13, ok: true},
+		{name: "negative only", raw: map[string]interface{}{"size": int64(-1)}, ok: false},
+		{name: "unsupported", raw: map[string]interface{}{"size": "14"}, ok: false},
+	} {
+		t.Run("firstInt64 "+tc.name, func(t *testing.T) {
+			got, ok := firstInt64(tc.raw, "bad", "size")
+			if ok != tc.ok || got != tc.want {
+				t.Fatalf("firstInt64 = %d %v, want %d %v", got, ok, tc.want, tc.ok)
+			}
+		})
 	}
 	if firstString(map[string]interface{}{"name": "  file.txt  "}, "name") != "  file.txt  " {
 		t.Fatalf("firstString should return original string")
@@ -275,6 +305,31 @@ func TestRegistryDTOAndJSONHelpers(t *testing.T) {
 	if linkResp.AgentSlug != "synced-slug" || linkResp.AgentName != "Synced Agent" || linkResp.MetadataSyncedAt != "2026-06-20T01:02:03Z" {
 		t.Fatalf("cloudListingLinkToResponse = %#v", linkResp)
 	}
+	metadataErr := "sync failed"
+	rowResp := cloudListingRowToResponse(db.ListCloudListingLinksByOwnerRow{
+		ID:                   uuid.New(),
+		CloudListingID:       uuid.New(),
+		RegistryNodeID:       uuid.New(),
+		NodeName:             "Row Node",
+		LocalAgentID:         uuid.New(),
+		AgentSlug:            "row-agent",
+		AgentName:            "Row Agent",
+		RoutingMode:          "pull_proxy",
+		PayloadPolicy:        payloadPolicyStoreRunSummary,
+		PayloadRedactionKeys: []string{"token"},
+		SyncStatus:           "paused",
+		AgentDescription:     "row desc",
+		AgentTags:            []string{"row", "bridge"},
+		AvailabilityStatus:   "degraded",
+		MetadataSyncedAt:     &now,
+		MetadataSyncError:    &metadataErr,
+		LastSyncAt:           now,
+		CreatedAt:            now,
+		UpdatedAt:            later,
+	})
+	if rowResp.NodeName != "Row Node" || rowResp.AgentSlug != "row-agent" || rowResp.MetadataSyncError != metadataErr || rowResp.PayloadRedactionKeys[0] != "token" || rowResp.UpdatedAt != "2026-06-20T01:03:03Z" {
+		t.Fatalf("cloudListingRowToResponse = %#v", rowResp)
+	}
 
 	inputSummary := "input summary"
 	outputSummary := "output summary"
@@ -337,11 +392,20 @@ func TestRegistryDTOAndJSONHelpers(t *testing.T) {
 	if got := jsonObjFromBytes([]byte(`{"x":1}`)); got["x"] != float64(1) {
 		t.Fatalf("jsonObjFromBytes valid = %#v", got)
 	}
+	if got := jsonObjFromBytes(nil); got != nil {
+		t.Fatalf("jsonObjFromBytes nil = %#v", got)
+	}
 	if got := jsonObjFromBytes([]byte(`{}`)); got != nil {
 		t.Fatalf("jsonObjFromBytes empty = %#v", got)
 	}
+	if got := jsonObjFromBytes([]byte(`[]`)); got != nil {
+		t.Fatalf("jsonObjFromBytes array = %#v", got)
+	}
 	if got, err := optionalText("  hello  ", 10, "field"); err != nil || got == nil || *got != "hello" {
 		t.Fatalf("optionalText = %#v %v", got, err)
+	}
+	if got, err := optionalText("   ", 10, "field"); err != nil || got != nil {
+		t.Fatalf("optionalText blank = %#v %v", got, err)
 	}
 	if _, err := optionalText(strings.Repeat("x", 11), 10, "field"); err == nil {
 		t.Fatalf("optionalText too long should fail")
