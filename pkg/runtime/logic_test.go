@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 
@@ -229,6 +231,122 @@ func TestA2AContextAndRequirementEvidenceHelpers(t *testing.T) {
 	require.Equal(t, []string{"data/sql"}, evidence.RequiredSkillIDs)
 }
 
+func TestRuntimeRequirementSnapshotQueries(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.New()
+	agentID := uuid.New()
+	taskID := uuid.New()
+	q := &fakeRunRequirementQueries{
+		task: db.TaskQuery{
+			ID:                  taskID,
+			UserID:              userID,
+			ParsedSkills:        []string{"data/sql", "content/summary", "data/sql"},
+			MCPTools:            []string{"run_agent", "files/export", "run_agent"},
+			RecommendedAgentIDs: []uuid.UUID{agentID},
+		},
+		skills: []db.Skill{
+			{ID: "data/sql"},
+			{ID: "data/analysis"},
+			{ID: "data/sql"},
+		},
+	}
+	svc := &Service{requirements: q}
+	req := &RunRequest{Metadata: map[string]interface{}{
+		"task_id":        taskID.String(),
+		"used_mcp_tools": []interface{}{"files/export", "files/export"},
+	}}
+
+	snapshot, err := svc.buildRunRequirementSnapshot(ctx, userID, agentID, req, "mcp")
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	require.Equal(t, taskID, q.taskID)
+	require.Equal(t, agentID, q.agentID)
+	require.Equal(t, []string{"data/sql", "content/summary"}, snapshot.RequiredSkills)
+	require.Equal(t, []string{"run_agent", "files/export"}, snapshot.RequiredMCPTools)
+	require.Equal(t, []string{"data/sql", "data/analysis"}, snapshot.AgentSkills)
+	require.Equal(t, []string{"data/sql"}, snapshot.MatchedSkills)
+	require.Equal(t, []string{"content/summary"}, snapshot.MissingSkills)
+	require.Equal(t, []string{"files/export", "run_agent"}, snapshot.UsedMCPTools)
+	require.Empty(t, snapshot.MissingMCPTools)
+	require.Equal(t, "partial", snapshot.CoverageStatus)
+	require.Equal(t, "mcp", snapshot.EvidenceSource)
+
+	withoutTask, err := (&Service{requirements: &fakeRunRequirementQueries{}}).buildRunRequirementSnapshot(ctx, userID, agentID, &RunRequest{}, "web")
+	require.NoError(t, err)
+	require.Nil(t, withoutTask)
+
+	_, err = (&Service{requirements: &fakeRunRequirementQueries{taskErr: pgx.ErrNoRows}}).buildRunRequirementSnapshot(ctx, userID, agentID, req, "web")
+	var httpErr *httpx.HTTPError
+	require.True(t, errors.As(err, &httpErr))
+	require.Equal(t, http.StatusNotFound, httpErr.Status)
+
+	_, err = (&Service{requirements: &fakeRunRequirementQueries{task: q.task, skillsErr: errors.New("skill store down")}}).buildRunRequirementSnapshot(ctx, userID, agentID, req, "web")
+	require.True(t, errors.As(err, &httpErr))
+	require.Equal(t, http.StatusInternalServerError, httpErr.Status)
+}
+
+func TestRuntimeAttachRequirementEvidenceFromQueries(t *testing.T) {
+	ctx := context.Background()
+	runID := uuid.New()
+	taskID := uuid.New()
+	agentID := uuid.New()
+	userID := uuid.New()
+	created := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	q := &fakeRunRequirementQueries{
+		evidence: db.RunRequirementEvidence{
+			RunID:            runID,
+			TaskID:           taskID,
+			AgentID:          agentID,
+			UserID:           userID,
+			RequiredSkillIDs: []string{"data/sql"},
+			MatchedSkillIDs:  []string{"data/sql"},
+			CoverageStatus:   "covered",
+			EvidenceSource:   "api",
+			CreatedAt:        created,
+		},
+	}
+	resp := &RunResponse{}
+
+	(&Service{requirements: q}).attachRunRequirementEvidence(ctx, runID, resp)
+	require.Equal(t, runID, q.runID)
+	require.NotNil(t, resp.RequirementEvidence)
+	require.Equal(t, taskID.String(), resp.RequirementEvidence.TaskID)
+	require.Equal(t, "covered", resp.RequirementEvidence.CoverageStatus)
+
+	missing := &RunResponse{}
+	(&Service{requirements: &fakeRunRequirementQueries{evidenceErr: pgx.ErrNoRows}}).attachRunRequirementEvidence(ctx, runID, missing)
+	require.Nil(t, missing.RequirementEvidence)
+	(&Service{requirements: q}).attachRunRequirementEvidence(ctx, runID, nil)
+}
+
+func TestRuntimeServiceDependencySettersAndRunWebhookTrigger(t *testing.T) {
+	svc := &Service{}
+	webhook := &fakeRuntimeWebhookEnqueuer{}
+	runWebhook := &recordingRunWebhookEnqueuer{events: make(chan db.RunEvent, 1)}
+	delivery := &fakeRuntimeDeliveryEnqueuer{}
+	wallet := &fakeRuntimeWalletCharger{}
+
+	svc.SetWebhookEnqueuer(webhook)
+	svc.SetRunWebhookEnqueuer(runWebhook)
+	svc.SetDeliveryEnqueuer(delivery)
+	svc.SetWalletCharger(wallet)
+	require.Equal(t, webhook, svc.webhookSvc)
+	require.Equal(t, runWebhook, svc.runWebhookSvc)
+	require.Equal(t, delivery, svc.deliverySvc)
+	require.Equal(t, wallet, svc.walletCharger)
+
+	svc.triggerRunWebhookEvent(nil)
+	event := &db.RunEvent{ID: uuid.New(), RunID: uuid.New(), EventType: "run.completed"}
+	svc.triggerRunWebhookEvent(event)
+	select {
+	case got := <-runWebhook.events:
+		require.Equal(t, event.ID, got.ID)
+		require.Equal(t, event.RunID, got.RunID)
+	case <-time.After(time.Second):
+		t.Fatal("run webhook event was not enqueued")
+	}
+}
+
 func TestRuntimeResponseAndNextActionHelpers(t *testing.T) {
 	runID := uuid.New()
 	agentID := uuid.New()
@@ -391,6 +509,31 @@ func TestRuntimeArtifactDraftHelpers(t *testing.T) {
 	require.Equal(t, strings.Repeat("a", 64), normalizeSHA256(strings.ToUpper(strings.Repeat("a", 64))))
 	require.Equal(t, "", normalizeSHA256("bad"))
 	require.Equal(t, "ab", normalizeArtifactMetadataString("abcd", 2))
+	partsMeta := artifactFileMetadataFromParts([]interface{}{
+		"skip",
+		map[string]interface{}{
+			"file": map[string]interface{}{
+				"uri":      "https://files.example/export.csv",
+				"mimeType": "text/csv",
+				"size":     int32(64),
+			},
+		},
+		map[string]interface{}{
+			"file_name": "export.csv",
+			"checksum":  strings.Repeat("c", 64),
+		},
+	})
+	require.Equal(t, "text/csv", partsMeta.MimeType)
+	require.Equal(t, "https://files.example/export.csv", partsMeta.FileURI)
+	require.Equal(t, "export.csv", partsMeta.FileName)
+	require.Equal(t, strings.Repeat("c", 64), partsMeta.FileSHA256)
+	require.NotNil(t, partsMeta.FileSizeBytes)
+	require.Equal(t, int64(64), *partsMeta.FileSizeBytes)
+	sizeFromFloat, ok := firstArtifactInt64(map[string]interface{}{"bad": -1, "size": float32(7.8)}, "bad", "size")
+	require.True(t, ok)
+	require.Equal(t, int64(7), sizeFromFloat)
+	_, ok = firstArtifactInt64(map[string]interface{}{"size": int32(-1)}, "size")
+	require.False(t, ok)
 	require.Equal(t, "default", normalizeArtifactSourceID(""))
 	require.Equal(t, "Agent 产物", normalizeArtifactTitle(""))
 	require.Equal(t, "fallback", coalesceArtifactString(map[string]interface{}{"x": " "}, "x", "fallback"))
@@ -520,4 +663,67 @@ func TestRuntimeJSONHelperIsValid(t *testing.T) {
 	var body map[string]interface{}
 	require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
 	require.Equal(t, true, body["ok"])
+}
+
+type fakeRunRequirementQueries struct {
+	task      db.TaskQuery
+	taskID    uuid.UUID
+	taskErr   error
+	skills    []db.Skill
+	agentID   uuid.UUID
+	skillsErr error
+
+	evidence    db.RunRequirementEvidence
+	runID       uuid.UUID
+	evidenceErr error
+}
+
+func (q *fakeRunRequirementQueries) GetTaskQuery(_ context.Context, taskID uuid.UUID) (db.TaskQuery, error) {
+	q.taskID = taskID
+	return q.task, q.taskErr
+}
+
+func (q *fakeRunRequirementQueries) ListAgentSkills(_ context.Context, agentID uuid.UUID) ([]db.Skill, error) {
+	q.agentID = agentID
+	return q.skills, q.skillsErr
+}
+
+func (q *fakeRunRequirementQueries) GetRunRequirementEvidenceByRun(_ context.Context, runID uuid.UUID) (db.RunRequirementEvidence, error) {
+	q.runID = runID
+	return q.evidence, q.evidenceErr
+}
+
+type fakeRuntimeWebhookEnqueuer struct{}
+
+func (f *fakeRuntimeWebhookEnqueuer) EnqueueDelivery(context.Context, *db.Run, string, map[string]interface{}) error {
+	return nil
+}
+
+type recordingRunWebhookEnqueuer struct {
+	events chan db.RunEvent
+}
+
+func (r *recordingRunWebhookEnqueuer) EnqueueRunEvent(_ context.Context, event db.RunEvent) error {
+	r.events <- event
+	return nil
+}
+
+type fakeRuntimeDeliveryEnqueuer struct{}
+
+func (f *fakeRuntimeDeliveryEnqueuer) EnqueueIfDefault(context.Context, *db.Run) error {
+	return nil
+}
+
+type fakeRuntimeWalletCharger struct{}
+
+func (f *fakeRuntimeWalletCharger) Charge(context.Context, pgx.Tx, uuid.UUID, int64) (bool, error) {
+	return true, nil
+}
+
+func (f *fakeRuntimeWalletCharger) CreditCreator(context.Context, pgx.Tx, uuid.UUID, int64) error {
+	return nil
+}
+
+func (f *fakeRuntimeWalletCharger) Refund(context.Context, pgx.Tx, uuid.UUID, int64) error {
+	return nil
 }

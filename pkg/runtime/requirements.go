@@ -31,6 +31,19 @@ type runRequirementSnapshot struct {
 	EvidenceSource   string
 }
 
+type runRequirementQueries interface {
+	GetTaskQuery(context.Context, uuid.UUID) (db.TaskQuery, error)
+	ListAgentSkills(context.Context, uuid.UUID) ([]db.Skill, error)
+	GetRunRequirementEvidenceByRun(context.Context, uuid.UUID) (db.RunRequirementEvidence, error)
+}
+
+func (s *Service) requirementQueries() runRequirementQueries {
+	if s.requirements != nil {
+		return s.requirements
+	}
+	return s.queries
+}
+
 func (s *Service) buildRunRequirementSnapshot(
 	ctx context.Context,
 	userID uuid.UUID,
@@ -46,7 +59,8 @@ func (s *Service) buildRunRequirementSnapshot(
 		return nil, nil
 	}
 
-	task, err := s.queries.GetTaskQuery(ctx, taskID)
+	queries := s.requirementQueries()
+	task, err := queries.GetTaskQuery(ctx, taskID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, httpx.NotFound("任务不存在")
 	}
@@ -58,7 +72,7 @@ func (s *Service) buildRunRequirementSnapshot(
 		return nil, err
 	}
 
-	declared, err := s.queries.ListAgentSkills(ctx, agentID)
+	declared, err := queries.ListAgentSkills(ctx, agentID)
 	if err != nil {
 		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("runtime.requirements: ListAgentSkills")
 		return nil, httpx.Internal("查询 Agent Skill 失败")
@@ -280,7 +294,7 @@ func (s *Service) attachRunRequirementEvidence(ctx context.Context, runID uuid.U
 	if resp == nil {
 		return
 	}
-	evidence, err := s.queries.GetRunRequirementEvidenceByRun(ctx, runID)
+	evidence, err := s.requirementQueries().GetRunRequirementEvidenceByRun(ctx, runID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return
 	}

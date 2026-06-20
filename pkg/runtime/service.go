@@ -90,6 +90,7 @@ type DeliveryEnqueuer interface {
 // HTTP 调用必须在事务外，否则会长时间锁住 wallets 行。
 type Service struct {
 	queries       *db.Queries
+	requirements  runRequirementQueries
 	pool          *pgxpool.Pool
 	cfg           *config.Config
 	httpClient    *http.Client
@@ -168,10 +169,12 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
+	queries := db.New(pool)
 	return &Service{
-		queries: db.New(pool),
-		pool:    pool,
-		cfg:     cfg,
+		queries:      queries,
+		requirements: queries,
+		pool:         pool,
+		cfg:          cfg,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
