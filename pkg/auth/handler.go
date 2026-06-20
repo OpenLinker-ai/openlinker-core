@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 
@@ -25,14 +26,23 @@ const (
 // 主程序通过 NewHandler 构造，再用 SetConfig 注入 cfg（OAuth callback 重定向需要）。
 // 单元测试可直接 NewHandler(svc) 不带 cfg。
 type Handler struct {
-	svc       *Service
+	svc       authService
 	validator *validator.Validate
 	cfg       *config.Config
 }
 
+type authService interface {
+	Register(context.Context, *RegisterRequest) (*AuthResponse, error)
+	Login(context.Context, *LoginRequest) (*AuthResponse, error)
+	FindOrCreateOAuthUser(context.Context, string, string, string, string, string) (*AuthResponse, error)
+	GetMe(context.Context, uuid.UUID) (*MeResponse, error)
+	UpdateMe(context.Context, uuid.UUID, *UpdateMeRequest) (*MeResponse, error)
+	ChangePassword(context.Context, uuid.UUID, *ChangePasswordRequest) error
+}
+
 // NewHandler 构造 Handler。
 // cfg 可选：传入则启用 OAuth 回调重定向；不传则只能用作单元测试 / 邮箱注册登录场景。
-func NewHandler(svc *Service, cfg ...*config.Config) *Handler {
+func NewHandler(svc authService, cfg ...*config.Config) *Handler {
 	h := &Handler{
 		svc:       svc,
 		validator: validator.New(validator.WithRequiredStructEnabled()),
