@@ -1144,6 +1144,265 @@ func TestCapabilityMessageArtifactQueriesScanRowsAndArgs(t *testing.T) {
 	}
 }
 
+func TestAvailabilityMetricApprovalRequirementQueriesScanRowsAndArgs(t *testing.T) {
+	creatorID := uuid.New()
+	userID := uuid.New()
+	tokenID := uuid.New()
+	agentID := uuid.New()
+	alertID := uuid.New()
+	approvalID := uuid.New()
+	runID := uuid.New()
+	taskID := uuid.New()
+	now := time.Date(2026, 6, 20, 21, 0, 0, 0, time.UTC)
+	lastSuccessful := now.Add(-time.Hour)
+	lastFailed := now.Add(-30 * time.Minute)
+	lastChecked := now.Add(-5 * time.Minute)
+	readAt := now.Add(time.Minute)
+	latencyMedian := int32(120)
+	latencyP95 := int32(450)
+	lastError := "timeout contacting endpoint"
+	decisionNote := "looks safe"
+	approvalExpires := now.Add(time.Hour)
+	approvalDecided := now.Add(10 * time.Minute)
+	approvalPayload := []byte(`{"action":"publish"}`)
+
+	availabilityValues := agentAvailabilitySnapshotRow(agentID, now, &lastSuccessful, &lastFailed, &lastChecked)
+	alertValues := agentAvailabilityAlertRow(alertID, agentID, creatorID, now, &lastError, &readAt)
+	metricValues := agentMetricSnapshotRow(agentID, now, &latencyMedian, &latencyP95)
+	approvalValues := agentApprovalRow(approvalID, agentID, &userID, &tokenID, now, approvalPayload, approvalExpires, &approvalDecided, &creatorID, &decisionNote)
+	evidenceValues := runRequirementEvidenceRow(runID, taskID, agentID, userID, now)
+	dbtx := &fakeDBTX{
+		row:     fakeRow{values: availabilityValues},
+		execTag: pgconn.NewCommandTag("UPDATE 6"),
+	}
+	q := New(dbtx)
+
+	snapshot, err := q.GetAgentAvailabilitySnapshot(context.Background(), agentID)
+	if err != nil {
+		t.Fatalf("GetAgentAvailabilitySnapshot error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentAvailabilitySnapshot")
+	if snapshot.AgentID != agentID || snapshot.LastCheckedAt == nil || *snapshot.LastCheckedAt != lastChecked {
+		t.Fatalf("GetAgentAvailabilitySnapshot scan = %#v", snapshot)
+	}
+
+	dbtx.row = fakeRow{values: availabilityValues}
+	if got, err := q.MarkAgentAvailabilitySuccess(context.Background(), agentID); err != nil || got.AvailabilityStatus != "degraded" {
+		t.Fatalf("MarkAgentAvailabilitySuccess = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "MarkAgentAvailabilitySuccess")
+
+	dbtx.row = fakeRow{values: availabilityValues}
+	if got, err := q.MarkAgentAvailabilityHeartbeat(context.Background(), agentID); err != nil || got.AgentID != agentID {
+		t.Fatalf("MarkAgentAvailabilityHeartbeat = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "MarkAgentAvailabilityHeartbeat")
+
+	dbtx.row = fakeRow{values: availabilityValues}
+	if got, err := q.MarkAgentAvailabilityFailure(context.Background(), agentID); err != nil || got.ConsecutiveFailures != 3 {
+		t.Fatalf("MarkAgentAvailabilityFailure = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "MarkAgentAvailabilityFailure")
+
+	dueRows := &fakeRows{rows: [][]any{agentRow(agentID, creatorID, now, nil, nil, nil)}}
+	dbtx.queryRows = dueRows
+	dueAgents, err := q.ListAgentsDueAvailabilityCheck(context.Background(), ListAgentsDueAvailabilityCheckParams{StaleSeconds: 300, Limit: 20})
+	if err != nil {
+		t.Fatalf("ListAgentsDueAvailabilityCheck error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentsDueAvailabilityCheck")
+	if !dueRows.closed || len(dueAgents) != 1 || dueAgents[0].ID != agentID {
+		t.Fatalf("ListAgentsDueAvailabilityCheck scan = %#v closed=%v", dueAgents, dueRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{int32(300), int32(20)}) {
+		t.Fatalf("ListAgentsDueAvailabilityCheck args = %#v", dbtx.queryArgs)
+	}
+
+	dbtx.row = fakeRow{values: alertValues}
+	alert, err := q.UpsertAgentAvailabilityAlert(context.Background(), UpsertAgentAvailabilityAlertParams{
+		AgentID:             agentID,
+		CreatorID:           creatorID,
+		AlertType:           "availability",
+		Severity:            "critical",
+		AvailabilityStatus:  "unreachable",
+		ConsecutiveFailures: 3,
+		Title:               "Agent unreachable",
+		Message:             "Endpoint timed out",
+		LastError:           &lastError,
+		RepairHints:         []string{"check endpoint", "rotate token"},
+	})
+	if err != nil {
+		t.Fatalf("UpsertAgentAvailabilityAlert error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpsertAgentAvailabilityAlert")
+	if alert.ID != alertID || alert.LastError == nil || *alert.LastError != lastError || alert.RepairHints[0] != "check endpoint" {
+		t.Fatalf("UpsertAgentAvailabilityAlert scan = %#v", alert)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, creatorID, "availability", "critical", "unreachable", int32(3), "Agent unreachable", "Endpoint timed out", &lastError, []string{"check endpoint", "rotate token"}}) {
+		t.Fatalf("UpsertAgentAvailabilityAlert args = %#v", dbtx.queryRowArgs)
+	}
+
+	alertRows := &fakeRows{rows: [][]any{agentAvailabilityAlertWithAgentRow(alertID, agentID, creatorID, now, &lastError, &readAt)}}
+	dbtx.queryRows = alertRows
+	alerts, err := q.ListAgentAvailabilityAlertsByCreator(context.Background(), ListAgentAvailabilityAlertsByCreatorParams{CreatorID: creatorID, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAgentAvailabilityAlertsByCreator error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentAvailabilityAlertsByCreator")
+	if !alertRows.closed || len(alerts) != 1 || alerts[0].AgentSlug != "agent-one" || alerts[0].AgentName != "Agent One" {
+		t.Fatalf("ListAgentAvailabilityAlertsByCreator scan = %#v closed=%v", alerts, alertRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(4)}}
+	alertCount, err := q.CountAgentAvailabilityAlertsByCreator(context.Background(), creatorID)
+	if err != nil || alertCount != 4 {
+		t.Fatalf("CountAgentAvailabilityAlertsByCreator = %d, %v", alertCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountAgentAvailabilityAlertsByCreator")
+
+	dbtx.row = fakeRow{values: []any{int32(2)}}
+	unreadCount, err := q.CountUnreadAgentAvailabilityAlertsByCreator(context.Background(), creatorID)
+	if err != nil || unreadCount != 2 {
+		t.Fatalf("CountUnreadAgentAvailabilityAlertsByCreator = %d, %v", unreadCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountUnreadAgentAvailabilityAlertsByCreator")
+
+	dbtx.row = fakeRow{values: alertValues}
+	readAlert, err := q.MarkAgentAvailabilityAlertRead(context.Background(), MarkAgentAvailabilityAlertReadParams{ID: alertID, CreatorID: creatorID})
+	if err != nil {
+		t.Fatalf("MarkAgentAvailabilityAlertRead error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "MarkAgentAvailabilityAlertRead")
+	if readAlert.ID != alertID || readAlert.ReadAt == nil {
+		t.Fatalf("MarkAgentAvailabilityAlertRead scan = %#v", readAlert)
+	}
+
+	if err := q.UpsertAgentMetricSnapshot(context.Background(), UpsertAgentMetricSnapshotParams{
+		AgentID:         agentID,
+		TimeWindow:      "24h",
+		CallCount:       12,
+		SuccessCount:    10,
+		FailureCount:    2,
+		SuccessRateBps:  8333,
+		MedianLatencyMs: &latencyMedian,
+		P95LatencyMs:    &latencyP95,
+	}); err != nil {
+		t.Fatalf("UpsertAgentMetricSnapshot error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "UpsertAgentMetricSnapshot")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{agentID, "24h", int32(12), int32(10), int32(2), int32(8333), &latencyMedian, &latencyP95}) {
+		t.Fatalf("UpsertAgentMetricSnapshot args = %#v", dbtx.execArgs)
+	}
+
+	metricRows := &fakeRows{rows: [][]any{metricValues}}
+	dbtx.queryRows = metricRows
+	metrics, err := q.ListAgentMetricSnapshotsByAgent(context.Background(), agentID)
+	if err != nil {
+		t.Fatalf("ListAgentMetricSnapshotsByAgent error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentMetricSnapshotsByAgent")
+	if !metricRows.closed || len(metrics) != 1 || metrics[0].SuccessRateBps != 8333 {
+		t.Fatalf("ListAgentMetricSnapshotsByAgent scan = %#v closed=%v", metrics, metricRows.closed)
+	}
+
+	aggregateRows := &fakeRows{rows: [][]any{{agentID, int32(12), int32(10), int32(2), &latencyMedian, &latencyP95}}}
+	dbtx.queryRows = aggregateRows
+	aggregates, err := q.AggregateAgentRunsForWindow(context.Background(), "24 hours")
+	if err != nil {
+		t.Fatalf("AggregateAgentRunsForWindow error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "AggregateAgentRunsForWindow")
+	if !aggregateRows.closed || len(aggregates) != 1 || aggregates[0].FailureCount != 2 {
+		t.Fatalf("AggregateAgentRunsForWindow scan = %#v closed=%v", aggregates, aggregateRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: approvalValues}
+	approval, err := q.CreateAgentApproval(context.Background(), CreateAgentApprovalParams{
+		AgentID:            agentID,
+		RequestedByUserID:  &userID,
+		RequestedByTokenID: &tokenID,
+		Action:             "publish",
+		PayloadJSON:        approvalPayload,
+		ApprovalURLSlug:    "approve-123",
+		ExpiresAt:          approvalExpires,
+	})
+	if err != nil {
+		t.Fatalf("CreateAgentApproval error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateAgentApproval")
+	if approval.ID != approvalID || approval.DecisionNote == nil || *approval.DecisionNote != decisionNote {
+		t.Fatalf("CreateAgentApproval scan = %#v", approval)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, &userID, &tokenID, "publish", approvalPayload, "approve-123", approvalExpires}) {
+		t.Fatalf("CreateAgentApproval args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: approvalValues}
+	if got, err := q.GetAgentApprovalForCreator(context.Background(), GetAgentApprovalForCreatorParams{ID: approvalID, CreatorID: creatorID}); err != nil || got.ID != approvalID {
+		t.Fatalf("GetAgentApprovalForCreator = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentApprovalForCreator")
+
+	approvalRows := &fakeRows{rows: [][]any{approvalValues}}
+	dbtx.queryRows = approvalRows
+	approvals, err := q.ListAgentApprovalsForCreator(context.Background(), creatorID)
+	if err != nil {
+		t.Fatalf("ListAgentApprovalsForCreator error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentApprovalsForCreator")
+	if !approvalRows.closed || len(approvals) != 1 || approvals[0].ID != approvalID {
+		t.Fatalf("ListAgentApprovalsForCreator scan = %#v closed=%v", approvals, approvalRows.closed)
+	}
+
+	if rows, err := q.ConfirmAgentApproval(context.Background(), ConfirmAgentApprovalParams{ID: approvalID, CreatorID: creatorID, DecisionNote: &decisionNote}); err != nil || rows != 6 {
+		t.Fatalf("ConfirmAgentApproval = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "ConfirmAgentApproval")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{approvalID, creatorID, &decisionNote}) {
+		t.Fatalf("ConfirmAgentApproval args = %#v", dbtx.execArgs)
+	}
+
+	if rows, err := q.RejectAgentApproval(context.Background(), RejectAgentApprovalParams{ID: approvalID, CreatorID: creatorID, DecisionNote: &decisionNote}); err != nil || rows != 6 {
+		t.Fatalf("RejectAgentApproval = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "RejectAgentApproval")
+
+	if rows, err := q.ExpireAgentApprovals(context.Background()); err != nil || rows != 6 {
+		t.Fatalf("ExpireAgentApprovals = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "ExpireAgentApprovals")
+
+	dbtx.row = fakeRow{values: evidenceValues}
+	evidence, err := q.CreateRunRequirementEvidence(context.Background(), CreateRunRequirementEvidenceParams{
+		RunID:            runID,
+		TaskID:           taskID,
+		AgentID:          agentID,
+		UserID:           userID,
+		RequiredSkillIDs: []string{"data/sql-query"},
+		RequiredMCPTools: []string{"run_agent"},
+		AgentSkillIDs:    []string{"data/sql-query", "writing/summary"},
+		MatchedSkillIDs:  []string{"data/sql-query"},
+		MissingSkillIDs:  []string{"writing/chart"},
+		UsedMCPTools:     []string{"run_agent"},
+		MissingMCPTools:  []string{"browser.search"},
+		CoverageStatus:   "partial",
+		EvidenceSource:   "task_requirements",
+	})
+	if err != nil {
+		t.Fatalf("CreateRunRequirementEvidence error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateRunRequirementEvidence")
+	if evidence.RunID != runID || evidence.CoverageStatus != "partial" || evidence.MissingMCPTools[0] != "browser.search" {
+		t.Fatalf("CreateRunRequirementEvidence scan = %#v", evidence)
+	}
+
+	dbtx.row = fakeRow{values: evidenceValues}
+	if got, err := q.GetRunRequirementEvidenceByRun(context.Background(), runID); err != nil || got.TaskID != taskID {
+		t.Fatalf("GetRunRequirementEvidenceByRun = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetRunRequirementEvidenceByRun")
+}
+
 func userRow(id uuid.UUID, now time.Time, passwordHash, provider, oauthID, avatar *string, deletedAt *time.Time) []any {
 	return []any{
 		id,
@@ -1439,6 +1698,100 @@ func runArtifactChunkRow(
 		payloadSHA,
 		declaredSHA,
 		"verified",
+		createdAt,
+	}
+}
+
+func agentAvailabilitySnapshotRow(agentID uuid.UUID, now time.Time, lastSuccessful, lastFailed, lastChecked *time.Time) []any {
+	return []any{agentID, "degraded", lastSuccessful, lastFailed, lastChecked, int32(3), now.Add(time.Minute)}
+}
+
+func agentAvailabilityAlertRow(id, agentID, creatorID uuid.UUID, now time.Time, lastError *string, readAt *time.Time) []any {
+	return []any{
+		id,
+		agentID,
+		creatorID,
+		"availability",
+		"critical",
+		"unreachable",
+		int32(3),
+		"Agent unreachable",
+		"Endpoint timed out",
+		lastError,
+		[]string{"check endpoint", "rotate token"},
+		readAt,
+		now,
+		now.Add(time.Minute),
+	}
+}
+
+func agentAvailabilityAlertWithAgentRow(id, agentID, creatorID uuid.UUID, now time.Time, lastError *string, readAt *time.Time) []any {
+	return []any{
+		id,
+		agentID,
+		"agent-one",
+		"Agent One",
+		creatorID,
+		"availability",
+		"critical",
+		"unreachable",
+		int32(3),
+		"Agent unreachable",
+		"Endpoint timed out",
+		lastError,
+		[]string{"check endpoint", "rotate token"},
+		readAt,
+		now,
+		now.Add(time.Minute),
+	}
+}
+
+func agentMetricSnapshotRow(agentID uuid.UUID, now time.Time, medianLatency, p95Latency *int32) []any {
+	return []any{agentID, "24h", int32(12), int32(10), int32(2), int32(8333), medianLatency, p95Latency, now}
+}
+
+func agentApprovalRow(
+	id, agentID uuid.UUID,
+	requestedByUserID, requestedByTokenID *uuid.UUID,
+	createdAt time.Time,
+	payload []byte,
+	expiresAt time.Time,
+	decidedAt *time.Time,
+	decidedByUserID *uuid.UUID,
+	decisionNote *string,
+) []any {
+	return []any{
+		id,
+		agentID,
+		requestedByUserID,
+		requestedByTokenID,
+		"publish",
+		payload,
+		"pending",
+		"approve-123",
+		expiresAt,
+		decidedAt,
+		decidedByUserID,
+		decisionNote,
+		createdAt,
+	}
+}
+
+func runRequirementEvidenceRow(runID, taskID, agentID, userID uuid.UUID, createdAt time.Time) []any {
+	return []any{
+		runID,
+		taskID,
+		agentID,
+		userID,
+		[]string{"data/sql-query"},
+		[]string{"run_agent"},
+		[]string{"data/sql-query", "writing/summary"},
+		[]string{"data/sql-query"},
+		[]string{"writing/chart"},
+		[]string{"run_agent"},
+		[]string{"browser.search"},
+		"partial",
+		"task_requirements",
 		createdAt,
 	}
 }
