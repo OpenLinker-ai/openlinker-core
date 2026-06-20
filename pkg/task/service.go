@@ -82,6 +82,10 @@ func NewService(pool *pgxpool.Pool, llmClient llm.Client, skillSvc SkillRecommen
 		llm:      llmClient,
 		skillSvc: skillSvc,
 	}
+	if pool == nil || skillSvc == nil {
+		log.Warn().Msg("task.NewService: skip skill warmup without database or skill recommender")
+		return s
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	skills, err := skillSvc.ListAll(ctx)

@@ -1,10 +1,12 @@
 package coreapi
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
 	"github.com/gorilla/sessions"
+	"github.com/labstack/echo/v4"
 	"github.com/markbates/goth"
 	"github.com/markbates/goth/gothic"
 
@@ -78,6 +80,75 @@ func TestConfigureGothDevelopmentStoreSkipsMissingProviders(t *testing.T) {
 	}
 }
 
+func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
+	resetGothGlobals(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	e := echo.New()
+	services := Register(ctx, e, nil, &config.Config{
+		Env:                           "development",
+		JWTSecret:                     "test-secret",
+		JWTExpireHours:                24,
+		APIURL:                        "https://api.openlinker.test",
+		FrontendURL:                   "https://openlinker.test",
+		RunTimeoutSeconds:             60,
+		AllowLocalHTTPEndpoints:       false,
+		AvailabilityMonitorEnabled:    false,
+		RuntimePullRunWorkerEnabled:   false,
+		WorkflowRunWorkerEnabled:      false,
+		RegistryProxyRunWorkerEnabled: false,
+	}, Options{
+		AdminMiddleware: func(next echo.HandlerFunc) echo.HandlerFunc {
+			return func(c echo.Context) error {
+				return next(c)
+			}
+		},
+	})
+
+	if services == nil {
+		t.Fatalf("Register returned nil services")
+	}
+	if services.Auth == nil || services.AgentMarket == nil || services.Agent == nil || services.Skill == nil ||
+		services.Runtime == nil || services.Webhook == nil || services.A2A == nil || services.Workflow == nil ||
+		services.Registry == nil || services.Benchmark == nil || services.Task == nil || services.MCP == nil ||
+		services.Delivery == nil {
+		t.Fatalf("Register returned incomplete services: %#v", services)
+	}
+
+	routes := routeSet(e)
+	expected := []string{
+		"GET /.well-known/openlinker.json",
+		"GET /skill/publish-agent",
+		"GET /skill/consume-agent",
+		"POST /api/v1/auth/register",
+		"GET /api/v1/me",
+		"GET /api/v1/agents",
+		"POST /api/v1/creator/agents",
+		"GET /api/v1/admin/agents/pending",
+		"POST /api/v1/agent-registration/agents",
+		"POST /api/v1/agent-runtime/heartbeat",
+		"GET /api/v1/agent-runtime/runs/claim",
+		"POST /api/v1/agent-runtime/call-agent",
+		"POST /api/v1/a2a/agents/:slug",
+		"GET /api/v1/a2a/agents/:slug/.well-known/agent-card.json",
+		"GET /api/v1/a2a/agents/:slug/tasks/:taskID/subscribe",
+		"GET /api/v1/mcp/tools",
+		"POST /api/v1/mcp/run_agent",
+		"POST /api/v1/workflows/:id/run",
+		"GET /api/v1/skills",
+		"GET /api/v1/benchmark/status",
+		"POST /api/v1/delivery-targets",
+		"POST /api/v1/proxy/runs",
+	}
+	for _, key := range expected {
+		if !routes[key] {
+			t.Fatalf("route %s not registered; routes=%v", key, sortedRouteKeys(routes))
+		}
+	}
+}
+
 func resetGothGlobals(t *testing.T) {
 	t.Helper()
 	previousStore := gothic.Store
@@ -86,4 +157,28 @@ func resetGothGlobals(t *testing.T) {
 		goth.ClearProviders()
 		gothic.Store = previousStore
 	})
+}
+
+func routeSet(e *echo.Echo) map[string]bool {
+	routes := make(map[string]bool)
+	for _, route := range e.Routes() {
+		if route.Method == echo.RouteNotFound {
+			continue
+		}
+		routes[route.Method+" "+route.Path] = true
+	}
+	return routes
+}
+
+func sortedRouteKeys(routes map[string]bool) []string {
+	keys := make([]string, 0, len(routes))
+	for key := range routes {
+		keys = append(keys, key)
+	}
+	for i := 1; i < len(keys); i++ {
+		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
+			keys[j], keys[j-1] = keys[j-1], keys[j]
+		}
+	}
+	return keys
 }

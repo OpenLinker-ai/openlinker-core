@@ -106,6 +106,9 @@ func (s *MetricService) AggregateOnce(ctx context.Context) error {
 // StartMetricWorker 启动 5 分钟 tick 的后台聚合 + approval 过期清扫。
 // 关闭 ctx 即结束 goroutine。
 func StartMetricWorker(ctx context.Context, metric *MetricService, approvals *ApprovalService) {
+	if ctx.Err() != nil {
+		return
+	}
 	go func() {
 		// 启动立即跑一次，避免冷启动后第一次要等 5 分钟。
 		runMetricTick(ctx, metric, approvals)
