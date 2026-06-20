@@ -1403,6 +1403,405 @@ func TestAvailabilityMetricApprovalRequirementQueriesScanRowsAndArgs(t *testing.
 	requireSQLName(t, dbtx.queryRowSQL, "GetRunRequirementEvidenceByRun")
 }
 
+func TestTaskAndBenchmarkQueriesScanRowsAndArgs(t *testing.T) {
+	userID := uuid.New()
+	creatorID := uuid.New()
+	agentID := uuid.New()
+	taskID := uuid.New()
+	runID := uuid.New()
+	testCaseID := uuid.New()
+	batchID := uuid.New()
+	benchmarkRunID := uuid.New()
+	now := time.Date(2026, 6, 20, 22, 0, 0, 0, time.UTC)
+	chosenAt := now.Add(time.Minute)
+	claimedAt := now.Add(2 * time.Minute)
+	completedAt := now.Add(3 * time.Minute)
+	acceptedAt := now.Add(4 * time.Minute)
+	revisionAt := now.Add(5 * time.Minute)
+	publishedAt := now.Add(6 * time.Minute)
+	finishedAt := now.Add(7 * time.Minute)
+	completionSummary := "dashboard delivered"
+	publicSummary := "Need a SQL dashboard"
+	revisionNote := "add chart labels"
+	deliveryArtifact := []byte(`{"artifact":"dashboard"}`)
+	score := int32(92)
+	judgeReasoning := "complete and accurate"
+	errorMessage := "judge failed"
+
+	taskValues := taskQueryRow(taskID, userID, agentID, creatorID, runID, now, &chosenAt, &claimedAt, &completedAt, &acceptedAt, &revisionAt, &publishedAt, &completionSummary, &publicSummary, &revisionNote, deliveryArtifact)
+	testCaseValues := skillTestCaseRow(testCaseID, now)
+	benchmarkValues := benchmarkRunRow(benchmarkRunID, batchID, agentID, testCaseID, now, &finishedAt, &score, []byte(`{"answer":"ok"}`), &judgeReasoning, &errorMessage)
+	scoreValues := agentSkillScoreRow(agentID, batchID, now, &score, &finishedAt)
+	dbtx := &fakeDBTX{
+		row:     fakeRow{values: taskValues},
+		execTag: pgconn.NewCommandTag("UPDATE 5"),
+	}
+	q := New(dbtx)
+
+	task, err := q.CreateTaskQuery(context.Background(), CreateTaskQueryParams{
+		UserID:              userID,
+		Query:               "build a dashboard",
+		ParsedSkills:        []string{"data/sql-query"},
+		MCPTools:            []string{"browser.search"},
+		RecommendedAgentIDs: []uuid.UUID{agentID},
+	})
+	if err != nil {
+		t.Fatalf("CreateTaskQuery error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateTaskQuery")
+	if task.ID != taskID || task.ChosenAgentID == nil || *task.ChosenAgentID != agentID || string(task.DeliveryArtifact) == "" {
+		t.Fatalf("CreateTaskQuery scan = %#v", task)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{userID, "build a dashboard", []string{"data/sql-query"}, []string{"browser.search"}, []uuid.UUID{agentID}}) {
+		t.Fatalf("CreateTaskQuery args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: taskValues}
+	if got, err := q.GetTaskQuery(context.Background(), taskID); err != nil || got.ID != taskID {
+		t.Fatalf("GetTaskQuery = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetTaskQuery")
+
+	dbtx.row = fakeRow{values: taskValues}
+	if got, err := q.MarkTaskQueryChosen(context.Background(), MarkTaskQueryChosenParams{ID: taskID, UserID: userID, ChosenAgentID: agentID}); err != nil || got.ChosenAt == nil {
+		t.Fatalf("MarkTaskQueryChosen = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "MarkTaskQueryChosen")
+
+	dbtx.row = fakeRow{values: taskValues}
+	if got, err := q.PublishTaskQuery(context.Background(), PublishTaskQueryParams{ID: taskID, UserID: userID, PublicSummary: publicSummary}); err != nil || got.PublicSummary == nil {
+		t.Fatalf("PublishTaskQuery = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "PublishTaskQuery")
+
+	dbtx.row = fakeRow{values: taskValues}
+	if got, err := q.ClaimTaskQuery(context.Background(), ClaimTaskQueryParams{ID: taskID, UserID: creatorID, AgentID: agentID}); err != nil || got.ClaimedByUserID == nil {
+		t.Fatalf("ClaimTaskQuery = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "ClaimTaskQuery")
+
+	dbtx.row = fakeRow{values: taskValues}
+	if got, err := q.CompleteTaskQuery(context.Background(), CompleteTaskQueryParams{
+		ID:                 taskID,
+		UserID:             creatorID,
+		AgentID:            agentID,
+		CompletionRunID:    runID,
+		CompletionSummary:  completionSummary,
+		DeliveryArtifact:   deliveryArtifact,
+		DeliveryVisibility: "shared",
+	}); err != nil || got.CompletedAt == nil {
+		t.Fatalf("CompleteTaskQuery = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CompleteTaskQuery")
+
+	dbtx.row = fakeRow{values: taskValues}
+	if got, err := q.AcceptTaskDelivery(context.Background(), AcceptTaskDeliveryParams{ID: taskID, UserID: userID}); err != nil || got.AcceptedAt == nil {
+		t.Fatalf("AcceptTaskDelivery = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "AcceptTaskDelivery")
+
+	dbtx.row = fakeRow{values: taskValues}
+	if got, err := q.RequestTaskRevision(context.Background(), RequestTaskRevisionParams{ID: taskID, UserID: userID, RevisionNote: revisionNote}); err != nil || got.RevisionNote == nil {
+		t.Fatalf("RequestTaskRevision = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "RequestTaskRevision")
+
+	taskRows := &fakeRows{rows: [][]any{taskValues}}
+	dbtx.queryRows = taskRows
+	tasks, err := q.ListTaskQueriesByUser(context.Background(), ListTaskQueriesByUserParams{UserID: userID, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListTaskQueriesByUser error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListTaskQueriesByUser")
+	if !taskRows.closed || len(tasks) != 1 || tasks[0].ID != taskID {
+		t.Fatalf("ListTaskQueriesByUser scan = %#v closed=%v", tasks, taskRows.closed)
+	}
+
+	publicTaskRows := &fakeRows{rows: [][]any{taskValues}}
+	dbtx.queryRows = publicTaskRows
+	publicTasks, err := q.ListPublicTaskQueries(context.Background(), 15)
+	if err != nil {
+		t.Fatalf("ListPublicTaskQueries error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListPublicTaskQueries")
+	if !publicTaskRows.closed || len(publicTasks) != 1 || publicTasks[0].Visibility != "public" {
+		t.Fatalf("ListPublicTaskQueries scan = %#v closed=%v", publicTasks, publicTaskRows.closed)
+	}
+
+	agentRows := &fakeRows{rows: [][]any{agentWithCreatorRow(agentID, creatorID, now)}}
+	dbtx.queryRows = agentRows
+	agents, err := q.GetAgentsByIDs(context.Background(), []uuid.UUID{agentID})
+	if err != nil {
+		t.Fatalf("GetAgentsByIDs error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "GetAgentsByIDs")
+	if !agentRows.closed || len(agents) != 1 || agents[0].CreatorName != "Creator Name" {
+		t.Fatalf("GetAgentsByIDs scan = %#v closed=%v", agents, agentRows.closed)
+	}
+
+	testCaseRows := &fakeRows{rows: [][]any{testCaseValues}}
+	dbtx.queryRows = testCaseRows
+	testCases, err := q.ListTestCasesBySkill(context.Background(), "data/sql-query")
+	if err != nil {
+		t.Fatalf("ListTestCasesBySkill error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListTestCasesBySkill")
+	if !testCaseRows.closed || len(testCases) != 1 || testCases[0].ID != testCaseID {
+		t.Fatalf("ListTestCasesBySkill scan = %#v closed=%v", testCases, testCaseRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(3)}}
+	testCaseCount, err := q.CountTestCasesBySkill(context.Background(), "data/sql-query")
+	if err != nil || testCaseCount != 3 {
+		t.Fatalf("CountTestCasesBySkill = %d, %v", testCaseCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountTestCasesBySkill")
+
+	dbtx.row = fakeRow{values: benchmarkValues}
+	benchmarkRun, err := q.CreateBenchmarkRun(context.Background(), CreateBenchmarkRunParams{
+		BatchID:    batchID,
+		AgentID:    agentID,
+		SkillID:    "data/sql-query",
+		TestCaseID: testCaseID,
+	})
+	if err != nil {
+		t.Fatalf("CreateBenchmarkRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateBenchmarkRun")
+	if benchmarkRun.ID != benchmarkRunID || benchmarkRun.Score == nil || *benchmarkRun.Score != score {
+		t.Fatalf("CreateBenchmarkRun scan = %#v", benchmarkRun)
+	}
+
+	if rows, err := q.MarkBenchmarkRunSuccess(context.Background(), MarkBenchmarkRunSuccessParams{ID: benchmarkRunID, Score: score, RawOutput: []byte(`{"ok":true}`), JudgeReasoning: judgeReasoning}); err != nil || rows != 5 {
+		t.Fatalf("MarkBenchmarkRunSuccess = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkBenchmarkRunSuccess")
+
+	if rows, err := q.MarkBenchmarkRunFailed(context.Background(), MarkBenchmarkRunFailedParams{ID: benchmarkRunID, ErrorMessage: errorMessage}); err != nil || rows != 5 {
+		t.Fatalf("MarkBenchmarkRunFailed = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkBenchmarkRunFailed")
+
+	benchmarkRows := &fakeRows{rows: [][]any{append(append([]any{}, benchmarkValues...), "SQL happy path")}}
+	dbtx.queryRows = benchmarkRows
+	benchmarkRuns, err := q.ListBenchmarkRunsByBatch(context.Background(), batchID)
+	if err != nil {
+		t.Fatalf("ListBenchmarkRunsByBatch error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListBenchmarkRunsByBatch")
+	if !benchmarkRows.closed || len(benchmarkRuns) != 1 || benchmarkRuns[0].TestCaseTitle != "SQL happy path" {
+		t.Fatalf("ListBenchmarkRunsByBatch scan = %#v closed=%v", benchmarkRuns, benchmarkRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: scoreValues}
+	skillScore, err := q.UpsertAgentSkillScore(context.Background(), UpsertAgentSkillScoreParams{
+		AgentID:      agentID,
+		SkillID:      "data/sql-query",
+		Status:       "verified",
+		AverageScore: &score,
+		PassCount:    2,
+		TotalCount:   3,
+		LastBatchID:  &batchID,
+		VerifiedAt:   &finishedAt,
+	})
+	if err != nil {
+		t.Fatalf("UpsertAgentSkillScore error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpsertAgentSkillScore")
+	if skillScore.AgentID != agentID || skillScore.AverageScore == nil || *skillScore.AverageScore != score {
+		t.Fatalf("UpsertAgentSkillScore scan = %#v", skillScore)
+	}
+
+	dbtx.row = fakeRow{values: scoreValues}
+	if got, err := q.GetAgentSkillScore(context.Background(), GetAgentSkillScoreParams{AgentID: agentID, SkillID: "data/sql-query"}); err != nil || got.SkillID != "data/sql-query" {
+		t.Fatalf("GetAgentSkillScore = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentSkillScore")
+
+	scoreRows := &fakeRows{rows: [][]any{scoreValues}}
+	dbtx.queryRows = scoreRows
+	scores, err := q.ListAgentSkillScoresByAgent(context.Background(), agentID)
+	if err != nil {
+		t.Fatalf("ListAgentSkillScoresByAgent error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentSkillScoresByAgent")
+	if !scoreRows.closed || len(scores) != 1 || scores[0].Status != "verified" {
+		t.Fatalf("ListAgentSkillScoresByAgent scan = %#v closed=%v", scores, scoreRows.closed)
+	}
+
+	slugScoreRows := &fakeRows{rows: [][]any{scoreValues}}
+	dbtx.queryRows = slugScoreRows
+	scoresBySlug, err := q.ListAgentSkillScoresBySlug(context.Background(), "agent-one")
+	if err != nil {
+		t.Fatalf("ListAgentSkillScoresBySlug error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentSkillScoresBySlug")
+	if !slugScoreRows.closed || len(scoresBySlug) != 1 || scoresBySlug[0].AgentID != agentID {
+		t.Fatalf("ListAgentSkillScoresBySlug scan = %#v closed=%v", scoresBySlug, slugScoreRows.closed)
+	}
+
+	topRows := &fakeRows{rows: [][]any{{agentID, &score, &finishedAt, "agent-one", "Agent One", "does work", []string{"data"}, int32(12), int32(34)}}}
+	dbtx.queryRows = topRows
+	topAgents, err := q.ListTopAgentsBySkill(context.Background(), ListTopAgentsBySkillParams{SkillID: "data/sql-query", Limit: 5})
+	if err != nil {
+		t.Fatalf("ListTopAgentsBySkill error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListTopAgentsBySkill")
+	if !topRows.closed || len(topAgents) != 1 || topAgents[0].Slug != "agent-one" {
+		t.Fatalf("ListTopAgentsBySkill scan = %#v closed=%v", topAgents, topRows.closed)
+	}
+
+	matchRows := &fakeRows{rows: [][]any{{agentID, int32(2), int32(1), int32(34)}}}
+	dbtx.queryRows = matchRows
+	matches, err := q.ListAgentsBySkillsWithVerified(context.Background(), []string{"data/sql-query", "writing/summary"})
+	if err != nil {
+		t.Fatalf("ListAgentsBySkillsWithVerified error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentsBySkillsWithVerified")
+	if !matchRows.closed || len(matches) != 1 || matches[0].VerifiedCount != 1 {
+		t.Fatalf("ListAgentsBySkillsWithVerified scan = %#v closed=%v", matches, matchRows.closed)
+	}
+
+	summaryRows := &fakeRows{rows: [][]any{{batchID, "data/sql-query", now, &finishedAt, int32(3), int32(2), &score}}}
+	dbtx.queryRows = summaryRows
+	summaries, err := q.ListBenchmarkBatchSummariesByAgent(context.Background(), ListBenchmarkBatchSummariesByAgentParams{AgentID: agentID, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListBenchmarkBatchSummariesByAgent error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListBenchmarkBatchSummariesByAgent")
+	if !summaryRows.closed || len(summaries) != 1 || summaries[0].AverageScore == nil {
+		t.Fatalf("ListBenchmarkBatchSummariesByAgent scan = %#v closed=%v", summaries, summaryRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(4), &batchID}}
+	verifiedStats, err := q.GetAgentVerifiedSkillStats(context.Background(), agentID)
+	if err != nil {
+		t.Fatalf("GetAgentVerifiedSkillStats error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentVerifiedSkillStats")
+	if verifiedStats.VerifiedCount != 4 || verifiedStats.LatestBatchID == nil {
+		t.Fatalf("GetAgentVerifiedSkillStats scan = %#v", verifiedStats)
+	}
+}
+
+func TestDashboardRunQueriesScanRowsAndScalars(t *testing.T) {
+	userID := uuid.New()
+	creatorID := uuid.New()
+	agentID := uuid.New()
+	runID := uuid.New()
+	tokenID := uuid.New()
+	now := time.Date(2026, 6, 20, 23, 0, 0, 0, time.UTC)
+	duration := int32(80)
+	finishedAt := now.Add(time.Minute)
+	claimedAt := now.Add(10 * time.Second)
+	runValues := runRow(runID, userID, agentID, []byte(`{"prompt":"hi"}`), []byte(`{"ok":true}`), "success", nil, nil, 100, 25, 75, &duration, now, &finishedAt, "dashboard")
+	creatorRunValues := append(append([]any{}, runValues...), &tokenID, &claimedAt, "agent-one", "Agent One")
+	dbtx := &fakeDBTX{row: fakeRow{values: []any{int32(9)}}}
+	q := New(dbtx)
+
+	runRows := &fakeRows{rows: [][]any{runValues}}
+	dbtx.queryRows = runRows
+	runs, err := q.ListRunsByUser(context.Background(), ListRunsByUserParams{UserID: userID, Limit: 10, Offset: 2})
+	if err != nil {
+		t.Fatalf("ListRunsByUser error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRunsByUser")
+	if !runRows.closed || len(runs) != 1 || runs[0].Source != "dashboard" {
+		t.Fatalf("ListRunsByUser scan = %#v closed=%v", runs, runRows.closed)
+	}
+
+	filteredRows := &fakeRows{rows: [][]any{runValues}}
+	dbtx.queryRows = filteredRows
+	filtered, err := q.ListRunsByUserAndAgent(context.Background(), ListRunsByUserAndAgentParams{
+		UserID:          userID,
+		AgentID:         agentID,
+		NoCursor:        false,
+		CursorStartedAt: now,
+		CursorID:        runID,
+		NoStatusFilter:  false,
+		Statuses:        []string{"success"},
+		NoSinceFilter:   false,
+		Since:           now.Add(-time.Hour),
+		ContextID:       "ctx-1",
+		Limit:           20,
+	})
+	if err != nil {
+		t.Fatalf("ListRunsByUserAndAgent error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRunsByUserAndAgent")
+	if !filteredRows.closed || len(filtered) != 1 || filtered[0].ID != runID {
+		t.Fatalf("ListRunsByUserAndAgent scan = %#v closed=%v", filtered, filteredRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(7)}}
+	filteredCount, err := q.CountRunsByUserAndAgent(context.Background(), CountRunsByUserAndAgentParams{
+		UserID: userID, AgentID: agentID, NoStatusFilter: false,
+		Statuses: []string{"success"}, NoSinceFilter: true, Since: now, ContextID: "",
+	})
+	if err != nil || filteredCount != 7 {
+		t.Fatalf("CountRunsByUserAndAgent = %d, %v", filteredCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountRunsByUserAndAgent")
+
+	creatorRows := &fakeRows{rows: [][]any{creatorRunValues}}
+	dbtx.queryRows = creatorRows
+	creatorRuns, err := q.ListRunsByCreatorAgentWithAgent(context.Background(), ListRunsByCreatorAgentWithAgentParams{CreatorID: creatorID, AgentID: agentID, Limit: 10, Offset: 0})
+	if err != nil {
+		t.Fatalf("ListRunsByCreatorAgentWithAgent error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRunsByCreatorAgentWithAgent")
+	if !creatorRows.closed || len(creatorRuns) != 1 || creatorRuns[0].ClaimedByRuntimeTokenID == nil || creatorRuns[0].AgentName != "Agent One" {
+		t.Fatalf("ListRunsByCreatorAgentWithAgent scan = %#v closed=%v", creatorRuns, creatorRows.closed)
+	}
+
+	scalarInt32Checks := []struct {
+		name string
+		call func() (int32, error)
+	}{
+		{"CountRunsByUser", func() (int32, error) { return q.CountRunsByUser(context.Background(), userID) }},
+		{"CountRunsByCreatorAgent", func() (int32, error) {
+			return q.CountRunsByCreatorAgent(context.Background(), CountRunsByCreatorAgentParams{CreatorID: creatorID, AgentID: agentID})
+		}},
+		{"CountRunsByUserThisMonth", func() (int32, error) { return q.CountRunsByUserThisMonth(context.Background(), userID) }},
+		{"CountRunsForCreatorThisMonth", func() (int32, error) { return q.CountRunsForCreatorThisMonth(context.Background(), creatorID) }},
+		{"CountAgentsByCreator", func() (int32, error) { return q.CountAgentsByCreator(context.Background(), creatorID) }},
+		{"CountPendingAgentsByCreator", func() (int32, error) { return q.CountPendingAgentsByCreator(context.Background(), creatorID) }},
+	}
+	for _, tc := range scalarInt32Checks {
+		dbtx.row = fakeRow{values: []any{int32(9)}}
+		got, err := tc.call()
+		if err != nil || got != 9 {
+			t.Fatalf("%s = %d, %v", tc.name, got, err)
+		}
+		requireSQLName(t, dbtx.queryRowSQL, tc.name)
+	}
+
+	dbtx.row = fakeRow{values: []any{int64(1234)}}
+	spent, err := q.SumSpentByUserThisMonth(context.Background(), userID)
+	if err != nil || spent != 1234 {
+		t.Fatalf("SumSpentByUserThisMonth = %d, %v", spent, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "SumSpentByUserThisMonth")
+
+	dbtx.row = fakeRow{values: []any{int64(5678)}}
+	earned, err := q.SumEarningsByCreatorThisMonth(context.Background(), creatorID)
+	if err != nil || earned != 5678 {
+		t.Fatalf("SumEarningsByCreatorThisMonth = %d, %v", earned, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "SumEarningsByCreatorThisMonth")
+
+	statsRows := &fakeRows{rows: [][]any{{agentID, "agent-one", "Agent One", "approved", int32(12), int32(34), int64(5600), int64(8), int64(900)}}}
+	dbtx.queryRows = statsRows
+	stats, err := q.ListAgentStatsForCreator(context.Background(), creatorID)
+	if err != nil {
+		t.Fatalf("ListAgentStatsForCreator error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentStatsForCreator")
+	if !statsRows.closed || len(stats) != 1 || stats[0].RevenueThisMonth != 900 {
+		t.Fatalf("ListAgentStatsForCreator scan = %#v closed=%v", stats, statsRows.closed)
+	}
+}
+
 func userRow(id uuid.UUID, now time.Time, passwordHash, provider, oauthID, avatar *string, deletedAt *time.Time) []any {
 	return []any{
 		id,
@@ -1793,6 +2192,109 @@ func runRequirementEvidenceRow(runID, taskID, agentID, userID uuid.UUID, created
 		"partial",
 		"task_requirements",
 		createdAt,
+	}
+}
+
+func taskQueryRow(
+	id, userID, agentID, claimedByUserID, runID uuid.UUID,
+	createdAt time.Time,
+	chosenAt, claimedAt, completedAt, acceptedAt, revisionRequestedAt, publishedAt *time.Time,
+	completionSummary, publicSummary, revisionNote *string,
+	deliveryArtifact []byte,
+) []any {
+	return []any{
+		id,
+		userID,
+		"build a dashboard",
+		[]string{"data/sql-query"},
+		[]string{"browser.search"},
+		[]uuid.UUID{agentID},
+		&agentID,
+		chosenAt,
+		&agentID,
+		&claimedByUserID,
+		claimedAt,
+		&runID,
+		completedAt,
+		completionSummary,
+		&runID,
+		"submitted",
+		"shared",
+		deliveryArtifact,
+		acceptedAt,
+		revisionRequestedAt,
+		revisionNote,
+		"public",
+		publicSummary,
+		publishedAt,
+		createdAt,
+	}
+}
+
+func agentWithCreatorRow(agentID, creatorID uuid.UUID, now time.Time) []any {
+	return []any{
+		agentID,
+		creatorID,
+		"agent-one",
+		"Agent One",
+		"does work",
+		"https://example.com/agent",
+		nil,
+		int32(12),
+		[]string{"data"},
+		"active",
+		"public",
+		"certified",
+		nil,
+		&now,
+		int32(34),
+		int64(5600),
+		nil,
+		now,
+		now.Add(time.Minute),
+		"Creator Name",
+	}
+}
+
+func skillTestCaseRow(id uuid.UUID, createdAt time.Time) []any {
+	return []any{id, "data/sql-query", "SQL happy path", []byte(`{"prompt":"query"}`), "judge {output}", int32(1), createdAt}
+}
+
+func benchmarkRunRow(
+	id, batchID, agentID, testCaseID uuid.UUID,
+	startedAt time.Time,
+	finishedAt *time.Time,
+	score *int32,
+	rawOutput []byte,
+	judgeReasoning, errorMessage *string,
+) []any {
+	return []any{
+		id,
+		batchID,
+		agentID,
+		"data/sql-query",
+		testCaseID,
+		"success",
+		score,
+		rawOutput,
+		judgeReasoning,
+		errorMessage,
+		startedAt,
+		finishedAt,
+	}
+}
+
+func agentSkillScoreRow(agentID, batchID uuid.UUID, updatedAt time.Time, averageScore *int32, verifiedAt *time.Time) []any {
+	return []any{
+		agentID,
+		"data/sql-query",
+		"verified",
+		averageScore,
+		int32(2),
+		int32(3),
+		&batchID,
+		verifiedAt,
+		updatedAt,
 	}
 }
 
