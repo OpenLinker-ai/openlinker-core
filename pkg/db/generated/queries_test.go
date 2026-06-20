@@ -602,6 +602,309 @@ func TestRegistryBridgeQueriesScanRowsAndScalars(t *testing.T) {
 	requireSQLName(t, dbtx.queryRowSQL, "CountPendingProxyRunsByNode")
 }
 
+func TestProxyRunAndRunWebhookQueriesScanRowsAndArgs(t *testing.T) {
+	ownerID := uuid.New()
+	requestingUserID := uuid.New()
+	nodeID := uuid.New()
+	listingID := uuid.New()
+	linkID := uuid.New()
+	localAgentID := uuid.New()
+	proxyRunID := uuid.New()
+	cloudRunID := uuid.New()
+	artifactID := uuid.New()
+	runID := uuid.New()
+	callerAgentID := uuid.New()
+	subscriptionID := uuid.New()
+	runEventID := uuid.New()
+	deliveryID := uuid.New()
+	now := time.Date(2026, 6, 20, 17, 30, 0, 0, time.UTC)
+	nextRetry := now.Add(2 * time.Minute)
+	claimedAt := now.Add(time.Minute)
+	finishedAt := now.Add(3 * time.Minute)
+	deliveredAt := now.Add(4 * time.Minute)
+	inputSummary := "summarized input"
+	outputSummary := "summarized output"
+	errCode := "PROXY_UPSTREAM"
+	errMsg := "node failed"
+	mimeType := "application/json"
+	fileURI := "https://files.example/proxy-result.json"
+	fileName := "proxy-result.json"
+	fileSHA := strings.Repeat("e", 64)
+	fileSize := int64(512)
+	pushScheme := "Bearer"
+	pushCredentials := "push-secret"
+	responseStatus := int32(202)
+	responseBody := "accepted"
+	deliveryErr := "retry later"
+	linkValues := cloudListingLinkRow(linkID, listingID, nodeID, localAgentID, now)
+	proxyValues := proxyRunRow(proxyRunID, cloudRunID, linkID, listingID, nodeID, localAgentID, requestingUserID, now, &inputSummary, &outputSummary, &errCode, &errMsg, &nextRetry, &claimedAt, &finishedAt)
+	artifactValues := proxyRunArtifactRow(artifactID, proxyRunID, cloudRunID, now, &mimeType, &fileURI, &fileName, &fileSHA, &fileSize)
+	subscriptionValues := runWebhookSubscriptionRow(subscriptionID, runID, ownerID, &callerAgentID, now, &pushScheme, &pushCredentials, nil)
+	deliveryValues := runWebhookDeliveryRow(deliveryID, subscriptionID, runEventID, now, &responseStatus, &responseBody, &deliveryErr, &nextRetry, &deliveredAt)
+	dbtx := &fakeDBTX{
+		row:     fakeRow{values: linkValues},
+		execTag: pgconn.NewCommandTag("UPDATE 8"),
+	}
+	q := New(dbtx)
+
+	link, err := q.GetCloudListingLinkForProxyRun(context.Background(), listingID)
+	if err != nil {
+		t.Fatalf("GetCloudListingLinkForProxyRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetCloudListingLinkForProxyRun")
+	if link.ID != linkID || link.RegistryNodeID != nodeID {
+		t.Fatalf("GetCloudListingLinkForProxyRun scan = %#v", link)
+	}
+
+	dbtx.row = fakeRow{values: proxyValues}
+	proxy, err := q.CreateProxyRun(context.Background(), CreateProxyRunParams{
+		CloudListingID:     listingID,
+		CloudListingLinkID: linkID,
+		RequestingUserID:   requestingUserID,
+		IdempotencyKey:     "idem-1",
+		Input:              []byte(`{"prompt":"hi"}`),
+		InputSummary:       &inputSummary,
+		NodeInput:          []byte(`{"node":"input"}`),
+	})
+	if err != nil {
+		t.Fatalf("CreateProxyRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateProxyRun")
+	if proxy.ID != proxyRunID || proxy.OutputSummary == nil || *proxy.OutputSummary != outputSummary {
+		t.Fatalf("CreateProxyRun scan = %#v", proxy)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{listingID, linkID, requestingUserID, "idem-1", []byte(`{"prompt":"hi"}`), &inputSummary, []byte(`{"node":"input"}`)}) {
+		t.Fatalf("CreateProxyRun args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: proxyValues}
+	if got, err := q.GetProxyRunForRequester(context.Background(), GetProxyRunForRequesterParams{ID: proxyRunID, RequestingUserID: requestingUserID}); err != nil || got.ID != proxyRunID {
+		t.Fatalf("GetProxyRunForRequester = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetProxyRunForRequester")
+
+	dbtx.row = fakeRow{values: proxyValues}
+	if got, err := q.GetProxyRunForNode(context.Background(), GetProxyRunForNodeParams{ID: proxyRunID, RegistryNodeID: nodeID}); err != nil || got.RegistryNodeID != nodeID {
+		t.Fatalf("GetProxyRunForNode = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetProxyRunForNode")
+
+	dbtx.row = fakeRow{values: proxyValues}
+	if got, err := q.ClaimPendingProxyRun(context.Background(), nodeID); err != nil || got.Status != "claimed" {
+		t.Fatalf("ClaimPendingProxyRun = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "ClaimPendingProxyRun")
+
+	dbtx.row = fakeRow{values: proxyValues}
+	if got, err := q.CompleteProxyRun(context.Background(), CompleteProxyRunParams{
+		ID:             proxyRunID,
+		RegistryNodeID: nodeID,
+		Status:         "success",
+		Output:         []byte(`{"ok":true}`),
+		OutputSummary:  &outputSummary,
+		ErrorCode:      nil,
+		ErrorMessage:   nil,
+		Retryable:      false,
+		RetryAfterSecs: 0,
+	}); err != nil || got.FinishedAt == nil {
+		t.Fatalf("CompleteProxyRun = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CompleteProxyRun")
+
+	if err := q.DeleteProxyRunArtifacts(context.Background(), proxyRunID); err != nil {
+		t.Fatalf("DeleteProxyRunArtifacts error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "DeleteProxyRunArtifacts")
+
+	dbtx.row = fakeRow{values: artifactValues}
+	artifact, err := q.CreateProxyRunArtifact(context.Background(), CreateProxyRunArtifactParams{
+		ProxyRunID:       proxyRunID,
+		CloudRunID:       cloudRunID,
+		SourceArtifactID: "artifact-1",
+		ArtifactType:     "json",
+		Title:            "Proxy result",
+		Content:          []byte(`{"ok":true}`),
+		MimeType:         &mimeType,
+		FileURI:          &fileURI,
+		FileName:         &fileName,
+		FileSHA256:       &fileSHA,
+		FileSizeBytes:    &fileSize,
+	})
+	if err != nil {
+		t.Fatalf("CreateProxyRunArtifact error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateProxyRunArtifact")
+	if artifact.ID != artifactID || artifact.FileURI == nil || *artifact.FileURI != fileURI {
+		t.Fatalf("CreateProxyRunArtifact scan = %#v", artifact)
+	}
+
+	artifactRows := &fakeRows{rows: [][]any{artifactValues}}
+	dbtx.queryRows = artifactRows
+	artifacts, err := q.ListProxyRunArtifactsForRequester(context.Background(), ListProxyRunArtifactsForRequesterParams{ProxyRunID: proxyRunID, RequestingUserID: requestingUserID})
+	if err != nil {
+		t.Fatalf("ListProxyRunArtifactsForRequester error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListProxyRunArtifactsForRequester")
+	if !artifactRows.closed || len(artifacts) != 1 || artifacts[0].ID != artifactID {
+		t.Fatalf("ListProxyRunArtifactsForRequester scan = %#v closed=%v", artifacts, artifactRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: artifactValues}
+	if got, err := q.GetProxyRunArtifactForRequester(context.Background(), GetProxyRunArtifactForRequesterParams{ID: artifactID, ProxyRunID: proxyRunID, RequestingUserID: requestingUserID}); err != nil || got.ProxyRunID != proxyRunID {
+		t.Fatalf("GetProxyRunArtifactForRequester = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetProxyRunArtifactForRequester")
+
+	dbtx.row = fakeRow{values: []any{int32(3)}}
+	timedOut, err := q.TimeoutStaleProxyRuns(context.Background(), now.Add(-time.Hour))
+	if err != nil || timedOut != 3 {
+		t.Fatalf("TimeoutStaleProxyRuns = %d, %v", timedOut, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "TimeoutStaleProxyRuns")
+
+	dbtx.row = fakeRow{values: subscriptionValues}
+	subscription, err := q.CreateRunWebhookSubscription(context.Background(), CreateRunWebhookSubscriptionParams{
+		RunID:               runID,
+		OwnerUserID:         ownerID,
+		CallerAgentID:       &callerAgentID,
+		TargetURL:           "https://hooks.example/run",
+		Secret:              "secret",
+		EventTypes:          []string{"completed", "artifact"},
+		PushAuthScheme:      &pushScheme,
+		PushAuthCredentials: &pushCredentials,
+		PushMetadata:        []byte(`{"source":"a2a"}`),
+	})
+	if err != nil {
+		t.Fatalf("CreateRunWebhookSubscription error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateRunWebhookSubscription")
+	if subscription.ID != subscriptionID || subscription.PushAuthScheme == nil || *subscription.PushAuthScheme != pushScheme {
+		t.Fatalf("CreateRunWebhookSubscription scan = %#v", subscription)
+	}
+
+	subscriptionRows := &fakeRows{rows: [][]any{subscriptionValues}}
+	dbtx.queryRows = subscriptionRows
+	byRun, err := q.ListRunWebhookSubscriptionsByRun(context.Background(), ListRunWebhookSubscriptionsByRunParams{RunID: runID, OwnerUserID: ownerID})
+	if err != nil {
+		t.Fatalf("ListRunWebhookSubscriptionsByRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRunWebhookSubscriptionsByRun")
+	if !subscriptionRows.closed || len(byRun) != 1 || byRun[0].ID != subscriptionID {
+		t.Fatalf("ListRunWebhookSubscriptionsByRun scan = %#v closed=%v", byRun, subscriptionRows.closed)
+	}
+
+	ownerRows := &fakeRows{rows: [][]any{subscriptionValues}}
+	dbtx.queryRows = ownerRows
+	byOwner, err := q.ListRunWebhookSubscriptionsByOwner(context.Background(), ListRunWebhookSubscriptionsByOwnerParams{OwnerUserID: ownerID, Status: "active", Limit: 20})
+	if err != nil {
+		t.Fatalf("ListRunWebhookSubscriptionsByOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRunWebhookSubscriptionsByOwner")
+	if !ownerRows.closed || len(byOwner) != 1 || byOwner[0].RunID != runID {
+		t.Fatalf("ListRunWebhookSubscriptionsByOwner scan = %#v closed=%v", byOwner, ownerRows.closed)
+	}
+
+	if rows, err := q.DeleteRunWebhookSubscriptionForOwner(context.Background(), DeleteRunWebhookSubscriptionForOwnerParams{ID: subscriptionID, RunID: runID, OwnerUserID: ownerID}); err != nil || rows != 8 {
+		t.Fatalf("DeleteRunWebhookSubscriptionForOwner = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "DeleteRunWebhookSubscriptionForOwner")
+
+	dbtx.row = fakeRow{values: subscriptionValues}
+	if got, err := q.UpdateRunWebhookSubscriptionStatusForOwner(context.Background(), UpdateRunWebhookSubscriptionStatusForOwnerParams{ID: subscriptionID, RunID: runID, OwnerUserID: ownerID, Status: "paused"}); err != nil || got.ID != subscriptionID {
+		t.Fatalf("UpdateRunWebhookSubscriptionStatusForOwner = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpdateRunWebhookSubscriptionStatusForOwner")
+
+	batchRows := &fakeRows{rows: [][]any{subscriptionValues}}
+	dbtx.queryRows = batchRows
+	batchUpdated, err := q.BatchUpdateRunWebhookSubscriptionsForOwner(context.Background(), BatchUpdateRunWebhookSubscriptionsForOwnerParams{OwnerUserID: ownerID, IDs: []uuid.UUID{subscriptionID}, Status: "active"})
+	if err != nil {
+		t.Fatalf("BatchUpdateRunWebhookSubscriptionsForOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "BatchUpdateRunWebhookSubscriptionsForOwner")
+	if !batchRows.closed || len(batchUpdated) != 1 || batchUpdated[0].Status != "active" {
+		t.Fatalf("BatchUpdateRunWebhookSubscriptionsForOwner scan = %#v closed=%v", batchUpdated, batchRows.closed)
+	}
+
+	activeRows := &fakeRows{rows: [][]any{subscriptionValues}}
+	dbtx.queryRows = activeRows
+	active, err := q.ListActiveRunWebhookSubscriptionsForEvent(context.Background(), ListActiveRunWebhookSubscriptionsForEventParams{RunID: runID, EventType: "completed"})
+	if err != nil {
+		t.Fatalf("ListActiveRunWebhookSubscriptionsForEvent error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListActiveRunWebhookSubscriptionsForEvent")
+	if !activeRows.closed || len(active) != 1 || active[0].ID != subscriptionID {
+		t.Fatalf("ListActiveRunWebhookSubscriptionsForEvent scan = %#v closed=%v", active, activeRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: deliveryValues}
+	delivery, err := q.CreateRunWebhookDelivery(context.Background(), CreateRunWebhookDeliveryParams{SubscriptionID: subscriptionID, RunEventID: runEventID, Payload: []byte(`{"event":"completed"}`)})
+	if err != nil {
+		t.Fatalf("CreateRunWebhookDelivery error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateRunWebhookDelivery")
+	if delivery.ID != deliveryID || delivery.NextRetryAt == nil {
+		t.Fatalf("CreateRunWebhookDelivery scan = %#v", delivery)
+	}
+
+	deliveryWithTarget := append(append([]any{}, deliveryValues...), "https://hooks.example/run", "secret", &pushScheme, &pushCredentials, "completed")
+	dbtx.row = fakeRow{values: deliveryWithTarget}
+	deliveryDetail, err := q.GetRunWebhookDeliveryByID(context.Background(), deliveryID)
+	if err != nil {
+		t.Fatalf("GetRunWebhookDeliveryByID error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetRunWebhookDeliveryByID")
+	if deliveryDetail.ID != deliveryID || deliveryDetail.TargetURL == "" || deliveryDetail.EventType != "completed" {
+		t.Fatalf("GetRunWebhookDeliveryByID scan = %#v", deliveryDetail)
+	}
+
+	if err := q.MarkRunWebhookDeliverySuccess(context.Background(), MarkRunWebhookDeliverySuccessParams{ID: deliveryID, ResponseStatus: &responseStatus, ResponseBody: &responseBody}); err != nil {
+		t.Fatalf("MarkRunWebhookDeliverySuccess error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkRunWebhookDeliverySuccess")
+
+	if err := q.MarkRunWebhookDeliveryFailedRetry(context.Background(), MarkRunWebhookDeliveryFailedRetryParams{ID: deliveryID, ResponseStatus: &responseStatus, ResponseBody: &responseBody, ErrorMessage: &deliveryErr, NextRetryAt: nextRetry}); err != nil {
+		t.Fatalf("MarkRunWebhookDeliveryFailedRetry error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkRunWebhookDeliveryFailedRetry")
+
+	if err := q.MarkRunWebhookDeliveryFailedFinal(context.Background(), MarkRunWebhookDeliveryFailedFinalParams{ID: deliveryID, ResponseStatus: &responseStatus, ResponseBody: &responseBody, ErrorMessage: &deliveryErr}); err != nil {
+		t.Fatalf("MarkRunWebhookDeliveryFailedFinal error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkRunWebhookDeliveryFailedFinal")
+
+	if err := q.IncrementRunWebhookSubscriptionFailure(context.Background(), subscriptionID); err != nil {
+		t.Fatalf("IncrementRunWebhookSubscriptionFailure error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "IncrementRunWebhookSubscriptionFailure")
+
+	if err := q.ResetRunWebhookSubscriptionFailures(context.Background(), subscriptionID); err != nil {
+		t.Fatalf("ResetRunWebhookSubscriptionFailures error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "ResetRunWebhookSubscriptionFailures")
+
+	pendingDeliveryRows := &fakeRows{rows: [][]any{deliveryValues}}
+	dbtx.queryRows = pendingDeliveryRows
+	pendingDeliveries, err := q.ListPendingRunWebhookDeliveries(context.Background())
+	if err != nil {
+		t.Fatalf("ListPendingRunWebhookDeliveries error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListPendingRunWebhookDeliveries")
+	if !pendingDeliveryRows.closed || len(pendingDeliveries) != 1 || pendingDeliveries[0].ID != deliveryID {
+		t.Fatalf("ListPendingRunWebhookDeliveries scan = %#v closed=%v", pendingDeliveries, pendingDeliveryRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: runEventRow(runEventID, runID, nil, 12, "completed", []byte(`{"ok":true}`), now)}
+	latestEvent, err := q.GetLatestRunEventForTypes(context.Background(), GetLatestRunEventForTypesParams{RunID: runID, EventTypes: []string{"completed", "failed"}})
+	if err != nil {
+		t.Fatalf("GetLatestRunEventForTypes error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetLatestRunEventForTypes")
+	if latestEvent.ID != runEventID || latestEvent.Sequence != 12 {
+		t.Fatalf("GetLatestRunEventForTypes scan = %#v", latestEvent)
+	}
+}
+
 func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	agentID := uuid.New()
 	userID := uuid.New()
@@ -2210,6 +2513,108 @@ func cloudListingLinkOwnerRow(id, listingID, nodeID, agentID uuid.UUID, now time
 		link[15],
 		link[16],
 		link[17],
+	}
+}
+
+func proxyRunRow(
+	id, cloudRunID, linkID, listingID, nodeID, localAgentID, requestingUserID uuid.UUID,
+	now time.Time,
+	inputSummary, outputSummary, errorCode, errorMessage *string,
+	nextRetryAt, claimedAt, finishedAt *time.Time,
+) []any {
+	return []any{
+		id,
+		cloudRunID,
+		linkID,
+		listingID,
+		nodeID,
+		localAgentID,
+		requestingUserID,
+		"idem-1",
+		"claimed",
+		"metadata_only",
+		[]string{"secret"},
+		[]byte(`{"prompt":"hi"}`),
+		inputSummary,
+		[]byte(`{"ok":true}`),
+		outputSummary,
+		errorCode,
+		errorMessage,
+		int32(2),
+		int32(3),
+		nextRetryAt,
+		claimedAt,
+		finishedAt,
+		now,
+		now.Add(time.Minute),
+	}
+}
+
+func proxyRunArtifactRow(id, proxyRunID, cloudRunID uuid.UUID, now time.Time, mimeType, fileURI, fileName, fileSHA *string, fileSize *int64) []any {
+	return []any{
+		id,
+		proxyRunID,
+		cloudRunID,
+		"artifact-1",
+		"json",
+		"Proxy result",
+		[]byte(`{"ok":true}`),
+		mimeType,
+		fileURI,
+		fileName,
+		fileSHA,
+		fileSize,
+		now,
+	}
+}
+
+func runWebhookSubscriptionRow(
+	id, runID, ownerUserID uuid.UUID,
+	callerAgentID *uuid.UUID,
+	now time.Time,
+	pushAuthScheme, pushAuthCredentials *string,
+	deletedAt *time.Time,
+) []any {
+	return []any{
+		id,
+		runID,
+		ownerUserID,
+		callerAgentID,
+		"https://hooks.example/run",
+		"secret",
+		[]string{"completed", "artifact"},
+		pushAuthScheme,
+		pushAuthCredentials,
+		[]byte(`{"source":"a2a"}`),
+		"active",
+		int32(1),
+		now,
+		now.Add(time.Minute),
+		deletedAt,
+	}
+}
+
+func runWebhookDeliveryRow(
+	id, subscriptionID, runEventID uuid.UUID,
+	now time.Time,
+	responseStatus *int32,
+	responseBody, errorMessage *string,
+	nextRetryAt, deliveredAt *time.Time,
+) []any {
+	return []any{
+		id,
+		subscriptionID,
+		runEventID,
+		[]byte(`{"event":"completed"}`),
+		"pending",
+		responseStatus,
+		responseBody,
+		errorMessage,
+		int32(2),
+		nextRetryAt,
+		deliveredAt,
+		now,
+		now.Add(time.Minute),
 	}
 }
 
