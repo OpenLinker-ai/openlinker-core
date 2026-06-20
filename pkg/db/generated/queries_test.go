@@ -602,6 +602,217 @@ func TestRegistryBridgeQueriesScanRowsAndScalars(t *testing.T) {
 	requireSQLName(t, dbtx.queryRowSQL, "CountPendingProxyRunsByNode")
 }
 
+func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
+	agentID := uuid.New()
+	userID := uuid.New()
+	tokenID := uuid.New()
+	childRunID := uuid.New()
+	parentRunID := uuid.New()
+	callerAgentID := uuid.New()
+	now := time.Date(2026, 6, 20, 18, 0, 0, 0, time.UTC)
+	lastUsedAt := now.Add(-time.Minute)
+	tokenValues := agentRuntimeTokenRow(tokenID, agentID, userID, now, &lastUsedAt, nil)
+	dbtx := &fakeDBTX{
+		row:       fakeRow{values: tokenValues},
+		queryRows: &fakeRows{rows: [][]any{tokenValues}},
+		execTag:   pgconn.NewCommandTag("UPDATE 5"),
+	}
+	q := New(dbtx)
+
+	token, err := q.CreateAgentRuntimeToken(context.Background(), CreateAgentRuntimeTokenParams{
+		AgentID:         agentID,
+		CreatedByUserID: userID,
+		Name:            "runtime",
+		Prefix:          "rt_live_abcd",
+		TokenHash:       "hash",
+		Scopes:          []string{"agent:pull"},
+	})
+	if err != nil {
+		t.Fatalf("CreateAgentRuntimeToken error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateAgentRuntimeToken")
+	if token.ID != tokenID || token.LastUsedAt == nil || token.Scopes[0] != "agent:pull" {
+		t.Fatalf("CreateAgentRuntimeToken scan = %#v", token)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, userID, "runtime", "rt_live_abcd", "hash", []string{"agent:pull"}}) {
+		t.Fatalf("CreateAgentRuntimeToken args = %#v", dbtx.queryRowArgs)
+	}
+
+	listed, err := q.ListAgentRuntimeTokensForOwner(context.Background(), ListAgentRuntimeTokensForOwnerParams{AgentID: agentID, UserID: userID})
+	if err != nil {
+		t.Fatalf("ListAgentRuntimeTokensForOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentRuntimeTokensForOwner")
+	if len(listed) != 1 || listed[0].ID != tokenID {
+		t.Fatalf("ListAgentRuntimeTokensForOwner scan = %#v", listed)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(3)}}
+	count, err := q.CountActiveAgentRuntimeTokens(context.Background(), agentID)
+	if err != nil || count != 3 {
+		t.Fatalf("CountActiveAgentRuntimeTokens = %d, %v", count, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountActiveAgentRuntimeTokens")
+
+	dbtx.row = fakeRow{values: []any{true}}
+	recent, err := q.HasRecentRuntimePullToken(context.Background(), agentID)
+	if err != nil || !recent {
+		t.Fatalf("HasRecentRuntimePullToken = %v, %v", recent, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "HasRecentRuntimePullToken")
+
+	dbtx.row = fakeRow{values: []any{agentID, "allowlist", now}}
+	policy, err := q.UpsertAgentCallPolicyForOwner(context.Background(), UpsertAgentCallPolicyForOwnerParams{
+		AgentID:    agentID,
+		UserID:     userID,
+		CallableBy: "allowlist",
+	})
+	if err != nil {
+		t.Fatalf("UpsertAgentCallPolicyForOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpsertAgentCallPolicyForOwner")
+	if policy.AgentID != agentID || policy.CallableBy != "allowlist" {
+		t.Fatalf("UpsertAgentCallPolicyForOwner scan = %#v", policy)
+	}
+
+	dbtx.row = fakeRow{values: runDelegationRow(childRunID, parentRunID, callerAgentID, now)}
+	delegation, err := q.CreateRunDelegation(context.Background(), CreateRunDelegationParams{
+		ChildRunID:    childRunID,
+		ParentRunID:   parentRunID,
+		CallerAgentID: callerAgentID,
+		Reason:        "delegate analysis",
+	})
+	if err != nil {
+		t.Fatalf("CreateRunDelegation error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateRunDelegation")
+	if delegation.ChildRunID != childRunID || delegation.ParentRunID != parentRunID || delegation.Reason != "delegate analysis" {
+		t.Fatalf("CreateRunDelegation scan = %#v", delegation)
+	}
+
+	if rows, err := q.RevokeAgentRuntimeTokenForOwner(context.Background(), RevokeAgentRuntimeTokenForOwnerParams{ID: tokenID, UserID: userID}); err != nil || rows != 5 {
+		t.Fatalf("RevokeAgentRuntimeTokenForOwner = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "RevokeAgentRuntimeTokenForOwner")
+}
+
+func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
+	userID := uuid.New()
+	workflowID := uuid.New()
+	nodeID := uuid.New()
+	agentID := uuid.New()
+	runID := uuid.New()
+	now := time.Date(2026, 6, 20, 19, 0, 0, 0, time.UTC)
+	finishedAt := now.Add(2 * time.Minute)
+	nextRetry := now.Add(time.Minute)
+	claimedAt := now.Add(30 * time.Second)
+	lastWorkerError := "worker failed"
+	workflowValues := workflowRow(workflowID, userID, now)
+	nodeValues := workflowNodeRow(nodeID, workflowID, agentID, now)
+	runValues := workflowRunRow(runID, workflowID, userID, now, &finishedAt, &nextRetry, &claimedAt, &lastWorkerError)
+	dbtx := &fakeDBTX{
+		row:       fakeRow{values: workflowValues},
+		queryRows: &fakeRows{rows: [][]any{workflowValues}},
+		execTag:   pgconn.NewCommandTag("UPDATE 7"),
+	}
+	q := New(dbtx)
+
+	workflow, err := q.CreateWorkflow(context.Background(), CreateWorkflowParams{
+		UserID:      userID,
+		Name:        "Review flow",
+		Description: "reviews work",
+		Edges:       []byte(`[{"from":"a","to":"b"}]`),
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkflow error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateWorkflow")
+	if workflow.ID != workflowID || workflow.Status != "active" || string(workflow.Edges) == "" {
+		t.Fatalf("CreateWorkflow scan = %#v", workflow)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{userID, "Review flow", "reviews work", []byte(`[{"from":"a","to":"b"}]`)}) {
+		t.Fatalf("CreateWorkflow args = %#v", dbtx.queryRowArgs)
+	}
+
+	listedWorkflows, err := q.ListWorkflowsByUser(context.Background(), ListWorkflowsByUserParams{UserID: userID, Limit: 20})
+	if err != nil {
+		t.Fatalf("ListWorkflowsByUser error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListWorkflowsByUser")
+	if len(listedWorkflows) != 1 || listedWorkflows[0].ID != workflowID {
+		t.Fatalf("ListWorkflowsByUser scan = %#v", listedWorkflows)
+	}
+
+	dbtx.row = fakeRow{values: nodeValues}
+	node, err := q.CreateWorkflowNode(context.Background(), CreateWorkflowNodeParams{
+		WorkflowID: workflowID,
+		NodeKey:    "analyze",
+		NodeType:   "agent",
+		AgentID:    agentID,
+		Title:      "Analyze",
+		Config:     []byte(`{"temperature":0}`),
+		Position:   1,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkflowNode error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateWorkflowNode")
+	if node.ID != nodeID || node.NodeKey != "analyze" || node.AgentID != agentID {
+		t.Fatalf("CreateWorkflowNode scan = %#v", node)
+	}
+
+	dbtx.queryRows = &fakeRows{rows: [][]any{nodeValues}}
+	nodes, err := q.ListWorkflowNodes(context.Background(), workflowID)
+	if err != nil {
+		t.Fatalf("ListWorkflowNodes error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListWorkflowNodes")
+	if len(nodes) != 1 || nodes[0].ID != nodeID {
+		t.Fatalf("ListWorkflowNodes scan = %#v", nodes)
+	}
+
+	dbtx.row = fakeRow{values: runValues}
+	run, err := q.CreatePendingWorkflowRun(context.Background(), CreatePendingWorkflowRunParams{
+		WorkflowID:  workflowID,
+		UserID:      userID,
+		Input:       []byte(`{"prompt":"go"}`),
+		MaxAttempts: 3,
+	})
+	if err != nil {
+		t.Fatalf("CreatePendingWorkflowRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreatePendingWorkflowRun")
+	if run.ID != runID || run.FinishedAt == nil || run.LastWorkerError == nil {
+		t.Fatalf("CreatePendingWorkflowRun scan = %#v", run)
+	}
+
+	dbtx.queryRows = &fakeRows{rows: [][]any{runValues}}
+	runs, err := q.ListWorkflowRunsByWorkflow(context.Background(), ListWorkflowRunsByWorkflowParams{WorkflowID: workflowID, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListWorkflowRunsByWorkflow error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListWorkflowRunsByWorkflow")
+	if len(runs) != 1 || runs[0].ID != runID {
+		t.Fatalf("ListWorkflowRunsByWorkflow scan = %#v", runs)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(8)}}
+	count, err := q.CountWorkflowRunsByWorkflow(context.Background(), workflowID)
+	if err != nil || count != 8 {
+		t.Fatalf("CountWorkflowRunsByWorkflow = %d, %v", count, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountWorkflowRunsByWorkflow")
+
+	before := now.Add(-time.Hour)
+	if rows, err := q.RequeueStaleWorkflowRuns(context.Background(), before); err != nil || rows != 7 {
+		t.Fatalf("RequeueStaleWorkflowRuns = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "RequeueStaleWorkflowRuns")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{before}) {
+		t.Fatalf("RequeueStaleWorkflowRuns args = %#v", dbtx.execArgs)
+	}
+}
+
 func userRow(id uuid.UUID, now time.Time, passwordHash, provider, oauthID, avatar *string, deletedAt *time.Time) []any {
 	return []any{
 		id,
@@ -794,6 +1005,43 @@ func cloudListingLinkOwnerRow(id, listingID, nodeID, agentID uuid.UUID, now time
 		link[15],
 		link[16],
 		link[17],
+	}
+}
+
+func agentRuntimeTokenRow(id, agentID, userID uuid.UUID, now time.Time, lastUsedAt, revokedAt *time.Time) []any {
+	return []any{id, agentID, userID, "runtime", "rt_live_abcd", "hash", []string{"agent:pull"}, lastUsedAt, revokedAt, now}
+}
+
+func runDelegationRow(childRunID, parentRunID, callerAgentID uuid.UUID, createdAt time.Time) []any {
+	return []any{childRunID, parentRunID, callerAgentID, "delegate analysis", createdAt}
+}
+
+func workflowRow(id, userID uuid.UUID, now time.Time) []any {
+	return []any{id, userID, "Review flow", "reviews work", "active", []byte(`[{"from":"a","to":"b"}]`), now, now.Add(time.Minute)}
+}
+
+func workflowNodeRow(id, workflowID, agentID uuid.UUID, now time.Time) []any {
+	return []any{id, workflowID, "analyze", "agent", agentID, "Analyze", []byte(`{"temperature":0}`), int32(1), now}
+}
+
+func workflowRunRow(id, workflowID, userID uuid.UUID, now time.Time, finishedAt, nextRetry, claimedAt *time.Time, lastWorkerError *string) []any {
+	return []any{
+		id,
+		workflowID,
+		userID,
+		"running",
+		[]byte(`{"prompt":"go"}`),
+		[]byte(`{"ok":true}`),
+		nil,
+		now,
+		finishedAt,
+		now,
+		now.Add(time.Minute),
+		int32(2),
+		int32(3),
+		nextRetry,
+		claimedAt,
+		lastWorkerError,
 	}
 }
 
