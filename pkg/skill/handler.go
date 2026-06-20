@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -17,13 +18,23 @@ import (
 
 // Handler Skill HTTP 入口。
 type Handler struct {
-	svc       *Service
-	q         *db.Queries // 仅用于 PATCH 时查 Agent 校验 owner
+	svc       skillService
+	q         skillAgentReader // 仅用于 PATCH 时查 Agent 校验 owner
 	validator *validator.Validate
 }
 
+type skillService interface {
+	ListAll(context.Context) ([]db.Skill, error)
+	SetAgentSkills(context.Context, uuid.UUID, []string) error
+	ListForAgent(context.Context, uuid.UUID) ([]db.Skill, error)
+}
+
+type skillAgentReader interface {
+	GetAgentByID(context.Context, uuid.UUID) (db.Agent, error)
+}
+
 // NewHandler 构造 Handler。
-func NewHandler(svc *Service, pool *pgxpool.Pool) *Handler {
+func NewHandler(svc skillService, pool *pgxpool.Pool) *Handler {
 	return &Handler{
 		svc:       svc,
 		q:         db.New(pool),

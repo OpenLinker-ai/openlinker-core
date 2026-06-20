@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 
@@ -13,12 +14,25 @@ import (
 
 // BenchmarkHandler HTTP 入口。Service 是 nil 时不挂路由（main.go 兜底）。
 type BenchmarkHandler struct {
-	svc       *BenchmarkService
+	svc       benchmarkService
 	validator *validator.Validate
 }
 
+type benchmarkService interface {
+	RunBenchmark(context.Context, uuid.UUID, uuid.UUID, string) (*RunBenchmarkResponse, error)
+	RuntimeStatus() BenchmarkRuntimeStatus
+	assertOwner(context.Context, uuid.UUID, uuid.UUID) error
+	ListAgentScores(context.Context, uuid.UUID) ([]SkillScoreItem, error)
+	GetBatchDetail(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*BenchmarkBatchDetail, error)
+	ListAgentScoresBySlug(context.Context, string) ([]SkillScoreItem, error)
+	ListTopAgents(context.Context, string, int) ([]TopAgentForSkill, error)
+	ListBatchSummariesPublic(context.Context, uuid.UUID, int) ([]BenchmarkBatchSummary, error)
+	GetBatchDetailPublic(context.Context, uuid.UUID, uuid.UUID) (*BenchmarkBatchDetail, error)
+	assertPublicVisible(context.Context, uuid.UUID) error
+}
+
 // NewBenchmarkHandler 构造。
-func NewBenchmarkHandler(svc *BenchmarkService) *BenchmarkHandler {
+func NewBenchmarkHandler(svc benchmarkService) *BenchmarkHandler {
 	return &BenchmarkHandler{
 		svc:       svc,
 		validator: validator.New(validator.WithRequiredStructEnabled()),
