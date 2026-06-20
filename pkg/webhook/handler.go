@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 
@@ -14,13 +15,26 @@ import (
 
 // Handler webhook HTTP 入口（创作者侧）。
 type Handler struct {
-	svc       *Service
+	svc       webhookService
 	validator *validator.Validate
 	cfg       *config.Config
 }
 
+type webhookService interface {
+	SetWebhook(context.Context, uuid.UUID, uuid.UUID, string) (*SetWebhookResponse, error)
+	ClearWebhook(context.Context, uuid.UUID, uuid.UUID) error
+	RotateSecret(context.Context, uuid.UUID, uuid.UUID) (*SetWebhookResponse, error)
+	ListDeliveries(context.Context, uuid.UUID, uuid.UUID, int) ([]DeliveryListItem, error)
+	CreateRunWebhookSubscription(context.Context, uuid.UUID, uuid.UUID, *CreateRunWebhookRequest) (*RunWebhookSubscriptionResponse, error)
+	ListRunWebhookSubscriptions(context.Context, uuid.UUID, uuid.UUID) ([]RunWebhookSubscriptionResponse, error)
+	ListRunWebhookSubscriptionsForOwner(context.Context, uuid.UUID, string, int) ([]RunWebhookSubscriptionResponse, error)
+	BatchManageRunWebhookSubscriptions(context.Context, uuid.UUID, *BatchRunWebhookSubscriptionsRequest) (*BatchRunWebhookSubscriptionsResponse, error)
+	DeleteRunWebhookSubscription(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
+	UpdateRunWebhookSubscriptionStatus(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) (*RunWebhookSubscriptionResponse, error)
+}
+
 // NewHandler 构造 Handler。cfg 可选（保持与其它模块一致）。
-func NewHandler(svc *Service, cfg ...*config.Config) *Handler {
+func NewHandler(svc webhookService, cfg ...*config.Config) *Handler {
 	h := &Handler{
 		svc:       svc,
 		validator: validator.New(validator.WithRequiredStructEnabled()),
