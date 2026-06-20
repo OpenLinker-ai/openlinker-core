@@ -1,10 +1,10 @@
 // Command api is the openlinker-core HTTP server.
 //
 // Pulls in only modules that live under openlinker-core/pkg/:
-// auth (sans HybridAuthMiddleware API-key path), agent, runtime, skill, task,
-// mcp, delivery, webhook, user. wallet / payment / dashboard / admin /
-// apikey live in openlinker-cloud and are not wired here -- core is meant
-// to be self-host-able without billing or operator tooling.
+// auth, agent, runtime, skill, task, mcp, delivery, webhook, user. wallet /
+// payment / dashboard / cloud API-key storage live in openlinker-cloud and
+// are not wired here -- core is meant to be self-host-able without billing
+// or operator tooling.
 package main
 
 import (
@@ -25,9 +25,11 @@ import (
 	emw "github.com/labstack/echo/v4/middleware"
 	"github.com/rs/zerolog/log"
 
+	"github.com/kinzhi/openlinker-core/pkg/auth"
 	"github.com/kinzhi/openlinker-core/pkg/config"
 	"github.com/kinzhi/openlinker-core/pkg/coreapi"
 	"github.com/kinzhi/openlinker-core/pkg/db"
+	dbgen "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 	openlinkerlog "github.com/kinzhi/openlinker-core/pkg/log"
 )
@@ -100,7 +102,14 @@ func main() {
 		}
 		return c.NoContent(http.StatusOK)
 	})
-	coreapi.Register(rootCtx, e, pool, cfg, coreapi.Options{})
+	opts := coreapi.Options{
+		AdminMiddleware: auth.AdminMiddleware(dbgen.New(pool)),
+	}
+	if verifier := auth.NewRemoteAPIKeyVerifier(cfg.APIKeyVerifyURL); verifier != nil {
+		opts.APIKeyVerifier = verifier
+		log.Info().Str("endpoint", cfg.APIKeyVerifyURL).Msg("remote api key verifier configured")
+	}
+	coreapi.Register(rootCtx, e, pool, cfg, opts)
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
