@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/go-playground/validator/v10"
@@ -12,11 +13,21 @@ import (
 
 // Handler Output Delivery HTTP 路由（用户侧）。
 type Handler struct {
-	svc       *Service
+	svc       deliveryService
 	validator *validator.Validate
 }
 
-func NewHandler(svc *Service) *Handler {
+type deliveryService interface {
+	CreateTarget(context.Context, uuid.UUID, *CreateTargetRequest) (*TargetResponse, error)
+	ListTargets(context.Context, uuid.UUID) ([]TargetResponse, error)
+	DeleteTarget(context.Context, uuid.UUID, uuid.UUID) error
+	SetDefault(context.Context, uuid.UUID, uuid.UUID) error
+	DeliverRun(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID) (*DeliveryItem, error)
+	ListByRun(context.Context, uuid.UUID, uuid.UUID) ([]DeliveryItem, error)
+	RetryDelivery(context.Context, uuid.UUID, uuid.UUID) error
+}
+
+func NewHandler(svc deliveryService) *Handler {
 	return &Handler{
 		svc:       svc,
 		validator: validator.New(validator.WithRequiredStructEnabled()),
