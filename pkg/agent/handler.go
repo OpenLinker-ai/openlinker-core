@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 
@@ -14,13 +15,35 @@ import (
 
 // Handler Agent 注册 / 公开状态 HTTP 入口。
 type Handler struct {
-	svc       *Service
+	svc       agentService
 	validator *validator.Validate
 	cfg       *config.Config
 }
 
+type agentService interface {
+	CheckSlug(context.Context, string) (*SlugCheckResponse, error)
+	BecomeCreator(context.Context, uuid.UUID) error
+	CreateAgent(context.Context, uuid.UUID, *CreateAgentRequest) (*AgentResponse, error)
+	ListMyAgents(context.Context, uuid.UUID) ([]AgentResponse, error)
+	GetMyAgent(context.Context, uuid.UUID, uuid.UUID) (*AgentResponse, error)
+	UpdateAgent(context.Context, uuid.UUID, uuid.UUID, *UpdateAgentRequest) (*AgentResponse, error)
+	SetVisibility(context.Context, uuid.UUID, uuid.UUID, string) (*AgentResponse, error)
+	DisableAgent(context.Context, uuid.UUID, uuid.UUID) error
+	GetAgentOnboarding(context.Context, uuid.UUID, uuid.UUID) (*OnboardingResponse, error)
+	UpsertCapability(context.Context, uuid.UUID, uuid.UUID, *UpsertCapabilityRequest) (*CapabilityResponse, error)
+	CreateExample(context.Context, uuid.UUID, uuid.UUID, *CreateExampleRequest) (*ExampleResponse, error)
+	DeleteExample(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
+	RunDryRun(context.Context, uuid.UUID, uuid.UUID) (*DryRunResponse, error)
+	ListAvailabilityAlerts(context.Context, uuid.UUID, int32) (*AvailabilityAlertListResponse, error)
+	MarkAvailabilityAlertRead(context.Context, uuid.UUID, uuid.UUID) (*AvailabilityAlertResponse, error)
+	ListPendingForAdmin(context.Context) ([]AgentResponse, error)
+	RequestCertification(context.Context, uuid.UUID, uuid.UUID) error
+	CertifyAgent(context.Context, uuid.UUID) error
+	RejectCertification(context.Context, uuid.UUID, string) error
+}
+
 // NewHandler 构造 Handler。cfg 可选（测试可省略）。
-func NewHandler(svc *Service, cfg ...*config.Config) *Handler {
+func NewHandler(svc agentService, cfg ...*config.Config) *Handler {
 	h := &Handler{
 		svc:       svc,
 		validator: validator.New(validator.WithRequiredStructEnabled()),

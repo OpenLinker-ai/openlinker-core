@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
@@ -11,11 +13,19 @@ import (
 
 // ApprovalHandler 高风险动作审批 HTTP 入口。
 type ApprovalHandler struct {
-	svc       *ApprovalService
+	svc       approvalService
 	validator *validator.Validate
 }
 
-func NewApprovalHandler(svc *ApprovalService) *ApprovalHandler {
+type approvalService interface {
+	CreateApproval(context.Context, uuid.UUID, *CreateApprovalRequest) (*ApprovalResponse, error)
+	ListApprovals(context.Context, uuid.UUID) ([]ApprovalResponse, error)
+	GetApproval(context.Context, uuid.UUID, uuid.UUID) (*ApprovalResponse, error)
+	ConfirmApproval(context.Context, uuid.UUID, uuid.UUID, string) error
+	RejectApproval(context.Context, uuid.UUID, uuid.UUID, string) error
+}
+
+func NewApprovalHandler(svc approvalService) *ApprovalHandler {
 	return &ApprovalHandler{
 		svc:       svc,
 		validator: validator.New(validator.WithRequiredStructEnabled()),

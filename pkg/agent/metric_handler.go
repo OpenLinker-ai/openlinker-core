@@ -1,17 +1,23 @@
 package agent
 
 import (
+	"context"
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 )
 
 // MetricHandler 公开 GET 单 Agent 指标快照。
 type MetricHandler struct {
-	svc *MetricService
+	svc metricService
 }
 
-func NewMetricHandler(svc *MetricService) *MetricHandler {
+type metricService interface {
+	GetSnapshots(context.Context, uuid.UUID) (*MetricSnapshotsResponse, error)
+}
+
+func NewMetricHandler(svc metricService) *MetricHandler {
 	return &MetricHandler{svc: svc}
 }
 

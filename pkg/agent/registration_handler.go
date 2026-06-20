@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
@@ -12,11 +14,18 @@ import (
 
 // RegistrationHandler Agent 自注册访问令牌 HTTP 入口。
 type RegistrationHandler struct {
-	svc       *RegistrationService
+	svc       registrationService
 	validator *validator.Validate
 }
 
-func NewRegistrationHandler(svc *RegistrationService) *RegistrationHandler {
+type registrationService interface {
+	MintBootstrapToken(context.Context, uuid.UUID, *CreateBootstrapTokenRequest) (*BootstrapTokenResponse, error)
+	ListBootstrapTokens(context.Context, uuid.UUID) ([]BootstrapTokenResponse, error)
+	RevokeBootstrapToken(context.Context, uuid.UUID, uuid.UUID) error
+	RegisterAgentViaBootstrap(context.Context, *RegisterAgentViaBootstrapRequest) (*RegisterAgentViaBootstrapResponse, error)
+}
+
+func NewRegistrationHandler(svc registrationService) *RegistrationHandler {
 	return &RegistrationHandler{
 		svc:       svc,
 		validator: validator.New(validator.WithRequiredStructEnabled()),
