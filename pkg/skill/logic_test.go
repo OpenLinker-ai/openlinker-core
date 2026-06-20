@@ -84,6 +84,14 @@ func TestBenchmarkRuntimeAndJudgeHelpers(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(88), score)
 	require.Equal(t, "ok", reason)
+	score, reason, err = parseJudgeResponse("```\n{\"score\":72,\"reason\":\"plain fence\"}\n```")
+	require.NoError(t, err)
+	require.Equal(t, int32(72), score)
+	require.Equal(t, "plain fence", reason)
+	score, reason, err = parseJudgeResponse(`{"score":66}`)
+	require.NoError(t, err)
+	require.Equal(t, int32(66), score)
+	require.Equal(t, "", reason)
 
 	score, reason, err = parseJudgeResponse("score: 77 because it works")
 	require.NoError(t, err)
@@ -107,8 +115,18 @@ func TestBenchmarkRuntimeAndJudgeHelpers(t *testing.T) {
 	require.Contains(t, readyLLM.user, `"answer": "ok"`)
 	require.NotContains(t, readyLLM.user, "{output}")
 
+	score, reason, err = NewBenchmarkService(&Service{}, fakeEndpointRunner{}, &fakeBenchmarkLLM{response: `{"score":-9,"reason":"too low"}`}).
+		judge(context.Background(), "{output}", map[string]interface{}{"answer": "bad"})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), score)
+	require.Equal(t, "too low", reason)
+	_, _, err = NewBenchmarkService(&Service{}, fakeEndpointRunner{}, &fakeBenchmarkLLM{response: `not parseable`}).
+		judge(context.Background(), "{output}", map[string]interface{}{"answer": "bad"})
+	require.Error(t, err)
 	_, _, err = NewBenchmarkService(&Service{}, nil, &fakeBenchmarkLLM{err: errors.New("llm down")}).
 		judge(context.Background(), "{output}", map[string]interface{}{"answer": "ok"})
+	require.Error(t, err)
+	_, _, err = ready.judge(context.Background(), "{output}", map[string]interface{}{"bad": make(chan int)})
 	require.Error(t, err)
 }
 
