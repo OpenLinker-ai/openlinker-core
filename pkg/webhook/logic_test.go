@@ -273,6 +273,44 @@ func TestDoDeliverWithEventAddsCompatibilityHeaders(t *testing.T) {
 	}
 }
 
+func TestDoDeliverWrapperLimitsBodyAndWorkerStopsOnCancel(t *testing.T) {
+	payload := []byte(`{"event":"run.completed"}`)
+	deliveryID := uuid.New()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-OpenLinker-Event") != eventRunCompleted {
+			t.Fatalf("wrapper event header = %q", r.Header.Get("X-OpenLinker-Event"))
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Fatalf("doDeliver should not set auth header: %q", r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(strings.Repeat("x", responseBodyMaxLen*5)))
+	}))
+	defer server.Close()
+
+	svc := &Service{httpClient: server.Client()}
+	status, body, err := svc.doDeliver(context.Background(), server.URL, "secret", deliveryID, payload)
+	if err != nil || status != http.StatusConflict {
+		t.Fatalf("doDeliver = %d %q %v", status, body, err)
+	}
+	if len(body) != responseBodyMaxLen*4 {
+		t.Fatalf("response body should be capped at %d, got %d", responseBodyMaxLen*4, len(body))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		StartWorker(ctx, &Service{})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatalf("StartWorker should stop promptly when context is already canceled")
+	}
+}
+
 func TestWebhookHandlerValidationAndRoutes(t *testing.T) {
 	h := NewHandler(&Service{})
 	userID := uuid.NewString()
