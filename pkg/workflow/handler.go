@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/go-playground/validator/v10"
@@ -11,11 +12,27 @@ import (
 )
 
 type Handler struct {
-	svc       *Service
+	svc       workflowService
 	validator *validator.Validate
 }
 
-func NewHandler(svc *Service) *Handler {
+type workflowService interface {
+	CreateWorkflow(context.Context, uuid.UUID, *CreateWorkflowRequest) (*WorkflowResponse, error)
+	ListWorkflows(context.Context, uuid.UUID, int32) (*WorkflowListResponse, error)
+	GetWorkflow(context.Context, uuid.UUID, uuid.UUID) (*WorkflowResponse, error)
+	RunWorkflow(context.Context, uuid.UUID, uuid.UUID, *RunWorkflowRequest) (*WorkflowRunResponse, error)
+	StartWorkflowRun(context.Context, uuid.UUID, uuid.UUID, *RunWorkflowRequest) (*WorkflowRunResponse, error)
+	ListWorkflowRuns(context.Context, uuid.UUID, uuid.UUID, int32) (*WorkflowRunListResponse, error)
+	GetWorkflowRun(context.Context, uuid.UUID, uuid.UUID) (*WorkflowRunResponse, error)
+	RetryWorkflowRun(context.Context, uuid.UUID, uuid.UUID) (*WorkflowRunResponse, error)
+	RerunWorkflowStep(context.Context, uuid.UUID, uuid.UUID, *RerunWorkflowStepRequest) (*WorkflowStepRerunResponse, error)
+	CompareWorkflowRuns(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*WorkflowRunComparisonResponse, error)
+	PauseWorkflowRun(context.Context, uuid.UUID, uuid.UUID) (*WorkflowRunResponse, error)
+	ResumeWorkflowRun(context.Context, uuid.UUID, uuid.UUID) (*WorkflowRunResponse, error)
+	CancelWorkflowRun(context.Context, uuid.UUID, uuid.UUID) (*WorkflowRunResponse, error)
+}
+
+func NewHandler(svc workflowService) *Handler {
 	return &Handler{
 		svc:       svc,
 		validator: validator.New(validator.WithRequiredStructEnabled()),
