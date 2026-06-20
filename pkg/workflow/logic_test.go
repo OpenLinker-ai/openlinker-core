@@ -102,6 +102,25 @@ func TestWorkflowGraphAndEdgeHelpers(t *testing.T) {
 	if err := validateWorkflowGraphFromRequest(requestNodes, requestEdges); err != nil {
 		t.Fatalf("validateWorkflowGraphFromRequest: %v", err)
 	}
+
+	defined, err := workflowGraphFromDefinition(db.Workflow{
+		Edges: []byte(`[
+			{"sourceKey":"collect","targetKey":"synthesize","condition":"ok"},
+			{"from":"analyze","to":"synthesize"}
+		]`),
+	}, dagNodes)
+	if err != nil {
+		t.Fatalf("workflowGraphFromDefinition: %v", err)
+	}
+	if !reflect.DeepEqual(defined.Parents["synthesize"], []string{"collect", "analyze"}) || !reflect.DeepEqual(defined.Sinks, []string{"synthesize"}) {
+		t.Fatalf("defined graph parents/sinks = %#v / %#v", defined.Parents, defined.Sinks)
+	}
+	if _, err := workflowGraphFromDefinition(db.Workflow{Edges: []byte(`{bad json`)}, dagNodes); err == nil {
+		t.Fatalf("invalid stored workflow edges should fail")
+	}
+	if _, err := workflowGraphFromDefinition(db.Workflow{Edges: []byte(`[{"from":"collect","to":"missing"}]`)}, dagNodes); err == nil {
+		t.Fatalf("stored workflow edges with unknown endpoint should fail")
+	}
 }
 
 func TestWorkflowResponseAndDataHelpers(t *testing.T) {
