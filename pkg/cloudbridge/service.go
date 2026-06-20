@@ -22,7 +22,23 @@ const (
 )
 
 type Service struct {
-	queries *db.Queries
+	queries cloudBridgeQueries
+}
+
+type cloudBridgeQueries interface {
+	ListRunsByUserWithAgent(context.Context, db.ListRunsByUserWithAgentParams) ([]db.ListRunsByUserWithAgentRow, error)
+	CountRunsByUser(context.Context, uuid.UUID) (int32, error)
+	GetAgentByIDForOwner(context.Context, db.GetAgentByIDForOwnerParams) (db.Agent, error)
+	ListRunsByCreatorAgentWithAgent(context.Context, db.ListRunsByCreatorAgentWithAgentParams) ([]db.ListRunsByCreatorAgentWithAgentRow, error)
+	CountRunsByCreatorAgent(context.Context, db.CountRunsByCreatorAgentParams) (int32, error)
+	GetUserByID(context.Context, uuid.UUID) (db.User, error)
+	CountRunsByUserThisMonth(context.Context, uuid.UUID) (int32, error)
+	SumSpentByUserThisMonth(context.Context, uuid.UUID) (int64, error)
+	CountRunsForCreatorThisMonth(context.Context, uuid.UUID) (int32, error)
+	SumEarningsByCreatorThisMonth(context.Context, uuid.UUID) (int64, error)
+	CountAgentsByCreator(context.Context, uuid.UUID) (int32, error)
+	CountPendingAgentsByCreator(context.Context, uuid.UUID) (int32, error)
+	ListAgentStatsForCreator(context.Context, uuid.UUID) ([]db.ListAgentStatsForCreatorRow, error)
 }
 
 func NewService(pool *pgxpool.Pool) *Service {
