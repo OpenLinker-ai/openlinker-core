@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,11 +14,37 @@ import (
 )
 
 type Handler struct {
-	svc       *Service
+	svc       registryService
 	validator *validator.Validate
 }
 
-func NewHandler(svc *Service) *Handler {
+type registryService interface {
+	CreateNode(context.Context, uuid.UUID, *CreateNodeRequest) (*RegistryNodeResponse, error)
+	ListNodes(context.Context, uuid.UUID) ([]RegistryNodeResponse, error)
+	RevokeNode(context.Context, uuid.UUID, uuid.UUID) (*RegistryNodeResponse, error)
+	RotateNodeSecret(context.Context, uuid.UUID, uuid.UUID) (*RegistryNodeResponse, error)
+	Heartbeat(context.Context, string) (*HeartbeatResponse, error)
+	SyncNodeMetadata(context.Context, string) (*NodeMetadataSyncResponse, error)
+	CreateRegistryPeer(context.Context, uuid.UUID, *CreateRegistryPeerRequest) (*RegistryPeerResponse, error)
+	ListRegistryPeers(context.Context, uuid.UUID) ([]RegistryPeerResponse, error)
+	DeleteRegistryPeer(context.Context, uuid.UUID, uuid.UUID) error
+	CreateRegistryFederationInvite(context.Context, uuid.UUID, *CreateRegistryFederationInviteRequest) (*RegistryFederationInviteResponse, error)
+	ConsumeRegistryFederationInvite(context.Context, *ConsumeRegistryFederationInviteRequest) (*RegistryFederationExchangeMaterial, error)
+	ExchangeRegistryFederationInvite(context.Context, uuid.UUID, *ExchangeRegistryFederationInviteRequest) (*RegistryFederationExchangeResponse, error)
+	CreateCloudListing(context.Context, uuid.UUID, *CreateCloudListingRequest) (*CloudListingLinkResponse, error)
+	ListCloudListings(context.Context, uuid.UUID) ([]CloudListingLinkResponse, error)
+	UpdateCloudListingStatus(context.Context, uuid.UUID, uuid.UUID, *UpdateCloudListingStatusRequest) (*CloudListingLinkResponse, error)
+	SyncCloudListingMetadata(context.Context, uuid.UUID, uuid.UUID) (*CloudListingLinkResponse, error)
+	CreateProxyRun(context.Context, uuid.UUID, *CreateProxyRunRequest) (*ProxyRunResponse, error)
+	CreateRemoteProxyRun(context.Context, uuid.UUID, *CreateRemoteProxyRunRequest) (*RemoteProxyRunResponse, error)
+	GetProxyRun(context.Context, uuid.UUID, uuid.UUID) (*ProxyRunResponse, error)
+	ListProxyRunArtifacts(context.Context, uuid.UUID, uuid.UUID) ([]ProxyRunArtifactResponse, error)
+	DownloadProxyRunArtifact(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*ProxyRunArtifactDownload, error)
+	ClaimProxyRun(context.Context, string) (*ProxyRunResponse, error)
+	CompleteProxyRun(context.Context, string, uuid.UUID, *CompleteProxyRunRequest) (*ProxyRunResponse, error)
+}
+
+func NewHandler(svc registryService) *Handler {
 	return &Handler{
 		svc:       svc,
 		validator: validator.New(validator.WithRequiredStructEnabled()),
