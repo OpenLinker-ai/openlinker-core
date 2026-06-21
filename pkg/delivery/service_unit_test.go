@@ -460,6 +460,180 @@ func TestDeliveryServiceEnqueueAndAttemptDelivery(t *testing.T) {
 	}
 }
 
+func TestDeliveryServiceDeliverRunSelectsExplicitAndDefaultTargets(t *testing.T) {
+	userID := uuid.New()
+	runID := uuid.New()
+	agentID := uuid.New()
+	explicitTargetID := uuid.New()
+	defaultTargetID := uuid.New()
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	run := db.Run{
+		ID:        runID,
+		UserID:    userID,
+		AgentID:   agentID,
+		Status:    "success",
+		StartedAt: now,
+	}
+	agent := db.Agent{ID: agentID, Slug: "delivery-agent", Name: "Delivery Agent"}
+
+	explicitQueries := &fakeDeliveryQueries{
+		run:   run,
+		agent: agent,
+		target: db.DeliveryTarget{
+			ID:     explicitTargetID,
+			UserID: userID,
+			Type:   targetTypeWebhook,
+			Config: []byte(`{"url":"https://example.com/explicit"}`),
+			Secret: "secret",
+		},
+		createDelivery: db.RunDelivery{
+			ID:         uuid.New(),
+			RunID:      runID,
+			TargetID:   explicitTargetID,
+			UserID:     userID,
+			TargetType: targetTypeWebhook,
+			TargetURL:  "https://example.com/explicit",
+			Status:     "pending",
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		},
+	}
+	explicitItem, err := (&Service{queries: explicitQueries}).DeliverRun(context.Background(), userID, runID, &explicitTargetID)
+	if err != nil {
+		t.Fatalf("DeliverRun explicit target error = %v", err)
+	}
+	if explicitItem.TargetID != explicitTargetID.String() || explicitQueries.createDeliveryArg.TargetURL != "https://example.com/explicit" {
+		t.Fatalf("explicit delivery item/arg = %#v/%#v", explicitItem, explicitQueries.createDeliveryArg)
+	}
+
+	defaultQueries := &fakeDeliveryQueries{
+		run:   run,
+		agent: agent,
+		defaultTarget: db.DeliveryTarget{
+			ID:     defaultTargetID,
+			UserID: userID,
+			Type:   targetTypeSlack,
+			Config: []byte(`{"url":"https://hooks.slack.com/services/T000/B000/secret"}`),
+			Secret: "unused",
+		},
+		createDelivery: db.RunDelivery{
+			ID:         uuid.New(),
+			RunID:      runID,
+			TargetID:   defaultTargetID,
+			UserID:     userID,
+			TargetType: targetTypeSlack,
+			TargetURL:  "https://hooks.slack.com/services/T000/B000/secret",
+			Status:     "pending",
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		},
+	}
+	defaultItem, err := (&Service{queries: defaultQueries}).DeliverRun(context.Background(), userID, runID, nil)
+	if err != nil {
+		t.Fatalf("DeliverRun default target error = %v", err)
+	}
+	if defaultItem.TargetID != defaultTargetID.String() || defaultQueries.createDeliveryArg.TargetType != targetTypeSlack {
+		t.Fatalf("default delivery item/arg = %#v/%#v", defaultItem, defaultQueries.createDeliveryArg)
+	}
+
+	wrongOwner := &fakeDeliveryQueries{
+		run: run,
+		target: db.DeliveryTarget{
+			ID:     explicitTargetID,
+			UserID: uuid.New(),
+			Config: []byte(`{"url":"https://example.com/foreign"}`),
+		},
+	}
+	_, err = (&Service{queries: wrongOwner}).DeliverRun(context.Background(), userID, runID, &explicitTargetID)
+	requireDeliveryHTTPStatus(t, err, http.StatusNotFound)
+}
+
+func TestDeliveryServiceAutoEnqueueRetryAndProcessPending(t *testing.T) {
+	userID := uuid.New()
+	runID := uuid.New()
+	agentID := uuid.New()
+	targetID := uuid.New()
+	deliveryID := uuid.New()
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	run := &db.Run{
+		ID:        runID,
+		UserID:    userID,
+		AgentID:   agentID,
+		Status:    "success",
+		StartedAt: now,
+	}
+	target := db.DeliveryTarget{
+		ID:     targetID,
+		UserID: userID,
+		Type:   targetTypeWebhook,
+		Config: []byte(`{"url":"https://example.com/default"}`),
+		Secret: "secret",
+	}
+	agent := db.Agent{ID: agentID, Slug: "delivery-agent", Name: "Delivery Agent"}
+
+	noDefault := &fakeDeliveryQueries{defaultGetErr: pgx.ErrNoRows}
+	if err := (&Service{queries: noDefault}).EnqueueIfDefault(context.Background(), run); err != nil {
+		t.Fatalf("EnqueueIfDefault without default should skip: %v", err)
+	}
+	if noDefault.createDeliveryArg.RunID != uuid.Nil {
+		t.Fatalf("EnqueueIfDefault without default created delivery = %#v", noDefault.createDeliveryArg)
+	}
+
+	autoQueries := &fakeDeliveryQueries{
+		defaultTarget: target,
+		agent:         agent,
+		createDelivery: db.RunDelivery{
+			ID:         deliveryID,
+			RunID:      runID,
+			TargetID:   targetID,
+			UserID:     userID,
+			TargetType: targetTypeWebhook,
+			TargetURL:  "https://example.com/default",
+			Status:     "pending",
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		},
+	}
+	if err := (&Service{queries: autoQueries}).EnqueueIfDefault(context.Background(), run); err != nil {
+		t.Fatalf("EnqueueIfDefault error = %v", err)
+	}
+	if autoQueries.createDeliveryArg.RunID != runID || autoQueries.createDeliveryArg.TargetID != targetID {
+		t.Fatalf("EnqueueIfDefault create arg = %#v", autoQueries.createDeliveryArg)
+	}
+
+	retryQueries := &fakeDeliveryQueries{resetRows: 1}
+	if err := (&Service{queries: retryQueries}).RetryDelivery(context.Background(), deliveryID, userID); err != nil {
+		t.Fatalf("RetryDelivery success error = %v", err)
+	}
+	if retryQueries.resetArg.ID != deliveryID || retryQueries.resetArg.UserID != userID {
+		t.Fatalf("RetryDelivery reset arg = %#v", retryQueries.resetArg)
+	}
+
+	secret := "webhook-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("processed"))
+	}))
+	defer server.Close()
+	pendingQueries := &fakeDeliveryQueries{
+		pending: []db.RunDelivery{{ID: deliveryID}},
+		runDeliveryRow: db.GetRunDeliveryRow{
+			RunDelivery: db.RunDelivery{
+				ID:         deliveryID,
+				TargetType: targetTypeWebhook,
+				TargetURL:  server.URL,
+				Payload:    []byte(`{"event":"run.completed"}`),
+				Status:     "pending",
+			},
+			TargetSecret: &secret,
+		},
+	}
+	(&Service{queries: pendingQueries, httpClient: server.Client()}).processPending(context.Background())
+	if pendingQueries.successArg.ID != deliveryID {
+		t.Fatalf("processPending success arg = %#v", pendingQueries.successArg)
+	}
+}
+
 func TestDeliveryServiceErrors(t *testing.T) {
 	userID := uuid.New()
 	runID := uuid.New()
