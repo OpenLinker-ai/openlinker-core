@@ -38,10 +38,9 @@ func NewMarketService(pool *pgxpool.Pool) *MarketService {
 //
 // size 上限设为 50，避免恶意大查询拖慢数据库（agents.tags 是 GIN 索引但仍要 scan）。
 const (
-	defaultPage               int32 = 1
-	defaultSize               int32 = 12
-	maxSize                   int32 = 50
-	runtimePullConnectionMode       = "runtime_pull"
+	defaultPage int32 = 1
+	defaultSize int32 = 12
+	maxSize     int32 = 50
 )
 
 // ListMarket 列出已公开 Agent。
@@ -383,8 +382,10 @@ func (s *MarketService) getAgentCardBySlug(ctx context.Context, slug string, ext
 func agentCardRuntimeExt(connectionMode string) AgentCardRuntimeExt {
 	onlineSignal := "direct_endpoint_probe_and_run_result"
 	switch connectionMode {
-	case runtimePullConnectionMode:
+	case ConnectionModeRuntimePull:
 		onlineSignal = "runtime_pull_heartbeat_claim_result"
+	case ConnectionModeRuntimeWS:
+		onlineSignal = "runtime_ws_socket_heartbeat_assignment_result"
 	case "mcp_server":
 		onlineSignal = "mcp_tool_call_and_run_result"
 	}
@@ -474,7 +475,7 @@ func (s *MarketService) agentVerifiedSkillStats(ctx context.Context, agentID uui
 }
 
 func (s *MarketService) runtimeAwareAvailability(ctx context.Context, agentID uuid.UUID, connectionMode string, availability Availability) Availability {
-	if connectionMode != runtimePullConnectionMode {
+	if !isQueuedRuntimeConnectionMode(connectionMode) {
 		return availability
 	}
 	hasRuntime, err := s.queries.HasRecentRuntimePullToken(ctx, agentID)
@@ -487,8 +488,12 @@ func (s *MarketService) runtimeAwareAvailability(ctx context.Context, agentID uu
 	}
 	availability.Status = "unreachable"
 	availability.Label = "不可达"
-	availability.Hint = "Runtime Pull Agent 最近没有运行时心跳或领取轮询，暂不建议试用。"
+	availability.Hint = "Runtime Agent 最近没有运行时心跳、WebSocket 连接或领取轮询，暂不建议试用。"
 	return availability
+}
+
+func isQueuedRuntimeConnectionMode(mode string) bool {
+	return mode == ConnectionModeRuntimePull || mode == ConnectionModeRuntimeWS
 }
 
 func readinessForAgent(

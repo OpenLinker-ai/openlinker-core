@@ -47,6 +47,7 @@ const (
 	connectionModeDirectHTTP  = "direct_http"
 	connectionModeMCPServer   = "mcp_server"
 	connectionModeRuntimePull = "runtime_pull"
+	connectionModeRuntimeWS   = "runtime_ws"
 
 	runtimeTokenPrefixLen = credential.PrefixLen
 )
@@ -98,6 +99,7 @@ type Service struct {
 	runWebhookSvc RunWebhookEnqueuer
 	deliverySvc   DeliveryEnqueuer
 	walletCharger WalletCharger
+	wsHub         *runtimeWSHub
 }
 
 type runInvocation struct {
@@ -175,6 +177,7 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		requirements: queries,
 		pool:         pool,
 		cfg:          cfg,
+		wsHub:        newRuntimeWSHub(),
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
@@ -257,9 +260,10 @@ func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, so
 	}
 	if s.isRuntimePull(invocation) {
 		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
-			"connection_mode": connectionModeRuntimePull,
+			"connection_mode": invocation.agent.ConnectionMode,
 			"agent_id":        invocation.agent.ID.String(),
 		})
+		s.dispatchRuntimeWSRunBestEffort(ctx, invocation.agent.ID)
 		return resp, nil
 	}
 	return s.executeRun(ctx, invocation), nil
@@ -277,13 +281,14 @@ func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunReques
 	if s.isRuntimePull(invocation) {
 		if invocation.runtimePullAvailable {
 			s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
-				"connection_mode": connectionModeRuntimePull,
+				"connection_mode": invocation.agent.ConnectionMode,
 				"agent_id":        invocation.agent.ID.String(),
 			})
+			s.dispatchRuntimeWSRunBestEffort(ctx, invocation.agent.ID)
 		} else {
 			resp.NextAction = runtimePullWaitingNextAction(resp.RunID, invocation.agent.ID)
 			s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.waiting_runtime", map[string]interface{}{
-				"connection_mode":    connectionModeRuntimePull,
+				"connection_mode":    invocation.agent.ConnectionMode,
 				"agent_id":           invocation.agent.ID.String(),
 				"reason":             "runtime_offline",
 				"recommended_action": "start_worker",
@@ -308,16 +313,21 @@ func (s *Service) RunDelegated(ctx context.Context, userID uuid.UUID, delegation
 	}
 	if s.isRuntimePull(invocation) {
 		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
-			"connection_mode": connectionModeRuntimePull,
+			"connection_mode": invocation.agent.ConnectionMode,
 			"agent_id":        invocation.agent.ID.String(),
 		})
+		s.dispatchRuntimeWSRunBestEffort(ctx, invocation.agent.ID)
 		return resp, nil
 	}
 	return s.executeRun(ctx, invocation), nil
 }
 
 func (s *Service) isRuntimePull(invocation *runInvocation) bool {
-	return invocation != nil && invocation.agent.ConnectionMode == connectionModeRuntimePull
+	return invocation != nil && isQueuedRuntimeMode(invocation.agent.ConnectionMode)
+}
+
+func isQueuedRuntimeMode(mode string) bool {
+	return mode == connectionModeRuntimePull || mode == connectionModeRuntimeWS
 }
 
 func (s *Service) createRunningRun(
@@ -357,7 +367,7 @@ func (s *Service) createRunningRun(
 		agent.ConnectionMode = connectionModeDirectHTTP
 	}
 	runtimePullAvailable := true
-	if agent.ConnectionMode != connectionModeRuntimePull {
+	if !isQueuedRuntimeMode(agent.ConnectionMode) {
 		if err := endpointurl.Validate(agent.EndpointURL, s.cfg.AllowLocalHTTPEndpoints); err != nil {
 			log.Warn().Err(err).Str("agent_id", agent.ID.String()).Msg("runtime.Run: endpoint policy rejected")
 			return nil, nil, httpx.Forbidden("Agent endpoint 当前不可调用")
@@ -598,6 +608,8 @@ func (s *Service) callAgent(
 		return s.callMCPServer(ctx, agent, runID, userID, req, delegation)
 	case connectionModeRuntimePull:
 		return nil, nil, nil, errors.New("runtime_pull run must be claimed by agent runtime")
+	case connectionModeRuntimeWS:
+		return nil, nil, nil, errors.New("runtime_ws run must be assigned over agent runtime websocket or claimed by fallback long-poll")
 	default:
 		return nil, nil, &AgentError{Code: "UNSUPPORTED_CONNECTION_MODE", Message: "Agent connection_mode 不支持"}, nil
 	}
@@ -891,6 +903,7 @@ func (s *Service) ReportRunEvent(ctx context.Context, runID uuid.UUID, token str
 }
 
 // ClaimRuntimePullRun lets a private / IPv4 Agent actively pull the next pending run.
+// runtime_ws Agents may use this as the fallback path after WebSocket loss.
 func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string, opts ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error) {
 	token, err := s.verifyRuntimeToken(ctx, plaintextToken, "agent:pull")
 	if err != nil {
@@ -903,8 +916,8 @@ func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string
 	if err != nil {
 		return nil, httpx.Internal("查询 Agent 失败")
 	}
-	if agent.ConnectionMode != connectionModeRuntimePull {
-		return nil, httpx.Conflict("Agent 不是 runtime_pull 接入模式")
+	if !isQueuedRuntimeMode(agent.ConnectionMode) {
+		return nil, httpx.Conflict("Agent 不是队列型 runtime 接入模式")
 	}
 	claimOpts := normalizeRuntimePullClaimOptions(opts...)
 	startedWaiting := time.Now()
@@ -1014,8 +1027,8 @@ func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken str
 	if err != nil {
 		return nil, httpx.Internal("查询 Agent 失败")
 	}
-	if agent.ConnectionMode != connectionModeRuntimePull {
-		return nil, httpx.Conflict("Agent 不是 runtime_pull 接入模式")
+	if !isQueuedRuntimeMode(agent.ConnectionMode) {
+		return nil, httpx.Conflict("Agent 不是队列型 runtime 接入模式")
 	}
 
 	duration := req.DurationMs
@@ -1046,7 +1059,7 @@ func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken str
 	return resp, nil
 }
 
-// TimeoutStaleRuntimePullRuns converts abandoned runtime_pull runs into timeout
+// TimeoutStaleRuntimePullRuns converts abandoned queued runtime runs into timeout
 // terminal states so users and upstream callers never wait forever.
 func (s *Service) TimeoutStaleRuntimePullRuns(ctx context.Context, cfg RuntimePullRunTimeoutConfig) (int32, error) {
 	cfg = normalizeRuntimePullRunTimeoutConfig(cfg)
@@ -2454,11 +2467,11 @@ func runtimePullWaitingNextAction(runID string, agentID uuid.UUID) *RunNextActio
 	return &RunNextAction{
 		Type:          "start_runtime_worker",
 		Label:         "启动 Agent runtime",
-		Hint:          "运行已进入 runtime_pull 队列，但当前没有在线 worker。请启动本地 worker 并保持 heartbeat/claim 循环。",
+		Hint:          "运行已进入 Agent runtime 队列，但当前没有在线 worker。请启动本地 worker 并保持 WebSocket，必要时降级到 heartbeat/claim 循环。",
 		Href:          "/hub/agents/" + agentID.String() + "/onboarding",
 		ResourceType:  "run",
 		ResourceID:    runID,
-		Source:        "runtime_pull",
+		Source:        "agent_runtime",
 		RequiresHuman: true,
 		AdditionalProps: map[string]interface{}{
 			"agent_id": agentID.String(),
@@ -2498,7 +2511,7 @@ func nextActionForFailure(status, code, message string) *RunNextAction {
 	hint := "运行失败。请检查输入、Agent endpoint 或认证配置，然后重新运行。"
 	if status == "timeout" {
 		label = "检查超时并重试"
-		hint = "Agent 没有在超时时间内返回。请确认 endpoint 响应时间、网络连通性或改用 runtime_pull。"
+		hint = "Agent 没有在超时时间内返回。请确认 endpoint 响应时间、网络连通性，或改用 runtime_ws/runtime_pull。"
 	}
 	props := map[string]interface{}{}
 	if code != "" {

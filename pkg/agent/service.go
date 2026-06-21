@@ -884,12 +884,17 @@ func repairHintsForDryRun(agent *db.Agent, errMsg string) []string {
 	}
 	hints := []string{}
 	switch agent.ConnectionMode {
-	case "runtime_pull":
+	case ConnectionModeRuntimeWS:
+		hints = append(hints,
+			"确认本地 Agent 进程正在运行，并使用含 agent:pull scope、绑定当前 Agent 的访问令牌连接 /api/v1/agent-runtime/ws。",
+			"如果 WebSocket 被代理或网络中断阻断，可临时降级到 heartbeat + claim?wait=25 + result。",
+		)
+	case ConnectionModeRuntimePull:
 		hints = append(hints,
 			"确认本地 Agent 进程正在运行，并使用含 agent:pull scope、绑定当前 Agent 的访问令牌轮询任务。",
 			"如果刚重启过 Agent，先调用 /api/v1/agent-runtime/heartbeat 刷新可用性。",
 		)
-	case "mcp_server":
+	case ConnectionModeMCPServer:
 		hints = append(hints,
 			"确认 MCP Server 地址可被 OpenLinker 访问，且工具名与 mcp_tool_name 配置一致。",
 			"检查示例 input 是否能被目标 MCP tool 接受，并返回 JSON object。",

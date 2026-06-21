@@ -11,9 +11,11 @@ const (
 	ConnectionModeDirectHTTP  = "direct_http"
 	ConnectionModeMCPServer   = "mcp_server"
 	ConnectionModeRuntimePull = "runtime_pull"
+	ConnectionModeRuntimeWS   = "runtime_ws"
 )
 
 const runtimePullEndpointPrefix = "openlinker-runtime-pull://"
+const runtimeWSEndpointPrefix = "openlinker-runtime-ws://"
 
 type connectionSettings struct {
 	Mode        string
@@ -52,6 +54,11 @@ func normalizeConnectionSettings(slug, endpointURL, mode, mcpToolName string, al
 	case ConnectionModeRuntimePull:
 		if endpointURL == "" || !strings.HasPrefix(endpointURL, runtimePullEndpointPrefix) {
 			endpointURL = runtimePullEndpointPrefix + slug
+		}
+		return connectionSettings{Mode: mode, EndpointURL: endpointURL}, nil
+	case ConnectionModeRuntimeWS:
+		if endpointURL == "" || !strings.HasPrefix(endpointURL, runtimeWSEndpointPrefix) {
+			endpointURL = runtimeWSEndpointPrefix + slug
 		}
 		return connectionSettings{Mode: mode, EndpointURL: endpointURL}, nil
 	default:

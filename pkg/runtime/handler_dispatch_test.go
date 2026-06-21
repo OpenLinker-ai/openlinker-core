@@ -273,6 +273,18 @@ func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
 		if completeRec.Code != http.StatusOK || mock.completeToken != "rt_live_secret" || mock.completeRunID != runID || mock.completeReq.Status != "success" {
 			t.Fatalf("complete code=%d token=%q run=%s req=%#v", completeRec.Code, mock.completeToken, mock.completeRunID, mock.completeReq)
 		}
+
+		wsCtx, _ := newRuntimeDispatchContext(&runtimeDispatchRequest{
+			method:  http.MethodGet,
+			target:  "/api/v1/agent-runtime/ws",
+			headers: map[string]string{echo.HeaderAuthorization: "Bearer rt_live_ws"},
+		})
+		if err := h.RuntimeWebSocket(wsCtx); err != nil {
+			t.Fatalf("RuntimeWebSocket error = %v", err)
+		}
+		if mock.wsToken != "rt_live_ws" {
+			t.Fatalf("websocket token=%q", mock.wsToken)
+		}
 	})
 }
 
@@ -404,6 +416,15 @@ func TestRuntimeHandlerPropagatesServiceErrors(t *testing.T) {
 				params:  map[string]string{"id": runID.String()},
 			}),
 		},
+		{
+			name: "websocket",
+			call: (*Handler).RuntimeWebSocket,
+			ctx: mustRuntimeDispatchContext(&runtimeDispatchRequest{
+				method:  http.MethodGet,
+				target:  "/api/v1/agent-runtime/ws",
+				headers: map[string]string{echo.HeaderAuthorization: "Bearer rt_live_secret"},
+			}),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -459,6 +480,8 @@ type mockRuntimeService struct {
 	completeRunID uuid.UUID
 	completeReq   *RuntimePullResultRequest
 	completeResp  *RunResponse
+
+	wsToken string
 }
 
 func (m *mockRuntimeService) Run(_ context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
@@ -526,6 +549,11 @@ func (m *mockRuntimeService) CompleteRuntimePullRun(_ context.Context, token str
 	m.completeRunID = runID
 	m.completeReq = req
 	return m.completeResp, m.err
+}
+
+func (m *mockRuntimeService) ServeRuntimeWebSocket(_ http.ResponseWriter, _ *http.Request, token string) error {
+	m.wsToken = token
+	return m.err
 }
 
 type runtimeDispatchRequest struct {

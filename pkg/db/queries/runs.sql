@@ -64,7 +64,7 @@ FROM runs
 WHERE id = $1;
 
 -- name: ClaimRuntimePullRun :one
--- Agent 通过绑定自身的访问令牌主动拉取自己名下 runtime_pull 模式的 pending run。
+-- Agent 通过绑定自身的访问令牌主动拉取自己名下队列型 runtime 模式的 pending run。
 -- claimed_at 超过 5 分钟视为可重领，避免 Agent 崩溃后任务永久卡住。
 WITH candidate AS (
     SELECT r.id
@@ -72,7 +72,7 @@ WITH candidate AS (
     JOIN agents a ON a.id = r.agent_id
     WHERE r.agent_id = $1
       AND r.status = 'running'
-      AND a.connection_mode = 'runtime_pull'
+      AND a.connection_mode IN ('runtime_pull', 'runtime_ws')
       AND (r.claimed_at IS NULL OR r.claimed_at < NOW() - INTERVAL '5 minutes')
     ORDER BY r.started_at ASC
     LIMIT 1
@@ -88,13 +88,13 @@ RETURNING r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code
           r.started_at, r.finished_at, r.source;
 
 -- name: CountClaimableRuntimePullRuns :one
--- 心跳只读统计：让 runtime_pull worker 先看 pending hint，再决定是否进入 claim。
+-- 心跳只读统计：让队列型 runtime worker 先看 pending hint，再决定是否进入 claim。
 SELECT COUNT(*)::int AS total
 FROM runs r
 JOIN agents a ON a.id = r.agent_id
 WHERE r.agent_id = $1
   AND r.status = 'running'
-  AND a.connection_mode = 'runtime_pull'
+  AND a.connection_mode IN ('runtime_pull', 'runtime_ws')
   AND (r.claimed_at IS NULL OR r.claimed_at < NOW() - INTERVAL '5 minutes');
 
 -- name: GetRuntimePullRunState :one
@@ -104,7 +104,7 @@ FROM runs
 WHERE id = $1;
 
 -- name: ListStaleRuntimePullRuns :many
--- runtime_pull 任务如果长时间未被领取或已领取但未回传终态，需要自动收敛为 timeout，
+-- 队列型 runtime 任务如果长时间未被领取或已领取但未回传终态，需要自动收敛为 timeout，
 -- 避免用户侧永久看到 running。
 -- 已领取任务使用 started_at 的绝对超时窗口，避免坏客户端反复 claim 刷新 claimed_at
 -- 导致同一条 run 被无限续命。
@@ -120,7 +120,7 @@ SELECT r.id, r.user_id, r.agent_id, r.cost_cents, r.started_at,
 FROM runs r
 JOIN agents a ON a.id = r.agent_id
 WHERE r.status = 'running'
-  AND a.connection_mode = 'runtime_pull'
+  AND a.connection_mode IN ('runtime_pull', 'runtime_ws')
   AND (
     (r.claimed_at IS NULL AND r.started_at < $1)
     OR (r.claimed_at IS NOT NULL AND r.started_at < $2)

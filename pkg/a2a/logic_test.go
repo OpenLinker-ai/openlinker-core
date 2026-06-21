@@ -613,6 +613,9 @@ func TestA2ARuntimeWorkbenchTokenAndPushHelpers(t *testing.T) {
 	if got := runtimeTokenScopesForAgent(db.Agent{ConnectionMode: "runtime_pull"}); !reflect.DeepEqual(got, []string{"agent:call", "agent:pull"}) {
 		t.Fatalf("runtime pull token scopes = %#v", got)
 	}
+	if got := runtimeTokenScopesForAgent(db.Agent{ConnectionMode: "runtime_ws"}); !reflect.DeepEqual(got, []string{"agent:call", "agent:pull"}) {
+		t.Fatalf("runtime ws token scopes = %#v", got)
+	}
 
 	lastUsed := "2026-06-20T01:02:03Z"
 	revokedAt := "2026-06-20T02:02:03Z"

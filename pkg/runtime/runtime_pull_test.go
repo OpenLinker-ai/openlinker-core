@@ -5,15 +5,21 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/kinzhi/openlinker-core/pkg/httpx"
 	"github.com/kinzhi/openlinker-core/pkg/runtime"
 )
 
@@ -26,6 +32,19 @@ func setRuntimePullMode(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
 		 WHERE id=$1`,
 		agentID,
 		"openlinker-runtime-pull://"+agentID.String(),
+	)
+	require.NoError(t, err)
+}
+
+func setRuntimeWSMode(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		`UPDATE agents
+		 SET connection_mode='runtime_ws',
+		     endpoint_url=$2
+		 WHERE id=$1`,
+		agentID,
+		"openlinker-runtime-ws://"+agentID.String(),
 	)
 	require.NoError(t, err)
 }
@@ -139,6 +158,109 @@ func TestRuntimePull_ClaimAndCompleteSuccess(t *testing.T) {
 		eventTypes = append(eventTypes, event.EventType)
 	}
 	assert.Contains(t, eventTypes, "run.dispatch.pending")
+	assert.Contains(t, eventTypes, "run.dispatch.claimed")
+	assert.Contains(t, eventTypes, "run.message.delta")
+	assert.Contains(t, eventTypes, "run.completed")
+}
+
+func TestRuntimeWS_AssignsRunAndAcceptsResultOverOpenConnection(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimeWSMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
+
+	e := echo.New()
+	e.HTTPErrorHandler = func(err error, c echo.Context) {
+		if c.Response().Committed {
+			return
+		}
+		_ = httpx.SendError(c, err)
+	}
+	runtime.NewHandler(svc).RegisterAgentRuntime(e.Group("/api/v1"))
+	server := httptest.NewServer(e)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/agent-runtime/ws"
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+token)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+	require.NoError(t, err)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	defer conn.Close()
+
+	var ready runtime.RuntimeWSServerMessage
+	require.NoError(t, conn.ReadJSON(&ready))
+	require.Equal(t, "runtime.ready", ready.Type)
+	require.Equal(t, agentID.String(), ready.AgentID)
+	require.NotNil(t, ready.Heartbeat)
+	require.Equal(t, "healthy", ready.Heartbeat.AvailabilityStatus)
+
+	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "via ws"}), "")
+	require.NoError(t, err)
+	require.Equal(t, "running", started.Status)
+
+	var assigned runtime.RuntimeWSServerMessage
+	require.NoError(t, conn.ReadJSON(&assigned))
+	require.Equal(t, "run.assigned", assigned.Type)
+	require.Equal(t, started.RunID, assigned.RunID)
+	require.Equal(t, agentID.String(), assigned.AgentID)
+	require.Equal(t, "via ws", assigned.Input["q"])
+	require.NotNil(t, assigned.A2A)
+	require.Equal(t, started.RunID, assigned.A2A.CurrentRunID)
+
+	require.NoError(t, conn.WriteJSON(runtime.RuntimeWSClientMessage{
+		Type:      "run.event",
+		ID:        "event-1",
+		RunID:     assigned.RunID,
+		EventType: "run.message.delta",
+		Payload:   map[string]interface{}{"text": "ws progress"},
+	}))
+
+	var eventAck runtime.RuntimeWSServerMessage
+	require.NoError(t, conn.ReadJSON(&eventAck))
+	require.Equal(t, "run.event.accepted", eventAck.Type)
+	require.Equal(t, "event-1", eventAck.ID)
+	require.Equal(t, assigned.RunID, eventAck.RunID)
+	require.NotNil(t, eventAck.Event)
+	require.Equal(t, "run.message.delta", eventAck.Event.EventType)
+
+	require.NoError(t, conn.WriteJSON(runtime.RuntimeWSClientMessage{
+		Type:   "run.result",
+		ID:     "result-1",
+		RunID:  assigned.RunID,
+		Status: "success",
+		Output: map[string]interface{}{"answer": "done over websocket"},
+		Events: []runtime.AgentEvent{{
+			EventType: "run.message.delta",
+			Payload:   map[string]interface{}{"text": "ws step"},
+		}},
+	}))
+
+	var ack runtime.RuntimeWSServerMessage
+	require.NoError(t, conn.ReadJSON(&ack))
+	require.Equal(t, "run.result.accepted", ack.Type)
+	require.Equal(t, "result-1", ack.ID)
+	require.Equal(t, assigned.RunID, ack.RunID)
+	require.NotNil(t, ack.Result)
+	require.Equal(t, "success", ack.Result.Status)
+
+	reloaded, err := svc.GetRun(ctx, userID, mustParseUUID(t, started.RunID))
+	require.NoError(t, err)
+	require.Equal(t, "success", reloaded.Status)
+	require.Equal(t, "done over websocket", reloaded.Output["answer"])
+
+	events := readRunEvents(t, pool, mustParseUUID(t, started.RunID))
+	var eventTypes []string
+	for _, event := range events {
+		eventTypes = append(eventTypes, event.EventType)
+	}
 	assert.Contains(t, eventTypes, "run.dispatch.claimed")
 	assert.Contains(t, eventTypes, "run.message.delta")
 	assert.Contains(t, eventTypes, "run.completed")

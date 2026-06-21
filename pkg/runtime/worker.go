@@ -21,8 +21,8 @@ type RuntimePullRunWorkerConfig struct {
 	BatchSize       int32
 }
 
-// StartRuntimePullRunWorker closes abandoned runtime_pull runs so a crashed or
-// misconfigured local worker cannot leave user-visible calls stuck forever.
+// StartRuntimePullRunWorker closes abandoned queued runtime runs so a crashed
+// or misconfigured local worker cannot leave user-visible calls stuck forever.
 func StartRuntimePullRunWorker(ctx context.Context, svc *Service, cfg RuntimePullRunWorkerConfig) {
 	if svc == nil {
 		return
@@ -44,8 +44,8 @@ func StartRuntimePullRunWorker(ctx context.Context, svc *Service, cfg RuntimePul
 		Dur("dispatch_timeout", cfg.DispatchTimeout).
 		Dur("result_timeout", cfg.ResultTimeout).
 		Int32("batch_size", cfg.BatchSize).
-		Msg("runtime: runtime_pull run worker started")
-	defer log.Info().Msg("runtime: runtime_pull run worker stopped")
+		Msg("runtime: queued runtime run worker started")
+	defer log.Info().Msg("runtime: queued runtime run worker stopped")
 
 	runRuntimePullRunWorkerTick(ctx, svc, cfg)
 	ticker := time.NewTicker(cfg.Interval)
@@ -68,10 +68,10 @@ func runRuntimePullRunWorkerTick(ctx context.Context, svc *Service, cfg RuntimeP
 		BatchSize:       cfg.BatchSize,
 	})
 	if err != nil {
-		log.Warn().Err(err).Msg("runtime: runtime_pull stale run timeout scan failed")
+		log.Warn().Err(err).Msg("runtime: queued runtime stale run timeout scan failed")
 		return
 	}
 	if timedOut > 0 {
-		log.Info().Int32("timed_out", timedOut).Msg("runtime: timed out stale runtime_pull runs")
+		log.Info().Int32("timed_out", timedOut).Msg("runtime: timed out stale queued runtime runs")
 	}
 }

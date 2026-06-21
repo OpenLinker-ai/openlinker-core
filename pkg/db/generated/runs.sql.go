@@ -177,7 +177,7 @@ WITH candidate AS (
     JOIN agents a ON a.id = r.agent_id
     WHERE r.agent_id = $1
       AND r.status = 'running'
-      AND a.connection_mode = 'runtime_pull'
+      AND a.connection_mode IN ('runtime_pull', 'runtime_ws')
       AND (r.claimed_at IS NULL OR r.claimed_at < NOW() - INTERVAL '5 minutes')
     ORDER BY r.started_at ASC
     LIMIT 1
@@ -197,7 +197,7 @@ type ClaimRuntimePullRunParams struct {
 	RuntimeTokenID uuid.UUID `db:"runtime_token_id" json:"runtime_token_id"`
 }
 
-// ClaimRuntimePullRun atomically assigns the oldest pending runtime_pull run to a Runtime Token.
+// ClaimRuntimePullRun atomically assigns the oldest pending queued runtime run to a Runtime Token.
 func (q *Queries) ClaimRuntimePullRun(ctx context.Context, arg ClaimRuntimePullRunParams) (Run, error) {
 	row := q.db.QueryRow(ctx, claimRuntimePullRun, arg.AgentID, arg.RuntimeTokenID)
 	var r Run
@@ -211,7 +211,7 @@ FROM runs r
 JOIN agents a ON a.id = r.agent_id
 WHERE r.agent_id = $1
   AND r.status = 'running'
-  AND a.connection_mode = 'runtime_pull'
+  AND a.connection_mode IN ('runtime_pull', 'runtime_ws')
   AND (r.claimed_at IS NULL OR r.claimed_at < NOW() - INTERVAL '5 minutes')`
 
 func (q *Queries) CountClaimableRuntimePullRuns(ctx context.Context, agentID uuid.UUID) (int32, error) {
@@ -271,7 +271,7 @@ SELECT r.id, r.user_id, r.agent_id, r.cost_cents, r.started_at,
 FROM runs r
 JOIN agents a ON a.id = r.agent_id
 WHERE r.status = 'running'
-  AND a.connection_mode = 'runtime_pull'
+  AND a.connection_mode IN ('runtime_pull', 'runtime_ws')
   AND (
     (r.claimed_at IS NULL AND r.started_at < $1)
     OR (r.claimed_at IS NOT NULL AND r.started_at < $2)

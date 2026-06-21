@@ -42,6 +42,7 @@ type runtimeService interface {
 	ClaimRuntimePullRun(context.Context, string, ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error)
 	HeartbeatAgent(context.Context, string) (*AgentHeartbeatResponse, error)
 	CompleteRuntimePullRun(context.Context, string, uuid.UUID, *RuntimePullResultRequest) (*RunResponse, error)
+	ServeRuntimeWebSocket(http.ResponseWriter, *http.Request, string) error
 }
 
 // NewHandler 构造 Handler。cfg 可选（测试可省略）。
@@ -87,10 +88,12 @@ func (h *Handler) RegisterProtected(api *echo.Group, runMw, queryMw echo.Middlew
 //	POST /agent-runtime/heartbeat        Agent 主动上报存活
 //	GET  /agent-runtime/runs/claim       Agent 拉取一个 pending run
 //	POST /agent-runtime/runs/:id/result  Agent 回传终态结果
+//	GET  /agent-runtime/ws               Agent 出站 WebSocket，平台实时下发 run
 func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
 	api.POST("/agent-runtime/heartbeat", h.PostAgentHeartbeat)
 	api.GET("/agent-runtime/runs/claim", h.ClaimRuntimePullRun)
 	api.POST("/agent-runtime/runs/:id/result", h.PostRuntimePullResult)
+	api.GET("/agent-runtime/ws", h.RuntimeWebSocket)
 }
 
 // PostRun 调用 Agent。
@@ -348,7 +351,7 @@ func (h *Handler) ClaimRuntimePullRun(c echo.Context) error {
 	tokenKey := runtimeLimiterTokenKey(token)
 	retry, finishClaim := h.runtimeLimiter.beginClaim(tokenKey, wait)
 	if retry > 0 {
-		return runtimeRateLimitError(c, retry, "runtime_pull claim 过于频繁，请按 Retry-After 退避")
+		return runtimeRateLimitError(c, retry, "runtime claim 过于频繁，请按 Retry-After 退避")
 	}
 	defer finishClaim()
 	resp, err := h.svc.ClaimRuntimePullRun(c.Request().Context(), token, RuntimePullClaimOptions{Wait: wait})
@@ -389,7 +392,7 @@ func (h *Handler) PostAgentHeartbeat(c echo.Context) error {
 		return err
 	}
 	if retry := h.runtimeLimiter.allowHeartbeat(runtimeLimiterTokenKey(token)); retry > 0 {
-		return runtimeRateLimitError(c, retry, "runtime_pull heartbeat 过于频繁，请按 Retry-After 退避")
+		return runtimeRateLimitError(c, retry, "runtime heartbeat 过于频繁，请按 Retry-After 退避")
 	}
 	resp, err := h.svc.HeartbeatAgent(c.Request().Context(), token)
 	if err != nil {
@@ -422,6 +425,19 @@ func (h *Handler) PostRuntimePullResult(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+// RuntimeWebSocket keeps an outbound Agent connection open so the platform can
+// assign queued runs without waiting for the next long-poll claim.
+func (h *Handler) RuntimeWebSocket(c echo.Context) error {
+	token, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
+	if err != nil {
+		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterIPKey(c)); retry > 0 {
+			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
+		}
+		return err
+	}
+	return h.svc.ServeRuntimeWebSocket(c.Response().Writer, c.Request(), token)
 }
 
 // userIDFromCtx 从 echo.Context 取出当前登录用户 uuid。

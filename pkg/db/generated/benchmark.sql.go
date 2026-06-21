@@ -390,7 +390,7 @@ WHERE ag.skill_id = ANY($1::text[])
       COALESCE(av.availability_status, 'unknown') = 'healthy'
       OR av.last_successful_run_at IS NOT NULL
       OR (
-          a.connection_mode = 'runtime_pull'
+          a.connection_mode IN ('runtime_pull', 'runtime_ws')
           AND rt.last_runtime_token_used_at >= NOW() - INTERVAL '5 minutes'
       )
   )

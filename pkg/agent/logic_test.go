@@ -181,6 +181,23 @@ func TestNormalizeConnectionSettings(t *testing.T) {
 			wantToolNil: true,
 		},
 		{
+			name:        "runtime ws fills endpoint",
+			slug:        "ws-agent",
+			mode:        ConnectionModeRuntimeWS,
+			wantMode:    ConnectionModeRuntimeWS,
+			wantURL:     runtimeWSEndpointPrefix + "ws-agent",
+			wantToolNil: true,
+		},
+		{
+			name:        "runtime ws replaces non canonical endpoint",
+			slug:        "ws-agent",
+			endpoint:    "https://example.com/ignored",
+			mode:        ConnectionModeRuntimeWS,
+			wantMode:    ConnectionModeRuntimeWS,
+			wantURL:     runtimeWSEndpointPrefix + "ws-agent",
+			wantToolNil: true,
+		},
+		{
 			name:        "unsupported mode",
 			slug:        "bad-agent",
 			endpoint:    "https://example.com/agent",
@@ -395,6 +412,7 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 	}{
 		{mode: ConnectionModeDirectHTTP, wantSignal: "direct_endpoint_probe_and_run_result"},
 		{mode: ConnectionModeRuntimePull, wantSignal: "runtime_pull_heartbeat_claim_result"},
+		{mode: ConnectionModeRuntimeWS, wantSignal: "runtime_ws_socket_heartbeat_assignment_result"},
 		{mode: ConnectionModeMCPServer, wantSignal: "mcp_tool_call_and_run_result"},
 	} {
 		if got := agentCardRuntimeExt(tc.mode); got.Adapter != "openlinker_a2a_proxy" || got.ConnectionMode != tc.mode || got.OnlineSignal != tc.wantSignal {

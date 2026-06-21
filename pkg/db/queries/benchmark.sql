@@ -167,7 +167,7 @@ LIMIT $2;
 
 -- name: ListAgentsBySkillsWithVerified :many
 -- 改造 RecommendAgentsBySkills 加 verified/availability 加权：
--- 复用市场 readiness，并把最近 runtime_pull token 使用作为 fresh 在线信号；
+-- 复用市场 readiness，并把最近 queued runtime token 使用作为 fresh 在线信号；
 -- 过滤无 healthy/成功运行/近期 runtime token 证据的 Agent，避免推荐给用户后跑不起来。
 -- 排序：命中 skill 数 desc → 可用性 → 最近在线/成功证据 → verified 数 desc → total_calls desc。
 -- 同时返回 verified_count 让上层决定排序权重。
@@ -194,7 +194,7 @@ WHERE ag.skill_id = ANY($1::text[])
       COALESCE(av.availability_status, 'unknown') = 'healthy'
       OR av.last_successful_run_at IS NOT NULL
       OR (
-          a.connection_mode = 'runtime_pull'
+          a.connection_mode IN ('runtime_pull', 'runtime_ws')
           AND rt.last_runtime_token_used_at >= NOW() - INTERVAL '5 minutes'
       )
   )

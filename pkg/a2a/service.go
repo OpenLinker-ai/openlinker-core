@@ -77,10 +77,14 @@ func (s *Service) CreateRuntimeToken(ctx context.Context, userID, agentID uuid.U
 
 func runtimeTokenScopesForAgent(agent db.Agent) []string {
 	scopes := []string{"agent:call"}
-	if agent.ConnectionMode == "runtime_pull" {
+	if agent.ConnectionMode == "runtime_pull" || agent.ConnectionMode == "runtime_ws" {
 		scopes = append(scopes, "agent:pull")
 	}
 	return scopes
+}
+
+func isQueuedRuntimeConnectionMode(mode string) bool {
+	return mode == "runtime_pull" || mode == "runtime_ws"
 }
 
 func (s *Service) ListRuntimeTokens(ctx context.Context, userID, agentID uuid.UUID) ([]RuntimeTokenResponse, error) {
@@ -111,7 +115,7 @@ func (s *Service) GetRuntimeWorkbench(ctx context.Context, userID, agentID uuid.
 		return nil, err
 	}
 	pendingCount := int32(0)
-	if agent.ConnectionMode == "runtime_pull" {
+	if agent.ConnectionMode == "runtime_pull" || agent.ConnectionMode == "runtime_ws" {
 		count, countErr := s.queries.CountClaimableRuntimePullRuns(ctx, agentID)
 		if countErr != nil {
 			log.Warn().Err(countErr).Str("agent_id", agentID.String()).Msg("a2a.GetRuntimeWorkbench: CountClaimableRuntimePullRuns")
@@ -235,7 +239,7 @@ func runtimeWorkbenchAvailability(agent db.Agent, tokens []RuntimeTokenResponse,
 	}
 	for _, token := range tokens {
 		if token.RevokedAt == nil && token.LastUsedAt != nil &&
-			(agent.ConnectionMode != "runtime_pull" || hasScope(token.Scopes, "agent:pull")) {
+			(!isQueuedRuntimeConnectionMode(agent.ConnectionMode) || hasScope(token.Scopes, "agent:pull")) {
 			return "active"
 		}
 	}
@@ -250,11 +254,11 @@ func runtimeWorkbenchDiagnostics(
 	lastActivity *string,
 ) []RuntimeWorkbenchDiagnostic {
 	diagnostics := []RuntimeWorkbenchDiagnostic{}
-	if agent.ConnectionMode != "runtime_pull" {
+	if !isQueuedRuntimeConnectionMode(agent.ConnectionMode) {
 		return append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:       "not_runtime_pull",
 			Severity:   "info",
-			Message:    "Agent 不是 runtime_pull 接入模式，使用 endpoint 或 MCP 健康检查维护可用性。",
+			Message:    "Agent 不是队列型 runtime 接入模式，使用 endpoint 或 MCP 健康检查维护可用性。",
 			NextAction: "run_health_check",
 		})
 	}
@@ -270,7 +274,7 @@ func runtimeWorkbenchDiagnostics(
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:       "scope_missing",
 			Severity:   "error",
-			Message:    "当前 active runtime token 缺少 agent:pull scope，worker 无法领取任务。",
+			Message:    "当前 active runtime token 缺少 agent:pull scope，worker 无法建立 WebSocket 或领取任务。",
 			NextAction: "create_runtime_token",
 		})
 	}
@@ -286,7 +290,7 @@ func runtimeWorkbenchDiagnostics(
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:       "pending_claimable_runs",
 			Severity:   "warning",
-			Message:    "存在待领取 run。确认 worker 正在使用 claim?wait=25 长轮询。",
+			Message:    "存在待派发 run。确认 worker 已建立 WebSocket，或正在使用 claim?wait=25 长轮询。",
 			NextAction: "check_claim_loop",
 		})
 	}
@@ -299,7 +303,7 @@ func runtimeWorkbenchDiagnostics(
 			diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 				Code:       "pending_not_claimed",
 				Severity:   "error",
-				Message:    "最近有 runtime_pull run 超时未被领取。",
+				Message:    "最近有 runtime run 超时未被派发或领取。",
 				NextAction: "start_worker",
 			})
 		case "RUNTIME_PULL_RESULT_TIMEOUT":
@@ -315,7 +319,7 @@ func runtimeWorkbenchDiagnostics(
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:       "runtime_ready",
 			Severity:   "success",
-			Message:    "runtime_pull 供给当前没有明显阻断项。",
+			Message:    "runtime 供给当前没有明显阻断项。",
 			NextAction: "keep_worker_supervised",
 		})
 	}

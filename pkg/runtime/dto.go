@@ -217,3 +217,42 @@ type RuntimePullResultRequest struct {
 	Error      *AgentError            `json:"error,omitempty"`
 	DurationMs int32                  `json:"duration_ms,omitempty"`
 }
+
+// RuntimeWSClientMessage is sent by a NAT/private Agent over
+// /api/v1/agent-runtime/ws. The same runtime token and run state checks used by
+// runtime_pull are reused for result and event writes.
+type RuntimeWSClientMessage struct {
+	Type       string                 `json:"type"`
+	ID         string                 `json:"id,omitempty"`
+	RunID      string                 `json:"run_id,omitempty"`
+	EventType  string                 `json:"event_type,omitempty"`
+	Payload    map[string]interface{} `json:"payload,omitempty"`
+	Status     string                 `json:"status,omitempty"`
+	Output     map[string]interface{} `json:"output,omitempty"`
+	Events     []AgentEvent           `json:"events,omitempty"`
+	Error      *AgentError            `json:"error,omitempty"`
+	DurationMs int32                  `json:"duration_ms,omitempty"`
+}
+
+// RuntimeWSServerMessage is sent by OpenLinker over the Agent WebSocket.
+// run.assigned is intentionally flattened so simple JS workers can consume it
+// without understanding nested protocol objects.
+type RuntimeWSServerMessage struct {
+	Type              string                  `json:"type"`
+	ID                string                  `json:"id,omitempty"`
+	RunID             string                  `json:"run_id,omitempty"`
+	AgentID           string                  `json:"agent_id,omitempty"`
+	Input             map[string]interface{}  `json:"input,omitempty"`
+	Metadata          map[string]interface{}  `json:"metadata,omitempty"`
+	Source            string                  `json:"source,omitempty"`
+	ResultEndpoint    string                  `json:"result_endpoint,omitempty"`
+	ResultMethod      string                  `json:"result_method,omitempty"`
+	ResultRequired    bool                    `json:"result_required,omitempty"`
+	A2A               *AgentA2AContext        `json:"a2a,omitempty"`
+	Status            string                  `json:"status,omitempty"`
+	Result            *RunResponse            `json:"result,omitempty"`
+	Event             *RunEventResponse       `json:"event,omitempty"`
+	Heartbeat         *AgentHeartbeatResponse `json:"heartbeat,omitempty"`
+	Error             *AgentError             `json:"error,omitempty"`
+	RetryAfterSeconds int32                   `json:"retry_after_seconds,omitempty"`
+}
