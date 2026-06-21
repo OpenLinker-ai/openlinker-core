@@ -123,10 +123,29 @@ func TestWorkflowRunExecutesIndependentBranchesInParallelAndAggregatesOutputs(t 
 	active := 0
 	maxActive := 0
 	var inputs []map[string]interface{}
+	branchStarted := make(chan string, 2)
+	releaseBranches := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBranches) }) }
+	t.Cleanup(release)
+	go func() {
+		seen := map[string]struct{}{}
+		deadline := time.After(3 * time.Second)
+		for len(seen) < 2 {
+			select {
+			case key := <-branchStarted:
+				seen[key] = struct{}{}
+			case <-deadline:
+				return
+			}
+		}
+		release()
+	}()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		var req runtimemod.AgentRequest
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		nodeKey, _ := req.Input["node_key"].(string)
 
 		mu.Lock()
 		active++
@@ -136,9 +155,12 @@ func TestWorkflowRunExecutesIndependentBranchesInParallelAndAggregatesOutputs(t 
 		inputs = append(inputs, req.Input)
 		mu.Unlock()
 
-		nodeKey, _ := req.Input["node_key"].(string)
 		if nodeKey == "collect" || nodeKey == "analyze" {
-			time.Sleep(200 * time.Millisecond)
+			branchStarted <- nodeKey
+			select {
+			case <-releaseBranches:
+			case <-time.After(3 * time.Second):
+			}
 		}
 
 		mu.Lock()
