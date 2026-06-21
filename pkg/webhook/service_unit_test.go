@@ -209,6 +209,63 @@ func TestWebhookServiceAttemptDeliveryStateMachine(t *testing.T) {
 	}
 }
 
+func TestWebhookServiceProcessPendingDeliversAgentAndRunQueues(t *testing.T) {
+	agentDeliveryID := uuid.New()
+	runDeliveryID := uuid.New()
+	subscriptionID := uuid.New()
+	payload := []byte(`{"event":"run.completed"}`)
+	secret := "webhook-secret"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-OpenLinker-Signature") != "sha256="+signPayload(payload, secret) {
+			t.Fatalf("signature = %q", r.Header.Get("X-OpenLinker-Signature"))
+		}
+		if r.Header.Get("X-OpenLinker-Delivery") == "" {
+			t.Fatal("delivery header was empty")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	q := &fakeWebhookQueries{
+		pendingDeliveries: []db.WebhookDelivery{{ID: agentDeliveryID}},
+		deliveryRow: db.GetWebhookDeliveryRow{
+			WebhookDelivery: db.WebhookDelivery{
+				ID:      agentDeliveryID,
+				URL:     server.URL,
+				Payload: payload,
+				Status:  "pending",
+			},
+			WebhookSecret: &secret,
+		},
+		pendingRunDeliveries: []db.RunWebhookDelivery{{ID: runDeliveryID}},
+		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
+			RunWebhookDelivery: db.RunWebhookDelivery{
+				ID:             runDeliveryID,
+				SubscriptionID: subscriptionID,
+				Payload:        payload,
+				Status:         "pending",
+			},
+			TargetURL: server.URL,
+			Secret:    secret,
+			EventType: "run.completed",
+		},
+	}
+	svc := &Service{queries: q, httpClient: server.Client()}
+
+	svc.processPending(context.Background())
+
+	if q.successArg.ID != agentDeliveryID || q.successArg.ResponseStatus == nil || *q.successArg.ResponseStatus != http.StatusNoContent {
+		t.Fatalf("agent delivery success arg = %#v", q.successArg)
+	}
+	if q.runSuccessArg.ID != runDeliveryID || q.runSuccessArg.ResponseStatus == nil || *q.runSuccessArg.ResponseStatus != http.StatusNoContent {
+		t.Fatalf("run delivery success arg = %#v", q.runSuccessArg)
+	}
+	if q.resetSubscriptionID != subscriptionID {
+		t.Fatalf("reset subscription id = %s, want %s", q.resetSubscriptionID, subscriptionID)
+	}
+}
+
 func TestWebhookRunSubscriptionManagement(t *testing.T) {
 	userID := uuid.New()
 	runID := uuid.New()
