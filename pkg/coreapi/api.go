@@ -68,7 +68,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	jwtMiddleware := auth.JWTMiddleware(cfg.JWTSecret)
 	authHandler.Register(api)
 	authHandler.RegisterProtected(api, jwtMiddleware)
-	cloudbridge.NewHandler(cloudbridge.NewService(pool)).Register(e, jwtMiddleware)
+	cloudBridgeHandler := cloudbridge.NewHandler(cloudbridge.NewService(pool))
+	cloudBridgeHandler.Register(e, jwtMiddleware)
+	cloudBridgeHandler.RegisterCoreAPI(api, jwtMiddleware)
 
 	agentMarketSvc := agent.NewMarketService(pool)
 	agentMarketHandler := agent.NewMarketHandler(agentMarketSvc)

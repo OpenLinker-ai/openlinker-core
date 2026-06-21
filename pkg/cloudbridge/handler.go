@@ -34,6 +34,14 @@ func (h *Handler) Register(e *echo.Echo, jwtMiddleware echo.MiddlewareFunc) {
 	g.GET("/creator/agents/:id/runs", h.ListCreatorAgentRuns)
 }
 
+func (h *Handler) RegisterCoreAPI(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
+	g := api.Group("", jwtMiddleware)
+	g.GET("/runs", h.ListRuns)
+	g.GET("/dashboard", h.GetDashboard)
+	g.GET("/creator/dashboard", h.GetCreatorDashboard)
+	g.GET("/creator/agents/:id/runs", h.ListCreatorAgentRuns)
+}
+
 func (h *Handler) ListRuns(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
