@@ -950,6 +950,28 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 		t.Fatalf("ListAgentRuntimeTokensForOwner scan = %#v", listed)
 	}
 
+	activeTokenRows := &fakeRows{rows: [][]any{tokenValues}}
+	dbtx.queryRows = activeTokenRows
+	activeTokens, err := q.ListActiveAgentRuntimeTokensByPrefix(context.Background(), "rt_live_abcd")
+	if err != nil {
+		t.Fatalf("ListActiveAgentRuntimeTokensByPrefix error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListActiveAgentRuntimeTokensByPrefix")
+	if !activeTokenRows.closed || len(activeTokens) != 1 || activeTokens[0].ID != tokenID {
+		t.Fatalf("ListActiveAgentRuntimeTokensByPrefix scan = %#v closed=%v", activeTokens, activeTokenRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{"rt_live_abcd"}) {
+		t.Fatalf("ListActiveAgentRuntimeTokensByPrefix args = %#v", dbtx.queryArgs)
+	}
+
+	if err := q.TouchAgentRuntimeToken(context.Background(), tokenID); err != nil {
+		t.Fatalf("TouchAgentRuntimeToken error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "TouchAgentRuntimeToken")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{tokenID}) {
+		t.Fatalf("TouchAgentRuntimeToken args = %#v", dbtx.execArgs)
+	}
+
 	dbtx.row = fakeRow{values: []any{int32(3)}}
 	count, err := q.CountActiveAgentRuntimeTokens(context.Background(), agentID)
 	if err != nil || count != 3 {
@@ -963,6 +985,16 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 		t.Fatalf("HasRecentRuntimePullToken = %v, %v", recent, err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "HasRecentRuntimePullToken")
+
+	dbtx.row = fakeRow{values: []any{"private"}}
+	callPolicy, err := q.GetAgentCallPolicy(context.Background(), agentID)
+	if err != nil || callPolicy != "private" {
+		t.Fatalf("GetAgentCallPolicy = %q, %v", callPolicy, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentCallPolicy")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID}) {
+		t.Fatalf("GetAgentCallPolicy args = %#v", dbtx.queryRowArgs)
+	}
 
 	dbtx.row = fakeRow{values: []any{agentID, "allowlist", now}}
 	policy, err := q.UpsertAgentCallPolicyForOwner(context.Background(), UpsertAgentCallPolicyForOwnerParams{
@@ -992,6 +1024,94 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	if delegation.ChildRunID != childRunID || delegation.ParentRunID != parentRunID || delegation.Reason != "delegate analysis" {
 		t.Fatalf("CreateRunDelegation scan = %#v", delegation)
 	}
+
+	dbtx.row = fakeRow{values: runDelegationRow(childRunID, parentRunID, callerAgentID, now)}
+	gotDelegation, err := q.GetRunDelegationByChild(context.Background(), childRunID)
+	if err != nil {
+		t.Fatalf("GetRunDelegationByChild error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetRunDelegationByChild")
+	if gotDelegation.ChildRunID != childRunID || gotDelegation.ParentRunID != parentRunID {
+		t.Fatalf("GetRunDelegationByChild scan = %#v", gotDelegation)
+	}
+
+	targetAgentID := uuid.New()
+	duration := int32(250)
+	finishedAt := now.Add(time.Minute)
+	childRows := &fakeRows{rows: [][]any{{
+		childRunID,
+		parentRunID,
+		callerAgentID,
+		"delegate analysis",
+		"success",
+		int32(15),
+		&duration,
+		now,
+		&finishedAt,
+		"a2a",
+		"caller-slug",
+		"Caller Agent",
+		[]string{"orchestration"},
+		[]string{"ai/agent-orchestration"},
+		[]string{"Agent orchestration"},
+		targetAgentID,
+		"target-slug",
+		"Target Agent",
+		[]string{"data"},
+		[]string{"data/sql-query"},
+		[]string{"SQL query"},
+	}}}
+	dbtx.queryRows = childRows
+	childRuns, err := q.ListChildRunsByParentAndUser(context.Background(), ListChildRunsByParentAndUserParams{ParentRunID: parentRunID, UserID: userID})
+	if err != nil {
+		t.Fatalf("ListChildRunsByParentAndUser error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListChildRunsByParentAndUser")
+	if !childRows.closed || len(childRuns) != 1 || childRuns[0].TargetAgentID != targetAgentID || childRuns[0].CallerSkillIDs[0] != "ai/agent-orchestration" {
+		t.Fatalf("ListChildRunsByParentAndUser scan = %#v closed=%v", childRuns, childRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{parentRunID, userID}) {
+		t.Fatalf("ListChildRunsByParentAndUser args = %#v", dbtx.queryArgs)
+	}
+
+	parentRows := &fakeRows{rows: [][]any{{
+		parentRunID,
+		callerAgentID,
+		"caller-slug",
+		"Caller Agent",
+		[]string{"orchestration"},
+		[]string{"ai/agent-orchestration"},
+		[]string{"Agent orchestration"},
+		"api",
+		"success",
+		&duration,
+		now,
+		&finishedAt,
+		int32(2),
+		int32(1),
+		int32(1),
+		int32(3),
+		&lastUsedAt,
+	}}}
+	dbtx.queryRows = parentRows
+	parentRuns, err := q.ListParentRunsWithDelegationsByUser(context.Background(), ListParentRunsWithDelegationsByUserParams{UserID: userID, Limit: 20, Offset: 5})
+	if err != nil {
+		t.Fatalf("ListParentRunsWithDelegationsByUser error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListParentRunsWithDelegationsByUser")
+	if !parentRows.closed || len(parentRuns) != 1 || parentRuns[0].ChildCount != 2 || parentRuns[0].ActiveRuntimeTokenCount != 3 {
+		t.Fatalf("ListParentRunsWithDelegationsByUser scan = %#v closed=%v", parentRuns, parentRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{userID, int32(20), int32(5)}) {
+		t.Fatalf("ListParentRunsWithDelegationsByUser args = %#v", dbtx.queryArgs)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(6)}}
+	parentRunCount, err := q.CountParentRunsWithDelegationsByUser(context.Background(), userID)
+	if err != nil || parentRunCount != 6 {
+		t.Fatalf("CountParentRunsWithDelegationsByUser = %d, %v", parentRunCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountParentRunsWithDelegationsByUser")
 
 	if rows, err := q.RevokeAgentRuntimeTokenForOwner(context.Background(), RevokeAgentRuntimeTokenForOwnerParams{ID: tokenID, UserID: userID}); err != nil || rows != 5 {
 		t.Fatalf("RevokeAgentRuntimeTokenForOwner = %d, %v", rows, err)
