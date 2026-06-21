@@ -140,7 +140,7 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			"agents:run":     "run public agents through REST, MCP, A2A, or delegated calls",
 			"runs:read":      "read run status, output, events, children and artifacts allowed to the owner",
 			"tasks:write":    "create tasks and task recommendations through OpenLinker tools",
-			"agent:pull":     "runtime_pull agents can heartbeat, claim runs, and submit results",
+			"agent:pull":     "queued runtime agents can open WebSocket, heartbeat, claim runs, and submit results",
 			"agent:call":     "an agent currently handling a run can delegate to another agent",
 			"register:agent": "one-time or short-lived creator invitation for agent self-registration",
 		},
