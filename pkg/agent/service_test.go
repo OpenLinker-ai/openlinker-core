@@ -525,6 +525,95 @@ func TestListMyAgents_IncludesWebhookURL(t *testing.T) {
 	assert.Equal(t, webhookURL, *got[0].WebhookURL)
 }
 
+func TestGetMyAgentOnboardingAndDeleteExample(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	ownerID := insertCreatorWithWallet(t, pool)
+	otherCreatorID := insertCreatorWithWallet(t, pool)
+	slug := freshSlug("onboarding")
+	created, err := svc.CreateAgent(ctx, ownerID, validCreateReq(slug))
+	require.NoError(t, err)
+	agentID := uuid.MustParse(created.ID)
+
+	owned, err := svc.GetMyAgent(ctx, agentID, ownerID)
+	require.NoError(t, err)
+	assert.Equal(t, slug, owned.Slug)
+	assert.Equal(t, "direct_http", owned.ConnectionMode)
+	assert.Equal(t, "public", owned.Visibility)
+
+	_, err = svc.GetMyAgent(ctx, agentID, otherCreatorID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.GetAgentOnboarding(ctx, agentID, otherCreatorID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	initial, err := svc.GetAgentOnboarding(ctx, agentID, ownerID)
+	require.NoError(t, err)
+	assert.Equal(t, agentID.String(), initial.Status.AgentID)
+	assert.True(t, initial.Status.EndpointSet)
+	assert.False(t, initial.Status.CapabilitiesSet)
+	assert.False(t, initial.Status.ExamplesSet)
+	assert.Nil(t, initial.Capability)
+	assert.Empty(t, initial.Examples)
+	assert.Equal(t, "unknown", initial.Availability.Status)
+
+	inputSchema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"query": map[string]interface{}{"type": "string"},
+		},
+		"required": []interface{}{"query"},
+	}
+	outputSchema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"result": map[string]interface{}{"type": "string"},
+		},
+		"required": []interface{}{"result"},
+	}
+	capability, err := svc.UpsertCapability(ctx, agentID, ownerID, &agent.UpsertCapabilityRequest{
+		InputSchema:  inputSchema,
+		OutputSchema: outputSchema,
+		Summary:      "single query to single result",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), capability.Version)
+
+	example, err := svc.CreateExample(ctx, agentID, ownerID, &agent.CreateExampleRequest{
+		Title:              "happy path",
+		InputJSON:          map[string]interface{}{"query": "ping"},
+		ExpectedOutputJSON: map[string]interface{}{"result": "pong"},
+		SortOrder:          7,
+	})
+	require.NoError(t, err)
+
+	onboarding, err := svc.GetAgentOnboarding(ctx, agentID, ownerID)
+	require.NoError(t, err)
+	assert.True(t, onboarding.Status.CapabilitiesSet)
+	assert.True(t, onboarding.Status.ExamplesSet)
+	require.NotNil(t, onboarding.Capability)
+	assert.Equal(t, "single query to single result", onboarding.Capability.Summary)
+	require.Len(t, onboarding.Examples, 1)
+	assert.Equal(t, example.ID, onboarding.Examples[0].ID)
+	assert.Equal(t, int32(7), onboarding.Examples[0].SortOrder)
+	assert.Equal(t, "ping", onboarding.Examples[0].InputJSON["query"])
+	assert.Equal(t, "pong", onboarding.Examples[0].ExpectedOutputJSON["result"])
+
+	exampleID := uuid.MustParse(example.ID)
+	err = svc.DeleteExample(ctx, agentID, exampleID, otherCreatorID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	require.NoError(t, svc.DeleteExample(ctx, agentID, exampleID, ownerID))
+	afterDelete, err := svc.GetAgentOnboarding(ctx, agentID, ownerID)
+	require.NoError(t, err)
+	assert.True(t, afterDelete.Status.CapabilitiesSet)
+	assert.False(t, afterDelete.Status.ExamplesSet)
+	assert.Empty(t, afterDelete.Examples)
+	require.NotNil(t, afterDelete.Capability)
+	assert.Equal(t, capability.ID, afterDelete.Capability.ID)
+}
+
 // ────────────────────────────────────────────────────────────
 // CheckSlug
 // ────────────────────────────────────────────────────────────
