@@ -21,6 +21,7 @@ package runtime_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -435,4 +436,50 @@ func TestStreamRunEvents_Handler_UsesLastEventID(t *testing.T) {
 	assert.NotContains(t, string(raw), "event: run.created")
 	assert.NotContains(t, string(raw), "event: run.started")
 	assert.Contains(t, string(raw), "event: run.completed")
+}
+
+func TestStreamRunEvents_Handler_EmitsEventReportedAfterConnectionStarts(t *testing.T) {
+	e, pool, svc := setupHandlerTest(t)
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
+	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
+	setAgentEndpointToken(t, pool, agentID, "agent-secret")
+	runID := insertRunningRun(t, pool, userID, agentID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID.String()+"/stream", nil).WithContext(ctx)
+	req.Header.Set(echo.HeaderAuthorization, signJWT(t, userID))
+	req.Header.Set(echo.HeaderAccept, "text/event-stream")
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		e.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	eventRec, eventRaw := doRequest(t, e, http.MethodPost, "/api/v1/runs/"+runID.String()+"/events", map[string]any{
+		"event_type": "run.message.delta",
+		"payload":    map[string]any{"text": "live event"},
+	}, map[string]string{
+		"X-OpenLinker-Token": "agent-secret",
+	})
+	require.Equal(t, http.StatusCreated, eventRec.Code, "body=%s", string(eventRaw))
+
+	time.Sleep(1500 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SSE handler did not stop after request cancellation")
+	}
+
+	raw := rec.Body.String()
+	assert.Equal(t, http.StatusOK, rec.Code, "body=%s", raw)
+	assert.Contains(t, rec.Header().Get(echo.HeaderContentType), "text/event-stream")
+	assert.Contains(t, raw, "event: run.message.delta")
+	assert.Contains(t, raw, "live event")
 }

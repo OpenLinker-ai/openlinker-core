@@ -53,6 +53,9 @@ func TestAgentSlugTagsStatusAndSQLStateHelpers(t *testing.T) {
 	if got := normalizeTags(nil); got == nil || len(got) != 0 {
 		t.Fatalf("normalizeTags(nil) = %#v, want empty non-nil slice", got)
 	}
+	if got := normalizeTags([]string{"ai"}); !reflect.DeepEqual(got, []string{"ai"}) {
+		t.Fatalf("normalizeTags(non-nil) = %#v", got)
+	}
 	if got := normalizeAuthHeader("  Bearer test  "); got == nil || *got != "Bearer test" {
 		t.Fatalf("normalizeAuthHeader did not trim non-empty header: %#v", got)
 	}
@@ -114,6 +117,22 @@ func TestNormalizeConnectionSettings(t *testing.T) {
 			name:        "direct requires endpoint",
 			slug:        "direct-agent",
 			mode:        ConnectionModeDirectHTTP,
+			wantHTTP:    http.StatusUnprocessableEntity,
+			wantToolNil: true,
+		},
+		{
+			name:        "direct allows local endpoint when enabled",
+			slug:        "local-agent",
+			endpoint:    "http://localhost:3000/agent",
+			allowLocal:  true,
+			wantMode:    ConnectionModeDirectHTTP,
+			wantURL:     "http://localhost:3000/agent",
+			wantToolNil: true,
+		},
+		{
+			name:        "direct rejects local endpoint by default",
+			slug:        "local-agent",
+			endpoint:    "http://localhost:3000/agent",
 			wantHTTP:    http.StatusUnprocessableEntity,
 			wantToolNil: true,
 		},
@@ -477,6 +496,9 @@ func TestRegistrationApprovalAndMetricHelpers(t *testing.T) {
 	if got, err := regSvc.normalizeRegistrationSkillIDs(context.Background(), nil); err != nil || len(got) != 0 {
 		t.Fatalf("normalizeRegistrationSkillIDs empty = %#v, %v", got, err)
 	}
+	if got, err := regSvc.normalizeRegistrationSkillIDs(context.Background(), []string{" ", ""}); err != nil || len(got) != 0 {
+		t.Fatalf("normalizeRegistrationSkillIDs blank = %#v, %v", got, err)
+	}
 	tooManySkills := []string{"skill/1", "skill/2", "skill/3", "skill/4", "skill/5", "skill/6"}
 	if _, err := regSvc.normalizeRegistrationSkillIDs(context.Background(), tooManySkills); err == nil {
 		t.Fatalf("normalizeRegistrationSkillIDs should reject too many skills before database lookup")
@@ -573,8 +595,14 @@ func TestMarketQueryParsingAndRouteRegistration(t *testing.T) {
 	if got := parseInt32QueryDefault("12", 3); got != 12 {
 		t.Fatalf("parseInt32QueryDefault valid = %d", got)
 	}
+	if got := parseInt32QueryDefault("", 3); got != 3 {
+		t.Fatalf("parseInt32QueryDefault empty = %d", got)
+	}
 	if got := parseInt32QueryDefault("-1", 3); got != 3 {
 		t.Fatalf("parseInt32QueryDefault invalid = %d", got)
+	}
+	if got := parseInt32QueryDefault("999999999999", 3); got != 3 {
+		t.Fatalf("parseInt32QueryDefault overflow = %d", got)
 	}
 	for _, raw := range []string{"1", "true", "YES", "y", "on"} {
 		if !parseBoolQuery(raw) {
@@ -583,6 +611,28 @@ func TestMarketQueryParsingAndRouteRegistration(t *testing.T) {
 	}
 	if parseBoolQuery("no") {
 		t.Fatalf("parseBoolQuery(no) = true")
+	}
+	if got := firstHeaderValue(" https , http "); got != "https" {
+		t.Fatalf("firstHeaderValue = %q", got)
+	}
+	if got := inferSkillDocWebBase("https://api.example.com:8080"); got != "https://example.com" {
+		t.Fatalf("inferSkillDocWebBase api host = %q", got)
+	}
+	if got := inferSkillDocWebBase("http://localhost:8080"); got != "http://localhost:3000" {
+		t.Fatalf("inferSkillDocWebBase localhost = %q", got)
+	}
+	eOrigin := echo.New()
+	reqOrigin := httptest.NewRequest(http.MethodGet, "http://internal.local/skill/publish-agent", nil)
+	reqOrigin.Header.Set("X-Forwarded-Proto", "https, http")
+	reqOrigin.Header.Set("X-Forwarded-Host", "api.example.com, internal.local")
+	if got := requestOrigin(eOrigin.NewContext(reqOrigin, httptest.NewRecorder())); got != "https://api.example.com" {
+		t.Fatalf("requestOrigin forwarded = %q", got)
+	}
+	t.Setenv("API_URL", "https://api.stage.example/")
+	t.Setenv("FRONTEND_URL", "")
+	apiBase, webBase := skillDocBaseURLs(eOrigin.NewContext(reqOrigin, httptest.NewRecorder()))
+	if apiBase != "https://api.stage.example" || webBase != "https://stage.example" {
+		t.Fatalf("skillDocBaseURLs inferred = %q %q", apiBase, webBase)
 	}
 
 	e := echo.New()
