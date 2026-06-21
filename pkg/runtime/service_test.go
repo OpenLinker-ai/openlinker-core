@@ -331,16 +331,17 @@ func readRun(t *testing.T, pool *pgxpool.Pool, runID uuid.UUID) runRow {
 }
 
 type runEventRow struct {
-	Sequence  int32
-	EventType string
-	Payload   map[string]any
+	Sequence    int32
+	EventType   string
+	ParentRunID *uuid.UUID
+	Payload     map[string]any
 }
 
 // readRunEvents 读 run_events 的事件类型和 payload，按 sequence 正序。
 func readRunEvents(t *testing.T, pool *pgxpool.Pool, runID uuid.UUID) []runEventRow {
 	t.Helper()
 	rows, err := pool.Query(context.Background(),
-		`SELECT sequence, event_type, payload FROM run_events WHERE run_id=$1 ORDER BY sequence ASC`,
+		`SELECT sequence, event_type, parent_run_id, payload FROM run_events WHERE run_id=$1 ORDER BY sequence ASC`,
 		runID)
 	require.NoError(t, err)
 	defer rows.Close()
@@ -349,7 +350,7 @@ func readRunEvents(t *testing.T, pool *pgxpool.Pool, runID uuid.UUID) []runEvent
 	for rows.Next() {
 		var event runEventRow
 		var raw []byte
-		require.NoError(t, rows.Scan(&event.Sequence, &event.EventType, &raw))
+		require.NoError(t, rows.Scan(&event.Sequence, &event.EventType, &event.ParentRunID, &raw))
 		require.NoError(t, json.Unmarshal(raw, &event.Payload))
 		events = append(events, event)
 	}
@@ -1170,6 +1171,128 @@ func TestListRunEvents_HappyPath(t *testing.T) {
 	assert.Equal(t, int32(2), events[0].Sequence)
 	assert.Equal(t, "run.started", events[0].EventType)
 	assert.Equal(t, "run.completed", events[1].EventType)
+}
+
+func TestCancelRun_MarksRunningRunCanceledAndEmitsEvent(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/agent", 10, "approved")
+	runID := insertRunningRun(t, pool, userID, agentID)
+
+	resp, err := svc.CancelRun(ctx, userID, runID)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, runID.String(), resp.RunID)
+	assert.Equal(t, "canceled", resp.Status)
+	assert.Equal(t, "CANCELED", resp.ErrorCode)
+	assert.Equal(t, "run canceled by user", resp.ErrorMsg)
+	assert.GreaterOrEqual(t, resp.DurationMs, int32(0))
+
+	stored := readRun(t, pool, runID)
+	assert.Equal(t, "canceled", stored.Status)
+	require.NotNil(t, stored.ErrorCode)
+	assert.Equal(t, "CANCELED", *stored.ErrorCode)
+
+	again, err := svc.CancelRun(ctx, userID, runID)
+	require.NoError(t, err)
+	assert.Equal(t, "canceled", again.Status)
+	assert.Equal(t, runID.String(), again.RunID)
+
+	events := readRunEvents(t, pool, runID)
+	require.Len(t, events, 1)
+	assert.Equal(t, "run.canceled", events[0].EventType)
+	assert.Equal(t, "canceled", events[0].Payload["status"])
+	assert.Equal(t, "CANCELED", events[0].Payload["error_code"])
+}
+
+func TestCancelRun_RejectsNonOwnerMissingAndFinishedRuns(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	otherUserID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/agent", 10, "approved")
+
+	runID := insertRunningRun(t, pool, userID, agentID)
+	_, err := svc.CancelRun(ctx, otherUserID, runID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	_, err = svc.CancelRun(ctx, userID, uuid.New())
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	finishedRunID := insertRunningRun(t, pool, userID, agentID)
+	_, err = pool.Exec(ctx,
+		`UPDATE runs SET status='success', output='{"ok":true}'::jsonb, finished_at=NOW() WHERE id=$1`,
+		finishedRunID)
+	require.NoError(t, err)
+	_, err = svc.CancelRun(ctx, userID, finishedRunID)
+	assertHTTPStatus(t, err, http.StatusConflict)
+}
+
+func TestRunDelegated_RecordsFreeChildRunAndParentEvents(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	callerCreatorID := insertCreator(t, pool)
+	targetCreatorID := insertCreator(t, pool)
+	callerAgentID := insertAgent(t, pool, callerCreatorID, "https://example.com/caller", 10, "approved")
+	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"answer":"delegated ok"}}`))
+	targetAgentID := insertAgent(t, pool, targetCreatorID, endpoint, 25, "approved")
+	parentRunID := insertRunningRun(t, pool, userID, callerAgentID)
+
+	resp, err := svc.RunDelegated(ctx, userID, runtime.Delegation{
+		ParentRunID:   parentRunID,
+		CallerAgentID: callerAgentID,
+		Reason:        "delegate to specialist",
+	}, makeRunReq(targetAgentID, map[string]any{"q": "finish child"}))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "success", resp.Status)
+	assert.Equal(t, "delegated ok", resp.Output["answer"])
+	assert.Equal(t, int32(0), resp.CostCents)
+	assert.Equal(t, parentRunID.String(), resp.ParentRunID)
+	assert.Equal(t, callerAgentID.String(), resp.CallerAgentID)
+	assert.Equal(t, "free_delegation", resp.BillingMode)
+
+	childRunID := mustParseUUID(t, resp.RunID)
+	var delegationCount int
+	err = pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM run_delegations
+		 WHERE parent_run_id=$1 AND child_run_id=$2 AND caller_agent_id=$3 AND reason=$4`,
+		parentRunID, childRunID, callerAgentID, "delegate to specialist").
+		Scan(&delegationCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, delegationCount)
+
+	child := readRun(t, pool, childRunID)
+	assert.Equal(t, "success", child.Status)
+	assert.Equal(t, int32(0), child.CostCents)
+	assert.Equal(t, int32(0), child.PlatformFeeCents)
+	assert.Equal(t, int32(0), child.CreatorRevenueCents)
+
+	parentEvents := readRunEvents(t, pool, parentRunID)
+	require.Len(t, parentEvents, 2)
+	assert.Equal(t, "run.child.created", parentEvents[0].EventType)
+	assert.Equal(t, resp.RunID, parentEvents[0].Payload["child_run_id"])
+	assert.Equal(t, "free_delegation", parentEvents[0].Payload["billing_mode"])
+	assert.Equal(t, "run.child.completed", parentEvents[1].EventType)
+	assert.Equal(t, "success", parentEvents[1].Payload["status"])
+
+	childEvents := readRunEvents(t, pool, childRunID)
+	require.Len(t, childEvents, 3)
+	assert.Equal(t, "run.created", childEvents[0].EventType)
+	require.NotNil(t, childEvents[0].ParentRunID)
+	assert.Equal(t, parentRunID, *childEvents[0].ParentRunID)
+	assert.Equal(t, "free_delegation", childEvents[0].Payload["billing_mode"])
+	assert.Equal(t, "run.completed", childEvents[2].EventType)
 }
 
 func TestReportRunEvent_HappyPath(t *testing.T) {
