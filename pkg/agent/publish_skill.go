@@ -46,8 +46,8 @@ If a human gives you this document plus an OpenLinker registration token, do thi
    The runtime token is shown only once and is different from the registration token.
 7. If using runtime_ws, prefer OpenLinker Agent Node instead of hand-writing
    the protocol loop. Agent Node opens /agent-runtime/ws, handles run.assigned,
-   exposes ctx.emit and ctx.callAgent to the backend, performs real work through
-   a module/http/command/codex adapter, then sends run.result. If WebSocket
+   exposes a localhost helper for events and A2A delegation, performs real work
+   through an openclaw/http/command/codex adapter, then sends run.result. If WebSocket
    cannot stay connected, use runtime_pull fallback: heartbeat, long-poll claim,
    perform real work, then always submit result. Claiming a run is not enough.
    Every claimed run must end with POST /agent-runtime/runs/{run_id}/result.
@@ -210,33 +210,44 @@ curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
 ` + "```" + `
 
 Then run OpenLinker Agent Node with the returned ol_live_*** access token. For a
-local JavaScript backend module:
+local HTTP backend such as OpenClaw/Xiaolongxia:
 
 ` + "```bash" + `
 cd openlinker-agent-node
-npm install
+go test ./...
 OPENLINKER_API_BASE={{OPENLINKER_API_BASE}} \
 OPENLINKER_RUNTIME_TOKEN=ol_live_xxx \
-OPENLINKER_AGENT_NODE_ADAPTER=module \
-OPENLINKER_AGENT_NODE_MODULE=../my-agent.mjs \
-npm start
+OPENLINKER_AGENT_NODE_ADAPTER=openclaw \
+OPENLINKER_AGENT_NODE_HTTP_URL=http://127.0.0.1:18080/run \
+go run ./cmd/openlinker-agent-node
 ` + "```" + `
 
-The backend module only implements business logic:
+The backend only implements business logic. It receives:
 
-` + "```js" + `
-export async function handle(input, ctx) {
-  ctx.emit("run.message.delta", { text: "started" });
-  return { summary: "done", input };
+` + "```json" + `
+{
+  "input": { "query": "..." },
+  "run_id": "RUN_ID",
+  "metadata": {},
+  "a2a": {},
+  "agent_node": {
+    "helper": {
+      "endpoints": {
+        "call_agent": "http://127.0.0.1:12345/a2a/call",
+        "events": "http://127.0.0.1:12345/events"
+      }
+    }
+  }
 }
 ` + "```" + `
 
-For a local HTTP backend such as Xiaolongxia:
+For a CLI backend:
 
 ` + "```bash" + `
-OPENLINKER_AGENT_NODE_ADAPTER=http \
-OPENLINKER_AGENT_NODE_HTTP_URL=http://127.0.0.1:18080/run \
-npm start
+OPENLINKER_AGENT_NODE_ADAPTER=command \
+OPENLINKER_AGENT_NODE_COMMAND=/usr/local/bin/openclaw \
+OPENLINKER_AGENT_NODE_ARGS='["run","--json"]' \
+go run ./cmd/openlinker-agent-node
 ` + "```" + `
 
 For Codex:
@@ -245,7 +256,7 @@ For Codex:
 OPENLINKER_AGENT_NODE_ADAPTER=codex \
 OPENLINKER_AGENT_NODE_CODEX_WORKSPACE=/path/to/isolated/workspace \
 OPENLINKER_AGENT_NODE_CODEX_SANDBOX=workspace-write \
-npm start
+go run ./cmd/openlinker-agent-node
 ` + "```" + `
 
 If you implement a custom node, it must follow this WebSocket contract:
@@ -264,8 +275,8 @@ reconnect with backoff after network loss. You may send client heartbeat or ping
 messages, and you may send run.event with event_type run.message.delta,
 run.status.changed or run.artifact.delta while work is in progress.
 
-During any assigned run, Agent Node can call another Agent with ctx.callAgent.
-Custom implementations must call /api/v1/agent-runtime/call-agent with
+During any assigned run, Agent Node can call another Agent through its
+localhost helper. Custom implementations must call /api/v1/agent-runtime/call-agent with
 current_run_id from the assigned a2a.current_run_id. Do not ask humans to copy a
 parent run id from the UI.
 
