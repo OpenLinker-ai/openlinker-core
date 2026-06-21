@@ -567,6 +567,84 @@ func TestRegistryBridgeQueriesScanRowsAndScalars(t *testing.T) {
 		t.Fatalf("ListRegistryNodesByOwner scan = %#v", nodes)
 	}
 
+	dbtx.row = fakeRow{values: nodeValues}
+	ownedNode, err := q.GetRegistryNodeByIDForOwner(context.Background(), GetRegistryNodeByIDForOwnerParams{ID: nodeID, OwnerUserID: ownerID})
+	if err != nil {
+		t.Fatalf("GetRegistryNodeByIDForOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetRegistryNodeByIDForOwner")
+	if ownedNode.ID != nodeID || ownedNode.OwnerUserID != ownerID {
+		t.Fatalf("GetRegistryNodeByIDForOwner scan = %#v", ownedNode)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{nodeID, ownerID}) {
+		t.Fatalf("GetRegistryNodeByIDForOwner args = %#v", dbtx.queryRowArgs)
+	}
+
+	activeNodeRows := &fakeRows{rows: [][]any{nodeValues}}
+	dbtx.queryRows = activeNodeRows
+	activeNodes, err := q.ListActiveRegistryNodesBySecretPrefix(context.Background(), "rn_live_abcd")
+	if err != nil {
+		t.Fatalf("ListActiveRegistryNodesBySecretPrefix error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListActiveRegistryNodesBySecretPrefix")
+	if !activeNodeRows.closed || len(activeNodes) != 1 || activeNodes[0].SecretPrefix != "rn_live_abcd" {
+		t.Fatalf("ListActiveRegistryNodesBySecretPrefix scan = %#v closed=%v", activeNodes, activeNodeRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{"rn_live_abcd"}) {
+		t.Fatalf("ListActiveRegistryNodesBySecretPrefix args = %#v", dbtx.queryArgs)
+	}
+
+	dbtx.row = fakeRow{values: nodeValues}
+	heartbeatNode, err := q.MarkRegistryNodeHeartbeat(context.Background(), nodeID)
+	if err != nil {
+		t.Fatalf("MarkRegistryNodeHeartbeat error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "MarkRegistryNodeHeartbeat")
+	if heartbeatNode.ID != nodeID || heartbeatNode.HeartbeatStatus != "healthy" {
+		t.Fatalf("MarkRegistryNodeHeartbeat scan = %#v", heartbeatNode)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{nodeID}) {
+		t.Fatalf("MarkRegistryNodeHeartbeat args = %#v", dbtx.queryRowArgs)
+	}
+
+	revokedAt := now.Add(2 * time.Minute)
+	revokedNodeValues := append([]any{}, nodeValues...)
+	revokedNodeValues[8] = "revoked"
+	revokedNodeValues[10] = &revokedAt
+	dbtx.row = fakeRow{values: revokedNodeValues}
+	revokedNode, err := q.RevokeRegistryNodeForOwner(context.Background(), RevokeRegistryNodeForOwnerParams{ID: nodeID, OwnerUserID: ownerID})
+	if err != nil {
+		t.Fatalf("RevokeRegistryNodeForOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "RevokeRegistryNodeForOwner")
+	if revokedNode.ID != nodeID || revokedNode.HeartbeatStatus != "revoked" || revokedNode.RevokedAt == nil {
+		t.Fatalf("RevokeRegistryNodeForOwner scan = %#v", revokedNode)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{nodeID, ownerID}) {
+		t.Fatalf("RevokeRegistryNodeForOwner args = %#v", dbtx.queryRowArgs)
+	}
+
+	rotatedNodeValues := append([]any{}, nodeValues...)
+	rotatedNodeValues[5] = "rn_live_wxyz"
+	rotatedNodeValues[6] = "new-hash"
+	dbtx.row = fakeRow{values: rotatedNodeValues}
+	rotatedNode, err := q.RotateRegistryNodeSecretForOwner(context.Background(), RotateRegistryNodeSecretForOwnerParams{
+		ID:           nodeID,
+		OwnerUserID:  ownerID,
+		SecretPrefix: "rn_live_wxyz",
+		SecretHash:   "new-hash",
+	})
+	if err != nil {
+		t.Fatalf("RotateRegistryNodeSecretForOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "RotateRegistryNodeSecretForOwner")
+	if rotatedNode.ID != nodeID || rotatedNode.SecretPrefix != "rn_live_wxyz" {
+		t.Fatalf("RotateRegistryNodeSecretForOwner scan = %#v", rotatedNode)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{nodeID, ownerID, "rn_live_wxyz", "new-hash"}) {
+		t.Fatalf("RotateRegistryNodeSecretForOwner args = %#v", dbtx.queryRowArgs)
+	}
+
 	dbtx.row = fakeRow{values: linkValues}
 	link, err := q.UpsertCloudListingLink(context.Background(), UpsertCloudListingLinkParams{
 		CloudListingID:       listingID,
@@ -584,6 +662,19 @@ func TestRegistryBridgeQueriesScanRowsAndScalars(t *testing.T) {
 		t.Fatalf("UpsertCloudListingLink scan = %#v", link)
 	}
 
+	dbtx.row = fakeRow{values: linkValues}
+	ownerLink, err := q.GetCloudListingLinkForOwner(context.Background(), GetCloudListingLinkForOwnerParams{CloudListingID: listingID, OwnerUserID: ownerID})
+	if err != nil {
+		t.Fatalf("GetCloudListingLinkForOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetCloudListingLinkForOwner")
+	if ownerLink.ID != linkID || ownerLink.RegistryNodeID != nodeID {
+		t.Fatalf("GetCloudListingLinkForOwner scan = %#v", ownerLink)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{listingID, ownerID}) {
+		t.Fatalf("GetCloudListingLinkForOwner args = %#v", dbtx.queryRowArgs)
+	}
+
 	dbtx.queryRows = &fakeRows{rows: [][]any{linkRowValues}}
 	links, err := q.ListCloudListingLinksByOwner(context.Background(), ownerID)
 	if err != nil {
@@ -593,6 +684,65 @@ func TestRegistryBridgeQueriesScanRowsAndScalars(t *testing.T) {
 	if len(links) != 1 || links[0].NodeName != "edge-one" || links[0].AgentSlug != "local-agent" {
 		t.Fatalf("ListCloudListingLinksByOwner scan = %#v", links)
 	}
+
+	dbtx.row = fakeRow{values: linkRowValues}
+	linkRow, err := q.GetCloudListingLinkRowForOwner(context.Background(), GetCloudListingLinkRowForOwnerParams{ID: linkID, OwnerUserID: ownerID})
+	if err != nil {
+		t.Fatalf("GetCloudListingLinkRowForOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetCloudListingLinkRowForOwner")
+	if linkRow.ID != linkID || linkRow.NodeName != "edge-one" || linkRow.AgentName != "Local Agent" {
+		t.Fatalf("GetCloudListingLinkRowForOwner scan = %#v", linkRow)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{linkID, ownerID}) {
+		t.Fatalf("GetCloudListingLinkRowForOwner args = %#v", dbtx.queryRowArgs)
+	}
+
+	pausedLinkRowValues := append([]any{}, linkRowValues...)
+	pausedLinkRowValues[10] = "paused"
+	dbtx.row = fakeRow{values: pausedLinkRowValues}
+	pausedLink, err := q.UpdateCloudListingLinkStatusForOwner(context.Background(), UpdateCloudListingLinkStatusForOwnerParams{
+		CloudListingID: listingID,
+		OwnerUserID:    ownerID,
+		SyncStatus:     "paused",
+	})
+	if err != nil {
+		t.Fatalf("UpdateCloudListingLinkStatusForOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpdateCloudListingLinkStatusForOwner")
+	if pausedLink.ID != linkID || pausedLink.SyncStatus != "paused" {
+		t.Fatalf("UpdateCloudListingLinkStatusForOwner scan = %#v", pausedLink)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{listingID, ownerID, "paused"}) {
+		t.Fatalf("UpdateCloudListingLinkStatusForOwner args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: linkRowValues}
+	syncedLink, err := q.SyncCloudListingMetadataForOwner(context.Background(), SyncCloudListingMetadataForOwnerParams{CloudListingID: listingID, OwnerUserID: ownerID})
+	if err != nil {
+		t.Fatalf("SyncCloudListingMetadataForOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "SyncCloudListingMetadataForOwner")
+	if syncedLink.ID != linkID || syncedLink.MetadataSyncedAt == nil || syncedLink.AvailabilityStatus != "healthy" {
+		t.Fatalf("SyncCloudListingMetadataForOwner scan = %#v", syncedLink)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{listingID, ownerID}) {
+		t.Fatalf("SyncCloudListingMetadataForOwner args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(4)}}
+	linkCount, err := q.CountCloudListingLinksByNode(context.Background(), nodeID)
+	if err != nil || linkCount != 4 {
+		t.Fatalf("CountCloudListingLinksByNode = %d, %v", linkCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountCloudListingLinksByNode")
+
+	dbtx.row = fakeRow{values: []any{int32(5)}}
+	syncedCount, err := q.SyncCloudListingMetadataByNode(context.Background(), nodeID)
+	if err != nil || syncedCount != 5 {
+		t.Fatalf("SyncCloudListingMetadataByNode = %d, %v", syncedCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "SyncCloudListingMetadataByNode")
 
 	dbtx.row = fakeRow{values: []any{int32(6)}}
 	count, err := q.CountPendingProxyRunsByNode(context.Background(), nodeID)
@@ -1125,6 +1275,8 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	nodeID := uuid.New()
 	agentID := uuid.New()
 	runID := uuid.New()
+	stepID := uuid.New()
+	childRunID := uuid.New()
 	now := time.Date(2026, 6, 20, 19, 0, 0, 0, time.UTC)
 	finishedAt := now.Add(2 * time.Minute)
 	nextRetry := now.Add(time.Minute)
@@ -1133,6 +1285,7 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	workflowValues := workflowRow(workflowID, userID, now)
 	nodeValues := workflowNodeRow(nodeID, workflowID, agentID, now)
 	runValues := workflowRunRow(runID, workflowID, userID, now, &finishedAt, &nextRetry, &claimedAt, &lastWorkerError)
+	stepValues := workflowRunStepRow(stepID, runID, nodeID, agentID, &childRunID, now, &finishedAt, nil)
 	dbtx := &fakeDBTX{
 		row:       fakeRow{values: workflowValues},
 		queryRows: &fakeRows{rows: [][]any{workflowValues}},
@@ -1166,6 +1319,26 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 		t.Fatalf("ListWorkflowsByUser scan = %#v", listedWorkflows)
 	}
 
+	dbtx.row = fakeRow{values: workflowValues}
+	gotWorkflow, err := q.GetWorkflowByID(context.Background(), workflowID)
+	if err != nil {
+		t.Fatalf("GetWorkflowByID error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetWorkflowByID")
+	if gotWorkflow.ID != workflowID || gotWorkflow.UserID != userID {
+		t.Fatalf("GetWorkflowByID scan = %#v", gotWorkflow)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{workflowID}) {
+		t.Fatalf("GetWorkflowByID args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(4)}}
+	workflowCount, err := q.CountWorkflowsByUser(context.Background(), userID)
+	if err != nil || workflowCount != 4 {
+		t.Fatalf("CountWorkflowsByUser = %d, %v", workflowCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountWorkflowsByUser")
+
 	dbtx.row = fakeRow{values: nodeValues}
 	node, err := q.CreateWorkflowNode(context.Background(), CreateWorkflowNodeParams{
 		WorkflowID: workflowID,
@@ -1195,6 +1368,23 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	}
 
 	dbtx.row = fakeRow{values: runValues}
+	runningRun, err := q.CreateWorkflowRun(context.Background(), CreateWorkflowRunParams{
+		WorkflowID: workflowID,
+		UserID:     userID,
+		Input:      []byte(`{"prompt":"go"}`),
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkflowRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateWorkflowRun")
+	if runningRun.ID != runID || runningRun.Status != "running" {
+		t.Fatalf("CreateWorkflowRun scan = %#v", runningRun)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{workflowID, userID, []byte(`{"prompt":"go"}`)}) {
+		t.Fatalf("CreateWorkflowRun args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: runValues}
 	run, err := q.CreatePendingWorkflowRun(context.Background(), CreatePendingWorkflowRunParams{
 		WorkflowID:  workflowID,
 		UserID:      userID,
@@ -1207,6 +1397,108 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	requireSQLName(t, dbtx.queryRowSQL, "CreatePendingWorkflowRun")
 	if run.ID != runID || run.FinishedAt == nil || run.LastWorkerError == nil {
 		t.Fatalf("CreatePendingWorkflowRun scan = %#v", run)
+	}
+
+	successRunValues := append([]any{}, runValues...)
+	successRunValues[3] = "success"
+	successRunValues[8] = &finishedAt
+	dbtx.row = fakeRow{values: successRunValues}
+	successRun, err := q.MarkWorkflowRunSuccess(context.Background(), MarkWorkflowRunSuccessParams{ID: runID, Output: []byte(`{"ok":true}`)})
+	if err != nil {
+		t.Fatalf("MarkWorkflowRunSuccess error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "MarkWorkflowRunSuccess")
+	if successRun.ID != runID || successRun.Status != "success" || successRun.FinishedAt == nil {
+		t.Fatalf("MarkWorkflowRunSuccess scan = %#v", successRun)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID, []byte(`{"ok":true}`)}) {
+		t.Fatalf("MarkWorkflowRunSuccess args = %#v", dbtx.queryRowArgs)
+	}
+
+	failedRunValues := append([]any{}, runValues...)
+	failedRunValues[3] = "failed"
+	failedRunValues[6] = &lastWorkerError
+	failedRunValues[8] = &finishedAt
+	dbtx.row = fakeRow{values: failedRunValues}
+	failedRun, err := q.MarkWorkflowRunFailed(context.Background(), MarkWorkflowRunFailedParams{ID: runID, ErrorMessage: &lastWorkerError})
+	if err != nil {
+		t.Fatalf("MarkWorkflowRunFailed error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "MarkWorkflowRunFailed")
+	if failedRun.ID != runID || failedRun.Status != "failed" || failedRun.ErrorMessage == nil {
+		t.Fatalf("MarkWorkflowRunFailed scan = %#v", failedRun)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID, &lastWorkerError}) {
+		t.Fatalf("MarkWorkflowRunFailed args = %#v", dbtx.queryRowArgs)
+	}
+
+	pausedRunValues := append([]any{}, runValues...)
+	pausedRunValues[3] = "paused"
+	pausedRunValues[13] = nil
+	pausedRunValues[14] = nil
+	pausedRunValues[15] = nil
+	dbtx.row = fakeRow{values: pausedRunValues}
+	pausedRun, err := q.PauseWorkflowRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("PauseWorkflowRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "PauseWorkflowRun")
+	if pausedRun.ID != runID || pausedRun.Status != "paused" {
+		t.Fatalf("PauseWorkflowRun scan = %#v", pausedRun)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID}) {
+		t.Fatalf("PauseWorkflowRun args = %#v", dbtx.queryRowArgs)
+	}
+
+	pendingRunValues := append([]any{}, runValues...)
+	pendingRunValues[3] = "pending"
+	pendingRunValues[13] = &nextRetry
+	pendingRunValues[14] = nil
+	pendingRunValues[15] = nil
+	dbtx.row = fakeRow{values: pendingRunValues}
+	resumedRun, err := q.ResumeWorkflowRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("ResumeWorkflowRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "ResumeWorkflowRun")
+	if resumedRun.ID != runID || resumedRun.Status != "pending" || resumedRun.NextRetryAt == nil {
+		t.Fatalf("ResumeWorkflowRun scan = %#v", resumedRun)
+	}
+
+	canceledRunValues := append([]any{}, runValues...)
+	canceledRunValues[3] = "canceled"
+	canceledRunValues[6] = &lastWorkerError
+	canceledRunValues[8] = &finishedAt
+	canceledRunValues[13] = nil
+	canceledRunValues[14] = nil
+	dbtx.row = fakeRow{values: canceledRunValues}
+	canceledRun, err := q.CancelWorkflowRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("CancelWorkflowRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CancelWorkflowRun")
+	if canceledRun.ID != runID || canceledRun.Status != "canceled" || canceledRun.FinishedAt == nil {
+		t.Fatalf("CancelWorkflowRun scan = %#v", canceledRun)
+	}
+
+	dbtx.row = fakeRow{values: runValues}
+	gotRun, err := q.GetWorkflowRunByID(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("GetWorkflowRunByID error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetWorkflowRunByID")
+	if gotRun.ID != runID || gotRun.WorkflowID != workflowID {
+		t.Fatalf("GetWorkflowRunByID scan = %#v", gotRun)
+	}
+
+	dbtx.row = fakeRow{values: runValues}
+	claimedRun, err := q.ClaimPendingWorkflowRun(context.Background())
+	if err != nil {
+		t.Fatalf("ClaimPendingWorkflowRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "ClaimPendingWorkflowRun")
+	if claimedRun.ID != runID || claimedRun.ClaimedAt == nil {
+		t.Fatalf("ClaimPendingWorkflowRun scan = %#v", claimedRun)
 	}
 
 	dbtx.queryRows = &fakeRows{rows: [][]any{runValues}}
@@ -1233,6 +1525,81 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	requireSQLName(t, dbtx.execSQL, "RequeueStaleWorkflowRuns")
 	if !reflect.DeepEqual(dbtx.execArgs, []any{before}) {
 		t.Fatalf("RequeueStaleWorkflowRuns args = %#v", dbtx.execArgs)
+	}
+
+	if err := q.DeleteWorkflowRunSteps(context.Background(), runID); err != nil {
+		t.Fatalf("DeleteWorkflowRunSteps error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "DeleteWorkflowRunSteps")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{runID}) {
+		t.Fatalf("DeleteWorkflowRunSteps args = %#v", dbtx.execArgs)
+	}
+
+	dbtx.row = fakeRow{values: stepValues}
+	step, err := q.CreateWorkflowRunStep(context.Background(), CreateWorkflowRunStepParams{
+		WorkflowRunID:  runID,
+		WorkflowNodeID: nodeID,
+		NodeKey:        "analyze",
+		AgentID:        agentID,
+		Input:          []byte(`{"step":1}`),
+		Sequence:       1,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkflowRunStep error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateWorkflowRunStep")
+	if step.ID != stepID || step.WorkflowRunID != runID || step.RunID == nil {
+		t.Fatalf("CreateWorkflowRunStep scan = %#v", step)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID, nodeID, "analyze", agentID, []byte(`{"step":1}`), int32(1)}) {
+		t.Fatalf("CreateWorkflowRunStep args = %#v", dbtx.queryRowArgs)
+	}
+
+	successStepValues := append([]any{}, stepValues...)
+	successStepValues[6] = "success"
+	successStepValues[8] = []byte(`{"step":"ok"}`)
+	successStepValues[12] = &finishedAt
+	dbtx.row = fakeRow{values: successStepValues}
+	successStep, err := q.MarkWorkflowRunStepSuccess(context.Background(), MarkWorkflowRunStepSuccessParams{
+		ID:     stepID,
+		RunID:  &childRunID,
+		Output: []byte(`{"step":"ok"}`),
+	})
+	if err != nil {
+		t.Fatalf("MarkWorkflowRunStepSuccess error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "MarkWorkflowRunStepSuccess")
+	if successStep.ID != stepID || successStep.Status != "success" || successStep.FinishedAt == nil {
+		t.Fatalf("MarkWorkflowRunStepSuccess scan = %#v", successStep)
+	}
+
+	failedStepValues := append([]any{}, stepValues...)
+	failedStepValues[6] = "failed"
+	failedStepValues[9] = &lastWorkerError
+	failedStepValues[12] = &finishedAt
+	dbtx.row = fakeRow{values: failedStepValues}
+	failedStep, err := q.MarkWorkflowRunStepFailed(context.Background(), MarkWorkflowRunStepFailedParams{
+		ID:           stepID,
+		RunID:        &childRunID,
+		ErrorMessage: &lastWorkerError,
+	})
+	if err != nil {
+		t.Fatalf("MarkWorkflowRunStepFailed error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "MarkWorkflowRunStepFailed")
+	if failedStep.ID != stepID || failedStep.Status != "failed" || failedStep.ErrorMessage == nil {
+		t.Fatalf("MarkWorkflowRunStepFailed scan = %#v", failedStep)
+	}
+
+	stepRows := &fakeRows{rows: [][]any{stepValues}}
+	dbtx.queryRows = stepRows
+	steps, err := q.ListWorkflowRunSteps(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("ListWorkflowRunSteps error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListWorkflowRunSteps")
+	if !stepRows.closed || len(steps) != 1 || steps[0].ID != stepID {
+		t.Fatalf("ListWorkflowRunSteps scan = %#v closed=%v", steps, stepRows.closed)
 	}
 }
 
@@ -2772,6 +3139,26 @@ func workflowRunRow(id, workflowID, userID uuid.UUID, now time.Time, finishedAt,
 		nextRetry,
 		claimedAt,
 		lastWorkerError,
+	}
+}
+
+func workflowRunStepRow(id, workflowRunID, workflowNodeID, agentID uuid.UUID, runID *uuid.UUID, now time.Time, finishedAt *time.Time, errorMessage *string) []any {
+	return []any{
+		id,
+		workflowRunID,
+		workflowNodeID,
+		"analyze",
+		agentID,
+		runID,
+		"running",
+		[]byte(`{"step":1}`),
+		[]byte(`{"step":"ok"}`),
+		errorMessage,
+		int32(1),
+		now,
+		finishedAt,
+		now,
+		now.Add(time.Minute),
 	}
 }
 
