@@ -400,6 +400,91 @@ func TestStartWorkflowRunQueuesAndWorkerExecutes(t *testing.T) {
 	require.Equal(t, queued.ID, history.Items[0].ID)
 }
 
+func TestStartRunWorkerProcessesPendingRunsInBurst(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+
+	var mu sync.Mutex
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req runtimemod.AgentRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		mu.Lock()
+		callCount++
+		callNumber := callCount
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+			"output": map[string]interface{}{
+				"step":       req.Input["node_key"],
+				"call_index": callNumber,
+			},
+		}))
+	}))
+	t.Cleanup(server.Close)
+
+	ctx := context.Background()
+	userID := insertWorkflowUser(t, pool, "wf-worker-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-worker-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		PlatformFeeRate:         0,
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	svc := workflow.NewService(pool, runtimeSvc)
+
+	created, err := svc.CreateWorkflow(ctx, userID, &workflow.CreateWorkflowRequest{
+		Name: "Worker burst workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "worker", Title: "Worker", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+	workflowID := uuid.MustParse(created.ID)
+
+	queuedA, err := svc.StartWorkflowRun(ctx, userID, workflowID, &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"run": "a"},
+	})
+	require.NoError(t, err)
+	queuedB, err := svc.StartWorkflowRun(ctx, userID, workflowID, &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"run": "b"},
+	})
+	require.NoError(t, err)
+
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		workflow.StartRunWorker(workerCtx, svc, workflow.RunWorkerConfig{
+			Interval:   time.Hour,
+			StaleAfter: time.Minute,
+			ClaimBurst: 3,
+		})
+	}()
+
+	doneA := waitForWorkflowRunStatus(t, svc, userID, uuid.MustParse(queuedA.ID), "success")
+	doneB := waitForWorkflowRunStatus(t, svc, userID, uuid.MustParse(queuedB.ID), "success")
+	cancelWorker()
+	select {
+	case <-workerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("workflow worker did not stop after context cancellation")
+	}
+
+	require.Len(t, doneA.Steps, 1)
+	require.Len(t, doneB.Steps, 1)
+	require.Equal(t, "success", doneA.Steps[0].Status)
+	require.Equal(t, "success", doneB.Steps[0].Status)
+	mu.Lock()
+	require.Equal(t, 2, callCount)
+	mu.Unlock()
+
+	claimed, err := svc.ClaimAndRunPendingWorkflow(ctx)
+	require.NoError(t, err)
+	require.False(t, claimed)
+}
+
 func TestWorkflowRunWaitsForRuntimePullCompletion(t *testing.T) {
 	pool := setupWorkflowTestDB(t)
 	ctx := context.Background()
@@ -1006,6 +1091,25 @@ func claimWorkflowRuntimeRun(t *testing.T, svc *runtimemod.Service, token string
 		select {
 		case <-deadline:
 			return nil, nil
+		case <-tick.C:
+		}
+	}
+}
+
+func waitForWorkflowRunStatus(t *testing.T, svc *workflow.Service, userID, runID uuid.UUID, status string) *workflow.WorkflowRunResponse {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		got, err := svc.GetWorkflowRun(context.Background(), userID, runID)
+		require.NoError(t, err)
+		if got.Status == status {
+			return got
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("workflow run %s did not reach %s; last status=%s", runID, status, got.Status)
 		case <-tick.C:
 		}
 	}
