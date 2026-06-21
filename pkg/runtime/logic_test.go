@@ -44,6 +44,8 @@ func TestRuntimeAuthScopeAndParsingHelpers(t *testing.T) {
 	c.Set(string(httpx.CtxKeyAuthMethod), "jwt")
 	require.Equal(t, "web", sourceFromCtx(c))
 	require.NoError(t, requireAPIKeyScope(c, "agents:run"))
+	c.Set(string(httpx.CtxKeyAuthMethod), "unknown")
+	require.Equal(t, "web", sourceFromCtx(c))
 
 	c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
 	c.Set(string(httpx.CtxKeyAuthScopes), []string{"runs:read"})
@@ -55,15 +57,21 @@ func TestRuntimeAuthScopeAndParsingHelpers(t *testing.T) {
 	token, err := runtimeBearerToken(" Bearer  ol_live_test  ")
 	require.NoError(t, err)
 	require.Equal(t, "ol_live_test", token)
+	token, err = runtimeBearerToken("bearer rt_lower")
+	require.NoError(t, err)
+	require.Equal(t, "rt_lower", token)
 	_, err = runtimeBearerToken("Basic abc")
 	require.True(t, errors.As(err, &httpErr))
 	require.Equal(t, http.StatusUnauthorized, httpErr.Status)
 	require.Equal(t, runtimeLimiterTokenKey("secret"), runtimeLimiterTokenKey("secret"))
 	require.NotEqual(t, runtimeLimiterTokenKey("secret"), runtimeLimiterTokenKey("other"))
 	require.True(t, strings.HasPrefix(runtimeLimiterIPKey(c), "ip:"))
+	require.Equal(t, "ip:unknown", runtimeLimiterIPKey(blankIPContext{Context: c}))
 
 	require.Equal(t, 1, retryAfterSeconds(0))
+	require.Equal(t, 1, retryAfterSeconds(999*time.Millisecond))
 	require.Equal(t, 2, retryAfterSeconds(1500*time.Millisecond))
+	require.Equal(t, 3, retryAfterSeconds(3*time.Second))
 	rec := httptest.NewRecorder()
 	c = e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
 	err = runtimeRateLimitError(c, 1500*time.Millisecond, "slow down")
@@ -91,6 +99,11 @@ func TestRuntimeAuthScopeAndParsingHelpers(t *testing.T) {
 	n, err = afterSequenceFromSSE(c)
 	require.NoError(t, err)
 	require.Equal(t, int32(9), n)
+	req = httptest.NewRequest(http.MethodGet, "/runs/id/stream", nil)
+	c = e.NewContext(req, httptest.NewRecorder())
+	n, err = afterSequenceFromSSE(c)
+	require.NoError(t, err)
+	require.Equal(t, int32(0), n)
 }
 
 func TestRuntimePullAndTimeoutOptionHelpers(t *testing.T) {
@@ -112,7 +125,11 @@ func TestRuntimePullAndTimeoutOptionHelpers(t *testing.T) {
 	require.Equal(t, time.Duration(0), normalizeRuntimePullClaimOptions(RuntimePullClaimOptions{Wait: -time.Second}).Wait)
 	require.Equal(t, runtimePullMaxLongPollWait, normalizeRuntimePullClaimOptions(RuntimePullClaimOptions{Wait: time.Hour}).Wait)
 
-	cfg := normalizeRuntimePullRunTimeoutConfig(RuntimePullRunTimeoutConfig{ResultTimeout: time.Minute})
+	cfg := normalizeRuntimePullRunTimeoutConfig(RuntimePullRunTimeoutConfig{})
+	require.Equal(t, 2*time.Minute, cfg.DispatchTimeout)
+	require.Equal(t, 15*time.Minute, cfg.ResultTimeout)
+	require.Equal(t, int32(50), cfg.BatchSize)
+	cfg = normalizeRuntimePullRunTimeoutConfig(RuntimePullRunTimeoutConfig{ResultTimeout: time.Minute})
 	require.Equal(t, 2*time.Minute, cfg.DispatchTimeout)
 	require.Equal(t, runtimePullClaimTTL, cfg.ResultTimeout)
 	require.Equal(t, int32(50), cfg.BatchSize)
@@ -125,6 +142,19 @@ func TestRuntimePullAndTimeoutOptionHelpers(t *testing.T) {
 	require.False(t, hasRuntimeScope([]string{"agent:call"}, "agent:pull"))
 	require.True(t, hasAnyRuntimeScope([]string{"agent:call"}, "agent:pull", "agent:call"))
 	require.False(t, hasAnyRuntimeScope([]string{"runs:read"}, "agent:pull", "agent:call"))
+}
+
+func TestRuntimeMCPAndLowLevelHelpers(t *testing.T) {
+	require.Equal(t, map[string]interface{}{}, normalizeMCPResult(nil))
+	require.Equal(t, map[string]interface{}{"answer": 1}, normalizeMCPResult(map[string]interface{}{"output": map[string]interface{}{"answer": 1}}))
+	require.Equal(t, map[string]interface{}{"summary": "done"}, normalizeMCPResult(map[string]interface{}{"structuredContent": map[string]interface{}{"summary": "done"}}))
+	require.Equal(t, map[string]interface{}{"mcp_result": map[string]interface{}{"content": []interface{}{"raw"}}}, normalizeMCPResult(map[string]interface{}{"content": []interface{}{"raw"}}))
+
+	require.Equal(t, "abc", truncate("abcdef", 3))
+	require.Equal(t, "ab", truncate("ab", 3))
+	require.True(t, isTimeoutErr(fakeTimeoutErr{timeout: true}))
+	require.False(t, isTimeoutErr(fakeTimeoutErr{timeout: false}))
+	require.False(t, isTimeoutErr(errors.New("plain error")))
 }
 
 func TestA2AContextAndRequirementEvidenceHelpers(t *testing.T) {
@@ -166,6 +196,10 @@ func TestA2AContextAndRequirementEvidenceHelpers(t *testing.T) {
 	require.Equal(t, []string{"a", "b"}, uniqueStrings([]string{" a ", "", "b", "a"}))
 	require.Equal(t, []string{"run_agent", "get_run"}, normalizeUsedMCPTools(map[string]interface{}{"used_mcp_tools": []interface{}{"run_agent", "get_run", "run_agent"}}, "web"))
 	require.Equal(t, []string{"x", "run_agent"}, normalizeUsedMCPTools(map[string]interface{}{"used_mcp_tools": "x"}, "mcp"))
+	require.Nil(t, stringListFromMetadata(nil))
+	require.Equal(t, []string{"a", "b"}, stringListFromMetadata([]string{"a", "b"}))
+	require.Equal(t, []string{" a ", "2", "true"}, stringListFromMetadata([]interface{}{" a ", 2, true}))
+	require.Nil(t, stringListFromMetadata(" "))
 	require.Equal(t, []string{"1"}, stringListFromMetadata(1))
 	matched, missing := splitCoverage([]string{"a", "b"}, []string{"b", "c"})
 	require.Equal(t, []string{"b"}, matched)
@@ -375,9 +409,26 @@ func TestRuntimeResponseAndNextActionHelpers(t *testing.T) {
 	require.Equal(t, "return_to_parent", delegated.Type)
 	require.Equal(t, runID.String(), delegated.ResourceID)
 	require.Equal(t, "review_output", nextActionForSuccess(nil, "", "").Type)
+	suggested, ok := nextActionFromOutput(map[string]interface{}{"next_action": " Review the result "})
+	require.True(t, ok)
+	require.Equal(t, "agent_suggested", suggested.Type)
+	require.Equal(t, "Review the result", suggested.Hint)
+	described, ok := nextActionFromOutput(map[string]interface{}{"next_action": map[string]interface{}{"description": "Use result", "method": 123}})
+	require.True(t, ok)
+	require.Equal(t, "执行 Agent 建议", described.Label)
+	require.Equal(t, "Use result", described.Hint)
+	require.Equal(t, "123", described.Method)
+	emptyAction, ok := nextActionFromOutput(map[string]interface{}{"next_action": map[string]interface{}{"label": " "}})
+	require.False(t, ok)
+	require.Nil(t, emptyAction)
 	require.Nil(t, nextActionFromUnsupportedOutput(t))
+	resp := &RunResponse{Status: "canceled"}
+	decorateNextAction(resp)
+	require.Nil(t, resp.NextAction)
+	decorateNextAction(nil)
 	require.Equal(t, "fallback", coalesceString(" ", "fallback"))
 	require.Equal(t, "value", coalesceString(" value ", "fallback"))
+	require.Equal(t, "7", stringFromMap(map[string]interface{}{"count": 7}, "count"))
 	require.Equal(t, "", stringPtrValue(nil))
 	require.Equal(t, "value", *stringPtrOrNil(" value "))
 	require.Nil(t, stringPtrOrNil(" "))
@@ -466,6 +517,10 @@ func TestRuntimeArtifactDraftHelpers(t *testing.T) {
 	require.Equal(t, "A", items[0].Title)
 	require.Equal(t, map[string]interface{}{"value": "raw"}, items[1].Content)
 	require.Equal(t, "Agent 输出", runArtifactsFromOutput(map[string]interface{}{"answer": 1})[0].Title)
+	explicitParts := []interface{}{"part-a", map[string]interface{}{"text": "part-b"}}
+	require.Equal(t, explicitParts, artifactDeltaPartsFromPayload(map[string]interface{}{"parts": explicitParts}))
+	require.Equal(t, []interface{}{map[string]interface{}{"type": "data", "data": map[string]interface{}{"value": 1}}}, artifactDeltaPartsFromPayload(map[string]interface{}{"content": map[string]interface{}{"value": 1}}))
+	require.Equal(t, []interface{}{map[string]interface{}{"type": "data", "data": []interface{}{"x"}}}, artifactDeltaPartsFromPayload(map[string]interface{}{"data": []interface{}{"x"}}))
 
 	delta := artifactDeltaDraftFromPayload(map[string]interface{}{
 		"artifact_id": "stream-1",
@@ -499,14 +554,21 @@ func TestRuntimeArtifactDraftHelpers(t *testing.T) {
 	require.Equal(t, "verified", content["last_checksum_status"])
 
 	require.Equal(t, []interface{}{"x"}, interfaceSliceFromAny("x"))
+	require.Equal(t, []interface{}{"x", "y"}, interfaceSliceFromAny([]interface{}{"x", "y"}))
 	require.Equal(t, []interface{}{}, interfaceSliceFromAny(nil))
 	require.Equal(t, "ab", artifactTextFromParts([]interface{}{"a", map[string]interface{}{"text": "b"}}))
 	declared, status := artifactChunkChecksum(map[string]interface{}{"parts_sha256": sha256Hex([]byte("parts"))}, sha256Hex([]byte("parts")))
 	require.Equal(t, sha256Hex([]byte("parts")), declared)
 	require.Equal(t, "verified", status)
+	declared, status = artifactChunkChecksum(map[string]interface{}{"parts_sha256": strings.Repeat("d", 64)}, strings.Repeat("e", 64))
+	require.Equal(t, strings.Repeat("d", 64), declared)
+	require.Equal(t, "mismatch", status)
+	_, status = artifactChunkChecksum(map[string]interface{}{}, "x")
+	require.Equal(t, "not_provided", status)
 	_, status = artifactChunkChecksum(map[string]interface{}{"parts_sha256": "bad"}, "x")
 	require.Equal(t, "invalid", status)
 	require.Equal(t, strings.Repeat("a", 64), normalizeSHA256(strings.ToUpper(strings.Repeat("a", 64))))
+	require.Equal(t, "", normalizeSHA256(strings.Repeat("g", 64)))
 	require.Equal(t, "", normalizeSHA256("bad"))
 	require.Equal(t, "ab", normalizeArtifactMetadataString("abcd", 2))
 	partsMeta := artifactFileMetadataFromParts([]interface{}{
@@ -529,13 +591,26 @@ func TestRuntimeArtifactDraftHelpers(t *testing.T) {
 	require.Equal(t, strings.Repeat("c", 64), partsMeta.FileSHA256)
 	require.NotNil(t, partsMeta.FileSizeBytes)
 	require.Equal(t, int64(64), *partsMeta.FileSizeBytes)
+	sizeFromInt64, ok := firstArtifactInt64(map[string]interface{}{"size": int64(9)}, "size")
+	require.True(t, ok)
+	require.Equal(t, int64(9), sizeFromInt64)
+	sizeFromInt, ok := firstArtifactInt64(map[string]interface{}{"size": 8}, "size")
+	require.True(t, ok)
+	require.Equal(t, int64(8), sizeFromInt)
+	sizeFromFloat64, ok := firstArtifactInt64(map[string]interface{}{"size": float64(6.9)}, "size")
+	require.True(t, ok)
+	require.Equal(t, int64(6), sizeFromFloat64)
 	sizeFromFloat, ok := firstArtifactInt64(map[string]interface{}{"bad": -1, "size": float32(7.8)}, "bad", "size")
 	require.True(t, ok)
 	require.Equal(t, int64(7), sizeFromFloat)
 	_, ok = firstArtifactInt64(map[string]interface{}{"size": int32(-1)}, "size")
 	require.False(t, ok)
+	_, ok = firstArtifactInt64(map[string]interface{}{"size": "7"}, "size")
+	require.False(t, ok)
 	require.Equal(t, "default", normalizeArtifactSourceID(""))
 	require.Equal(t, "Agent 产物", normalizeArtifactTitle(""))
+	require.Len(t, []rune(normalizeArtifactSourceID(strings.Repeat("s", 201))), 200)
+	require.Len(t, []rune(normalizeArtifactTitle(strings.Repeat("t", 201))), 200)
 	require.Equal(t, "fallback", coalesceArtifactString(map[string]interface{}{"x": " "}, "x", "fallback"))
 	require.True(t, validArtifactType("json"))
 	require.False(t, validArtifactType("html"))
@@ -726,4 +801,24 @@ func (f *fakeRuntimeWalletCharger) CreditCreator(context.Context, pgx.Tx, uuid.U
 
 func (f *fakeRuntimeWalletCharger) Refund(context.Context, pgx.Tx, uuid.UUID, int64) error {
 	return nil
+}
+
+type blankIPContext struct {
+	echo.Context
+}
+
+func (blankIPContext) RealIP() string {
+	return " "
+}
+
+type fakeTimeoutErr struct {
+	timeout bool
+}
+
+func (e fakeTimeoutErr) Error() string {
+	return "timeout"
+}
+
+func (e fakeTimeoutErr) Timeout() bool {
+	return e.timeout
 }
