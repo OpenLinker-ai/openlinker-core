@@ -1066,6 +1066,244 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 	}
 }
 
+func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
+	userID := uuid.MustParse("8582c7a4-0f02-4895-8570-7c7cce357e5f")
+	taskID := uuid.MustParse("c93dbab2-404f-4460-bcb7-0f17ece85567").String()
+	configID := uuid.MustParse("2f151345-b29a-463b-90fc-7e20e27fbf20").String()
+	const slug = "agent-one"
+
+	tests := []struct {
+		name   string
+		method func(*Handler, echo.Context) error
+		req    *a2aHandlerRequest
+		want   int
+		assert func(t *testing.T, c echo.Context, svc *fakeA2AService, cards *fakeA2ACardProvider)
+	}{
+		{
+			name: "public agent card",
+			method: func(h *Handler, c echo.Context) error {
+				return h.GetPublicAgentCardHTTP(c)
+			},
+			req:  &a2aHandlerRequest{method: http.MethodGet, target: "/", params: map[string]string{"slug": slug}},
+			want: http.StatusOK,
+			assert: func(t *testing.T, c echo.Context, _ *fakeA2AService, cards *fakeA2ACardProvider) {
+				if cards.publicSlug != slug {
+					t.Fatalf("public card slug = %q", cards.publicSlug)
+				}
+				if got := c.Response().Header().Get(echo.HeaderCacheControl); got != "public, max-age=300" {
+					t.Fatalf("public card cache header = %q", got)
+				}
+			},
+		},
+		{
+			name: "extended agent card",
+			method: func(h *Handler, c echo.Context) error {
+				return h.GetExtendedAgentCardHTTP(c)
+			},
+			req:  &a2aHandlerRequest{method: http.MethodGet, target: "/?version=v1", userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug}},
+			want: http.StatusOK,
+			assert: func(t *testing.T, c echo.Context, _ *fakeA2AService, cards *fakeA2ACardProvider) {
+				if cards.extendedSlug != slug {
+					t.Fatalf("extended card slug = %q", cards.extendedSlug)
+				}
+				if got := c.Response().Header().Get(a2aVersionHeader); got != a2aProtocolVersionCurrent {
+					t.Fatalf("extended card version header = %q", got)
+				}
+			},
+		},
+		{
+			name: "message send",
+			method: func(h *Handler, c echo.Context) error {
+				return h.MessageHTTP(c)
+			},
+			req: &a2aHandlerRequest{
+				method:     http.MethodPost,
+				target:     "/message:send?version=1.0",
+				body:       `{"message":{"messageId":"msg-http","contextId":"ctx-http","role":"user","parts":[{"kind":"text","text":"hello http"}]}}`,
+				userID:     userID.String(),
+				authMethod: "apikey",
+				scopes:     []string{"agents:run"},
+				params:     map[string]string{"slug": slug, "action": ":send"},
+			},
+			want: http.StatusOK,
+			assert: func(t *testing.T, c echo.Context, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("message/send") || svc.slug != slug || svc.userID != userID {
+					t.Fatalf("message send dispatch = calls=%v slug=%q user=%s", svc.calls, svc.slug, svc.userID)
+				}
+				if svc.sendParams.Metadata["a2a_protocol_version"] != a2aProtocolVersionCurrent {
+					t.Fatalf("message send metadata = %#v", svc.sendParams.Metadata)
+				}
+				if got := c.Response().Header().Get(a2aVersionHeader); got != a2aProtocolVersionCurrent {
+					t.Fatalf("message send version header = %q", got)
+				}
+			},
+		},
+		{
+			name: "tasks list",
+			method: func(h *Handler, c echo.Context) error {
+				return h.ListTasksHTTP(c)
+			},
+			req: &a2aHandlerRequest{
+				method:     http.MethodGet,
+				target:     "/tasks?page_size=5&history_length=2&include_artifacts=yes&context_id=ctx-http&status=completed&page_token=next&version=1.0",
+				userID:     userID.String(),
+				authMethod: "apikey",
+				scopes:     []string{"runs:read"},
+				params:     map[string]string{"slug": slug},
+			},
+			want: http.StatusOK,
+			assert: func(t *testing.T, _ echo.Context, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("tasks/list") || svc.listParams.ContextID != "ctx-http" || svc.listParams.Status != "completed" || svc.listParams.PageToken != "next" {
+					t.Fatalf("tasks list dispatch = calls=%v params=%#v", svc.calls, svc.listParams)
+				}
+				if svc.listParams.PageSize == nil || *svc.listParams.PageSize != 5 || svc.listParams.HistoryLength == nil || *svc.listParams.HistoryLength != 2 || svc.listParams.IncludeArtifacts == nil || !*svc.listParams.IncludeArtifacts {
+					t.Fatalf("tasks list optional params = %#v", svc.listParams)
+				}
+			},
+		},
+		{
+			name: "tasks get",
+			method: func(h *Handler, c echo.Context) error {
+				return h.GetTaskHTTP(c)
+			},
+			req: &a2aHandlerRequest{
+				method:     http.MethodGet,
+				target:     "/tasks/" + taskID + "?historyLength=3&version=1.0",
+				userID:     userID.String(),
+				authMethod: "apikey",
+				scopes:     []string{"runs:read"},
+				params:     map[string]string{"slug": slug, "taskID": taskID},
+			},
+			want: http.StatusOK,
+			assert: func(t *testing.T, _ echo.Context, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("tasks/get") || svc.taskID != taskID || svc.historyLength == nil || *svc.historyLength != 3 {
+					t.Fatalf("tasks get dispatch = calls=%v task=%q history=%v", svc.calls, svc.taskID, svc.historyLength)
+				}
+			},
+		},
+		{
+			name: "tasks cancel via action route",
+			method: func(h *Handler, c echo.Context) error {
+				return h.TaskActionHTTP(c)
+			},
+			req: &a2aHandlerRequest{
+				method:     http.MethodPost,
+				target:     "/tasks/" + taskID + ":cancel?version=1.0",
+				userID:     userID.String(),
+				authMethod: "apikey",
+				scopes:     []string{"agents:run"},
+				params:     map[string]string{"slug": slug, "*": "tasks/" + taskID + ":cancel"},
+			},
+			want: http.StatusOK,
+			assert: func(t *testing.T, _ echo.Context, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("tasks/cancel") || svc.taskID != taskID {
+					t.Fatalf("tasks cancel dispatch = calls=%v task=%q", svc.calls, svc.taskID)
+				}
+			},
+		},
+		{
+			name: "push set",
+			method: func(h *Handler, c echo.Context) error {
+				return h.SetTaskPushNotificationHTTP(c)
+			},
+			req: &a2aHandlerRequest{
+				method:     http.MethodPost,
+				target:     "/tasks/" + taskID + "/pushNotificationConfig?version=1.0",
+				body:       `{"pushNotificationConfig":{"url":"https://hooks.example/a2a","token":"secret","eventTypes":["run.completed"]}}`,
+				userID:     userID.String(),
+				authMethod: "apikey",
+				scopes:     []string{"runs:read"},
+				params:     map[string]string{"slug": slug, "taskID": taskID},
+			},
+			want: http.StatusCreated,
+			assert: func(t *testing.T, _ echo.Context, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("push/set") || svc.pushParams.ID != taskID || svc.pushParams.PushNotificationConfig.URL != "https://hooks.example/a2a" {
+					t.Fatalf("push set dispatch = calls=%v params=%#v", svc.calls, svc.pushParams)
+				}
+			},
+		},
+		{
+			name: "push list",
+			method: func(h *Handler, c echo.Context) error {
+				return h.ListTaskPushNotificationsHTTP(c)
+			},
+			req: &a2aHandlerRequest{
+				method:     http.MethodGet,
+				target:     "/tasks/" + taskID + "/pushNotificationConfig?version=1.0",
+				userID:     userID.String(),
+				authMethod: "apikey",
+				scopes:     []string{"runs:read"},
+				params:     map[string]string{"slug": slug, "taskID": taskID},
+			},
+			want: http.StatusOK,
+			assert: func(t *testing.T, _ echo.Context, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("push/list") || svc.pushParams.ID != taskID {
+					t.Fatalf("push list dispatch = calls=%v params=%#v", svc.calls, svc.pushParams)
+				}
+			},
+		},
+		{
+			name: "push get",
+			method: func(h *Handler, c echo.Context) error {
+				return h.GetTaskPushNotificationHTTP(c)
+			},
+			req: &a2aHandlerRequest{
+				method:     http.MethodGet,
+				target:     "/tasks/" + taskID + "/pushNotificationConfig/" + configID + "?version=1.0",
+				userID:     userID.String(),
+				authMethod: "apikey",
+				scopes:     []string{"runs:read"},
+				params:     map[string]string{"slug": slug, "taskID": taskID, "configID": configID},
+			},
+			want: http.StatusOK,
+			assert: func(t *testing.T, _ echo.Context, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("push/get") || svc.pushParams.ID != taskID || svc.pushParams.PushNotificationConfigID != configID {
+					t.Fatalf("push get dispatch = calls=%v params=%#v", svc.calls, svc.pushParams)
+				}
+			},
+		},
+		{
+			name: "push delete",
+			method: func(h *Handler, c echo.Context) error {
+				return h.DeleteTaskPushNotificationHTTP(c)
+			},
+			req: &a2aHandlerRequest{
+				method:     http.MethodDelete,
+				target:     "/tasks/" + taskID + "/pushNotificationConfig/" + configID + "?version=1.0",
+				userID:     userID.String(),
+				authMethod: "apikey",
+				scopes:     []string{"runs:read"},
+				params:     map[string]string{"slug": slug, "taskID": taskID, "configID": configID},
+			},
+			want: http.StatusNoContent,
+			assert: func(t *testing.T, _ echo.Context, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("push/delete") || svc.pushParams.ID != taskID || svc.pushParams.PushNotificationConfigID != configID {
+					t.Fatalf("push delete dispatch = calls=%v params=%#v", svc.calls, svc.pushParams)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newFakeA2AService(taskID)
+			cards := &fakeA2ACardProvider{}
+			h := NewHandler(svc)
+			h.SetAgentCardProvider(cards)
+			c := newA2ATestContext(tt.req)
+
+			if err := tt.method(h, c); err != nil {
+				t.Fatalf("%s returned error: %v", tt.name, err)
+			}
+			rec := c.(*a2ATestContext).rec
+			if rec.Code != tt.want {
+				t.Fatalf("%s status = %d, want %d, body = %s", tt.name, rec.Code, tt.want, rec.Body.String())
+			}
+			tt.assert(t, c, svc, cards)
+		})
+	}
+}
+
 type a2aHandlerRequest struct {
 	method     string
 	target     string
@@ -1270,10 +1508,12 @@ func fakeA2APushConfig(params *A2ATaskPushConfigParams) *A2ATaskPushNotification
 }
 
 type fakeA2ACardProvider struct {
+	publicSlug   string
 	extendedSlug string
 }
 
 func (f *fakeA2ACardProvider) GetAgentCardBySlug(_ context.Context, slug string) (*agent.AgentCardResponse, error) {
+	f.publicSlug = slug
 	return &agent.AgentCardResponse{Name: slug, Version: "1.0"}, nil
 }
 
