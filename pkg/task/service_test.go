@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ type fakeSkillRecommender struct {
 	skills      []db.Skill
 	matches     []task.AgentMatch
 	gotSkillIDs []string
+	listErr     error
 }
 
 type fakeRuntimeStarter struct {
@@ -43,6 +45,9 @@ func (f *fakeRuntimeStarter) StartRun(_ context.Context, userID uuid.UUID, req *
 }
 
 func (f *fakeSkillRecommender) ListAll(context.Context) ([]db.Skill, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return append([]db.Skill{}, f.skills...), nil
 }
 
@@ -486,6 +491,90 @@ func TestRecommendWithoutMatchesReturnsPrivateDraftNextAction(t *testing.T) {
 	board, err := svc.ListBoard(context.Background(), 20)
 	require.NoError(t, err)
 	require.Empty(t, board)
+}
+
+func TestPublicTaskBoundariesAndCatalogFallback(t *testing.T) {
+	pool := setupTaskTestDB(t)
+	ownerID := insertTaskUser(t, pool)
+	otherUserID := insertTaskUser(t, pool)
+	creatorID := insertTaskCreator(t, pool)
+	agentID := insertTaskAgent(t, pool, creatorID, "task-public-"+uuid.NewString()[:8], "approved")
+	insertTaskAgentSkills(t, pool, agentID, "data/sql-query")
+
+	longQuery := strings.TrimSpace(strings.Repeat("SQL task boundary ", 20))
+	var taskID uuid.UUID
+	err := pool.QueryRow(context.Background(),
+		`INSERT INTO task_queries (user_id, query, parsed_skills, mcp_tools, recommended_agent_ids)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id`,
+		ownerID, longQuery, []string{"missing/skill", "data/sql-query"}, []string{"run_agent", "create_task"}, []uuid.UUID{agentID}).Scan(&taskID)
+	require.NoError(t, err)
+
+	svc := task.NewService(pool, nil, &fakeSkillRecommender{listErr: errors.New("catalog offline")})
+	published, err := svc.Publish(context.Background(), taskID, ownerID, nil)
+	require.NoError(t, err)
+	require.NotNil(t, published.PublicSummary)
+	assert.Equal(t, longQuery, published.Query)
+	assert.Len(t, []rune(*published.PublicSummary), 240)
+	assert.Equal(t, longQuery[:240], *published.PublicSummary)
+	require.Len(t, published.ParsedSkillRefs, 2)
+	assert.Equal(t, "missing/skill", published.ParsedSkillRefs[0].Name)
+	assert.Equal(t, "data/sql-query", published.ParsedSkillRefs[1].Name)
+	require.Len(t, published.Recommendations, 1)
+	assert.Equal(t, agentID.String(), published.Recommendations[0].Agent.ID)
+
+	republished, err := svc.Publish(context.Background(), taskID, ownerID, &task.PublishRequest{
+		PublicSummary: "do not replace an already public task",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, republished.PublicSummary)
+	assert.Equal(t, *published.PublicSummary, *republished.PublicSummary)
+
+	_, err = svc.Publish(context.Background(), taskID, otherUserID, &task.PublishRequest{PublicSummary: "wrong owner"})
+	assertTaskHTTPStatus(t, err, http.StatusNotFound)
+
+	_, err = svc.GetByID(context.Background(), taskID, otherUserID)
+	assertTaskHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.GetByID(context.Background(), uuid.New(), ownerID)
+	assertTaskHTTPStatus(t, err, http.StatusNotFound)
+
+	board, err := svc.ListBoard(context.Background(), 0)
+	require.NoError(t, err)
+	require.Len(t, board, 1)
+	assert.Equal(t, taskID.String(), board[0].ID)
+	assert.Equal(t, *published.PublicSummary, board[0].Query)
+	assert.Equal(t, "open", board[0].Status)
+	assert.Equal(t, "pending", board[0].DeliveryStatus)
+	require.Len(t, board[0].ParsedSkillRefs, 2)
+	assert.Equal(t, "missing/skill", board[0].ParsedSkillRefs[0].Name)
+	assert.Equal(t, "data/sql-query", board[0].ParsedSkillRefs[1].Name)
+	require.Len(t, board[0].MCPToolRefs, 2)
+	assert.Equal(t, "run_agent", board[0].MCPToolRefs[0].Name)
+
+	history, err := svc.ListMine(context.Background(), ownerID, 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, history)
+	assert.Equal(t, taskID.String(), history[0].ID)
+	assert.Equal(t, "public", history[0].Visibility)
+
+	var completedTaskID uuid.UUID
+	err = pool.QueryRow(context.Background(),
+		`INSERT INTO task_queries (
+			user_id, query, parsed_skills, recommended_agent_ids,
+			claimed_agent_id, claimed_by_user_id, claimed_at,
+			completed_at, completion_summary, delivery_status
+		) VALUES (
+			$1, 'completed task cannot publish', '{}', $2,
+			$3, $4, NOW(),
+			NOW(), 'done', 'submitted'
+		) RETURNING id`,
+		ownerID, []uuid.UUID{agentID}, agentID, creatorID).Scan(&completedTaskID)
+	require.NoError(t, err)
+
+	_, err = svc.Publish(context.Background(), completedTaskID, ownerID, &task.PublishRequest{
+		PublicSummary: "completed task cannot publish",
+	})
+	assertTaskHTTPStatus(t, err, http.StatusConflict)
 }
 
 func TestRunTaskUsesSelectedAgentAndTaskInput(t *testing.T) {
