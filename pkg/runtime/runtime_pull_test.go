@@ -605,6 +605,56 @@ func TestRuntimePull_TimeoutsUnclaimedRun(t *testing.T) {
 	assert.Contains(t, eventTypes, "run.failed")
 }
 
+func TestRuntimePullWorker_TimeoutsStaleUnclaimedRun(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:pull"})
+	markRuntimePullAvailable(t, svc, token)
+
+	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "worker timeout"}), "")
+	require.NoError(t, err)
+	runID := mustParseUUID(t, started.RunID)
+	_, err = pool.Exec(ctx,
+		`UPDATE runs SET started_at=$2 WHERE id=$1`,
+		runID,
+		time.Now().Add(-3*time.Minute),
+	)
+	require.NoError(t, err)
+
+	workerCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runtime.StartRuntimePullRunWorker(workerCtx, svc, runtime.RuntimePullRunWorkerConfig{})
+	}()
+
+	require.Eventually(t, func() bool {
+		reloaded, err := svc.GetRun(context.Background(), userID, runID)
+		return err == nil && reloaded.Status == "timeout" && reloaded.ErrorCode == "RUNTIME_PULL_NOT_CLAIMED"
+	}, 2*time.Second, 20*time.Millisecond)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime pull worker did not stop after cancellation")
+	}
+
+	claimed, err := svc.ClaimRuntimePullRun(ctx, token)
+	require.NoError(t, err)
+	assert.Nil(t, claimed)
+
+	availability := readAgentAvailability(t, pool, agentID)
+	assert.Equal(t, "degraded", availability.Status)
+}
+
 func TestRuntimePull_TimeoutsClaimedRunWithoutResult(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
