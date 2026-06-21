@@ -403,6 +403,80 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	assert.Equal(t, "paused", listings[0].SyncStatus)
 }
 
+func TestStartProxyRunWorkerStopsWhenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	registry.StartProxyRunWorker(ctx, nil, registry.ProxyRunWorkerConfig{})
+}
+
+func TestStartProxyRunWorkerExpiresStaleProxyRuns(t *testing.T) {
+	pool := setupRegistryBridgeDB(t)
+	svc := registry.NewService(pool)
+	ctx := context.Background()
+
+	ownerID := insertRegistryOwner(t, pool)
+	agentID := insertRegistryAgent(t, pool, ownerID)
+	node, err := svc.CreateNode(ctx, ownerID, &registry.CreateNodeRequest{
+		NodeName: "Worker Bridge",
+		NodeType: "bridge_proxy",
+		BaseURL:  "http://127.0.0.1:3000",
+	})
+	require.NoError(t, err)
+	listing, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+		RegistryNodeID: node.ID,
+		AgentID:        agentID.String(),
+		RoutingMode:    "pull_proxy",
+		PayloadPolicy:  "store_full_payload",
+	})
+	require.NoError(t, err)
+	proxyRun, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
+		CloudListingID: listing.CloudListingID,
+		IdempotencyKey: "worker-timeout-" + uuid.NewString(),
+		InputSummary:   "worker should expire this run",
+	})
+	require.NoError(t, err)
+	claimed, err := svc.ClaimProxyRun(ctx, node.NodeSecret)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	assert.Equal(t, proxyRun.ID, claimed.ID)
+	runID := uuid.MustParse(proxyRun.ID)
+	_, err = pool.Exec(ctx, `UPDATE proxy_runs SET claimed_at = NOW() - INTERVAL '1 minute' WHERE id=$1`, runID)
+	require.NoError(t, err)
+
+	workerCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		registry.StartProxyRunWorker(workerCtx, svc, registry.ProxyRunWorkerConfig{
+			Interval: 5 * time.Millisecond,
+			Timeout:  time.Millisecond,
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("proxy run worker did not stop after cancellation")
+		}
+	})
+
+	require.Eventually(t, func() bool {
+		fetched, err := svc.GetProxyRun(ctx, ownerID, runID)
+		return err == nil && fetched.Status == "timeout" && fetched.ErrorCode == "PROXY_RUN_TIMEOUT"
+	}, time.Second, 10*time.Millisecond)
+	cancel()
+	require.Eventually(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestCreateRemoteProxyRunRoutesToRemoteRegistryAPI(t *testing.T) {
 	remoteListingID := uuid.New()
 	remoteRunID := uuid.New()
