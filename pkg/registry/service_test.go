@@ -20,7 +20,7 @@ import (
 	"github.com/kinzhi/openlinker-core/pkg/registry"
 )
 
-const truncateRegistryBridgeTables = "TRUNCATE proxy_runs, registry_peers, cloud_listing_links, registry_nodes, agent_skills, agents, wallets, users RESTART IDENTITY CASCADE"
+const truncateRegistryBridgeTables = "TRUNCATE proxy_runs, registry_peers, registry_federation_invites, cloud_listing_links, registry_nodes, agent_skills, agents, wallets, users RESTART IDENTITY CASCADE"
 const registryTestDBTimeout = 30 * time.Second
 
 func setupRegistryBridgeDB(t *testing.T) *pgxpool.Pool {
@@ -551,6 +551,87 @@ func TestRegistryPeerRoutesRemoteProxyRunWithoutRepeatingCredentials(t *testing.
 	peers, err = svc.ListRegistryPeers(ctx, ownerID)
 	require.NoError(t, err)
 	require.Len(t, peers, 1)
+}
+
+func TestRegistryFederationInviteExchangeCreatesPeer(t *testing.T) {
+	pool := setupRegistryBridgeDB(t)
+	svc := registry.NewService(pool)
+	ctx := context.Background()
+
+	ownerID := insertRegistryOwner(t, pool)
+	var capturedExchangeToken string
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/registry-peers/federation-invitations/exchange", r.URL.Path)
+		assert.Empty(t, r.Header.Get("Authorization"))
+
+		var req registry.ConsumeRegistryFederationInviteRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		capturedExchangeToken = req.FederationToken
+
+		material, err := svc.ConsumeRegistryFederationInvite(ctx, &req)
+		if err != nil {
+			http.Error(w, "federation exchange failed", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(material))
+	}))
+	defer remote.Close()
+
+	directInvite, err := svc.CreateRegistryFederationInvite(ctx, ownerID, &registry.CreateRegistryFederationInviteRequest{
+		Name:             "Direct Federation",
+		APIBaseURL:       remote.URL,
+		BearerToken:      "direct-peer-token-123",
+		ExpiresInSeconds: 120,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, directInvite.FederationToken)
+	assert.Equal(t, "active", directInvite.Status)
+	assert.Equal(t, remote.URL+"/api/v1", directInvite.APIBaseURL)
+	assert.Equal(t, remote.URL+"/api/v1/registry-peers/federation-invitations/exchange", directInvite.ExchangeURL)
+	assert.NotContains(t, directInvite.CredentialHint, "direct-peer-token-123")
+
+	material, err := svc.ConsumeRegistryFederationInvite(ctx, &registry.ConsumeRegistryFederationInviteRequest{
+		FederationToken: directInvite.FederationToken,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Direct Federation", material.Name)
+	assert.Equal(t, remote.URL+"/api/v1", material.APIBaseURL)
+	assert.Equal(t, "direct-peer-token-123", material.BearerToken)
+	assert.Equal(t, directInvite.CredentialHint, material.CredentialHint)
+
+	_, err = svc.ConsumeRegistryFederationInvite(ctx, &registry.ConsumeRegistryFederationInviteRequest{
+		FederationToken: directInvite.FederationToken,
+	})
+	requireHTTPStatus(t, err, http.StatusUnauthorized)
+
+	exchangeInvite, err := svc.CreateRegistryFederationInvite(ctx, ownerID, &registry.CreateRegistryFederationInviteRequest{
+		Name:             "Remote Registry",
+		APIBaseURL:       remote.URL,
+		BearerToken:      "exchange-peer-token-123",
+		ExpiresInSeconds: 120,
+	})
+	require.NoError(t, err)
+	exchanged, err := svc.ExchangeRegistryFederationInvite(ctx, ownerID, &registry.ExchangeRegistryFederationInviteRequest{
+		ExchangeURL:     exchangeInvite.ExchangeURL,
+		FederationToken: exchangeInvite.FederationToken,
+		Name:            "Federated Peer",
+		InitialStatus:   "active",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, exchangeInvite.FederationToken, capturedExchangeToken)
+	assert.Equal(t, exchangeInvite.ExchangeURL, exchanged.ExchangeURL)
+	assert.Equal(t, exchangeInvite.CredentialHint, exchanged.RemoteCredentialHint)
+	assert.Equal(t, "Federated Peer", exchanged.Peer.Name)
+	assert.Equal(t, remote.URL+"/api/v1", exchanged.Peer.APIBaseURL)
+	assert.Equal(t, "active", exchanged.Peer.Status)
+	assert.NotContains(t, exchanged.Peer.CredentialHint, "exchange-peer-token-123")
+
+	peers, err := svc.ListRegistryPeers(ctx, ownerID)
+	require.NoError(t, err)
+	require.Len(t, peers, 1)
+	assert.Equal(t, exchanged.Peer.ID, peers[0].ID)
 }
 
 func TestProxyRunPayloadPolicies(t *testing.T) {
