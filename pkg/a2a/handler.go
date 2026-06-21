@@ -12,15 +12,38 @@ import (
 
 	"github.com/kinzhi/openlinker-core/pkg/agent"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/kinzhi/openlinker-core/pkg/runtime"
 )
 
 type Handler struct {
-	svc          *Service
+	svc          service
 	cardProvider AgentCardProvider
 	validator    *validator.Validate
 }
 
-func NewHandler(svc *Service) *Handler {
+type service interface {
+	CreateRuntimeToken(ctx context.Context, userID, agentID uuid.UUID, req *CreateRuntimeTokenRequest) (*RuntimeTokenResponse, error)
+	ListRuntimeTokens(ctx context.Context, userID, agentID uuid.UUID) ([]RuntimeTokenResponse, error)
+	RevokeRuntimeToken(ctx context.Context, userID, tokenID uuid.UUID) error
+	GetRuntimeWorkbench(ctx context.Context, userID, agentID uuid.UUID) (*RuntimeWorkbenchResponse, error)
+	GetCallPolicy(ctx context.Context, userID, agentID uuid.UUID) (*CallPolicyResponse, error)
+	UpdateCallPolicy(ctx context.Context, userID, agentID uuid.UUID, req *UpdateCallPolicyRequest) (*CallPolicyResponse, error)
+	CallAgent(ctx context.Context, plaintextToken string, req *CallAgentRequest) (*runtime.RunResponse, error)
+	ListChildren(ctx context.Context, userID, parentRunID uuid.UUID) ([]ChildRunResponse, error)
+	ListParentRuns(ctx context.Context, userID uuid.UUID, page, size int32) (*ParentRunListResponse, error)
+	SendProtocolMessage(ctx context.Context, userID uuid.UUID, slug string, params *A2AMessageSendParams) (*A2ATask, error)
+	StartProtocolMessage(ctx context.Context, userID uuid.UUID, slug string, params *A2AMessageSendParams) (*A2ATask, error)
+	GetProtocolTask(ctx context.Context, userID uuid.UUID, slug, taskID string, historyLength *int) (*A2ATask, error)
+	ListProtocolTasks(ctx context.Context, userID uuid.UUID, slug string, params *A2ATaskListParams) (*A2ATaskListResponse, error)
+	CancelProtocolTask(ctx context.Context, userID uuid.UUID, slug, taskID string) (*A2ATask, error)
+	ListProtocolTaskEvents(ctx context.Context, userID uuid.UUID, slug, taskID string, afterSequence int32) ([]interface{}, bool, int32, error)
+	SetPushNotificationConfig(ctx context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) (*A2ATaskPushNotificationConfig, error)
+	GetPushNotificationConfig(ctx context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) (*A2ATaskPushNotificationConfig, error)
+	ListPushNotificationConfigs(ctx context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) (*A2ATaskPushConfigList, error)
+	DeletePushNotificationConfig(ctx context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) error
+}
+
+func NewHandler(svc service) *Handler {
 	return &Handler{svc: svc, validator: validator.New(validator.WithRequiredStructEnabled())}
 }
 

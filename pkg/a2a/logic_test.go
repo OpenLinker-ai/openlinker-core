@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	"github.com/kinzhi/openlinker-core/pkg/agent"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 	runtimepkg "github.com/kinzhi/openlinker-core/pkg/runtime"
@@ -891,6 +892,180 @@ func TestA2AJSONRPCHandlerValidationBeforeServiceDispatch(t *testing.T) {
 	}
 }
 
+func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
+	userID := uuid.MustParse("8582c7a4-0f02-4895-8570-7c7cce357e5f")
+	taskID := uuid.MustParse("c93dbab2-404f-4460-bcb7-0f17ece85567").String()
+	const slug = "agent-one"
+
+	tests := []struct {
+		name      string
+		body      string
+		scopes    []string
+		streaming bool
+		assert    func(t *testing.T, svc *fakeA2AService, cards *fakeA2ACardProvider)
+	}{
+		{
+			name:   "message send",
+			body:   `{"jsonrpc":"2.0","id":"send","method":"message/send","params":{"message":{"messageId":"msg-send","contextId":"ctx-jsonrpc","role":"user","parts":[{"kind":"text","text":"hello"}]}}}`,
+			scopes: []string{"agents:run"},
+			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("message/send") || svc.slug != slug || svc.userID != userID {
+					t.Fatalf("message/send dispatch = calls=%v slug=%q user=%s", svc.calls, svc.slug, svc.userID)
+				}
+				if svc.sendParams.Metadata["a2a_protocol_version"] != a2aProtocolVersionCurrent {
+					t.Fatalf("message/send metadata = %#v", svc.sendParams.Metadata)
+				}
+			},
+		},
+		{
+			name:      "message stream",
+			body:      `{"jsonrpc":"2.0","id":"stream","method":"message/stream","params":{"message":{"messageId":"msg-stream","role":"user","parts":[{"kind":"text","text":"stream"}]}}}`,
+			scopes:    []string{"agents:run"},
+			streaming: true,
+			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("message/stream") || !svc.called("events") {
+					t.Fatalf("message/stream dispatch calls = %v", svc.calls)
+				}
+			},
+		},
+		{
+			name:   "tasks get",
+			body:   `{"jsonrpc":"2.0","id":"get","method":"tasks/get","params":{"id":"` + taskID + `","historyLength":2}}`,
+			scopes: []string{"runs:read"},
+			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("tasks/get") || svc.taskID != taskID || svc.historyLength == nil || *svc.historyLength != 2 {
+					t.Fatalf("tasks/get dispatch = calls=%v task=%q history=%v", svc.calls, svc.taskID, svc.historyLength)
+				}
+			},
+		},
+		{
+			name:   "tasks list",
+			body:   `{"jsonrpc":"2.0","id":"list","method":"tasks/list","params":{"status":"completed","pageSize":7,"contextId":"ctx-jsonrpc","includeArtifacts":true}}`,
+			scopes: []string{"runs:read"},
+			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("tasks/list") || svc.listParams.Status != "completed" || svc.listParams.PageSize == nil || *svc.listParams.PageSize != 7 {
+					t.Fatalf("tasks/list dispatch = calls=%v params=%#v", svc.calls, svc.listParams)
+				}
+			},
+		},
+		{
+			name:   "tasks cancel",
+			body:   `{"jsonrpc":"2.0","id":"cancel","method":"tasks/cancel","params":{"id":"` + taskID + `"}}`,
+			scopes: []string{"agents:run"},
+			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("tasks/cancel") || svc.taskID != taskID {
+					t.Fatalf("tasks/cancel dispatch = calls=%v task=%q", svc.calls, svc.taskID)
+				}
+			},
+		},
+		{
+			name:      "tasks resubscribe",
+			body:      `{"jsonrpc":"2.0","id":"resub","method":"tasks/resubscribe","params":{"id":"` + taskID + `"}}`,
+			scopes:    []string{"runs:read"},
+			streaming: true,
+			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("tasks/get") || !svc.called("events") {
+					t.Fatalf("tasks/resubscribe dispatch calls = %v", svc.calls)
+				}
+			},
+		},
+		{
+			name:   "push set",
+			body:   `{"jsonrpc":"2.0","id":"push-set","method":"tasks/pushNotificationConfig/set","params":{"id":"` + taskID + `","pushNotificationConfig":{"url":"https://hooks.example/a2a","token":"secret"}}}`,
+			scopes: []string{"runs:read"},
+			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("push/set") || svc.pushParams.ID != taskID || svc.pushParams.PushNotificationConfig.URL != "https://hooks.example/a2a" {
+					t.Fatalf("push set dispatch = calls=%v params=%#v", svc.calls, svc.pushParams)
+				}
+			},
+		},
+		{
+			name:   "push get",
+			body:   `{"jsonrpc":"2.0","id":"push-get","method":"tasks/pushNotificationConfig/get","params":{"id":"` + taskID + `","pushNotificationConfigId":"cfg-1"}}`,
+			scopes: []string{"runs:read"},
+			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("push/get") || svc.pushParams.PushNotificationConfigID != "cfg-1" {
+					t.Fatalf("push get dispatch = calls=%v params=%#v", svc.calls, svc.pushParams)
+				}
+			},
+		},
+		{
+			name:   "push list",
+			body:   `{"jsonrpc":"2.0","id":"push-list","method":"tasks/pushNotificationConfig/list","params":{"id":"` + taskID + `"}}`,
+			scopes: []string{"runs:read"},
+			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("push/list") || svc.pushParams.ID != taskID {
+					t.Fatalf("push list dispatch = calls=%v params=%#v", svc.calls, svc.pushParams)
+				}
+			},
+		},
+		{
+			name:   "push delete",
+			body:   `{"jsonrpc":"2.0","id":"push-delete","method":"tasks/pushNotificationConfig/delete","params":{"id":"` + taskID + `","pushNotificationConfigId":"cfg-1"}}`,
+			scopes: []string{"runs:read"},
+			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
+				if !svc.called("push/delete") || svc.pushParams.PushNotificationConfigID != "cfg-1" {
+					t.Fatalf("push delete dispatch = calls=%v params=%#v", svc.calls, svc.pushParams)
+				}
+			},
+		},
+		{
+			name:   "extended card",
+			body:   `{"jsonrpc":"2.0","id":"card","method":"agent/getExtendedCard","params":{}}`,
+			scopes: []string{"runs:read"},
+			assert: func(t *testing.T, _ *fakeA2AService, cards *fakeA2ACardProvider) {
+				if cards.extendedSlug != slug {
+					t.Fatalf("extended card slug = %q", cards.extendedSlug)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newFakeA2AService(taskID)
+			cards := &fakeA2ACardProvider{}
+			h := NewHandler(svc)
+			h.SetAgentCardProvider(cards)
+			c := newA2ATestContext(&a2aHandlerRequest{
+				method:     http.MethodPost,
+				target:     "/?version=1.0",
+				body:       tt.body,
+				userID:     userID.String(),
+				authMethod: "apikey",
+				scopes:     tt.scopes,
+				params:     map[string]string{"slug": slug},
+			})
+
+			if err := h.JSONRPC(c); err != nil {
+				t.Fatalf("JSONRPC returned error: %v", err)
+			}
+			rec := c.(*a2ATestContext).rec
+			if rec.Code != http.StatusOK {
+				t.Fatalf("JSONRPC status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			if got := c.Response().Header().Get(a2aVersionHeader); got != a2aProtocolVersionCurrent {
+				t.Fatalf("A2A version header = %q", got)
+			}
+			if tt.streaming {
+				body := rec.Body.String()
+				if !strings.Contains(body, "event: task") || !strings.Contains(body, "event: status-update") {
+					t.Fatalf("stream body missing expected events: %s", body)
+				}
+			} else {
+				var resp JSONRPCResponse
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("JSONRPC response decode failed: %v", err)
+				}
+				if resp.Error != nil {
+					t.Fatalf("JSONRPC error response = %#v", resp.Error)
+				}
+			}
+			tt.assert(t, svc, cards)
+		})
+	}
+}
+
 type a2aHandlerRequest struct {
 	method     string
 	target     string
@@ -960,6 +1135,151 @@ func requireA2AHTTPStatus(t *testing.T, err error, want int) {
 func userIDFromCtxOnly(c echo.Context) error {
 	_, err := userIDFromCtx(c)
 	return err
+}
+
+type fakeA2AService struct {
+	*Service
+	calls         []string
+	userID        uuid.UUID
+	slug          string
+	taskID        string
+	historyLength *int
+	sendParams    A2AMessageSendParams
+	streamParams  A2AMessageSendParams
+	listParams    A2ATaskListParams
+	pushParams    A2ATaskPushConfigParams
+}
+
+func newFakeA2AService(taskID string) *fakeA2AService {
+	return &fakeA2AService{taskID: taskID}
+}
+
+func (f *fakeA2AService) called(name string) bool {
+	for _, call := range f.calls {
+		if call == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeA2AService) record(name string, userID uuid.UUID, slug string) {
+	f.calls = append(f.calls, name)
+	f.userID = userID
+	f.slug = slug
+}
+
+func (f *fakeA2AService) SendProtocolMessage(_ context.Context, userID uuid.UUID, slug string, params *A2AMessageSendParams) (*A2ATask, error) {
+	f.record("message/send", userID, slug)
+	f.sendParams = *params
+	return fakeA2ATask(f.taskID, a2aTaskStateCompleted), nil
+}
+
+func (f *fakeA2AService) StartProtocolMessage(_ context.Context, userID uuid.UUID, slug string, params *A2AMessageSendParams) (*A2ATask, error) {
+	f.record("message/stream", userID, slug)
+	f.streamParams = *params
+	return fakeA2ATask(f.taskID, a2aTaskStateWorking), nil
+}
+
+func (f *fakeA2AService) GetProtocolTask(_ context.Context, userID uuid.UUID, slug, taskID string, historyLength *int) (*A2ATask, error) {
+	f.record("tasks/get", userID, slug)
+	f.taskID = taskID
+	f.historyLength = historyLength
+	return fakeA2ATask(taskID, a2aTaskStateWorking), nil
+}
+
+func (f *fakeA2AService) ListProtocolTasks(_ context.Context, userID uuid.UUID, slug string, params *A2ATaskListParams) (*A2ATaskListResponse, error) {
+	f.record("tasks/list", userID, slug)
+	f.listParams = *params
+	return &A2ATaskListResponse{Tasks: []A2ATask{*fakeA2ATask(f.taskID, a2aTaskStateCompleted)}, PageSize: 1, TotalSize: 1}, nil
+}
+
+func (f *fakeA2AService) CancelProtocolTask(_ context.Context, userID uuid.UUID, slug, taskID string) (*A2ATask, error) {
+	f.record("tasks/cancel", userID, slug)
+	f.taskID = taskID
+	return fakeA2ATask(taskID, a2aTaskStateCanceled), nil
+}
+
+func (f *fakeA2AService) ListProtocolTaskEvents(_ context.Context, userID uuid.UUID, slug, taskID string, afterSequence int32) ([]interface{}, bool, int32, error) {
+	f.record("events", userID, slug)
+	f.taskID = taskID
+	return []interface{}{&A2ATaskStatusUpdateEvent{
+		Kind:      "status-update",
+		TaskID:    taskID,
+		ContextID: "ctx-jsonrpc",
+		Status:    A2ATaskStatus{State: a2aTaskStateCompleted, Timestamp: "2026-06-21T00:00:00Z"},
+		Final:     true,
+		Metadata:  map[string]interface{}{"openlinker_sequence": afterSequence + 1},
+	}}, true, afterSequence + 1, nil
+}
+
+func (f *fakeA2AService) SetPushNotificationConfig(_ context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) (*A2ATaskPushNotificationConfig, error) {
+	f.record("push/set", userID, slug)
+	f.pushParams = *params
+	return fakeA2APushConfig(params), nil
+}
+
+func (f *fakeA2AService) GetPushNotificationConfig(_ context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) (*A2ATaskPushNotificationConfig, error) {
+	f.record("push/get", userID, slug)
+	f.pushParams = *params
+	return fakeA2APushConfig(params), nil
+}
+
+func (f *fakeA2AService) ListPushNotificationConfigs(_ context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) (*A2ATaskPushConfigList, error) {
+	f.record("push/list", userID, slug)
+	f.pushParams = *params
+	return &A2ATaskPushConfigList{Items: []A2ATaskPushNotificationConfig{*fakeA2APushConfig(params)}}, nil
+}
+
+func (f *fakeA2AService) DeletePushNotificationConfig(_ context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) error {
+	f.record("push/delete", userID, slug)
+	f.pushParams = *params
+	return nil
+}
+
+func fakeA2ATask(taskID, state string) *A2ATask {
+	return &A2ATask{
+		Kind:      "task",
+		ID:        taskID,
+		ContextID: "ctx-jsonrpc",
+		Status: A2ATaskStatus{
+			State:     state,
+			Timestamp: "2026-06-21T00:00:00Z",
+			Message: &A2AMessage{
+				Kind:  "message",
+				Role:  "agent",
+				Parts: []map[string]interface{}{{"kind": "text", "text": "ok"}},
+			},
+		},
+	}
+}
+
+func fakeA2APushConfig(params *A2ATaskPushConfigParams) *A2ATaskPushNotificationConfig {
+	cfg := params.PushNotificationConfig
+	if cfg.ID == "" {
+		cfg.ID = params.PushNotificationConfigID
+	}
+	if cfg.URL == "" {
+		cfg.URL = "https://hooks.example/a2a"
+	}
+	taskID := taskIDFromPushParams(params)
+	if taskID == "" {
+		taskID = params.ID
+	}
+	return &A2ATaskPushNotificationConfig{TaskID: taskID, PushNotificationConfig: cfg}
+}
+
+type fakeA2ACardProvider struct {
+	extendedSlug string
+}
+
+func (f *fakeA2ACardProvider) GetAgentCardBySlug(_ context.Context, slug string) (*agent.AgentCardResponse, error) {
+	return &agent.AgentCardResponse{Name: slug, Version: "1.0"}, nil
+}
+
+func (f *fakeA2ACardProvider) GetExtendedAgentCardBySlug(_ context.Context, slug string) (*agent.AgentCardResponse, error) {
+	f.extendedSlug = slug
+	return &agent.AgentCardResponse{Name: slug, Version: "1.0", SupportsAuthenticatedExtendedCard: true}, nil
 }
 
 func diagnosticCodes(items []RuntimeWorkbenchDiagnostic) []string {
