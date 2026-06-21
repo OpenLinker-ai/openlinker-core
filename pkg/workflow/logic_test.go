@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/labstack/echo/v4"
 
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
@@ -397,6 +399,47 @@ func TestWorkflowComparisonAndRerunHelpers(t *testing.T) {
 	}
 }
 
+func TestWorkflowFailureStatusMarking(t *testing.T) {
+	runID := uuid.New()
+	workflowID := uuid.New()
+	userID := uuid.New()
+	longMessage := strings.Repeat("x", 1205)
+	storedMessage := strings.Repeat("x", 1000)
+
+	dbtx := &workflowFakeDBTX{
+		row: workflowFakeRow{
+			values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusFailed, &storedMessage),
+		},
+	}
+	svc := &Service{queries: db.New(dbtx)}
+
+	err := svc.failWorkflowRun(context.Background(), runID, longMessage)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+	if !strings.Contains(dbtx.queryRowSQL, "-- name: MarkWorkflowRunFailed") {
+		t.Fatalf("expected MarkWorkflowRunFailed query, got %q", dbtx.queryRowSQL)
+	}
+	if len(dbtx.queryRowArgs) != 2 || dbtx.queryRowArgs[0] != runID {
+		t.Fatalf("unexpected MarkWorkflowRunFailed args: %#v", dbtx.queryRowArgs)
+	}
+	messageArg, ok := dbtx.queryRowArgs[1].(*string)
+	if !ok || messageArg == nil || *messageArg != storedMessage {
+		t.Fatalf("expected truncated error message arg, got %#v", dbtx.queryRowArgs[1])
+	}
+
+	conflictSvc := &Service{queries: db.New(&workflowFakeDBTX{row: workflowFakeRow{err: pgx.ErrNoRows}})}
+	err = conflictSvc.markWorkflowRunFailedStatus(context.Background(), runID, "already stopped")
+	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
+
+	dbErr := errors.New("db down")
+	failingSvc := &Service{queries: db.New(&workflowFakeDBTX{row: workflowFakeRow{err: dbErr}})}
+	err = failingSvc.markWorkflowRunFailedStatus(context.Background(), runID, "boom")
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+}
+
+func TestStartRunWorkerNoopsWithoutService(t *testing.T) {
+	StartRunWorker(context.Background(), nil, RunWorkerConfig{})
+}
+
 func TestWorkflowHandlerValidationAndRoutes(t *testing.T) {
 	h := NewHandler(&Service{})
 	userID := uuid.NewString()
@@ -532,4 +575,83 @@ func requireWorkflowHTTPStatus(t *testing.T, err error, want int) {
 func userIDFromCtxOnly(c echo.Context) error {
 	_, err := userIDFromCtx(c)
 	return err
+}
+
+type workflowFakeDBTX struct {
+	row          workflowFakeRow
+	queryRowSQL  string
+	queryRowArgs []any
+}
+
+func (f *workflowFakeDBTX) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+
+func (f *workflowFakeDBTX) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
+	return nil, errors.New("workflow fake query is not implemented")
+}
+
+func (f *workflowFakeDBTX) QueryRow(_ context.Context, sql string, args ...interface{}) pgx.Row {
+	f.queryRowSQL = sql
+	f.queryRowArgs = append([]any(nil), args...)
+	return f.row
+}
+
+type workflowFakeRow struct {
+	values []any
+	err    error
+}
+
+func (r workflowFakeRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	if len(dest) != len(r.values) {
+		return errors.New("workflow fake row scan destination mismatch")
+	}
+	for i, value := range r.values {
+		target := reflect.ValueOf(dest[i])
+		if target.Kind() != reflect.Ptr || target.IsNil() {
+			return errors.New("workflow fake row scan target must be a non-nil pointer")
+		}
+		slot := target.Elem()
+		if value == nil {
+			slot.Set(reflect.Zero(slot.Type()))
+			continue
+		}
+		source := reflect.ValueOf(value)
+		if source.Type().AssignableTo(slot.Type()) {
+			slot.Set(source)
+			continue
+		}
+		if source.Type().ConvertibleTo(slot.Type()) {
+			slot.Set(source.Convert(slot.Type()))
+			continue
+		}
+		return errors.New("workflow fake row scan value type mismatch")
+	}
+	return nil
+}
+
+func workflowFakeRunValues(runID, workflowID, userID uuid.UUID, status string, errorMessage *string) []any {
+	now := time.Date(2026, 6, 22, 9, 30, 0, 0, time.UTC)
+	finished := now.Add(time.Second)
+	return []any{
+		runID,
+		workflowID,
+		userID,
+		status,
+		[]byte(`{"prompt":"a2a"}`),
+		[]byte(`{}`),
+		errorMessage,
+		now,
+		&finished,
+		now,
+		now,
+		int32(1),
+		int32(3),
+		nil,
+		nil,
+		nil,
+	}
 }
