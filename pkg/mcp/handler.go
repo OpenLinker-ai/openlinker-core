@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,7 +11,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	"github.com/kinzhi/openlinker-core/pkg/agent"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/kinzhi/openlinker-core/pkg/runtime"
+	"github.com/kinzhi/openlinker-core/pkg/task"
 )
 
 const mcpProtocolVersion = "2025-06-18"
@@ -20,12 +24,21 @@ const mcpProtocolVersion = "2025-06-18"
 // 路由组应挂 HybridAuthMiddleware：JWT 与访问令牌都能进，
 // 但 handler 内强制只接受 apikey（assertAPIKeyAuth），避免浏览器 cookie 误调。
 type Handler struct {
-	svc       *Service
+	svc       service
 	validator *validator.Validate
 }
 
+type service interface {
+	SearchAgents(ctx context.Context, req *SearchAgentsRequest) (*agent.MarketListResponse, error)
+	GetAgent(ctx context.Context, req *GetAgentRequest) (*agent.AgentDetailResponse, error)
+	RunAgent(ctx context.Context, userID uuid.UUID, req *RunAgentRequest) (*runtime.RunResponse, error)
+	GetRun(ctx context.Context, userID, runID uuid.UUID) (*runtime.RunResponse, error)
+	CreateTask(ctx context.Context, userID uuid.UUID, req *CreateTaskRequest) (*task.RecommendResponse, error)
+	Tools() []ToolDescriptor
+}
+
 // NewHandler 构造 MCP handler。
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc service) *Handler {
 	return &Handler{
 		svc:       svc,
 		validator: validator.New(validator.WithRequiredStructEnabled()),

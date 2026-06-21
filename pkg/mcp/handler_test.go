@@ -2,16 +2,21 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/kinzhi/openlinker-core/pkg/agent"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/kinzhi/openlinker-core/pkg/runtime"
+	"github.com/kinzhi/openlinker-core/pkg/task"
 )
 
 func TestPostRunAgentRejectsAPIKeyWithoutRunScope(t *testing.T) {
@@ -401,6 +406,178 @@ func TestRESTHandlersValidateAuthBodiesAndUserContextBeforeServiceDispatch(t *te
 	}
 }
 
+func TestRESTHandlersDispatchToService(t *testing.T) {
+	userID := uuid.MustParse("8582c7a4-0f02-4895-8570-7c7cce357e5f")
+	runID := uuid.MustParse("c93dbab2-404f-4460-bcb7-0f17ece85567")
+	agentID := uuid.MustParse("1a63b493-52c8-4b43-81a3-0fbd18422a7f")
+	svc := newFakeMCPService()
+	tests := []struct {
+		name     string
+		build    func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context
+		call     func(*Handler, echo.Context) error
+		wantHTTP int
+		assert   func(t *testing.T)
+	}{
+		{
+			name: "search agents",
+			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
+				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/search_agents", `{"query":"translate","tags":["text"],"limit":99}`), rec)
+				setAPIKeyScopes(c, "agents:read")
+				return c
+			},
+			call:     (*Handler).PostSearchAgents,
+			wantHTTP: http.StatusOK,
+			assert: func(t *testing.T) {
+				require.Equal(t, "translate", svc.searchReq.Query)
+				require.Equal(t, int32(99), svc.searchReq.Limit)
+			},
+		},
+		{
+			name: "get agent",
+			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
+				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/get_agent", `{"slug":"agent-one"}`), rec)
+				setAPIKeyScopes(c, "agents:read")
+				return c
+			},
+			call:     (*Handler).PostGetAgent,
+			wantHTTP: http.StatusOK,
+			assert: func(t *testing.T) {
+				require.Equal(t, "agent-one", svc.getReq.Slug)
+			},
+		},
+		{
+			name: "run agent",
+			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
+				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/run_agent", `{"agent_id":"`+agentID.String()+`","input":{"text":"hi"},"metadata":{"trace":"mcp"}}`), rec)
+				setAPIKeyScopes(c, "agents:run")
+				c.Set(string(httpx.CtxKeyUserID), userID.String())
+				return c
+			},
+			call:     (*Handler).PostRunAgent,
+			wantHTTP: http.StatusOK,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.runUserID)
+				require.Equal(t, agentID.String(), svc.runReq.AgentID)
+				require.Equal(t, "mcp", svc.runReq.Metadata["trace"])
+			},
+		},
+		{
+			name: "get run",
+			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
+				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/get_run", `{"run_id":"`+runID.String()+`"}`), rec)
+				setAPIKeyScopes(c, "runs:read")
+				c.Set(string(httpx.CtxKeyUserID), userID.String())
+				return c
+			},
+			call:     (*Handler).PostGetRun,
+			wantHTTP: http.StatusOK,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.getRunUserID)
+				require.Equal(t, runID, svc.getRunID)
+			},
+		},
+		{
+			name: "create task",
+			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
+				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/create_task", `{"query":"summarize a long document","skill_ids":["summary"],"mcp_tools":["search_agents"]}`), rec)
+				setAPIKeyScopes(c, "tasks:write")
+				c.Set(string(httpx.CtxKeyUserID), userID.String())
+				return c
+			},
+			call:     (*Handler).PostCreateTask,
+			wantHTTP: http.StatusOK,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.taskUserID)
+				require.Equal(t, "summarize a long document", svc.taskReq.Query)
+				require.Equal(t, []string{"search_agents"}, svc.taskReq.MCPTools)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := echo.New()
+			rec := httptest.NewRecorder()
+			require.NoError(t, tt.call(NewHandler(svc), tt.build(e, rec)))
+			require.Equal(t, tt.wantHTTP, rec.Code)
+			tt.assert(t)
+		})
+	}
+}
+
+func TestPostRPCToolCallDispatchesAllTools(t *testing.T) {
+	userID := uuid.MustParse("8582c7a4-0f02-4895-8570-7c7cce357e5f")
+	runID := uuid.MustParse("c93dbab2-404f-4460-bcb7-0f17ece85567")
+	agentID := uuid.MustParse("1a63b493-52c8-4b43-81a3-0fbd18422a7f")
+	svc := newFakeMCPService()
+	tests := []struct {
+		name   string
+		params string
+		assert func(t *testing.T)
+	}{
+		{
+			name:   "search_agents",
+			params: `{"name":"search_agents","arguments":{"query":"data","limit":2}}`,
+			assert: func(t *testing.T) {
+				require.Equal(t, "data", svc.searchReq.Query)
+				require.Equal(t, int32(2), svc.searchReq.Limit)
+			},
+		},
+		{
+			name:   "get_agent",
+			params: `{"name":"get_agent","arguments":{"slug":"agent-one"}}`,
+			assert: func(t *testing.T) {
+				require.Equal(t, "agent-one", svc.getReq.Slug)
+			},
+		},
+		{
+			name:   "run_agent",
+			params: `{"name":"run_agent","arguments":{"agent_id":"` + agentID.String() + `","input":{"text":"hi"}}}`,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.runUserID)
+				require.Equal(t, agentID.String(), svc.runReq.AgentID)
+			},
+		},
+		{
+			name:   "get_run",
+			params: `{"name":"get_run","arguments":{"run_id":"` + runID.String() + `"}}`,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.getRunUserID)
+				require.Equal(t, runID, svc.getRunID)
+			},
+		},
+		{
+			name:   "create_task",
+			params: `{"name":"create_task","arguments":{"query":"summarize a long document"}}`,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.taskUserID)
+				require.Equal(t, "summarize a long document", svc.taskReq.Query)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c := newRPCContext(`{"jsonrpc":"2.0","id":"ok","method":"tools/call","params":`+tt.params+`}`, rec)
+			c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+			c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read", "agents:run", "runs:read", "tasks:write"})
+			c.Set(string(httpx.CtxKeyUserID), userID.String())
+
+			require.NoError(t, NewHandler(svc).PostRPC(c))
+			require.Equal(t, http.StatusOK, rec.Code)
+
+			var resp struct {
+				Result mcpToolResult `json:"result"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.False(t, resp.Result.IsError)
+			require.NotNil(t, resp.Result.StructuredContent)
+			tt.assert(t)
+		})
+	}
+}
+
 func TestGetToolsReturnsRESTToolDescriptors(t *testing.T) {
 	e := echo.New()
 	rec := httptest.NewRecorder()
@@ -477,4 +654,79 @@ func jsonFieldNameForToolDescriptorInput(t *testing.T, tool ToolDescriptor) stri
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"input_schema"`)
 	return "input_schema"
+}
+
+type fakeMCPService struct {
+	searchResp *agent.MarketListResponse
+	getResp    *agent.AgentDetailResponse
+	runResp    *runtime.RunResponse
+	taskResp   *task.RecommendResponse
+
+	searchReq    SearchAgentsRequest
+	getReq       GetAgentRequest
+	runUserID    uuid.UUID
+	runReq       RunAgentRequest
+	getRunUserID uuid.UUID
+	getRunID     uuid.UUID
+	taskUserID   uuid.UUID
+	taskReq      CreateTaskRequest
+}
+
+func newFakeMCPService() *fakeMCPService {
+	return &fakeMCPService{
+		searchResp: &agent.MarketListResponse{
+			Items: []agent.MarketListItem{{ID: "agent-1", Slug: "agent-one", Name: "Agent One"}},
+			Total: 1,
+			Page:  1,
+			Size:  1,
+		},
+		getResp: &agent.AgentDetailResponse{
+			ID:   "agent-1",
+			Slug: "agent-one",
+			Name: "Agent One",
+		},
+		runResp: &runtime.RunResponse{
+			RunID:  "run-1",
+			Status: "success",
+			Output: map[string]interface{}{"ok": true},
+			Source: "mcp",
+		},
+		taskResp: &task.RecommendResponse{
+			TaskID:     uuid.MustParse("9e080dc1-1d0f-4806-a570-4aa25a2e759c"),
+			Visibility: "private",
+			MCPTools:   []string{"search_agents"},
+		},
+	}
+}
+
+func (f *fakeMCPService) SearchAgents(_ context.Context, req *SearchAgentsRequest) (*agent.MarketListResponse, error) {
+	f.searchReq = *req
+	return f.searchResp, nil
+}
+
+func (f *fakeMCPService) GetAgent(_ context.Context, req *GetAgentRequest) (*agent.AgentDetailResponse, error) {
+	f.getReq = *req
+	return f.getResp, nil
+}
+
+func (f *fakeMCPService) RunAgent(_ context.Context, userID uuid.UUID, req *RunAgentRequest) (*runtime.RunResponse, error) {
+	f.runUserID = userID
+	f.runReq = *req
+	return f.runResp, nil
+}
+
+func (f *fakeMCPService) GetRun(_ context.Context, userID, runID uuid.UUID) (*runtime.RunResponse, error) {
+	f.getRunUserID = userID
+	f.getRunID = runID
+	return f.runResp, nil
+}
+
+func (f *fakeMCPService) CreateTask(_ context.Context, userID uuid.UUID, req *CreateTaskRequest) (*task.RecommendResponse, error) {
+	f.taskUserID = userID
+	f.taskReq = *req
+	return f.taskResp, nil
+}
+
+func (f *fakeMCPService) Tools() []ToolDescriptor {
+	return mcpTools
 }
