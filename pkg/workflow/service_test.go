@@ -661,6 +661,82 @@ func TestRetryWorkflowRunCreatesNewPendingRun(t *testing.T) {
 	require.Equal(t, "manual retry", retry.Input["topic"])
 }
 
+func TestWorkflowControlPlaneReadsListsAndRunStateTransitions(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+
+	ctx := context.Background()
+	userID := insertWorkflowUser(t, pool, "wf-control-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-control-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, "http://127.0.0.1:18080")
+	svc := workflow.NewService(pool, nil)
+
+	created, err := svc.CreateWorkflow(ctx, userID, &workflow.CreateWorkflowRequest{
+		Name:        "Control plane workflow",
+		Description: "covers workflow read and run state controls",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "review", Title: "Review", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+
+	workflowID := uuid.MustParse(created.ID)
+	fetched, err := svc.GetWorkflow(ctx, userID, workflowID)
+	require.NoError(t, err)
+	require.Equal(t, created.ID, fetched.ID)
+	require.Equal(t, "Control plane workflow", fetched.Name)
+	require.Len(t, fetched.Nodes, 1)
+
+	listed, err := svc.ListWorkflows(ctx, userID, 0)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), listed.Total)
+	require.Len(t, listed.Items, 1)
+	require.Equal(t, fetched.ID, listed.Items[0].ID)
+
+	runID := uuid.New()
+	_, err = pool.Exec(ctx, `
+		INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts)
+		VALUES ($1, $2, $3, 'pending', $4, 5)`,
+		runID, workflowID, userID, []byte(`{"topic":"control plane"}`))
+	require.NoError(t, err)
+
+	runs, err := svc.ListWorkflowRuns(ctx, userID, workflowID, 0)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), runs.Total)
+	require.Len(t, runs.Items, 1)
+	require.Equal(t, runID.String(), runs.Items[0].ID)
+	require.Equal(t, "pending", runs.Items[0].Status)
+	require.Equal(t, "control plane", runs.Items[0].Input["topic"])
+
+	gotRun, err := svc.GetWorkflowRun(ctx, userID, runID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", gotRun.Status)
+	require.Equal(t, int32(5), gotRun.MaxAttempts)
+
+	paused, err := svc.PauseWorkflowRun(ctx, userID, runID)
+	require.NoError(t, err)
+	require.Equal(t, "paused", paused.Status)
+
+	pausedAgain, err := svc.PauseWorkflowRun(ctx, userID, runID)
+	require.NoError(t, err)
+	require.Equal(t, "paused", pausedAgain.Status)
+
+	resumed, err := svc.ResumeWorkflowRun(ctx, userID, runID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", resumed.Status)
+
+	canceled, err := svc.CancelWorkflowRun(ctx, userID, runID)
+	require.NoError(t, err)
+	require.Equal(t, "canceled", canceled.Status)
+
+	canceledAgain, err := svc.CancelWorkflowRun(ctx, userID, runID)
+	require.NoError(t, err)
+	require.Equal(t, "canceled", canceledAgain.Status)
+
+	_, err = svc.GetWorkflow(ctx, uuid.New(), workflowID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "workflow 不存在")
+}
+
 func TestCreateWorkflowRejectsCyclicEdges(t *testing.T) {
 	svc := workflow.NewService(nil, nil)
 	agentID := uuid.New()
