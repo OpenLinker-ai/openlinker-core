@@ -221,6 +221,20 @@ func TestSkillQueriesScanRowsAndMatches(t *testing.T) {
 		t.Fatalf("ListSkills scan = %#v", listed)
 	}
 
+	agentSkillRows := &fakeRows{rows: [][]any{skillRow("ai/agent-orchestration", "ai", "Agent orchestration", "delegate safely", 3, now)}}
+	dbtx.queryRows = agentSkillRows
+	agentSkills, err := q.ListAgentSkills(context.Background(), agentID)
+	if err != nil {
+		t.Fatalf("ListAgentSkills error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentSkills")
+	if !agentSkillRows.closed || len(agentSkills) != 1 || agentSkills[0].ID != "ai/agent-orchestration" {
+		t.Fatalf("ListAgentSkills scan = %#v closed=%v", agentSkills, agentSkillRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{agentID}) {
+		t.Fatalf("ListAgentSkills args = %#v", dbtx.queryArgs)
+	}
+
 	matchRows := &fakeRows{rows: [][]any{{agentID, int32(2), int32(99)}}}
 	matchDB := &fakeDBTX{queryRows: matchRows}
 	matches, err := New(matchDB).ListAgentsBySkills(context.Background(), []string{"data/sql-query", "data/analysis"})
@@ -230,6 +244,25 @@ func TestSkillQueriesScanRowsAndMatches(t *testing.T) {
 	requireSQLName(t, matchDB.querySQL, "ListAgentsBySkills")
 	if len(matches) != 1 || matches[0].AgentID != agentID || matches[0].MatchCount != 2 || matches[0].TotalCalls != 99 {
 		t.Fatalf("ListAgentsBySkills scan = %#v", matches)
+	}
+
+	tx := &fakeTx{tag: pgconn.NewCommandTag("INSERT 0 1")}
+	if err := ReplaceAgentSkills(context.Background(), tx, agentID, []string{"ai/agent-orchestration", "data/sql-query"}); err != nil {
+		t.Fatalf("ReplaceAgentSkills error = %v", err)
+	}
+	if len(tx.execSQLs) != 3 {
+		t.Fatalf("ReplaceAgentSkills exec count = %d", len(tx.execSQLs))
+	}
+	requireSQLName(t, tx.execSQLs[0], "DeleteAgentSkills")
+	requireSQLName(t, tx.execSQLs[1], "InsertAgentSkill")
+	requireSQLName(t, tx.execSQLs[2], "InsertAgentSkill")
+	if !reflect.DeepEqual(tx.execArgs[0], []any{agentID}) || !reflect.DeepEqual(tx.execArgs[2], []any{agentID, "data/sql-query"}) {
+		t.Fatalf("ReplaceAgentSkills args = %#v", tx.execArgs)
+	}
+
+	withTx := q.WithTx(tx)
+	if withTx.db != tx {
+		t.Fatalf("WithTx did not bind the provided transaction")
 	}
 }
 
@@ -272,6 +305,22 @@ func TestAgentRegistrationTokenQueriesScanRowsAndAffectedRows(t *testing.T) {
 	requireSQLName(t, dbtx.querySQL, "ListAgentRegistrationTokensByCreator")
 	if len(listed) != 1 || listed[0].TokenHash != "hash" {
 		t.Fatalf("ListAgentRegistrationTokensByCreator scan = %#v", listed)
+	}
+
+	activeTokenValues := append([]any{}, tokenValues...)
+	activeTokenValues[8] = nil
+	activeRows := &fakeRows{rows: [][]any{activeTokenValues}}
+	dbtx.queryRows = activeRows
+	activeTokens, err := q.ListActiveAgentRegistrationTokensByPrefix(context.Background(), "rt_live_abcd")
+	if err != nil {
+		t.Fatalf("ListActiveAgentRegistrationTokensByPrefix error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListActiveAgentRegistrationTokensByPrefix")
+	if !activeRows.closed || len(activeTokens) != 1 || activeTokens[0].RevokedAt != nil {
+		t.Fatalf("ListActiveAgentRegistrationTokensByPrefix scan = %#v closed=%v", activeTokens, activeRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{"rt_live_abcd"}) {
+		t.Fatalf("ListActiveAgentRegistrationTokensByPrefix args = %#v", dbtx.queryArgs)
 	}
 
 	affected, err := q.RevokeAgentRegistrationTokenForCreator(context.Background(), RevokeAgentRegistrationTokenForCreatorParams{ID: tokenID, CreatorUserID: creatorID})
@@ -374,6 +423,45 @@ func TestDeliveryQueriesScanRowsAndAffectedRows(t *testing.T) {
 		t.Fatalf("ListDeliveryTargetsByUser scan = %#v", listed)
 	}
 
+	dbtx.row = fakeRow{values: targetValues}
+	gotTarget, err := q.GetDeliveryTargetByID(context.Background(), targetID)
+	if err != nil {
+		t.Fatalf("GetDeliveryTargetByID error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetDeliveryTargetByID")
+	if gotTarget.ID != targetID || gotTarget.UserID != userID {
+		t.Fatalf("GetDeliveryTargetByID scan = %#v", gotTarget)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{targetID}) {
+		t.Fatalf("GetDeliveryTargetByID args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: targetValues}
+	defaultTarget, err := q.GetDefaultDeliveryTarget(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetDefaultDeliveryTarget error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetDefaultDeliveryTarget")
+	if defaultTarget.ID != targetID || !defaultTarget.IsDefault {
+		t.Fatalf("GetDefaultDeliveryTarget scan = %#v", defaultTarget)
+	}
+
+	if err := q.ClearDefaultDeliveryTarget(context.Background(), userID); err != nil {
+		t.Fatalf("ClearDefaultDeliveryTarget error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "ClearDefaultDeliveryTarget")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{userID}) {
+		t.Fatalf("ClearDefaultDeliveryTarget args = %#v", dbtx.execArgs)
+	}
+
+	if rows, err := q.SetDeliveryTargetDefault(context.Background(), SetDeliveryTargetDefaultParams{ID: targetID, UserID: userID}); err != nil || rows != 2 {
+		t.Fatalf("SetDeliveryTargetDefault = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "SetDeliveryTargetDefault")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{targetID, userID}) {
+		t.Fatalf("SetDeliveryTargetDefault args = %#v", dbtx.execArgs)
+	}
+
 	dbtx.row = fakeRow{values: runDeliveryValues}
 	createdDelivery, err := q.CreateRunDelivery(context.Background(), CreateRunDeliveryParams{
 		RunID:      runID,
@@ -413,6 +501,20 @@ func TestDeliveryQueriesScanRowsAndAffectedRows(t *testing.T) {
 		t.Fatalf("ListPendingRunDeliveries scan = %#v", pending)
 	}
 
+	runDeliveryRows := &fakeRows{rows: [][]any{runDeliveryValues}}
+	dbtx.queryRows = runDeliveryRows
+	byRun, err := q.ListRunDeliveriesByRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("ListRunDeliveriesByRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRunDeliveriesByRun")
+	if !runDeliveryRows.closed || len(byRun) != 1 || byRun[0].RunID != runID {
+		t.Fatalf("ListRunDeliveriesByRun scan = %#v closed=%v", byRun, runDeliveryRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{runID}) {
+		t.Fatalf("ListRunDeliveriesByRun args = %#v", dbtx.queryArgs)
+	}
+
 	if rows, err := q.DeleteDeliveryTarget(context.Background(), DeleteDeliveryTargetParams{ID: targetID, UserID: userID}); err != nil || rows != 2 {
 		t.Fatalf("DeleteDeliveryTarget = %d, %v", rows, err)
 	}
@@ -421,6 +523,22 @@ func TestDeliveryQueriesScanRowsAndAffectedRows(t *testing.T) {
 		t.Fatalf("ResetRunDeliveryForRetry = %d, %v", rows, err)
 	}
 	requireSQLName(t, dbtx.execSQL, "ResetRunDeliveryForRetry")
+
+	if err := q.MarkRunDeliverySuccess(context.Background(), MarkRunDeliverySuccessParams{ID: deliveryID, ResponseStatus: &status, ResponseBody: &body}); err != nil {
+		t.Fatalf("MarkRunDeliverySuccess error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkRunDeliverySuccess")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{deliveryID, &status, &body}) {
+		t.Fatalf("MarkRunDeliverySuccess args = %#v", dbtx.execArgs)
+	}
+
+	if err := q.MarkRunDeliveryFailedFinal(context.Background(), MarkRunDeliveryFailedFinalParams{ID: deliveryID, ResponseStatus: &status, ResponseBody: &body, ErrorMessage: &errMsg}); err != nil {
+		t.Fatalf("MarkRunDeliveryFailedFinal error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkRunDeliveryFailedFinal")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{deliveryID, &status, &body, &errMsg}) {
+		t.Fatalf("MarkRunDeliveryFailedFinal args = %#v", dbtx.execArgs)
+	}
 
 	if err := q.MarkRunDeliveryFailedRetry(context.Background(), MarkRunDeliveryFailedRetryParams{
 		ID:             deliveryID,
@@ -465,6 +583,14 @@ func TestWebhookQueriesScanRowsAndAffectedRows(t *testing.T) {
 		t.Fatalf("SetAgentWebhook args = %#v", dbtx.execArgs)
 	}
 
+	if rows, err := q.ClearAgentWebhook(context.Background(), ClearAgentWebhookParams{ID: agentID, CreatorID: creatorID}); err != nil || rows != 4 {
+		t.Fatalf("ClearAgentWebhook = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "ClearAgentWebhook")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{agentID, creatorID}) {
+		t.Fatalf("ClearAgentWebhook args = %#v", dbtx.execArgs)
+	}
+
 	cfg, err := q.GetAgentWebhookConfig(context.Background(), agentID)
 	if err != nil {
 		t.Fatalf("GetAgentWebhookConfig error = %v", err)
@@ -506,6 +632,28 @@ func TestWebhookQueriesScanRowsAndAffectedRows(t *testing.T) {
 	requireSQLName(t, dbtx.querySQL, "ListPendingDeliveries")
 	if len(pending) != 1 || pending[0].ID != deliveryID {
 		t.Fatalf("ListPendingDeliveries scan = %#v", pending)
+	}
+
+	agentDeliveryRows := &fakeRows{rows: [][]any{deliveryValues}}
+	dbtx.queryRows = agentDeliveryRows
+	agentDeliveries, err := q.ListDeliveriesByAgent(context.Background(), ListDeliveriesByAgentParams{AgentID: agentID, Limit: 25})
+	if err != nil {
+		t.Fatalf("ListDeliveriesByAgent error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListDeliveriesByAgent")
+	if !agentDeliveryRows.closed || len(agentDeliveries) != 1 || agentDeliveries[0].AgentID != agentID {
+		t.Fatalf("ListDeliveriesByAgent scan = %#v closed=%v", agentDeliveries, agentDeliveryRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{agentID, int32(25)}) {
+		t.Fatalf("ListDeliveriesByAgent args = %#v", dbtx.queryArgs)
+	}
+
+	if err := q.MarkDeliverySuccess(context.Background(), MarkDeliverySuccessParams{ID: deliveryID, ResponseStatus: &status, ResponseBody: &body}); err != nil {
+		t.Fatalf("MarkDeliverySuccess error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkDeliverySuccess")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{deliveryID, &status, &body}) {
+		t.Fatalf("MarkDeliverySuccess args = %#v", dbtx.execArgs)
 	}
 
 	if err := q.MarkDeliveryFailedFinal(context.Background(), MarkDeliveryFailedFinalParams{ID: deliveryID, ResponseStatus: &status, ResponseBody: &body, ErrorMessage: &errMsg}); err != nil {
@@ -3462,6 +3610,65 @@ func (f *fakeDBTX) QueryRow(_ context.Context, sql string, args ...interface{}) 
 	f.queryRowSQL = sql
 	f.queryRowArgs = append([]any(nil), args...)
 	return f.row
+}
+
+type fakeTx struct {
+	execSQLs []string
+	execArgs [][]any
+	tag      pgconn.CommandTag
+	err      error
+}
+
+func (f *fakeTx) Begin(context.Context) (pgx.Tx, error) {
+	return f, f.err
+}
+
+func (f *fakeTx) Commit(context.Context) error {
+	return f.err
+}
+
+func (f *fakeTx) Rollback(context.Context) error {
+	return f.err
+}
+
+func (f *fakeTx) CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	return 0, nil
+}
+
+func (f *fakeTx) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults {
+	return nil
+}
+
+func (f *fakeTx) LargeObjects() pgx.LargeObjects {
+	return pgx.LargeObjects{}
+}
+
+func (f *fakeTx) Prepare(context.Context, string, string) (*pgconn.StatementDescription, error) {
+	return nil, f.err
+}
+
+func (f *fakeTx) Exec(_ context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+	f.execSQLs = append(f.execSQLs, sql)
+	f.execArgs = append(f.execArgs, append([]any(nil), args...))
+	if f.err != nil {
+		return pgconn.CommandTag{}, f.err
+	}
+	return f.tag, nil
+}
+
+func (f *fakeTx) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
+	return nil, f.err
+}
+
+func (f *fakeTx) QueryRow(context.Context, string, ...interface{}) pgx.Row {
+	return fakeRow{err: f.err}
+}
+
+func (f *fakeTx) Conn() *pgx.Conn {
+	return nil
 }
 
 type fakeRow struct {
