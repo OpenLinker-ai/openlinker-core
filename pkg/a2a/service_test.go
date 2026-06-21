@@ -195,6 +195,40 @@ func TestRuntimeWorkbenchFlagsRuntimePullTokenScopeMissing(t *testing.T) {
 	assert.Contains(t, codes, "scope_missing")
 }
 
+func TestRuntimeTokenRevokeAndCallPolicyReadback(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	ownerID := insertCreator(t, pool)
+	otherUserID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, ownerID, "https://example.com/runtime")
+
+	token, err := svc.CreateRuntimeToken(context.Background(), ownerID, agentID, &a2a.CreateRuntimeTokenRequest{Name: "worker"})
+	require.NoError(t, err)
+	require.NotEmpty(t, token.PlaintextToken)
+
+	policy, err := svc.GetCallPolicy(context.Background(), ownerID, agentID)
+	require.NoError(t, err)
+	assert.Equal(t, "public", policy.CallableBy)
+
+	updatedPolicy, err := svc.UpdateCallPolicy(context.Background(), ownerID, agentID, &a2a.UpdateCallPolicyRequest{CallableBy: "same_creator"})
+	require.NoError(t, err)
+	assert.Equal(t, "same_creator", updatedPolicy.CallableBy)
+	policy, err = svc.GetCallPolicy(context.Background(), ownerID, agentID)
+	require.NoError(t, err)
+	assert.Equal(t, "same_creator", policy.CallableBy)
+
+	err = svc.RevokeRuntimeToken(context.Background(), ownerID, uuid.MustParse(token.ID))
+	require.NoError(t, err)
+	tokens, err := svc.ListRuntimeTokens(context.Background(), ownerID, agentID)
+	require.NoError(t, err)
+	require.Len(t, tokens, 1)
+	require.NotNil(t, tokens[0].RevokedAt)
+
+	err = svc.RevokeRuntimeToken(context.Background(), ownerID, uuid.MustParse(token.ID))
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.GetCallPolicy(context.Background(), otherUserID, agentID)
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
+}
+
 func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	pool, svc, runtimeSvc := setupService(t)
 	callerOwner := insertCreator(t, pool)
@@ -610,6 +644,214 @@ func TestProtocolStreamEventsExposeStatusAndArtifactUpdates(t *testing.T) {
 	assert.True(t, sawArtifact, "expected artifact-update from run.artifact.delta")
 }
 
+func TestProtocolListTasksSupportsPagingFiltersAndArtifacts(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Input map[string]any `json:"input"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"output": map[string]any{
+				"summary": "listed " + request.Input["message"].(string),
+				"artifacts": []map[string]any{{
+					"title":         "List Evidence",
+					"artifact_type": "json",
+					"content":       map[string]any{"message": request.Input["message"]},
+				}},
+			},
+			"events": []map[string]any{{
+				"event_type": "run.message.delta",
+				"payload": map[string]any{
+					"text": "history for " + request.Input["message"].(string),
+				},
+			}},
+		})
+	}))
+	defer server.Close()
+	defaultTransport := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
+
+	agentID := insertAgent(t, pool, owner, server.URL)
+	slug := "a2a-" + agentID.String()[:8]
+	first, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			MessageID: "msg-list-1",
+			ContextID: "ctx-list-1",
+			Role:      "user",
+			Parts:     []map[string]any{{"kind": "text", "text": "first"}},
+		},
+	})
+	require.NoError(t, err)
+	second, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			MessageID: "msg-list-2",
+			ContextID: "ctx-list-2",
+			Role:      "user",
+			Parts:     []map[string]any{{"kind": "text", "text": "second"}},
+		},
+	})
+	require.NoError(t, err)
+
+	pageSize := 1
+	historyLength := 1
+	includeArtifacts := true
+	page, err := svc.ListProtocolTasks(context.Background(), owner, slug, &a2a.A2ATaskListParams{
+		Status:           "completed",
+		PageSize:         &pageSize,
+		HistoryLength:    &historyLength,
+		IncludeArtifacts: &includeArtifacts,
+	})
+	require.NoError(t, err)
+	require.Len(t, page.Tasks, 1)
+	assert.Equal(t, int32(1), page.PageSize)
+	assert.Equal(t, int32(2), page.TotalSize)
+	assert.NotEmpty(t, page.NextPageToken)
+	assert.NotEmpty(t, page.Tasks[0].Artifacts)
+	assert.NotEmpty(t, page.Tasks[0].History)
+
+	nextPage, err := svc.ListProtocolTasks(context.Background(), owner, slug, &a2a.A2ATaskListParams{
+		Status:    "completed",
+		PageSize:  &pageSize,
+		PageToken: page.NextPageToken,
+	})
+	require.NoError(t, err)
+	require.Len(t, nextPage.Tasks, 1)
+	assert.Empty(t, nextPage.NextPageToken)
+
+	listedIDs := map[string]bool{
+		page.Tasks[0].ID:     true,
+		nextPage.Tasks[0].ID: true,
+	}
+	assert.True(t, listedIDs[first.ID])
+	assert.True(t, listedIDs[second.ID])
+
+	byContext, err := svc.ListProtocolTasks(context.Background(), owner, slug, &a2a.A2ATaskListParams{ContextID: "ctx-list-1"})
+	require.NoError(t, err)
+	require.Len(t, byContext.Tasks, 1)
+	assert.Equal(t, first.ID, byContext.Tasks[0].ID)
+	assert.Equal(t, int32(1), byContext.TotalSize)
+
+	_, err = svc.ListProtocolTasks(context.Background(), owner, "", nil)
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.ListProtocolTasks(context.Background(), owner, "missing", nil)
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.ListProtocolTasks(context.Background(), owner, slug, &a2a.A2ATaskListParams{Status: "strange"})
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+}
+
+func TestProtocolCancelTaskMapsRunCancellation(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+
+	release := make(chan struct{})
+	called := make(chan struct{}, 1)
+	releaseServer := func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case called <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"summary":"too late"}}`))
+	}))
+	defer server.Close()
+	t.Cleanup(releaseServer)
+	defaultTransport := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
+
+	agentID := insertAgent(t, pool, owner, server.URL)
+	slug := "a2a-" + agentID.String()[:8]
+	task, err := svc.StartProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			MessageID: "msg-cancel",
+			ContextID: "ctx-cancel",
+			Role:      "user",
+			Parts:     []map[string]any{{"kind": "text", "text": "cancel me"}},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "working", task.Status.State)
+
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("async endpoint was not called")
+	}
+
+	canceled, err := svc.CancelProtocolTask(context.Background(), owner, slug, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, task.ID, canceled.ID)
+	assert.Equal(t, "ctx-cancel", canceled.ContextID)
+	assert.Equal(t, "canceled", canceled.Status.State)
+	require.NotNil(t, canceled.Status.Message)
+	assert.Contains(t, canceled.Status.Message.Parts[0]["text"], "canceled")
+	releaseServer()
+
+	_, err = svc.CancelProtocolTask(context.Background(), owner, slug, "not-a-uuid")
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.CancelProtocolTask(context.Background(), owner, slug, uuid.NewString())
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
+}
+
+func TestProtocolMessageCreatesInlinePushNotificationConfig(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+	pushSvc := webhook.NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true})
+	svc.SetRunPushManager(pushSvc)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"summary":"inline push configured"}}`))
+	}))
+	defer server.Close()
+
+	agentID := insertAgent(t, pool, owner, server.URL)
+	slug := "a2a-" + agentID.String()[:8]
+	task, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			MessageID: "msg-inline-push",
+			ContextID: "ctx-inline-push",
+			Role:      "user",
+			Parts:     []map[string]any{{"kind": "text", "text": "configure inline push"}},
+		},
+		Configuration: &a2a.A2ASendConfiguration{
+			PushNotificationConfig: &a2a.A2APushNotificationConfig{
+				URL:   server.URL + "/inline-push",
+				Token: "inline-token",
+				Metadata: map[string]any{
+					"client": "inline-a2a",
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	list, err := svc.ListPushNotificationConfigs(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{ID: task.ID})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, task.ID, list.Items[0].TaskID)
+	assert.Equal(t, server.URL+"/inline-push", list.Items[0].PushNotificationConfig.URL)
+	assert.Equal(t, "Bearer", list.Items[0].PushNotificationConfig.Authentication.Scheme)
+	assert.Equal(t, "inline-a2a", list.Items[0].PushNotificationConfig.Metadata["client"])
+}
+
 func TestPushNotificationConfigMapsToRunWebhook(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	owner := insertCreator(t, pool)
@@ -695,4 +937,12 @@ func TestCallAgent_RespectsPrivateTargetPolicy(t *testing.T) {
 	httpErr, ok := err.(*httpx.HTTPError)
 	require.True(t, ok)
 	assert.Equal(t, http.StatusForbidden, httpErr.Status)
+}
+
+func requireA2AServiceHTTPStatus(t *testing.T, err error, want int) {
+	t.Helper()
+	require.Error(t, err)
+	httpErr, ok := err.(*httpx.HTTPError)
+	require.True(t, ok, "expected *httpx.HTTPError, got %T (%v)", err, err)
+	assert.Equal(t, want, httpErr.Status)
 }
