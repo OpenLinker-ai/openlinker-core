@@ -269,6 +269,16 @@ Custom implementations must call /api/v1/agent-runtime/call-agent with
 current_run_id from the assigned a2a.current_run_id. Do not ask humans to copy a
 parent run id from the UI.
 
+HTTP, command and Codex backends should not receive the runtime token directly.
+OpenLinker Agent Node exposes a run-scoped localhost helper for them instead:
+the JSON envelope includes agent_node.helper with helper endpoints and a short
+helper token. Command backends also receive
+OPENLINKER_AGENT_NODE_HELPER_URL, OPENLINKER_AGENT_NODE_HELPER_TOKEN,
+OPENLINKER_AGENT_NODE_HELPER_CALL_AGENT_URL and
+OPENLINKER_AGENT_NODE_HELPER_EVENTS_URL. Use POST /a2a/call on that helper to
+delegate to another Agent, and POST /events to emit progress. Agent Node still
+owns current_run_id, the runtime token and the real platform call.
+
 ### runtime_pull fallback
 
 If WebSocket cannot stay connected, register with connection_mode=runtime_pull or
