@@ -379,3 +379,95 @@ func TestGetMe_NotFound(t *testing.T) {
 	_, err := svc.GetMe(ctx, uuid.New())
 	assertHTTPStatus(t, err, http.StatusNotFound)
 }
+
+func TestUpdateMe_HappyPathAndValidation(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	regResp, err := svc.Register(ctx, &RegisterRequest{
+		Email:       uniqueEmail("me-update"),
+		Password:    "supersecret123",
+		DisplayName: "Before",
+	})
+	require.NoError(t, err)
+	uid, err := uuid.Parse(regResp.UserID)
+	require.NoError(t, err)
+
+	updated, err := svc.UpdateMe(ctx, uid, &UpdateMeRequest{DisplayName: "  After  "})
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	assert.Equal(t, "After", updated.DisplayName)
+	assert.Equal(t, regResp.Email, updated.Email)
+
+	_, err = svc.UpdateMe(ctx, uid, &UpdateMeRequest{DisplayName: "   "})
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	_, err = svc.UpdateMe(ctx, uuid.New(), &UpdateMeRequest{DisplayName: "Missing"})
+	assertHTTPStatus(t, err, http.StatusNotFound)
+}
+
+func TestChangePassword_HappyPathAndGuards(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	email := uniqueEmail("password-change")
+	oldPassword := "supersecret123"
+	newPassword := "newsecret456"
+	regResp, err := svc.Register(ctx, &RegisterRequest{
+		Email:       email,
+		Password:    oldPassword,
+		DisplayName: "Password Tester",
+	})
+	require.NoError(t, err)
+	uid, err := uuid.Parse(regResp.UserID)
+	require.NoError(t, err)
+
+	err = svc.ChangePassword(ctx, uid, &ChangePasswordRequest{
+		CurrentPassword: "wrong-password",
+		NewPassword:     newPassword,
+	})
+	assertHTTPStatus(t, err, http.StatusUnauthorized)
+
+	err = svc.ChangePassword(ctx, uid, &ChangePasswordRequest{
+		CurrentPassword: oldPassword,
+		NewPassword:     newPassword,
+	})
+	require.NoError(t, err)
+
+	_, err = svc.Login(ctx, &LoginRequest{Email: email, Password: oldPassword})
+	assertHTTPStatus(t, err, http.StatusUnauthorized)
+	loginResp, err := svc.Login(ctx, &LoginRequest{Email: email, Password: newPassword})
+	require.NoError(t, err)
+	assert.Equal(t, regResp.UserID, loginResp.UserID)
+
+	err = svc.ChangePassword(ctx, uuid.New(), &ChangePasswordRequest{
+		CurrentPassword: oldPassword,
+		NewPassword:     newPassword,
+	})
+	assertHTTPStatus(t, err, http.StatusNotFound)
+}
+
+func TestChangePassword_OAuthOnlyUserRejected(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	resp, err := svc.FindOrCreateOAuthUser(ctx,
+		"google",
+		"google-password-"+uuid.NewString()[:8],
+		uniqueEmail("oauth-password"),
+		"OAuth Password",
+		"",
+	)
+	require.NoError(t, err)
+	uid, err := uuid.Parse(resp.UserID)
+	require.NoError(t, err)
+
+	err = svc.ChangePassword(ctx, uid, &ChangePasswordRequest{
+		CurrentPassword: "anything",
+		NewPassword:     "newsecret456",
+	})
+	assertHTTPStatus(t, err, http.StatusBadRequest)
+}
