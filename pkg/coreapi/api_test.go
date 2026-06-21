@@ -134,6 +134,7 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		"POST /api/v1/agent-registration/agents",
 		"POST /api/v1/agent-runtime/heartbeat",
 		"GET /api/v1/agent-runtime/runs/claim",
+		"GET /api/v1/agent-runtime/ws",
 		"POST /api/v1/agent-runtime/call-agent",
 		"POST /api/v1/a2a/agents/:slug",
 		"GET /api/v1/a2a/agents/:slug/.well-known/agent-card.json",
