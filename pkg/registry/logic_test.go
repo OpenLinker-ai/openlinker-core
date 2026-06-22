@@ -42,6 +42,12 @@ func TestRegistryURLScopeAndCredentialHelpers(t *testing.T) {
 	if got, err := normalizeFederationExchangeURL("https://peer.example/api/v1/registry-peers/federation-invitations/exchange?token=secret#frag"); err != nil || got != "https://peer.example/api/v1/registry-peers/federation-invitations/exchange" {
 		t.Fatalf("normalizeFederationExchangeURL = %q, %v", got, err)
 	}
+	if _, err := normalizeRemoteAPIBaseURL("https://peer.example/" + strings.Repeat("a", 501)); err == nil {
+		t.Fatalf("too long remote api base URL should fail")
+	}
+	if _, err := normalizeFederationExchangeURL("https://peer.example/" + strings.Repeat("a", 601)); err == nil {
+		t.Fatalf("too long federation exchange URL should fail")
+	}
 	for _, raw := range []string{"", "mailto:test@example.com", "://bad"} {
 		if _, err := normalizeRemoteAPIBaseURL(raw); err == nil {
 			t.Fatalf("normalizeRemoteAPIBaseURL(%q) should fail", raw)
@@ -95,6 +101,40 @@ func TestRegistryURLScopeAndCredentialHelpers(t *testing.T) {
 	} else {
 		requireRegistryHTTPStatus(t, err, http.StatusUnauthorized)
 	}
+	remoteRoot, token, peerID, routeMode, err := svc.resolveRemoteRegistryCredentials(context.Background(), uuid.New(), &CreateRemoteProxyRunRequest{
+		RemoteAPIBaseURL:  " https://remote.example/root?x=1#frag ",
+		RemoteBearerToken: "  bearer-token-123  ",
+	})
+	if err != nil || remoteRoot != "https://remote.example/root/api/v1" || token != "bearer-token-123" || peerID != "" || routeMode != "explicit" {
+		t.Fatalf("resolve explicit credentials = %q %q %q %q %v", remoteRoot, token, peerID, routeMode, err)
+	}
+	if _, _, _, _, err := svc.resolveRemoteRegistryCredentials(context.Background(), uuid.New(), &CreateRemoteProxyRunRequest{
+		RemoteAPIBaseURL:  "https://remote.example",
+		RemoteBearerToken: "short",
+	}); err == nil {
+		t.Fatalf("short remote bearer token should fail")
+	} else {
+		requireRegistryHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	}
+	if _, _, _, _, err := svc.resolveRemoteRegistryCredentials(context.Background(), uuid.New(), &CreateRemoteProxyRunRequest{
+		RegistryPeerID:    uuid.NewString(),
+		RemoteAPIBaseURL:  "https://remote.example",
+		RemoteBearerToken: "bearer-token-123",
+	}); err == nil {
+		t.Fatalf("mixed registry peer and explicit credentials should fail")
+	} else {
+		requireRegistryHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	}
+	if _, _, _, _, err := svc.resolveRemoteRegistryCredentials(context.Background(), uuid.New(), &CreateRemoteProxyRunRequest{}); err == nil {
+		t.Fatalf("auto registry peer without storage should fail")
+	} else {
+		requireRegistryHTTPStatus(t, err, http.StatusInternalServerError)
+	}
+	if _, _, _, _, err := svc.resolveRemoteRegistryCredentials(context.Background(), uuid.New(), &CreateRemoteProxyRunRequest{RegistryPeerID: uuid.NewString()}); err == nil {
+		t.Fatalf("registry peer lookup without storage should fail")
+	} else {
+		requireRegistryHTTPStatus(t, err, http.StatusInternalServerError)
+	}
 }
 
 func TestRegistryPayloadPolicyAndArtifactHelpers(t *testing.T) {
@@ -123,6 +163,9 @@ func TestRegistryPayloadPolicyAndArtifactHelpers(t *testing.T) {
 	}
 	if got := string(redactPayload([]byte(`not-json`), []string{"secret"})); got != "not-json" {
 		t.Fatalf("invalid JSON payload should be preserved, got %q", got)
+	}
+	if got := string(redactPayload(raw, nil)); got != string(raw) {
+		t.Fatalf("payload without redaction keys should be preserved, got %q", got)
 	}
 
 	summary := "summary"
@@ -183,8 +226,24 @@ func TestRegistryPayloadPolicyAndArtifactHelpers(t *testing.T) {
 	if got := artifactValuesFromOutput(map[string]interface{}{"artifact": map[string]interface{}{"id": "one"}}); len(got) != 1 {
 		t.Fatalf("artifactValuesFromOutput single = %#v", got)
 	}
+	fallbackItems := extractProxyRunArtifacts([]byte(`{"artifacts":[42,{"content":{"ok":true}}]}`), payloadPolicyStoreFullPayload)
+	if len(fallbackItems) != 1 || fallbackItems[0].SourceArtifactID != "artifact-2" || fallbackItems[0].Title != "Artifact 2" || fallbackItems[0].ArtifactType != "data" || string(fallbackItems[0].Content) != `{"ok":true}` {
+		t.Fatalf("fallback artifacts = %#v", fallbackItems)
+	}
+	if got := extractProxyRunArtifacts(nil, payloadPolicyStoreFullPayload); got != nil {
+		t.Fatalf("empty artifact output = %#v", got)
+	}
+	if got := extractProxyRunArtifacts([]byte(`not-json`), payloadPolicyStoreFullPayload); got != nil {
+		t.Fatalf("invalid artifact output = %#v", got)
+	}
 	if got := string(artifactContent(map[string]interface{}{"data": map[string]interface{}{"ok": true}})); got != `{"ok":true}` {
 		t.Fatalf("artifactContent data = %q", got)
+	}
+	if got := string(artifactContent(map[string]interface{}{"content": map[string]interface{}{"ok": true}})); got != `{"ok":true}` {
+		t.Fatalf("artifactContent content = %q", got)
+	}
+	if got := string(artifactContent(map[string]interface{}{"content": "raw"})); got != "{}" {
+		t.Fatalf("artifactContent fallback = %q", got)
 	}
 
 	meta := artifactFileMetadataFromMap(map[string]interface{}{
@@ -229,8 +288,60 @@ func TestRegistryPayloadPolicyAndArtifactHelpers(t *testing.T) {
 	if normalizeSHA256(strings.Repeat("C", 64)) != strings.Repeat("c", 64) || normalizeSHA256("not-sha") != "" {
 		t.Fatalf("normalizeSHA256 failed")
 	}
+	if normalizeSHA256(strings.Repeat("g", 64)) != "" {
+		t.Fatalf("normalizeSHA256 should reject non-hex strings")
+	}
 	if stringPtr("") != nil || stringPtr("x") == nil {
 		t.Fatalf("stringPtr failed")
+	}
+}
+
+func TestRegistryScannerHelpers(t *testing.T) {
+	now := time.Date(2026, 6, 21, 1, 2, 3, 0, time.UTC)
+	later := now.Add(time.Minute)
+	peerID := uuid.New()
+	ownerID := uuid.New()
+
+	peer, err := scanRegistryPeer(fakeRegistryScanner{values: []any{
+		peerID,
+		ownerID,
+		"Peer",
+		"https://peer.example/api/v1",
+		"token",
+		"sha256:abc",
+		"active",
+		&later,
+		now,
+		later,
+	}})
+	if err != nil || peer.ID != peerID || peer.OwnerUserID != ownerID || peer.LastUsedAt == nil || !peer.LastUsedAt.Equal(later) {
+		t.Fatalf("scanRegistryPeer = %#v, %v", peer, err)
+	}
+	if _, err := scanRegistryPeer(fakeRegistryScanner{err: errors.New("scan failed")}); err == nil {
+		t.Fatalf("scanRegistryPeer error should propagate")
+	}
+
+	inviteID := uuid.New()
+	invite, err := scanRegistryFederationInvite(fakeRegistryScanner{values: []any{
+		inviteID,
+		ownerID,
+		"Invite",
+		"https://peer.example/api/v1",
+		"token",
+		"rf_live_abcd",
+		"hash",
+		"sha256:def",
+		"active",
+		later,
+		&later,
+		now,
+		later,
+	}})
+	if err != nil || invite.ID != inviteID || invite.TokenPrefix != "rf_live_abcd" || invite.ConsumedAt == nil || !invite.ConsumedAt.Equal(later) {
+		t.Fatalf("scanRegistryFederationInvite = %#v, %v", invite, err)
+	}
+	if _, err := scanRegistryFederationInvite(fakeRegistryScanner{err: errors.New("scan failed")}); err == nil {
+		t.Fatalf("scanRegistryFederationInvite error should propagate")
 	}
 }
 
@@ -537,6 +648,21 @@ func newRegistryTestContext(spec *registryHandlerRequest) echo.Context {
 		c.SetParamValues(values...)
 	}
 	return c
+}
+
+type fakeRegistryScanner struct {
+	values []any
+	err    error
+}
+
+func (s fakeRegistryScanner) Scan(dest ...any) error {
+	if s.err != nil {
+		return s.err
+	}
+	for i := range dest {
+		reflect.ValueOf(dest[i]).Elem().Set(reflect.ValueOf(s.values[i]))
+	}
+	return nil
 }
 
 func requireRegistryHTTPStatus(t *testing.T, err error, want int) {
