@@ -8,12 +8,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 
@@ -450,9 +452,15 @@ func TestRuntimeRequirementSnapshotQueries(t *testing.T) {
 	require.True(t, errors.As(err, &httpErr))
 	require.Equal(t, http.StatusNotFound, httpErr.Status)
 
+	_, err = (&Service{requirements: &fakeRunRequirementQueries{taskErr: errors.New("task store down")}}).buildRunRequirementSnapshot(ctx, userID, agentID, req, "web")
+	require.True(t, errors.As(err, &httpErr))
+	require.Equal(t, http.StatusInternalServerError, httpErr.Status)
+
 	_, err = (&Service{requirements: &fakeRunRequirementQueries{task: q.task, skillsErr: errors.New("skill store down")}}).buildRunRequirementSnapshot(ctx, userID, agentID, req, "web")
 	require.True(t, errors.As(err, &httpErr))
 	require.Equal(t, http.StatusInternalServerError, httpErr.Status)
+
+	require.Nil(t, (&Service{}).requirementQueries())
 }
 
 func TestRuntimeAttachRequirementEvidenceFromQueries(t *testing.T) {
@@ -486,6 +494,9 @@ func TestRuntimeAttachRequirementEvidenceFromQueries(t *testing.T) {
 	missing := &RunResponse{}
 	(&Service{requirements: &fakeRunRequirementQueries{evidenceErr: pgx.ErrNoRows}}).attachRunRequirementEvidence(ctx, runID, missing)
 	require.Nil(t, missing.RequirementEvidence)
+	errored := &RunResponse{}
+	(&Service{requirements: &fakeRunRequirementQueries{evidenceErr: errors.New("evidence store down")}}).attachRunRequirementEvidence(ctx, runID, errored)
+	require.Nil(t, errored.RequirementEvidence)
 	(&Service{requirements: q}).attachRunRequirementEvidence(ctx, runID, nil)
 }
 
@@ -645,6 +656,49 @@ func TestRuntimeArtifactMessageAndEventHelpers(t *testing.T) {
 	require.True(t, constantTimeEqual("secret", "secret"))
 	require.False(t, constantTimeEqual("secret", "other"))
 	require.False(t, constantTimeEqual("secret", "secret2"))
+}
+
+func TestRuntimePersistenceHelperEdges(t *testing.T) {
+	ctx := context.Background()
+	runID := uuid.New()
+	seq := int32(5)
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	messageID := uuid.New()
+	eventID := uuid.New()
+
+	dbtx := &runtimeFakeDBTX{rows: []runtimeFakeRow{{
+		values: []any{messageID, runID, &seq, "agent", "trimmed", []byte(`{}`), now},
+	}}}
+	q := db.New(dbtx)
+	require.NoError(t, createRunMessage(ctx, q, runID, &seq, "", "  trimmed  ", nil))
+	require.Len(t, dbtx.queryRowArgs, 1)
+	require.Equal(t, "agent", dbtx.queryRowArgs[0][2])
+	require.Equal(t, "trimmed", dbtx.queryRowArgs[0][3])
+	require.JSONEq(t, `{}`, string(dbtx.queryRowArgs[0][4].([]byte)))
+
+	require.Error(t, createRunMessage(ctx, q, runID, nil, "agent", "bad", map[string]interface{}{"bad": func() {}}))
+	_, err := createRunEventRecord(ctx, q, runID, nil, "run.message.delta", map[string]interface{}{"bad": func() {}})
+	require.Error(t, err)
+
+	errorDB := db.New(&runtimeFakeDBTX{rows: []runtimeFakeRow{{err: errors.New("insert failed")}}})
+	require.Error(t, createRunMessage(ctx, errorDB, runID, nil, "agent", "ok", map[string]interface{}{}))
+
+	svc := &Service{queries: db.New(&runtimeFakeDBTX{rows: []runtimeFakeRow{{err: errors.New("event insert failed")}}})}
+	require.Nil(t, svc.recordRunEventBestEffort(ctx, runID, "run.completed", map[string]interface{}{"status": "success"}))
+	svc.recordRunMessageBestEffort(ctx, runID, nil, "", "", map[string]interface{}{"bad": func() {}})
+
+	eventPayload := []byte(`{"text":"hello"}`)
+	agentDBTX := &runtimeFakeDBTX{rows: []runtimeFakeRow{
+		{values: []any{eventID, runID, (*uuid.UUID)(nil), seq, "run.message.delta", eventPayload, now}},
+		{values: []any{messageID, runID, &seq, "agent", "hello", eventPayload, now}},
+	}}
+	(&Service{queries: db.New(agentDBTX)}).recordAgentEventsBestEffort(ctx, runID, []AgentEvent{
+		{EventType: "run.unsupported", Payload: map[string]interface{}{"text": "skip"}},
+		{EventType: "run.message.delta", Payload: nil},
+	})
+	require.Len(t, agentDBTX.queryRowArgs, 2)
+	require.Equal(t, "run.message.delta", agentDBTX.queryRowArgs[0][2])
+	require.Equal(t, "agent", agentDBTX.queryRowArgs[1][2])
 }
 
 func TestRuntimeArtifactDraftHelpers(t *testing.T) {
@@ -1001,6 +1055,65 @@ func (q *fakeRunRequirementQueries) ListAgentSkills(_ context.Context, agentID u
 func (q *fakeRunRequirementQueries) GetRunRequirementEvidenceByRun(_ context.Context, runID uuid.UUID) (db.RunRequirementEvidence, error) {
 	q.runID = runID
 	return q.evidence, q.evidenceErr
+}
+
+type runtimeFakeDBTX struct {
+	rows         []runtimeFakeRow
+	queryRowArgs [][]interface{}
+}
+
+func (f *runtimeFakeDBTX) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
+	return pgconn.NewCommandTag("INSERT 1"), nil
+}
+
+func (f *runtimeFakeDBTX) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
+	return nil, errors.New("unexpected query")
+}
+
+func (f *runtimeFakeDBTX) QueryRow(_ context.Context, _ string, args ...interface{}) pgx.Row {
+	f.queryRowArgs = append(f.queryRowArgs, args)
+	if len(f.rows) == 0 {
+		return runtimeFakeRow{err: errors.New("unexpected query row")}
+	}
+	row := f.rows[0]
+	f.rows = f.rows[1:]
+	return row
+}
+
+type runtimeFakeRow struct {
+	values []any
+	err    error
+}
+
+func (r runtimeFakeRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	if len(dest) != len(r.values) {
+		return errors.New("scan destination count mismatch")
+	}
+	for i, value := range r.values {
+		target := reflect.ValueOf(dest[i])
+		if target.Kind() != reflect.Pointer || target.IsNil() {
+			return errors.New("scan destination must be pointer")
+		}
+		slot := target.Elem()
+		if value == nil {
+			slot.SetZero()
+			continue
+		}
+		got := reflect.ValueOf(value)
+		if got.Type().AssignableTo(slot.Type()) {
+			slot.Set(got)
+			continue
+		}
+		if got.Type().ConvertibleTo(slot.Type()) {
+			slot.Set(got.Convert(slot.Type()))
+			continue
+		}
+		return errors.New("scan value type mismatch")
+	}
+	return nil
 }
 
 type fakeRuntimeWebhookEnqueuer struct{}

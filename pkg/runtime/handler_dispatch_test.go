@@ -433,6 +433,115 @@ func TestRuntimeHandlerPropagatesServiceErrors(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandlerStreamRunEventsEdges(t *testing.T) {
+	userID := uuid.New()
+	runID := uuid.New()
+	started := RunEventResponse{
+		EventID:   uuid.NewString(),
+		RunID:     runID.String(),
+		Sequence:  1,
+		EventType: "run.started",
+		Payload:   map[string]interface{}{"status": "running"},
+		CreatedAt: time.Now(),
+	}
+
+	noFlusherCtx, _ := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method:     http.MethodGet,
+		target:     "/api/v1/runs/" + runID.String() + "/stream",
+		userID:     userID.String(),
+		authMethod: "jwt",
+		params:     map[string]string{"id": runID.String()},
+	})
+	noFlusherCtx.Response().Writer = errorResponseWriter{}
+	err := NewHandler(&mockRuntimeService{}).StreamRunEvents(noFlusherCtx)
+	requireRuntimeHTTPStatus(t, err, http.StatusInternalServerError)
+
+	streamSvc := &pollingRuntimeService{
+		firstEvents: []RunEventResponse{started},
+		pollErr:     httpx.Internal("poll failed"),
+	}
+	streamCtx, streamRec := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method:     http.MethodGet,
+		target:     "/api/v1/runs/" + runID.String() + "/stream",
+		userID:     userID.String(),
+		authMethod: "jwt",
+		params:     map[string]string{"id": runID.String()},
+	})
+	ctx, cancel := context.WithTimeout(streamCtx.Request().Context(), 2*time.Second)
+	defer cancel()
+	streamCtx.SetRequest(streamCtx.Request().WithContext(ctx))
+	if err := NewHandler(streamSvc).StreamRunEvents(streamCtx); err != nil {
+		t.Fatalf("StreamRunEvents poll error path returned error = %v", err)
+	}
+	if streamRec.Code != http.StatusOK || !strings.Contains(streamRec.Body.String(), "event: run.stream.error") || streamSvc.calls < 2 {
+		t.Fatalf("stream poll error code=%d calls=%d body=%s", streamRec.Code, streamSvc.calls, streamRec.Body.String())
+	}
+}
+
+func TestRuntimeHandlerRuntimeAuthAndResultValidationEdges(t *testing.T) {
+	runID := uuid.New()
+	runtimeCalls := []struct {
+		name string
+		call func(*Handler, echo.Context) error
+		ctx  *runtimeDispatchRequest
+	}{
+		{
+			name: "heartbeat",
+			call: (*Handler).PostAgentHeartbeat,
+			ctx: &runtimeDispatchRequest{
+				method:  http.MethodPost,
+				target:  "/api/v1/agent-runtime/heartbeat",
+				headers: map[string]string{echo.HeaderAuthorization: "Basic nope"},
+			},
+		},
+		{
+			name: "claim",
+			call: (*Handler).ClaimRuntimePullRun,
+			ctx: &runtimeDispatchRequest{
+				method:  http.MethodGet,
+				target:  "/api/v1/agent-runtime/runs/claim",
+				headers: map[string]string{echo.HeaderAuthorization: "Basic nope"},
+			},
+		},
+		{
+			name: "result",
+			call: (*Handler).PostRuntimePullResult,
+			ctx: &runtimeDispatchRequest{
+				method:  http.MethodPost,
+				target:  "/api/v1/agent-runtime/runs/" + runID.String() + "/result",
+				params:  map[string]string{"id": runID.String()},
+				headers: map[string]string{echo.HeaderAuthorization: "Basic nope"},
+			},
+		},
+		{
+			name: "websocket",
+			call: (*Handler).RuntimeWebSocket,
+			ctx: &runtimeDispatchRequest{
+				method:  http.MethodGet,
+				target:  "/api/v1/agent-runtime/ws",
+				headers: map[string]string{echo.HeaderAuthorization: "Basic nope"},
+			},
+		},
+	}
+	for _, tt := range runtimeCalls {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewHandler(&mockRuntimeService{})
+			ctx := mustRuntimeDispatchContext(tt.ctx)
+			requireRuntimeHTTPStatus(t, tt.call(h, ctx), http.StatusUnauthorized)
+			requireRuntimeHTTPStatus(t, tt.call(h, ctx), http.StatusTooManyRequests)
+		})
+	}
+
+	badJSONCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
+		method:  http.MethodPost,
+		target:  "/api/v1/agent-runtime/runs/" + runID.String() + "/result",
+		body:    `{`,
+		params:  map[string]string{"id": runID.String()},
+		headers: map[string]string{echo.HeaderAuthorization: "Bearer rt_live_secret"},
+	})
+	requireRuntimeHTTPStatus(t, NewHandler(&mockRuntimeService{}).PostRuntimePullResult(badJSONCtx), http.StatusBadRequest)
+}
+
 type mockRuntimeService struct {
 	err error
 
@@ -556,6 +665,25 @@ func (m *mockRuntimeService) ServeRuntimeWebSocket(_ http.ResponseWriter, _ *htt
 	return m.err
 }
 
+type pollingRuntimeService struct {
+	mockRuntimeService
+	calls       int
+	firstEvents []RunEventResponse
+	pollErr     error
+}
+
+func (m *pollingRuntimeService) ListRunEvents(_ context.Context, userID, runID uuid.UUID, afterSequence, limit int32) ([]RunEventResponse, error) {
+	m.calls++
+	m.eventsUserID = userID
+	m.eventsRunID = runID
+	m.eventsAfter = afterSequence
+	m.eventsLimit = limit
+	if m.calls == 1 {
+		return m.firstEvents, nil
+	}
+	return nil, m.pollErr
+}
+
 type runtimeDispatchRequest struct {
 	method     string
 	target     string
@@ -626,5 +754,16 @@ func requireRuntimeDispatchHTTPStatus(t *testing.T, err error, want int) {
 	}
 	if ok := errors.As(err, &httpErr); !ok || httpErr.Status != want {
 		t.Fatalf("HTTP status = %#v, want %d", httpErr, want)
+	}
+}
+
+func requireRuntimeHTTPStatus(t *testing.T, err error, want int) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected HTTP error %d, got nil", want)
+	}
+	var httpErr *httpx.HTTPError
+	if ok := errors.As(err, &httpErr); !ok || httpErr.Status != want {
+		t.Fatalf("HTTP status = %#v for error %v, want %d", httpErr, err, want)
 	}
 }
