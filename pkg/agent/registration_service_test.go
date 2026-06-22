@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/kinzhi/openlinker-core/pkg/agent"
+	"github.com/kinzhi/openlinker-core/pkg/config"
 )
 
 // 覆盖 Phase 2 缺口 1：注册用途访问令牌 → Agent 自注册流程。
@@ -41,6 +42,16 @@ func TestRegistrationService_MintBootstrapToken_NonCreatorRejected(t *testing.T)
 		Label: "无权 token",
 	})
 	assertHTTPStatus(t, err, 403)
+}
+
+func TestRegistrationService_MintBootstrapToken_MissingUser(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := agent.NewRegistrationService(pool)
+
+	_, err := svc.MintBootstrapToken(context.Background(), uuid.New(), &agent.CreateBootstrapTokenRequest{
+		Label: "missing user",
+	})
+	assertHTTPStatus(t, err, 404)
 }
 
 func TestAgentTokenPrefixesAllowCollisions(t *testing.T) {
@@ -151,6 +162,32 @@ func TestRegistrationService_RegisterAgentViaBootstrap_RuntimePull(t *testing.T)
 	require.Contains(t, endpointURL, "openlinker-runtime-pull://")
 	require.Contains(t, scopes, "agent:call")
 	require.Contains(t, scopes, "agent:pull")
+}
+
+func TestRegistrationService_RegisterAgentViaBootstrap_AllowsLocalEndpointWhenConfigured(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "Local Bootstrap Creator")
+	ctx := context.Background()
+
+	svc := agent.NewRegistrationService(pool, &config.Config{AllowLocalHTTPEndpoints: true})
+	minted, err := svc.MintBootstrapToken(ctx, creatorID, &agent.CreateBootstrapTokenRequest{
+		Label: "local direct token",
+	})
+	require.NoError(t, err)
+
+	resp, err := svc.RegisterAgentViaBootstrap(ctx, &agent.RegisterAgentViaBootstrapRequest{
+		BootstrapToken:    minted.PlaintextToken,
+		Slug:              "local-direct-agent",
+		Name:              "Local Direct Agent",
+		Description:       "dev loop local endpoint",
+		ConnectionMode:    "direct_http",
+		EndpointURL:       "http://localhost:3000/agent",
+		PricePerCallCents: 0,
+		Tags:              []string{"local"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "direct_http", resp.Agent.ConnectionMode)
+	require.Equal(t, "http://localhost:3000/agent", resp.Agent.EndpointURL)
 }
 
 func TestRegistrationService_RegisterAgentViaBootstrap_MCPServer(t *testing.T) {
@@ -300,6 +337,15 @@ func TestRegistrationService_RegisterAgentViaBootstrap_RevokedToken(t *testing.T
 	assertHTTPStatus(t, err, 401)
 }
 
+func TestRegistrationService_RevokeBootstrapToken_NotFound(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "Bootstrap Creator")
+
+	svc := agent.NewRegistrationService(pool)
+	err := svc.RevokeBootstrapToken(context.Background(), creatorID, uuid.New())
+	assertHTTPStatus(t, err, 404)
+}
+
 func TestRegistrationService_RegisterAgentViaBootstrap_BadToken(t *testing.T) {
 	pool := setupTestDB(t)
 	insertCreatorUser(t, pool, "Bootstrap Creator")
@@ -317,6 +363,67 @@ func TestRegistrationService_RegisterAgentViaBootstrap_BadToken(t *testing.T) {
 		Tags:              []string{"content/translation"},
 	})
 	assertHTTPStatus(t, err, 401)
+}
+
+func TestRegistrationService_RegisterAgentViaBootstrap_InvalidSkillIDDoesNotConsumeToken(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "Invalid Skill Creator")
+	ctx := context.Background()
+
+	svc := agent.NewRegistrationService(pool)
+	minted, err := svc.MintBootstrapToken(ctx, creatorID, &agent.CreateBootstrapTokenRequest{
+		Label:     "invalid skill token",
+		MaxAgents: 2,
+	})
+	require.NoError(t, err)
+
+	_, err = svc.RegisterAgentViaBootstrap(ctx, &agent.RegisterAgentViaBootstrapRequest{
+		BootstrapToken:    minted.PlaintextToken,
+		Name:              "Invalid Skill Agent",
+		Description:       "invalid skill should stop before token consumption",
+		EndpointURL:       "https://example.com/agent/invalid-skill",
+		PricePerCallCents: 50,
+		Tags:              []string{"content/translation"},
+		SkillIDs:          []string{"missing/skill"},
+	})
+	assertHTTPStatus(t, err, 400)
+
+	var usedCount int32
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT used_count FROM agent_registration_tokens WHERE id = $1`,
+		uuid.MustParse(minted.ID)).Scan(&usedCount))
+	require.Equal(t, int32(0), usedCount)
+}
+
+func TestRegistrationService_RegisterAgentViaBootstrap_DuplicateSlugRollsBackTokenConsumption(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "Duplicate Slug Creator")
+	ctx := context.Background()
+	createApprovedAgent(t, pool, creatorID, "duplicate-bootstrap-slug")
+
+	svc := agent.NewRegistrationService(pool)
+	minted, err := svc.MintBootstrapToken(ctx, creatorID, &agent.CreateBootstrapTokenRequest{
+		Label:     "duplicate slug token",
+		MaxAgents: 2,
+	})
+	require.NoError(t, err)
+
+	_, err = svc.RegisterAgentViaBootstrap(ctx, &agent.RegisterAgentViaBootstrapRequest{
+		BootstrapToken:    minted.PlaintextToken,
+		Slug:              "duplicate-bootstrap-slug",
+		Name:              "Duplicate Slug Agent",
+		Description:       "should rollback token consumption on unique violation",
+		EndpointURL:       "https://example.com/agent/duplicate",
+		PricePerCallCents: 50,
+		Tags:              []string{"content/translation"},
+	})
+	assertHTTPStatus(t, err, 409)
+
+	var usedCount int32
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT used_count FROM agent_registration_tokens WHERE id = $1`,
+		uuid.MustParse(minted.ID)).Scan(&usedCount))
+	require.Equal(t, int32(0), usedCount)
 }
 
 func TestRegistrationService_ListBootstrapTokens_OnlyOwn(t *testing.T) {

@@ -129,6 +129,16 @@ func validCreateReq(slug string) *agent.CreateAgentRequest {
 	}
 }
 
+func validObjectSchema(requiredField string) map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			requiredField: map[string]interface{}{"type": "string"},
+		},
+		"required": []interface{}{requiredField},
+	}
+}
+
 type mockDryRunner struct {
 	output map[string]interface{}
 	errMsg string
@@ -476,6 +486,118 @@ func TestUpdateAgent_NotOwner(t *testing.T) {
 	_, err = svc.UpdateAgent(ctx, agentID, b, upd)
 	// 不暴露存在性 -> 404
 	assertHTTPStatus(t, err, http.StatusNotFound)
+}
+
+func TestServiceBoundaryValidationBranches(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	ownerID := insertCreatorWithWallet(t, pool)
+	otherCreatorID := insertCreatorWithWallet(t, pool)
+
+	_, err := svc.CreateAgent(ctx, uuid.New(), validCreateReq(freshSlug("missing-user")))
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	missingTool := validCreateReq(freshSlug("mcp-missing-tool"))
+	missingTool.ConnectionMode = "mcp_server"
+	missingTool.MCPToolName = ""
+	missingTool.EndpointURL = "https://example.com/mcp"
+	_, err = svc.CreateAgent(ctx, ownerID, missingTool)
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	localDirect := validCreateReq(freshSlug("local-rejected"))
+	localDirect.EndpointURL = "http://localhost:3000/agent"
+	_, err = svc.CreateAgent(ctx, ownerID, localDirect)
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	mcpReq := validCreateReq(freshSlug("mcp-preserve-tool"))
+	mcpReq.ConnectionMode = "mcp_server"
+	mcpReq.EndpointURL = "https://example.com/mcp"
+	mcpReq.MCPToolName = "lookup"
+	mcpCreated, err := svc.CreateAgent(ctx, ownerID, mcpReq)
+	require.NoError(t, err)
+	mcpAgentID := uuid.MustParse(mcpCreated.ID)
+
+	updated, err := svc.UpdateAgent(ctx, mcpAgentID, ownerID, &agent.UpdateAgentRequest{
+		Name:              "MCP Updated",
+		Description:       "preserves tool name when connection mode is unchanged",
+		PricePerCallCents: 42,
+		Tags:              []string{"mcp"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, updated.MCPToolName)
+	assert.Equal(t, "lookup", *updated.MCPToolName)
+	assert.Equal(t, "https://example.com/mcp", updated.EndpointURL)
+
+	_, err = svc.UpdateAgent(ctx, mcpAgentID, ownerID, &agent.UpdateAgentRequest{
+		Name:              "Bad Local Update",
+		Description:       "local endpoint is not allowed for direct mode by default",
+		ConnectionMode:    "direct_http",
+		EndpointURL:       "http://localhost:3000/agent",
+		PricePerCallCents: 42,
+		Tags:              []string{"bad"},
+	})
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	_, err = svc.SetVisibility(ctx, uuid.New(), ownerID, "public")
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	_, err = svc.UpsertCapability(ctx, mcpAgentID, ownerID, nil)
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	_, err = svc.UpsertCapability(ctx, mcpAgentID, ownerID, &agent.UpsertCapabilityRequest{
+		InputSchema:  validObjectSchema("query"),
+		OutputSchema: validObjectSchema("result"),
+		Summary:      strings.Repeat("x", 1001),
+	})
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	_, err = svc.UpsertCapability(ctx, mcpAgentID, otherCreatorID, &agent.UpsertCapabilityRequest{
+		InputSchema:  validObjectSchema("query"),
+		OutputSchema: validObjectSchema("result"),
+		Summary:      "not owner",
+	})
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	_, err = svc.CreateExample(ctx, mcpAgentID, ownerID, nil)
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	_, err = svc.CreateExample(ctx, mcpAgentID, ownerID, &agent.CreateExampleRequest{
+		Title:     " ",
+		InputJSON: map[string]interface{}{"query": "ping"},
+	})
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	_, err = svc.CreateExample(ctx, mcpAgentID, otherCreatorID, &agent.CreateExampleRequest{
+		Title:     "not owner",
+		InputJSON: map[string]interface{}{"query": "ping"},
+	})
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	err = svc.DeleteExample(ctx, mcpAgentID, uuid.New(), ownerID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	svc.SetDryRunner(mockDryRunner{output: map[string]interface{}{"result": "pong"}})
+	_, err = svc.RunDryRun(ctx, mcpAgentID, otherCreatorID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	_, err = svc.UpsertCapability(ctx, mcpAgentID, ownerID, &agent.UpsertCapabilityRequest{
+		InputSchema:  validObjectSchema("query"),
+		OutputSchema: validObjectSchema("result"),
+		Summary:      "valid capability",
+	})
+	require.NoError(t, err)
+	example, err := svc.CreateExample(ctx, mcpAgentID, ownerID, &agent.CreateExampleRequest{
+		Title:              "valid then corrupt",
+		InputJSON:          map[string]interface{}{"query": "ping"},
+		ExpectedOutputJSON: map[string]interface{}{"result": "pong"},
+	})
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx,
+		`UPDATE agent_examples SET input_json = '[]'::jsonb WHERE id = $1`,
+		uuid.MustParse(example.ID))
+	require.NoError(t, err)
+	_, err = svc.RunDryRun(ctx, mcpAgentID, ownerID)
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
 }
 
 // ────────────────────────────────────────────────────────────

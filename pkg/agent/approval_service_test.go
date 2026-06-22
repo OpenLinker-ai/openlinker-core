@@ -28,6 +28,21 @@ func TestApprovalService_Create_RequiresOwnership(t *testing.T) {
 	assertHTTPStatus(t, err, 404)
 }
 
+func TestApprovalService_CreateRejectsMalformedAgentIDAndMissingApproval(t *testing.T) {
+	pool := setupTestDB(t)
+	creator := insertCreatorUser(t, pool, "Malformed")
+	svc := agent.NewApprovalService(pool, nil)
+
+	_, err := svc.CreateApproval(context.Background(), creator, &agent.CreateApprovalRequest{
+		AgentID: "not-a-uuid",
+		Action:  "x",
+	})
+	assertHTTPStatus(t, err, 400)
+
+	_, err = svc.GetApproval(context.Background(), creator, uuid.New())
+	assertHTTPStatus(t, err, 404)
+}
+
 func TestApprovalService_CreateAndList_OwnerOnly(t *testing.T) {
 	pool := setupTestDB(t)
 	creator := insertCreatorUser(t, pool, "Owner")
@@ -145,6 +160,33 @@ func TestApprovalService_ConfirmFailsAfterDecision(t *testing.T) {
 	// 第二次：已 confirmed → 409
 	err = svc.ConfirmApproval(ctx, creator, approvalID, "")
 	assertHTTPStatus(t, err, 409)
+}
+
+func TestApprovalService_RejectExpiredApprovalConflicts(t *testing.T) {
+	pool := setupTestDB(t)
+	creator := insertCreatorUser(t, pool, "Reject Expired")
+	agentID := createApprovedAgent(t, pool, creator, "approval-reject-expired")
+	ctx := context.Background()
+
+	svc := agent.NewApprovalService(pool, nil)
+	created, err := svc.CreateApproval(ctx, creator, &agent.CreateApprovalRequest{
+		AgentID:          agentID.String(),
+		Action:           "x",
+		ExpiresInMinutes: 5,
+	})
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx,
+		`UPDATE agent_action_approval_requests SET expires_at = NOW() - INTERVAL '1 hour' WHERE id = $1`,
+		uuid.MustParse(created.ID))
+	require.NoError(t, err)
+
+	err = svc.RejectApproval(ctx, creator, uuid.MustParse(created.ID), "too late")
+	assertHTTPStatus(t, err, 409)
+
+	got, err := svc.GetApproval(ctx, creator, uuid.MustParse(created.ID))
+	require.NoError(t, err)
+	require.Equal(t, "pending", got.Status)
 }
 
 func TestApprovalService_SweepExpires(t *testing.T) {

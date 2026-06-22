@@ -98,6 +98,49 @@ func TestMetricService_AggregateOnce_Idempotent(t *testing.T) {
 	require.Len(t, resp.Items, 3, "二次聚合也只会 upsert，不会复制行")
 }
 
+func TestStartMetricWorkerAggregatesAndSweepsExpiredApprovals(t *testing.T) {
+	pool := setupTestDB(t)
+	creator := insertCreatorUser(t, pool, "Metric Worker Creator")
+	agentID := createApprovedAgent(t, pool, creator, "metric-worker")
+	ctx := context.Background()
+
+	insertRun(t, pool, creator, agentID, "success", 1000, time.Now().Add(-15*time.Minute))
+
+	approvals := agent.NewApprovalService(pool, nil)
+	approval, err := approvals.CreateApproval(ctx, creator, &agent.CreateApprovalRequest{
+		AgentID:          agentID.String(),
+		Action:           "x",
+		ExpiresInMinutes: 5,
+	})
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx,
+		`UPDATE agent_action_approval_requests SET expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1`,
+		uuid.MustParse(approval.ID))
+	require.NoError(t, err)
+
+	metrics := agent.NewMetricService(pool)
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	agent.StartMetricWorker(workerCtx, metrics, approvals)
+
+	require.Eventually(t, func() bool {
+		snapshots, err := metrics.GetSnapshots(ctx, agentID)
+		if err != nil || len(snapshots.Items) != 3 {
+			return false
+		}
+		for _, item := range snapshots.Items {
+			if item.CallCount != 1 || item.SuccessCount != 1 {
+				return false
+			}
+		}
+		got, err := approvals.GetApproval(ctx, creator, uuid.MustParse(approval.ID))
+		return err == nil && got.Status == "expired"
+	}, 2*time.Second, 20*time.Millisecond)
+
+	cancel()
+	time.Sleep(20 * time.Millisecond)
+}
+
 // insertRun 直接 SQL 插一条 run，给 metric worker 测试用。
 func insertRun(t *testing.T, pool *pgxpool.Pool, userID, agentID uuid.UUID, status string, durationMs int32, startedAt time.Time) {
 	t.Helper()
