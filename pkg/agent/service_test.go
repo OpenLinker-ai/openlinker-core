@@ -388,6 +388,54 @@ func TestSetVisibility_HappyPath(t *testing.T) {
 	require.Equal(t, "active", resp.LifecycleStatus)
 }
 
+func TestUpdateAgentRuntimeWSVisibilityAndDisabledBoundaries(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	ownerID := insertCreatorWithWallet(t, pool)
+	otherCreatorID := insertCreatorWithWallet(t, pool)
+	created, err := svc.CreateAgent(ctx, ownerID, validCreateReq(freshSlug("runtime-ws-update")))
+	require.NoError(t, err)
+	agentID := uuid.MustParse(created.ID)
+
+	updated, err := svc.UpdateAgent(ctx, agentID, ownerID, &agent.UpdateAgentRequest{
+		Name:               "Runtime WS Agent",
+		Description:        "Updated to websocket runtime mode.",
+		EndpointURL:        "https://example.com/ignored-for-runtime-ws",
+		EndpointAuthHeader: "  Bearer websocket-secret  ",
+		PricePerCallCents:  321,
+		Tags:               []string{" Runtime ", "WS"},
+		Visibility:         "unlisted",
+		ConnectionMode:     "runtime_ws",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "runtime_ws", updated.ConnectionMode)
+	assert.Equal(t, "openlinker-runtime-ws://"+created.Slug, updated.EndpointURL)
+	assert.Equal(t, "unlisted", updated.Visibility)
+	assert.ElementsMatch(t, []string{"runtime", "ws"}, updated.Tags)
+	assert.Nil(t, updated.MCPToolName)
+
+	_, err = svc.SetVisibility(ctx, agentID, ownerID, "invalid")
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	err = svc.DisableAgent(ctx, agentID, otherCreatorID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	require.NoError(t, svc.DisableAgent(ctx, agentID, ownerID))
+	_, err = svc.UpdateAgent(ctx, agentID, ownerID, &agent.UpdateAgentRequest{
+		Name:              "Cannot edit disabled",
+		Description:       "disabled",
+		EndpointURL:       "https://example.com/disabled",
+		PricePerCallCents: 1,
+		Tags:              []string{"disabled"},
+	})
+	assertHTTPStatus(t, err, http.StatusForbidden)
+
+	_, err = svc.SetVisibility(ctx, agentID, ownerID, "private")
+	assertHTTPStatus(t, err, http.StatusForbidden)
+}
+
 func TestUpdateAgent_ApprovedEditable(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
@@ -614,6 +662,67 @@ func TestGetMyAgentOnboardingAndDeleteExample(t *testing.T) {
 	assert.Equal(t, capability.ID, afterDelete.Capability.ID)
 }
 
+func TestCreateExampleRejectsSchemaMismatchesAndLimit(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	ownerID := insertCreatorWithWallet(t, pool)
+	created, err := svc.CreateAgent(ctx, ownerID, validCreateReq(freshSlug("example-limits")))
+	require.NoError(t, err)
+	agentID := uuid.MustParse(created.ID)
+
+	_, err = svc.UpsertCapability(ctx, agentID, ownerID, &agent.UpsertCapabilityRequest{
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{"type": "string"},
+			},
+			"required": []interface{}{"query"},
+		},
+		OutputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"result": map[string]interface{}{"type": "string"},
+			},
+			"required": []interface{}{"result"},
+		},
+		Summary: "schema guarded examples",
+	})
+	require.NoError(t, err)
+
+	_, err = svc.CreateExample(ctx, agentID, ownerID, &agent.CreateExampleRequest{
+		Title:              "bad input type",
+		InputJSON:          map[string]interface{}{"query": float64(123)},
+		ExpectedOutputJSON: map[string]interface{}{"result": "ok"},
+	})
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	_, err = svc.CreateExample(ctx, agentID, ownerID, &agent.CreateExampleRequest{
+		Title:              "bad output type",
+		InputJSON:          map[string]interface{}{"query": "ping"},
+		ExpectedOutputJSON: map[string]interface{}{"result": float64(123)},
+	})
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	for i := 0; i < 20; i++ {
+		_, err = svc.CreateExample(ctx, agentID, ownerID, &agent.CreateExampleRequest{
+			Title:              "valid example " + uuid.NewString()[:8],
+			InputJSON:          map[string]interface{}{"query": "ping"},
+			ExpectedOutputJSON: map[string]interface{}{"result": "pong"},
+			SortOrder:          int32(i),
+		})
+		require.NoError(t, err)
+	}
+
+	_, err = svc.CreateExample(ctx, agentID, ownerID, &agent.CreateExampleRequest{
+		Title:              "too many examples",
+		InputJSON:          map[string]interface{}{"query": "ping"},
+		ExpectedOutputJSON: map[string]interface{}{"result": "pong"},
+	})
+	assertHTTPStatus(t, err, http.StatusBadRequest)
+}
+
 // ────────────────────────────────────────────────────────────
 // CheckSlug
 // ────────────────────────────────────────────────────────────
@@ -830,6 +939,59 @@ func TestRunDryRunFailureReturnsRepairHintsAndMarksDegraded(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "degraded", status)
 	assert.Equal(t, int32(1), failures)
+}
+
+func TestRunDryRunPreconditionsAndOutputSchemaFailure(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	ownerID := insertCreatorWithWallet(t, pool)
+	created, err := svc.CreateAgent(ctx, ownerID, validCreateReq(freshSlug("dryrun-preconditions")))
+	require.NoError(t, err)
+	agentID := uuid.MustParse(created.ID)
+
+	_, err = svc.RunDryRun(ctx, agentID, ownerID)
+	assertHTTPStatus(t, err, http.StatusServiceUnavailable)
+
+	svc.SetDryRunner(mockDryRunner{output: map[string]interface{}{"result": float64(123)}})
+	_, err = svc.RunDryRun(ctx, agentID, ownerID)
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	_, err = svc.CreateExample(ctx, agentID, ownerID, &agent.CreateExampleRequest{
+		Title:     "input before capability",
+		InputJSON: map[string]interface{}{"query": "ping"},
+	})
+	require.NoError(t, err)
+	_, err = svc.RunDryRun(ctx, agentID, ownerID)
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	_, err = svc.UpsertCapability(ctx, agentID, ownerID, &agent.UpsertCapabilityRequest{
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{"type": "string"},
+			},
+			"required": []interface{}{"query"},
+		},
+		OutputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"result": map[string]interface{}{"type": "string"},
+			},
+			"required": []interface{}{"result"},
+		},
+		Summary: "dry run output validation",
+	})
+	require.NoError(t, err)
+
+	resp, err := svc.RunDryRun(ctx, agentID, ownerID)
+	require.NoError(t, err)
+	assert.Equal(t, "fail", resp.Result)
+	require.NotNil(t, resp.Error)
+	assert.Contains(t, *resp.Error, "output 不匹配 output_schema")
+	assert.Contains(t, strings.Join(resp.RepairHints, "\n"), "input_schema / output_schema")
+	assert.Equal(t, "degraded", resp.Availability.Status)
 }
 
 func TestRunDueAvailabilityChecksCreatesUnreadAlert(t *testing.T) {
