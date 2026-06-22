@@ -413,11 +413,28 @@ func TestRuntimeResponseAndNextActionHelpers(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "agent_suggested", suggested.Type)
 	require.Equal(t, "Review the result", suggested.Hint)
+	emptySuggestion, ok := nextActionFromOutput(map[string]interface{}{"next_action": " "})
+	require.False(t, ok)
+	require.Nil(t, emptySuggestion)
+	missingSuggestion, ok := nextActionFromOutput(map[string]interface{}{})
+	require.False(t, ok)
+	require.Nil(t, missingSuggestion)
 	described, ok := nextActionFromOutput(map[string]interface{}{"next_action": map[string]interface{}{"description": "Use result", "method": 123}})
 	require.True(t, ok)
 	require.Equal(t, "执行 Agent 建议", described.Label)
 	require.Equal(t, "Use result", described.Hint)
 	require.Equal(t, "123", described.Method)
+	labelOnly, ok := nextActionFromOutput(map[string]interface{}{"next_action": map[string]interface{}{
+		"label":         "Open run",
+		"href":          "/run/123",
+		"resource_type": "run",
+		"resource_id":   "123",
+	}})
+	require.True(t, ok)
+	require.Equal(t, "Open run", labelOnly.Label)
+	require.Equal(t, "Open run", labelOnly.Hint)
+	require.Equal(t, "run", labelOnly.ResourceType)
+	require.Equal(t, "123", labelOnly.ResourceID)
 	emptyAction, ok := nextActionFromOutput(map[string]interface{}{"next_action": map[string]interface{}{"label": " "}})
 	require.False(t, ok)
 	require.Nil(t, emptyAction)
@@ -483,7 +500,10 @@ func TestRuntimeArtifactMessageAndEventHelpers(t *testing.T) {
 	require.Empty(t, runEventToResponse(db.RunEvent{Payload: []byte("bad")}).Payload)
 
 	require.Equal(t, "hello", messageContentFromMap(map[string]interface{}{"text": " hello "}))
+	require.Equal(t, "summary", messageContentFromMap(map[string]interface{}{"text": " ", "summary": " summary "}))
+	require.Equal(t, "prompt", messageContentFromMap(map[string]interface{}{"content": nil, "prompt": " prompt "}))
 	require.Equal(t, `{"value":3}`, messageContentFromMap(map[string]interface{}{"value": 3}))
+	require.Equal(t, "", messageContentFromMap(map[string]interface{}{"bad": func() {}}))
 	require.Equal(t, "", messageContentFromMap(nil))
 	require.Len(t, []rune(truncateRunMessageContent(strings.Repeat("数", maxRunMessageContentLen+1))), maxRunMessageContentLen)
 	require.True(t, constantTimeEqual("secret", "secret"))
@@ -516,11 +536,25 @@ func TestRuntimeArtifactDraftHelpers(t *testing.T) {
 	require.Len(t, items, 2)
 	require.Equal(t, "A", items[0].Title)
 	require.Equal(t, map[string]interface{}{"value": "raw"}, items[1].Content)
+	require.Equal(t, "Agent 产物", runArtifactsFromOutput(map[string]interface{}{"artifact": map[string]interface{}{"data": map[string]interface{}{"x": 1}}})[0].Title)
 	require.Equal(t, "Agent 输出", runArtifactsFromOutput(map[string]interface{}{"answer": 1})[0].Title)
+	require.Equal(t, map[string]interface{}{}, runArtifactsFromOutput(nil)[0].Content)
+	invalidDraft := artifactDraftFromMap(map[string]interface{}{
+		"title":      " ",
+		"type":       "html",
+		"visibility": "world",
+		"data":       map[string]interface{}{"file_uri": "https://example.com/nested.csv", "name": "nested.csv"},
+	}, "Fallback")
+	require.Equal(t, "json", invalidDraft.ArtifactType)
+	require.Equal(t, "private", invalidDraft.Visibility)
+	require.Equal(t, "Fallback", invalidDraft.Title)
+	require.Equal(t, "https://example.com/nested.csv", invalidDraft.FileURI)
+	require.Equal(t, "nested.csv", invalidDraft.FileName)
 	explicitParts := []interface{}{"part-a", map[string]interface{}{"text": "part-b"}}
 	require.Equal(t, explicitParts, artifactDeltaPartsFromPayload(map[string]interface{}{"parts": explicitParts}))
 	require.Equal(t, []interface{}{map[string]interface{}{"type": "data", "data": map[string]interface{}{"value": 1}}}, artifactDeltaPartsFromPayload(map[string]interface{}{"content": map[string]interface{}{"value": 1}}))
 	require.Equal(t, []interface{}{map[string]interface{}{"type": "data", "data": []interface{}{"x"}}}, artifactDeltaPartsFromPayload(map[string]interface{}{"data": []interface{}{"x"}}))
+	require.Equal(t, []interface{}{map[string]interface{}{"type": "text", "text": "hello"}}, artifactDeltaPartsFromPayload(map[string]interface{}{"message": "hello"}))
 
 	delta := artifactDeltaDraftFromPayload(map[string]interface{}{
 		"artifact_id": "stream-1",
@@ -534,6 +568,22 @@ func TestRuntimeArtifactDraftHelpers(t *testing.T) {
 	require.False(t, delta.Append)
 	require.True(t, delta.LastChunk)
 	require.Equal(t, []interface{}{map[string]interface{}{"type": "text", "text": "hello"}}, delta.Parts)
+	defaultDelta := artifactDeltaDraftFromPayload(map[string]interface{}{
+		"id":         "raw id",
+		"type":       "bad",
+		"visibility": "world",
+		"parts": []interface{}{map[string]interface{}{
+			"file": map[string]interface{}{"url": "https://files.example/default.bin", "contentType": "application/octet-stream"},
+		}},
+	})
+	require.Equal(t, "raw id", defaultDelta.SourceArtifactID)
+	require.Equal(t, "file", defaultDelta.ArtifactType)
+	require.Equal(t, "private", defaultDelta.Visibility)
+	require.True(t, defaultDelta.Append)
+	require.False(t, defaultDelta.LastChunk)
+	require.Equal(t, "Artifact raw id", defaultDelta.Title)
+	require.Equal(t, "https://files.example/default.bin", defaultDelta.FileURI)
+	require.Equal(t, "application/octet-stream", defaultDelta.MimeType)
 
 	seq := int32(7)
 	partsSHA := "parts"
@@ -552,6 +602,16 @@ func TestRuntimeArtifactDraftHelpers(t *testing.T) {
 	require.Equal(t, "stream-1", content["artifact_id"])
 	require.Equal(t, "hello", content["text"])
 	require.Equal(t, "verified", content["last_checksum_status"])
+	appended := mergeArtifactDeltaContent(map[string]interface{}{"parts": "previous", "chunks": []interface{}{"old"}}, runArtifactDeltaDraft{
+		SourceArtifactID: "append-1",
+		ArtifactType:     "data",
+		Title:            "Append",
+		Visibility:       "shared",
+		Append:           true,
+		Parts:            []interface{}{"new"},
+	}, db.RunArtifactChunk{ChunkIndex: 3, ChecksumStatus: "not_provided"})
+	require.Equal(t, []interface{}{"previous", "new"}, appended["parts"])
+	require.Len(t, appended["chunks"], 2)
 
 	require.Equal(t, []interface{}{"x"}, interfaceSliceFromAny("x"))
 	require.Equal(t, []interface{}{"x", "y"}, interfaceSliceFromAny([]interface{}{"x", "y"}))
@@ -591,6 +651,18 @@ func TestRuntimeArtifactDraftHelpers(t *testing.T) {
 	require.Equal(t, strings.Repeat("c", 64), partsMeta.FileSHA256)
 	require.NotNil(t, partsMeta.FileSizeBytes)
 	require.Equal(t, int64(64), *partsMeta.FileSizeBytes)
+	require.Equal(t, artifactFileMetadata{}, artifactFileMetadataFromMap(nil))
+	bytesMeta := artifactFileMetadataFromMap(map[string]interface{}{
+		"bytes": map[string]interface{}{
+			"url":         "https://files.example/raw.bin",
+			"contentType": "application/octet-stream",
+			"sizeBytes":   float32(128.9),
+		},
+	})
+	require.Equal(t, "https://files.example/raw.bin", bytesMeta.FileURI)
+	require.Equal(t, "application/octet-stream", bytesMeta.MimeType)
+	require.NotNil(t, bytesMeta.FileSizeBytes)
+	require.Equal(t, int64(128), *bytesMeta.FileSizeBytes)
 	sizeFromInt64, ok := firstArtifactInt64(map[string]interface{}{"size": int64(9)}, "size")
 	require.True(t, ok)
 	require.Equal(t, int64(9), sizeFromInt64)
@@ -623,6 +695,7 @@ func TestRuntimeSSEAndHandlerValidation(t *testing.T) {
 	err := writeSSEStreamError(rec, errors.New("boom"))
 	require.NoError(t, err)
 	require.Contains(t, rec.Body.String(), "run.stream.error")
+	require.Error(t, writeSSEStreamError(errorResponseWriter{}, errors.New("boom")))
 	require.True(t, isTerminalRunEvent("run.failed"))
 	require.True(t, isTerminalRunEvent("run.canceled"))
 	require.False(t, isTerminalRunEvent("run.started"))
@@ -719,6 +792,18 @@ func TestRuntimeRoutes(t *testing.T) {
 		require.True(t, routes[key], key)
 	}
 }
+
+type errorResponseWriter struct{}
+
+func (errorResponseWriter) Header() http.Header {
+	return http.Header{}
+}
+
+func (errorResponseWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
+}
+
+func (errorResponseWriter) WriteHeader(int) {}
 
 func nextActionFromUnsupportedOutput(t *testing.T) *RunNextAction {
 	t.Helper()
