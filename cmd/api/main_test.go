@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	migratecmd "github.com/golang-migrate/migrate/v4"
 	"github.com/labstack/echo/v4"
 
 	"github.com/kinzhi/openlinker-core/pkg/config"
@@ -202,10 +204,182 @@ func TestMigrationConfig(t *testing.T) {
 	}
 }
 
+func TestRunMigrateWithCommandBranches(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		env       map[string]string
+		migrator  *fakeMigrator
+		newErr    error
+		wantCode  int
+		wantOut   string
+		wantErr   string
+		wantSrc   string
+		wantDBURL string
+	}{
+		{name: "missing command", wantCode: 2, wantOut: "usage: api migrate <up|down|status>"},
+		{name: "missing database", args: []string{"up"}, wantCode: 1, wantErr: "DATABASE_URL not set"},
+		{
+			name:      "init failure",
+			args:      []string{"up"},
+			env:       map[string]string{"DATABASE_URL": "postgres://db"},
+			newErr:    errors.New("bad migration source"),
+			wantCode:  1,
+			wantErr:   "migrate init: bad migration source",
+			wantSrc:   "file://./migrations",
+			wantDBURL: "postgres://db",
+		},
+		{
+			name:      "up success",
+			args:      []string{"up"},
+			env:       map[string]string{"DATABASE_URL": "postgres://db", "MIGRATIONS_DIR": "/app/migrations"},
+			migrator:  &fakeMigrator{},
+			wantCode:  0,
+			wantOut:   "migrate up: ok",
+			wantSrc:   "file:///app/migrations",
+			wantDBURL: "postgres://db",
+		},
+		{
+			name:      "up no change is ok",
+			args:      []string{"up"},
+			env:       map[string]string{"DATABASE_URL": "postgres://db"},
+			migrator:  &fakeMigrator{upErr: migratecmd.ErrNoChange},
+			wantCode:  0,
+			wantOut:   "migrate up: ok",
+			wantSrc:   "file://./migrations",
+			wantDBURL: "postgres://db",
+		},
+		{
+			name:      "up failure",
+			args:      []string{"up"},
+			env:       map[string]string{"DATABASE_URL": "postgres://db"},
+			migrator:  &fakeMigrator{upErr: errors.New("up failed")},
+			wantCode:  1,
+			wantErr:   "migrate up: up failed",
+			wantSrc:   "file://./migrations",
+			wantDBURL: "postgres://db",
+		},
+		{
+			name:      "down success",
+			args:      []string{"down"},
+			env:       map[string]string{"DATABASE_URL": "postgres://db"},
+			migrator:  &fakeMigrator{},
+			wantCode:  0,
+			wantOut:   "migrate down 1 step: ok",
+			wantSrc:   "file://./migrations",
+			wantDBURL: "postgres://db",
+		},
+		{
+			name:      "down failure",
+			args:      []string{"down"},
+			env:       map[string]string{"DATABASE_URL": "postgres://db"},
+			migrator:  &fakeMigrator{stepsErr: errors.New("down failed")},
+			wantCode:  1,
+			wantErr:   "migrate down: down failed",
+			wantSrc:   "file://./migrations",
+			wantDBURL: "postgres://db",
+		},
+		{
+			name:      "status success",
+			args:      []string{"status"},
+			env:       map[string]string{"DATABASE_URL": "postgres://db"},
+			migrator:  &fakeMigrator{version: 42, dirty: true},
+			wantCode:  0,
+			wantOut:   "version=42 dirty=true",
+			wantSrc:   "file://./migrations",
+			wantDBURL: "postgres://db",
+		},
+		{
+			name:      "status failure",
+			args:      []string{"status"},
+			env:       map[string]string{"DATABASE_URL": "postgres://db"},
+			migrator:  &fakeMigrator{versionErr: errors.New("status failed")},
+			wantCode:  1,
+			wantErr:   "status: status failed",
+			wantSrc:   "file://./migrations",
+			wantDBURL: "postgres://db",
+		},
+		{
+			name:      "unknown command",
+			args:      []string{"sideways"},
+			env:       map[string]string{"DATABASE_URL": "postgres://db"},
+			migrator:  &fakeMigrator{},
+			wantCode:  2,
+			wantErr:   "unknown migrate command: sideways",
+			wantSrc:   "file://./migrations",
+			wantDBURL: "postgres://db",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			var gotSrc, gotDBURL string
+			fakeM := tt.migrator
+			if fakeM == nil {
+				fakeM = &fakeMigrator{}
+			}
+			code := runMigrateWith(tt.args, func(key string) string { return tt.env[key] }, func(sourceURL, databaseURL string) (migrator, error) {
+				gotSrc = sourceURL
+				gotDBURL = databaseURL
+				if tt.newErr != nil {
+					return nil, tt.newErr
+				}
+				return fakeM, nil
+			}, &stdout, &stderr)
+
+			if code != tt.wantCode {
+				t.Fatalf("runMigrateWith code = %d, want %d", code, tt.wantCode)
+			}
+			if tt.wantOut != "" && !strings.Contains(stdout.String(), tt.wantOut) {
+				t.Fatalf("stdout = %q, want contains %q", stdout.String(), tt.wantOut)
+			}
+			if tt.wantErr != "" && !strings.Contains(stderr.String(), tt.wantErr) {
+				t.Fatalf("stderr = %q, want contains %q", stderr.String(), tt.wantErr)
+			}
+			if tt.wantSrc != "" && gotSrc != tt.wantSrc {
+				t.Fatalf("sourceURL = %q, want %q", gotSrc, tt.wantSrc)
+			}
+			if tt.wantDBURL != "" && gotDBURL != tt.wantDBURL {
+				t.Fatalf("databaseURL = %q, want %q", gotDBURL, tt.wantDBURL)
+			}
+		})
+	}
+}
+
 type fakePinger struct {
 	err         error
 	calls       int
 	sawDeadline bool
+}
+
+type fakeMigrator struct {
+	upErr      error
+	stepsErr   error
+	version    uint
+	dirty      bool
+	versionErr error
+	closed     bool
+}
+
+func (m *fakeMigrator) Up() error {
+	return m.upErr
+}
+
+func (m *fakeMigrator) Steps(n int) error {
+	if n != -1 {
+		return errors.New("unexpected step count")
+	}
+	return m.stepsErr
+}
+
+func (m *fakeMigrator) Version() (uint, bool, error) {
+	return m.version, m.dirty, m.versionErr
+}
+
+func (m *fakeMigrator) Close() (error, error) {
+	m.closed = true
+	return nil, nil
 }
 
 func (p *fakePinger) Ping(ctx context.Context) error {

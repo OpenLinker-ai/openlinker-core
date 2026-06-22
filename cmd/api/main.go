@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -204,49 +205,66 @@ func rateLimiterConfig() emw.RateLimiterConfig {
 
 // runMigrate runs goose-style up/down/status against MIGRATIONS_DIR (default ./migrations).
 func runMigrate(args []string) {
+	code := runMigrateWith(args, os.Getenv, func(sourceURL, databaseURL string) (migrator, error) {
+		return migratecmd.New(sourceURL, databaseURL)
+	}, os.Stdout, os.Stderr)
+	if code != 0 {
+		os.Exit(code)
+	}
+}
+
+type migrator interface {
+	Up() error
+	Steps(int) error
+	Version() (uint, bool, error)
+	Close() (error, error)
+}
+
+func runMigrateWith(args []string, getenv func(string) string, newMigrator func(string, string) (migrator, error), stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Println("usage: api migrate <up|down|status>")
-		os.Exit(2)
+		fmt.Fprintln(stdout, "usage: api migrate <up|down|status>")
+		return 2
 	}
 	cmd := args[0]
 
-	dbURL, src, err := migrationConfig(os.Getenv)
+	dbURL, src, err := migrationConfig(getenv)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
 
-	m, err := migratecmd.New("file://"+src, dbURL)
+	m, err := newMigrator("file://"+src, dbURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "migrate init: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "migrate init: %v\n", err)
+		return 1
 	}
 	defer func() { _, _ = m.Close() }()
 
 	switch cmd {
 	case "up":
 		if err := m.Up(); err != nil && !errors.Is(err, migratecmd.ErrNoChange) {
-			fmt.Fprintf(os.Stderr, "migrate up: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(stderr, "migrate up: %v\n", err)
+			return 1
 		}
-		fmt.Println("migrate up: ok")
+		fmt.Fprintln(stdout, "migrate up: ok")
 	case "down":
 		if err := m.Steps(-1); err != nil {
-			fmt.Fprintf(os.Stderr, "migrate down: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(stderr, "migrate down: %v\n", err)
+			return 1
 		}
-		fmt.Println("migrate down 1 step: ok")
+		fmt.Fprintln(stdout, "migrate down 1 step: ok")
 	case "status":
 		v, dirty, err := m.Version()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "status: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(stderr, "status: %v\n", err)
+			return 1
 		}
-		fmt.Printf("version=%d dirty=%v\n", v, dirty)
+		fmt.Fprintf(stdout, "version=%d dirty=%v\n", v, dirty)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown migrate command: %s\n", cmd)
-		os.Exit(2)
+		fmt.Fprintf(stderr, "unknown migrate command: %s\n", cmd)
+		return 2
 	}
+	return 0
 }
 
 func migrationConfig(getenv func(string) string) (dbURL string, src string, err error) {
