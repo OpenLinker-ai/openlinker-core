@@ -755,6 +755,16 @@ func TestCheckSlug_Taken(t *testing.T) {
 	assert.False(t, resp.Available, "existing slug must be reported taken")
 }
 
+func TestCheckSlug_InvalidReturnsUnavailableWithoutDB(t *testing.T) {
+	svc := agent.NewService(nil, &config.Config{})
+
+	resp, err := svc.CheckSlug(context.Background(), " Bad Slug ")
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "Bad Slug", resp.Slug)
+	assert.False(t, resp.Available)
+}
+
 // ────────────────────────────────────────────────────────────
 // BecomeCreator
 // ────────────────────────────────────────────────────────────
@@ -774,6 +784,14 @@ func TestBecomeCreator(t *testing.T) {
 	// 幂等：再调一次仍然成功，不报错
 	require.NoError(t, svc.BecomeCreator(ctx, uid))
 	assert.True(t, readUserIsCreator(t, pool, uid))
+}
+
+func TestBecomeCreator_NotFound(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+
+	err := svc.BecomeCreator(context.Background(), uuid.New())
+	assertHTTPStatus(t, err, http.StatusNotFound)
 }
 
 // ────────────────────────────────────────────────────────────
@@ -834,6 +852,27 @@ func TestRequestCertification_NotRepeatable(t *testing.T) {
 	// 第二次再申请：已 pending → 409
 	err = svc.RequestCertification(ctx, agentID, uid)
 	assertHTTPStatusIn(t, err, http.StatusConflict, http.StatusBadRequest)
+}
+
+func TestCertificationBoundaryNotFoundAndOwnerIsolation(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	ownerID := insertCreatorWithWallet(t, pool)
+	otherOwnerID := insertCreatorUser(t, pool, "Other Creator")
+	created, err := svc.CreateAgent(ctx, ownerID, validCreateReq(freshSlug("cert-boundary")))
+	require.NoError(t, err)
+	agentID := uuid.MustParse(created.ID)
+
+	err = svc.RequestCertification(ctx, agentID, otherOwnerID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+	err = svc.RequestCertification(ctx, uuid.New(), ownerID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+	err = svc.CertifyAgent(ctx, uuid.New())
+	assertHTTPStatus(t, err, http.StatusNotFound)
+	err = svc.RejectCertification(ctx, uuid.New(), "missing")
+	assertHTTPStatus(t, err, http.StatusNotFound)
 }
 
 func TestRejectCertification_HappyPath(t *testing.T) {
@@ -1059,6 +1098,86 @@ func TestRunDueAvailabilityChecksCreatesRecoveryAlert(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), alerts.Total)
 	assert.Contains(t, []string{alerts.Items[0].Type, alerts.Items[1].Type}, "availability_recovered")
+}
+
+func TestStartAvailabilityMonitorRunsInitialTick(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	svc.SetDryRunner(mockDryRunner{errMsg: "endpoint 调用失败: timeout"})
+	ctx := context.Background()
+
+	uid := insertCreatorWithWallet(t, pool)
+	agentID := createDryRunReadyAgent(t, svc, uid, freshSlug("monitor-start"))
+
+	monitorCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	agent.StartAvailabilityMonitor(monitorCtx, svc, agent.AvailabilityMonitorConfig{
+		InitialDelay: time.Millisecond,
+		Interval:     time.Hour,
+		BatchSize:    1,
+	})
+
+	require.Eventually(t, func() bool {
+		alerts, err := svc.ListAvailabilityAlerts(ctx, uid, 10)
+		return err == nil &&
+			alerts.Total == 1 &&
+			alerts.Unread == 1 &&
+			len(alerts.Items) == 1 &&
+			alerts.Items[0].AgentID == agentID.String() &&
+			alerts.Items[0].Type == "availability_failed"
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestRunDueAvailabilityChecksEscalatesAndIsolatesAlerts(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	_, err := svc.RunDueAvailabilityChecks(ctx, 0, -1)
+	assertHTTPStatus(t, err, http.StatusServiceUnavailable)
+
+	uid := insertCreatorWithWallet(t, pool)
+	otherUID := insertCreatorUser(t, pool, "Other Creator")
+	agentID := createDryRunReadyAgent(t, svc, uid, freshSlug("monitor-critical"))
+	svc.SetDryRunner(mockDryRunner{errMsg: "endpoint 调用失败: timeout"})
+
+	for i := 0; i < 3; i++ {
+		resp, err := svc.RunDueAvailabilityChecks(ctx, 0, -1)
+		require.NoError(t, err)
+		assert.Equal(t, int32(1), resp.Checked)
+		assert.Equal(t, int32(1), resp.Failed)
+		require.Len(t, resp.Alerts, 1)
+
+		_, err = pool.Exec(ctx,
+			`UPDATE agent_availability_snapshots
+			 SET last_checked_at = NOW() - INTERVAL '1 hour'
+			 WHERE agent_id = $1`, agentID)
+		require.NoError(t, err)
+	}
+
+	alerts, err := svc.ListAvailabilityAlerts(ctx, uid, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), alerts.Total)
+	assert.Equal(t, int32(1), alerts.Unread)
+	require.Len(t, alerts.Items, 1)
+	assert.Equal(t, "availability_failed", alerts.Items[0].Type)
+	assert.Equal(t, "critical", alerts.Items[0].Severity)
+	assert.Equal(t, "unreachable", alerts.Items[0].AvailabilityStatus)
+	assert.Equal(t, int32(3), alerts.Items[0].ConsecutiveFailures)
+	assert.NotNil(t, alerts.Items[0].LastError)
+	assert.Contains(t, strings.Join(alerts.Items[0].RepairHints, "\n"), "首包响应")
+
+	otherAlerts, err := svc.ListAvailabilityAlerts(ctx, otherUID, 200)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), otherAlerts.Total)
+	assert.Empty(t, otherAlerts.Items)
+
+	alertID := uuid.MustParse(alerts.Items[0].ID)
+	_, err = svc.MarkAvailabilityAlertRead(ctx, otherUID, alertID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+	read, err := svc.MarkAvailabilityAlertRead(ctx, uid, alertID)
+	require.NoError(t, err)
+	assert.NotNil(t, read.ReadAt)
 }
 
 // ────────────────────────────────────────────────────────────
