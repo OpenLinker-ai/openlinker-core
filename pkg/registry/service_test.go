@@ -636,6 +636,26 @@ func TestRegistryNodePeerAndRemoteRouteBoundaries(t *testing.T) {
 	otherOwnerID := insertRegistryOwner(t, pool)
 	agentID := insertRegistryAgent(t, pool, ownerID)
 
+	_, err := svc.CreateNode(ctx, ownerID, &registry.CreateNodeRequest{
+		NodeName: "X",
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	_, err = svc.CreateNode(ctx, ownerID, &registry.CreateNodeRequest{
+		NodeName: "Bad Type",
+		NodeType: "invalid",
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	_, err = svc.CreateNode(ctx, ownerID, &registry.CreateNodeRequest{
+		NodeName: "Bad URL",
+		BaseURL:  "ftp://node.example",
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	_, err = svc.CreateNode(ctx, ownerID, &registry.CreateNodeRequest{
+		NodeName: "Bad Scope",
+		Scopes:   []string{"unknown"},
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
 	limitedNode, err := svc.CreateNode(ctx, ownerID, &registry.CreateNodeRequest{
 		NodeName: "Heartbeat Only",
 		NodeType: "bridge_proxy",
@@ -703,6 +723,19 @@ func TestRegistryNodePeerAndRemoteRouteBoundaries(t *testing.T) {
 		BearerToken: "short",
 	})
 	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	_, err = svc.CreateRegistryPeer(ctx, ownerID, &registry.CreateRegistryPeerRequest{
+		Name:        "Bad URL Peer",
+		APIBaseURL:  "ftp://remote.example",
+		BearerToken: "peer-token-123",
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	_, err = svc.CreateRegistryPeer(ctx, ownerID, &registry.CreateRegistryPeerRequest{
+		Name:          "Bad Status Peer",
+		APIBaseURL:    "https://remote.example",
+		BearerToken:   "peer-token-123",
+		InitialStatus: "disabled",
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
 	pausedPeer, err := svc.CreateRegistryPeer(ctx, ownerID, &registry.CreateRegistryPeerRequest{
 		Name:          "Paused Peer",
 		APIBaseURL:    "https://remote.example",
@@ -736,6 +769,52 @@ func TestRegistryNodePeerAndRemoteRouteBoundaries(t *testing.T) {
 	require.NoError(t, svc.DeleteRegistryPeer(ctx, ownerID, uuid.MustParse(pausedPeer.ID)))
 	err = svc.DeleteRegistryPeer(ctx, ownerID, uuid.MustParse(pausedPeer.ID))
 	requireHTTPStatus(t, err, http.StatusNotFound)
+
+	_, err = svc.CreateRegistryFederationInvite(ctx, ownerID, &registry.CreateRegistryFederationInviteRequest{
+		Name:             "X",
+		APIBaseURL:       "https://peer.example",
+		BearerToken:      "federation-peer-token-123",
+		ExpiresInSeconds: 120,
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	_, err = svc.CreateRegistryFederationInvite(ctx, ownerID, &registry.CreateRegistryFederationInviteRequest{
+		Name:             "Bad Federation URL",
+		APIBaseURL:       "ftp://peer.example",
+		BearerToken:      "federation-peer-token-123",
+		ExpiresInSeconds: 120,
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	_, err = svc.CreateRegistryFederationInvite(ctx, ownerID, &registry.CreateRegistryFederationInviteRequest{
+		Name:             "Short Federation Token",
+		APIBaseURL:       "https://peer.example",
+		BearerToken:      "short",
+		ExpiresInSeconds: 120,
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	_, err = svc.CreateRegistryFederationInvite(ctx, ownerID, &registry.CreateRegistryFederationInviteRequest{
+		Name:             "Short Federation TTL",
+		APIBaseURL:       "https://peer.example",
+		BearerToken:      "federation-peer-token-123",
+		ExpiresInSeconds: 30,
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	_, err = svc.ConsumeRegistryFederationInvite(ctx, &registry.ConsumeRegistryFederationInviteRequest{
+		FederationToken: "bad-token",
+	})
+	requireHTTPStatus(t, err, http.StatusUnauthorized)
+	expiringInvite, err := svc.CreateRegistryFederationInvite(ctx, ownerID, &registry.CreateRegistryFederationInviteRequest{
+		Name:             "Expiring Federation",
+		APIBaseURL:       "https://peer.example",
+		BearerToken:      "federation-peer-token-123",
+		ExpiresInSeconds: 60,
+	})
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `UPDATE registry_federation_invites SET expires_at = NOW() - INTERVAL '1 second' WHERE id = $1`, expiringInvite.ID)
+	require.NoError(t, err)
+	_, err = svc.ConsumeRegistryFederationInvite(ctx, &registry.ConsumeRegistryFederationInviteRequest{
+		FederationToken: expiringInvite.FederationToken,
+	})
+	requireHTTPStatus(t, err, http.StatusUnauthorized)
 
 	_, err = svc.RevokeNode(ctx, otherOwnerID, nodeID)
 	requireHTTPStatus(t, err, http.StatusNotFound)
