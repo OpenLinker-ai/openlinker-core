@@ -13,6 +13,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/kinzhi/openlinker-core/pkg/agent"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
@@ -957,6 +959,227 @@ func TestA2AHTTPHandlersValidateBeforeServiceDispatch(t *testing.T) {
 	}
 }
 
+func TestA2AControlHTTPHandlersDispatchService(t *testing.T) {
+	userID := uuid.New()
+	agentID := uuid.New()
+	tokenID := uuid.New()
+	parentRunID := uuid.New()
+	targetAgentID := uuid.New()
+
+	t.Run("create runtime token", func(t *testing.T) {
+		svc := newControlA2AService()
+		c := newA2ATestContext(&a2aHandlerRequest{
+			method: http.MethodPost,
+			target: "/creator/agents/" + agentID.String() + "/runtime-tokens",
+			userID: userID.String(),
+			body:   `{"name":"worker"}`,
+			params: map[string]string{"id": agentID.String()},
+		})
+
+		require.NoError(t, NewHandler(svc).CreateRuntimeToken(c))
+		assert.Equal(t, http.StatusCreated, c.(*a2ATestContext).rec.Code)
+		assert.Equal(t, "create-runtime-token", svc.calls[len(svc.calls)-1])
+		assert.Equal(t, userID, svc.userID)
+		assert.Equal(t, agentID, svc.agentID)
+		assert.Equal(t, "worker", svc.createReq.Name)
+		assert.Contains(t, c.(*a2ATestContext).rec.Body.String(), "rt_live_test")
+	})
+
+	t.Run("list runtime tokens", func(t *testing.T) {
+		svc := newControlA2AService()
+		c := newA2ATestContext(&a2aHandlerRequest{
+			method: http.MethodGet,
+			target: "/creator/agents/" + agentID.String() + "/runtime-tokens",
+			userID: userID.String(),
+			params: map[string]string{"id": agentID.String()},
+		})
+
+		require.NoError(t, NewHandler(svc).ListRuntimeTokens(c))
+		assert.Equal(t, http.StatusOK, c.(*a2ATestContext).rec.Code)
+		assert.Equal(t, "list-runtime-tokens", svc.calls[len(svc.calls)-1])
+		assert.Contains(t, c.(*a2ATestContext).rec.Body.String(), "worker")
+	})
+
+	t.Run("revoke runtime token", func(t *testing.T) {
+		svc := newControlA2AService()
+		c := newA2ATestContext(&a2aHandlerRequest{
+			method: http.MethodDelete,
+			target: "/creator/runtime-tokens/" + tokenID.String(),
+			userID: userID.String(),
+			params: map[string]string{"tokenID": tokenID.String()},
+		})
+
+		require.NoError(t, NewHandler(svc).RevokeRuntimeToken(c))
+		assert.Equal(t, http.StatusNoContent, c.(*a2ATestContext).rec.Code)
+		assert.Equal(t, tokenID, svc.tokenID)
+	})
+
+	t.Run("runtime workbench", func(t *testing.T) {
+		svc := newControlA2AService()
+		c := newA2ATestContext(&a2aHandlerRequest{
+			method: http.MethodGet,
+			target: "/creator/agents/" + agentID.String() + "/runtime-workbench",
+			userID: userID.String(),
+			params: map[string]string{"id": agentID.String()},
+		})
+
+		require.NoError(t, NewHandler(svc).GetRuntimeWorkbench(c))
+		assert.Equal(t, http.StatusOK, c.(*a2ATestContext).rec.Code)
+		assert.Contains(t, c.(*a2ATestContext).rec.Body.String(), "runtime-agent")
+	})
+
+	t.Run("get and update call policy", func(t *testing.T) {
+		svc := newControlA2AService()
+		h := NewHandler(svc)
+		c := newA2ATestContext(&a2aHandlerRequest{
+			method: http.MethodGet,
+			target: "/creator/agents/" + agentID.String() + "/a2a-policy",
+			userID: userID.String(),
+			params: map[string]string{"id": agentID.String()},
+		})
+
+		require.NoError(t, h.GetCallPolicy(c))
+		assert.Equal(t, http.StatusOK, c.(*a2ATestContext).rec.Code)
+		assert.Contains(t, c.(*a2ATestContext).rec.Body.String(), "public")
+
+		c = newA2ATestContext(&a2aHandlerRequest{
+			method: http.MethodPut,
+			target: "/creator/agents/" + agentID.String() + "/a2a-policy",
+			userID: userID.String(),
+			body:   `{"callable_by":"same_creator"}`,
+			params: map[string]string{"id": agentID.String()},
+		})
+
+		require.NoError(t, h.UpdateCallPolicy(c))
+		assert.Equal(t, http.StatusOK, c.(*a2ATestContext).rec.Code)
+		assert.Equal(t, "same_creator", svc.updatePolicyReq.CallableBy)
+	})
+
+	t.Run("call agent", func(t *testing.T) {
+		svc := newControlA2AService()
+		c := newA2ATestContext(&a2aHandlerRequest{
+			method: http.MethodPost,
+			target: "/agent-runtime/call-agent",
+			body:   `{"target_agent_id":"` + targetAgentID.String() + `","reason":"need data","input":{"q":"hi"}}`,
+			headers: map[string]string{
+				echo.HeaderAuthorization: "Bearer rt_live_test",
+				"X-OpenLinker-Run-Id":    parentRunID.String(),
+			},
+		})
+
+		require.NoError(t, NewHandler(svc).CallAgent(c))
+		assert.Equal(t, http.StatusOK, c.(*a2ATestContext).rec.Code)
+		assert.Equal(t, "rt_live_test", svc.callToken)
+		assert.Equal(t, parentRunID.String(), svc.callReq.CurrentRunID)
+		assert.Equal(t, targetAgentID.String(), svc.callReq.TargetAgentID)
+	})
+
+	t.Run("list children and parents", func(t *testing.T) {
+		svc := newControlA2AService()
+		h := NewHandler(svc)
+		c := newA2ATestContext(&a2aHandlerRequest{
+			method: http.MethodGet,
+			target: "/runs/" + parentRunID.String() + "/children",
+			userID: userID.String(),
+			params: map[string]string{"id": parentRunID.String()},
+		})
+
+		require.NoError(t, h.ListChildren(c))
+		assert.Equal(t, http.StatusOK, c.(*a2ATestContext).rec.Code)
+		assert.Contains(t, c.(*a2ATestContext).rec.Body.String(), parentRunID.String())
+
+		c = newA2ATestContext(&a2aHandlerRequest{
+			method: http.MethodGet,
+			target: "/a2a/parents?page=3&size=25",
+			userID: userID.String(),
+		})
+
+		require.NoError(t, h.ListParentRuns(c))
+		assert.Equal(t, http.StatusOK, c.(*a2ATestContext).rec.Code)
+		assert.Equal(t, int32(3), svc.page)
+		assert.Equal(t, int32(25), svc.size)
+		assert.Contains(t, c.(*a2ATestContext).rec.Body.String(), "child_count")
+	})
+}
+
+func TestA2AControlHTTPHandlersPropagateServiceErrors(t *testing.T) {
+	userID := uuid.New()
+	agentID := uuid.New()
+	tokenID := uuid.New()
+	parentRunID := uuid.New()
+	serviceDown := httpx.ServiceUnavailable("service down")
+
+	for _, tc := range []struct {
+		name string
+		key  string
+		call func(*Handler, echo.Context) error
+		req  *a2aHandlerRequest
+	}{
+		{
+			name: "create runtime token",
+			key:  "create-runtime-token",
+			call: (*Handler).CreateRuntimeToken,
+			req:  &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID.String(), body: `{"name":"worker"}`, params: map[string]string{"id": agentID.String()}},
+		},
+		{
+			name: "list runtime tokens",
+			key:  "list-runtime-tokens",
+			call: (*Handler).ListRuntimeTokens,
+			req:  &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID.String(), params: map[string]string{"id": agentID.String()}},
+		},
+		{
+			name: "revoke runtime token",
+			key:  "revoke-runtime-token",
+			call: (*Handler).RevokeRuntimeToken,
+			req:  &a2aHandlerRequest{method: http.MethodDelete, target: "/", userID: userID.String(), params: map[string]string{"tokenID": tokenID.String()}},
+		},
+		{
+			name: "runtime workbench",
+			key:  "runtime-workbench",
+			call: (*Handler).GetRuntimeWorkbench,
+			req:  &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID.String(), params: map[string]string{"id": agentID.String()}},
+		},
+		{
+			name: "get call policy",
+			key:  "get-call-policy",
+			call: (*Handler).GetCallPolicy,
+			req:  &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID.String(), params: map[string]string{"id": agentID.String()}},
+		},
+		{
+			name: "update call policy",
+			key:  "update-call-policy",
+			call: (*Handler).UpdateCallPolicy,
+			req:  &a2aHandlerRequest{method: http.MethodPut, target: "/", userID: userID.String(), body: `{"callable_by":"private"}`, params: map[string]string{"id": agentID.String()}},
+		},
+		{
+			name: "call agent",
+			key:  "call-agent",
+			call: (*Handler).CallAgent,
+			req: &a2aHandlerRequest{method: http.MethodPost, target: "/", body: `{"target_agent_id":"` + agentID.String() + `","current_run_id":"` + parentRunID.String() + `","input":{"q":"hi"}}`, headers: map[string]string{
+				echo.HeaderAuthorization: "Bearer rt_live_test",
+			}},
+		},
+		{
+			name: "list children",
+			key:  "list-children",
+			call: (*Handler).ListChildren,
+			req:  &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID.String(), params: map[string]string{"id": parentRunID.String()}},
+		},
+		{
+			name: "list parents",
+			key:  "list-parent-runs",
+			call: (*Handler).ListParentRuns,
+			req:  &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID.String()},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newControlA2AService()
+			svc.errs[tc.key] = serviceDown
+			requireA2AHTTPStatus(t, tc.call(NewHandler(svc), newA2ATestContext(tc.req)), http.StatusServiceUnavailable)
+		})
+	}
+}
+
 func TestA2AJSONRPCHandlerValidationBeforeServiceDispatch(t *testing.T) {
 	h := NewHandler(nil)
 	userID := uuid.NewString()
@@ -1593,6 +1816,188 @@ func (f *fakeA2AService) DeletePushNotificationConfig(_ context.Context, userID 
 	f.record("push/delete", userID, slug)
 	f.pushParams = *params
 	return nil
+}
+
+type controlA2AService struct {
+	*fakeA2AService
+	errs map[string]error
+
+	agentID         uuid.UUID
+	tokenID         uuid.UUID
+	parentRunID     uuid.UUID
+	page            int32
+	size            int32
+	createReq       CreateRuntimeTokenRequest
+	updatePolicyReq UpdateCallPolicyRequest
+	callToken       string
+	callReq         CallAgentRequest
+}
+
+func newControlA2AService() *controlA2AService {
+	return &controlA2AService{
+		fakeA2AService: newFakeA2AService(uuid.NewString()),
+		errs:           map[string]error{},
+	}
+}
+
+func (f *controlA2AService) maybeErr(name string) error {
+	if err := f.errs[name]; err != nil {
+		return err
+	}
+	return nil
+}
+
+func (f *controlA2AService) recordControl(name string, userID uuid.UUID) error {
+	f.calls = append(f.calls, name)
+	f.userID = userID
+	return f.maybeErr(name)
+}
+
+func (f *controlA2AService) CreateRuntimeToken(_ context.Context, userID, agentID uuid.UUID, req *CreateRuntimeTokenRequest) (*RuntimeTokenResponse, error) {
+	f.agentID = agentID
+	if req != nil {
+		f.createReq = *req
+	}
+	if err := f.recordControl("create-runtime-token", userID); err != nil {
+		return nil, err
+	}
+	return &RuntimeTokenResponse{
+		ID:             uuid.NewString(),
+		AgentID:        agentID.String(),
+		Name:           f.createReq.Name,
+		Prefix:         "rt_live_abcd",
+		PlaintextToken: "rt_live_test",
+		Scopes:         []string{"agents:run"},
+		CreatedAt:      "2026-06-21T00:00:00Z",
+	}, nil
+}
+
+func (f *controlA2AService) ListRuntimeTokens(_ context.Context, userID, agentID uuid.UUID) ([]RuntimeTokenResponse, error) {
+	f.agentID = agentID
+	if err := f.recordControl("list-runtime-tokens", userID); err != nil {
+		return nil, err
+	}
+	return []RuntimeTokenResponse{{
+		ID:        uuid.NewString(),
+		AgentID:   agentID.String(),
+		Name:      "worker",
+		Prefix:    "rt_live_abcd",
+		Scopes:    []string{"agents:run"},
+		CreatedAt: "2026-06-21T00:00:00Z",
+	}}, nil
+}
+
+func (f *controlA2AService) RevokeRuntimeToken(_ context.Context, userID, tokenID uuid.UUID) error {
+	f.tokenID = tokenID
+	return f.recordControl("revoke-runtime-token", userID)
+}
+
+func (f *controlA2AService) GetRuntimeWorkbench(_ context.Context, userID, agentID uuid.UUID) (*RuntimeWorkbenchResponse, error) {
+	f.agentID = agentID
+	if err := f.recordControl("runtime-workbench", userID); err != nil {
+		return nil, err
+	}
+	return &RuntimeWorkbenchResponse{
+		Agent: RuntimeWorkbenchAgent{
+			ID:             agentID.String(),
+			Slug:           "runtime-agent",
+			Name:           "Runtime Agent",
+			ConnectionMode: "runtime_pull",
+		},
+		Runtime: RuntimeWorkbenchRuntime{ActiveTokenCount: 1, PendingRunCount: 2, ClaimNow: true},
+		Tokens:  []RuntimeTokenResponse{{ID: uuid.NewString(), AgentID: agentID.String(), Name: "worker", Prefix: "rt_live_abcd", CreatedAt: "2026-06-21T00:00:00Z"}},
+		RecentRuns: []RuntimeWorkbenchRun{{
+			RunID:     uuid.NewString(),
+			Status:    "running",
+			Source:    "a2a",
+			StartedAt: "2026-06-21T00:00:00Z",
+			DetailURL: "/runs/detail",
+		}},
+		Diagnostics: []RuntimeWorkbenchDiagnostic{{Code: "runtime_ready", Severity: "info", Message: "ready", NextAction: "none"}},
+	}, nil
+}
+
+func (f *controlA2AService) GetCallPolicy(_ context.Context, userID, agentID uuid.UUID) (*CallPolicyResponse, error) {
+	f.agentID = agentID
+	if err := f.recordControl("get-call-policy", userID); err != nil {
+		return nil, err
+	}
+	return &CallPolicyResponse{AgentID: agentID.String(), CallableBy: "public", UpdatedAt: "2026-06-21T00:00:00Z"}, nil
+}
+
+func (f *controlA2AService) UpdateCallPolicy(_ context.Context, userID, agentID uuid.UUID, req *UpdateCallPolicyRequest) (*CallPolicyResponse, error) {
+	f.agentID = agentID
+	if req != nil {
+		f.updatePolicyReq = *req
+	}
+	if err := f.recordControl("update-call-policy", userID); err != nil {
+		return nil, err
+	}
+	return &CallPolicyResponse{AgentID: agentID.String(), CallableBy: f.updatePolicyReq.CallableBy, UpdatedAt: "2026-06-21T00:00:00Z"}, nil
+}
+
+func (f *controlA2AService) CallAgent(_ context.Context, plaintextToken string, req *CallAgentRequest) (*runtimepkg.RunResponse, error) {
+	f.calls = append(f.calls, "call-agent")
+	f.callToken = plaintextToken
+	if req != nil {
+		f.callReq = *req
+	}
+	if err := f.maybeErr("call-agent"); err != nil {
+		return nil, err
+	}
+	return &runtimepkg.RunResponse{
+		RunID:         uuid.NewString(),
+		Status:        "success",
+		Output:        map[string]interface{}{"ok": true},
+		ParentRunID:   f.callReq.ParentRunID,
+		CallerAgentID: f.callReq.TargetAgentID,
+		BillingMode:   "a2a",
+	}, nil
+}
+
+func (f *controlA2AService) ListChildren(_ context.Context, userID, parentRunID uuid.UUID) ([]ChildRunResponse, error) {
+	f.parentRunID = parentRunID
+	if err := f.recordControl("list-children", userID); err != nil {
+		return nil, err
+	}
+	return []ChildRunResponse{{
+		ChildRunID:      uuid.NewString(),
+		ParentRunID:     parentRunID.String(),
+		CallerAgentID:   uuid.NewString(),
+		CallerAgentSlug: "caller",
+		CallerAgentName: "Caller",
+		TargetAgentID:   uuid.NewString(),
+		TargetAgentSlug: "target",
+		TargetAgentName: "Target",
+		Reason:          "need data",
+		Status:          "success",
+		StartedAt:       "2026-06-21T00:00:00Z",
+		Source:          "a2a",
+		BillingMode:     "a2a",
+	}}, nil
+}
+
+func (f *controlA2AService) ListParentRuns(_ context.Context, userID uuid.UUID, page, size int32) (*ParentRunListResponse, error) {
+	f.page = page
+	f.size = size
+	if err := f.recordControl("list-parent-runs", userID); err != nil {
+		return nil, err
+	}
+	return &ParentRunListResponse{
+		Items: []ParentRunSummary{{
+			ParentRunID:     uuid.NewString(),
+			CallerAgentID:   uuid.NewString(),
+			CallerAgentSlug: "caller",
+			CallerAgentName: "Caller",
+			Source:          "a2a",
+			Status:          "success",
+			StartedAt:       "2026-06-21T00:00:00Z",
+			ChildCount:      1,
+		}},
+		Total: 1,
+		Page:  page,
+		Size:  size,
+	}, nil
 }
 
 func fakeA2ATask(taskID, state string) *A2ATask {
