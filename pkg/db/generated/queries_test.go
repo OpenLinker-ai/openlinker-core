@@ -1417,6 +1417,374 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	requireSQLName(t, dbtx.execSQL, "RevokeAgentRuntimeTokenForOwner")
 }
 
+func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
+	sentinel := errors.New("query failed")
+	ctx := context.Background()
+	id := uuid.New()
+	now := time.Date(2026, 6, 20, 20, 0, 0, 0, time.UTC)
+	q := New(&fakeDBTX{queryErr: sentinel})
+
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "ListAgentRuntimeTokensForOwner", run: func() error {
+			_, err := q.ListAgentRuntimeTokensForOwner(ctx, ListAgentRuntimeTokensForOwnerParams{AgentID: id, UserID: id})
+			return err
+		}},
+		{name: "ListActiveAgentRuntimeTokensByPrefix", run: func() error {
+			_, err := q.ListActiveAgentRuntimeTokensByPrefix(ctx, "rt_live_abcd")
+			return err
+		}},
+		{name: "ListChildRunsByParentAndUser", run: func() error {
+			_, err := q.ListChildRunsByParentAndUser(ctx, ListChildRunsByParentAndUserParams{ParentRunID: id, UserID: id})
+			return err
+		}},
+		{name: "ListParentRunsWithDelegationsByUser", run: func() error {
+			_, err := q.ListParentRunsWithDelegationsByUser(ctx, ListParentRunsWithDelegationsByUserParams{UserID: id, Limit: 10})
+			return err
+		}},
+		{name: "ListAgentApprovalsForCreator", run: func() error {
+			_, err := q.ListAgentApprovalsForCreator(ctx, id)
+			return err
+		}},
+		{name: "ListAgentsDueAvailabilityCheck", run: func() error {
+			_, err := q.ListAgentsDueAvailabilityCheck(ctx, ListAgentsDueAvailabilityCheckParams{StaleSeconds: 60, Limit: 5})
+			return err
+		}},
+		{name: "ListAgentAvailabilityAlertsByCreator", run: func() error {
+			_, err := q.ListAgentAvailabilityAlertsByCreator(ctx, ListAgentAvailabilityAlertsByCreatorParams{CreatorID: id, Limit: 5})
+			return err
+		}},
+		{name: "ListAgentMetricSnapshotsByAgent", run: func() error {
+			_, err := q.ListAgentMetricSnapshotsByAgent(ctx, id)
+			return err
+		}},
+		{name: "AggregateAgentRunsForWindow", run: func() error {
+			_, err := q.AggregateAgentRunsForWindow(ctx, "24 hours")
+			return err
+		}},
+		{name: "ListAgentRegistrationTokensByCreator", run: func() error {
+			_, err := q.ListAgentRegistrationTokensByCreator(ctx, id)
+			return err
+		}},
+		{name: "ListActiveAgentRegistrationTokensByPrefix", run: func() error {
+			_, err := q.ListActiveAgentRegistrationTokensByPrefix(ctx, "rt_live_abcd")
+			return err
+		}},
+		{name: "ListAgentsByCreator", run: func() error {
+			_, err := q.ListAgentsByCreator(ctx, id)
+			return err
+		}},
+		{name: "ListPendingAgents", run: func() error {
+			_, err := q.ListPendingAgents(ctx)
+			return err
+		}},
+		{name: "ListPublicAgents", run: func() error {
+			_, err := q.ListPublicAgents(ctx, ListPublicAgentsParams{Tags: []string{"data"}, Keyword: "agent", Limit: 10, CallableOnly: true})
+			return err
+		}},
+		{name: "ListTestCasesBySkill", run: func() error {
+			_, err := q.ListTestCasesBySkill(ctx, "data/sql-query")
+			return err
+		}},
+		{name: "ListBenchmarkRunsByBatch", run: func() error {
+			_, err := q.ListBenchmarkRunsByBatch(ctx, id)
+			return err
+		}},
+		{name: "ListAgentSkillScoresByAgent", run: func() error {
+			_, err := q.ListAgentSkillScoresByAgent(ctx, id)
+			return err
+		}},
+		{name: "ListAgentSkillScoresBySlug", run: func() error {
+			_, err := q.ListAgentSkillScoresBySlug(ctx, "agent-one")
+			return err
+		}},
+		{name: "ListTopAgentsBySkill", run: func() error {
+			_, err := q.ListTopAgentsBySkill(ctx, ListTopAgentsBySkillParams{SkillID: "data/sql-query", Limit: 5})
+			return err
+		}},
+		{name: "ListAgentsBySkillsWithVerified", run: func() error {
+			_, err := q.ListAgentsBySkillsWithVerified(ctx, []string{"data/sql-query"})
+			return err
+		}},
+		{name: "ListBenchmarkBatchSummariesByAgent", run: func() error {
+			_, err := q.ListBenchmarkBatchSummariesByAgent(ctx, ListBenchmarkBatchSummariesByAgentParams{AgentID: id, Limit: 5})
+			return err
+		}},
+		{name: "ListAgentExamplesByAgentID", run: func() error {
+			_, err := q.ListAgentExamplesByAgentID(ctx, id)
+			return err
+		}},
+		{name: "ListAgentExamplesBySlug", run: func() error {
+			_, err := q.ListAgentExamplesBySlug(ctx, "agent-one")
+			return err
+		}},
+		{name: "ListDeliveryTargetsByUser", run: func() error {
+			_, err := q.ListDeliveryTargetsByUser(ctx, id)
+			return err
+		}},
+		{name: "ListPendingRunDeliveries", run: func() error {
+			_, err := q.ListPendingRunDeliveries(ctx)
+			return err
+		}},
+		{name: "ListRunDeliveriesByRun", run: func() error {
+			_, err := q.ListRunDeliveriesByRun(ctx, id)
+			return err
+		}},
+		{name: "ListRegistryNodesByOwner", run: func() error {
+			_, err := q.ListRegistryNodesByOwner(ctx, id)
+			return err
+		}},
+		{name: "ListActiveRegistryNodesBySecretPrefix", run: func() error {
+			_, err := q.ListActiveRegistryNodesBySecretPrefix(ctx, "rn_live_abcd")
+			return err
+		}},
+		{name: "ListCloudListingLinksByOwner", run: func() error {
+			_, err := q.ListCloudListingLinksByOwner(ctx, id)
+			return err
+		}},
+		{name: "ListProxyRunArtifactsForRequester", run: func() error {
+			_, err := q.ListProxyRunArtifactsForRequester(ctx, ListProxyRunArtifactsForRequesterParams{ProxyRunID: id, RequestingUserID: id})
+			return err
+		}},
+		{name: "ListRunArtifactsByRun", run: func() error {
+			_, err := q.ListRunArtifactsByRun(ctx, id)
+			return err
+		}},
+		{name: "ListRunArtifactChunksByRun", run: func() error {
+			_, err := q.ListRunArtifactChunksByRun(ctx, id)
+			return err
+		}},
+		{name: "ListRunEventsByRun", run: func() error {
+			_, err := q.ListRunEventsByRun(ctx, ListRunEventsByRunParams{RunID: id, Limit: 10})
+			return err
+		}},
+		{name: "ListRunMessagesByRun", run: func() error {
+			_, err := q.ListRunMessagesByRun(ctx, id)
+			return err
+		}},
+		{name: "ListRunWebhookSubscriptionsByRun", run: func() error {
+			_, err := q.ListRunWebhookSubscriptionsByRun(ctx, ListRunWebhookSubscriptionsByRunParams{RunID: id, OwnerUserID: id})
+			return err
+		}},
+		{name: "ListRunWebhookSubscriptionsByOwner", run: func() error {
+			_, err := q.ListRunWebhookSubscriptionsByOwner(ctx, ListRunWebhookSubscriptionsByOwnerParams{OwnerUserID: id, Status: "active", Limit: 10})
+			return err
+		}},
+		{name: "BatchUpdateRunWebhookSubscriptionsForOwner", run: func() error {
+			_, err := q.BatchUpdateRunWebhookSubscriptionsForOwner(ctx, BatchUpdateRunWebhookSubscriptionsForOwnerParams{OwnerUserID: id, IDs: []uuid.UUID{id}, Status: "active"})
+			return err
+		}},
+		{name: "ListActiveRunWebhookSubscriptionsForEvent", run: func() error {
+			_, err := q.ListActiveRunWebhookSubscriptionsForEvent(ctx, ListActiveRunWebhookSubscriptionsForEventParams{RunID: id, EventType: "completed"})
+			return err
+		}},
+		{name: "ListPendingRunWebhookDeliveries", run: func() error {
+			_, err := q.ListPendingRunWebhookDeliveries(ctx)
+			return err
+		}},
+		{name: "ListStaleRuntimePullRuns", run: func() error {
+			_, err := q.ListStaleRuntimePullRuns(ctx, ListStaleRuntimePullRunsParams{DispatchStaleBefore: now, ResultStaleBefore: now, Limit: 10})
+			return err
+		}},
+		{name: "ListRunsByUser", run: func() error {
+			_, err := q.ListRunsByUser(ctx, ListRunsByUserParams{UserID: id, Limit: 10})
+			return err
+		}},
+		{name: "ListRunsByUserWithAgent", run: func() error {
+			_, err := q.ListRunsByUserWithAgent(ctx, ListRunsByUserWithAgentParams{UserID: id, Limit: 10})
+			return err
+		}},
+		{name: "ListRunsByUserAndAgent", run: func() error {
+			_, err := q.ListRunsByUserAndAgent(ctx, ListRunsByUserAndAgentParams{UserID: id, AgentID: id, NoCursor: true, NoStatusFilter: true, NoSinceFilter: true, Limit: 10})
+			return err
+		}},
+		{name: "ListRunsByCreatorAgentWithAgent", run: func() error {
+			_, err := q.ListRunsByCreatorAgentWithAgent(ctx, ListRunsByCreatorAgentWithAgentParams{CreatorID: id, AgentID: id, Limit: 10})
+			return err
+		}},
+		{name: "ListAgentStatsForCreator", run: func() error {
+			_, err := q.ListAgentStatsForCreator(ctx, id)
+			return err
+		}},
+		{name: "ListSkills", run: func() error {
+			_, err := q.ListSkills(ctx)
+			return err
+		}},
+		{name: "ListAgentSkills", run: func() error {
+			_, err := q.ListAgentSkills(ctx, id)
+			return err
+		}},
+		{name: "ListAgentsBySkills", run: func() error {
+			_, err := q.ListAgentsBySkills(ctx, []string{"data/sql-query"})
+			return err
+		}},
+		{name: "GetAgentsByIDs", run: func() error {
+			_, err := q.GetAgentsByIDs(ctx, []uuid.UUID{id})
+			return err
+		}},
+		{name: "ListTaskQueriesByUser", run: func() error {
+			_, err := q.ListTaskQueriesByUser(ctx, ListTaskQueriesByUserParams{UserID: id, Limit: 10})
+			return err
+		}},
+		{name: "ListPublicTaskQueries", run: func() error {
+			_, err := q.ListPublicTaskQueries(ctx, 10)
+			return err
+		}},
+		{name: "ListPendingDeliveries", run: func() error {
+			_, err := q.ListPendingDeliveries(ctx)
+			return err
+		}},
+		{name: "ListDeliveriesByAgent", run: func() error {
+			_, err := q.ListDeliveriesByAgent(ctx, ListDeliveriesByAgentParams{AgentID: id, Limit: 10})
+			return err
+		}},
+		{name: "ListWorkflowNodes", run: func() error {
+			_, err := q.ListWorkflowNodes(ctx, id)
+			return err
+		}},
+		{name: "ListWorkflowsByUser", run: func() error {
+			_, err := q.ListWorkflowsByUser(ctx, ListWorkflowsByUserParams{UserID: id, Limit: 10})
+			return err
+		}},
+		{name: "ListWorkflowRunsByWorkflow", run: func() error {
+			_, err := q.ListWorkflowRunsByWorkflow(ctx, ListWorkflowRunsByWorkflowParams{WorkflowID: id, Limit: 10})
+			return err
+		}},
+		{name: "ListWorkflowRunSteps", run: func() error {
+			_, err := q.ListWorkflowRunSteps(ctx, id)
+			return err
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.run(); !errors.Is(err, sentinel) {
+				t.Fatalf("error = %v, want %v", err, sentinel)
+			}
+		})
+	}
+}
+
+func TestGeneratedExecQueriesPropagateExecErrors(t *testing.T) {
+	sentinel := errors.New("exec failed")
+	ctx := context.Background()
+	id := uuid.New()
+	message := "network timeout"
+	url := "https://example.com/webhook"
+	secret := "secret"
+	q := New(&fakeDBTX{execErr: sentinel})
+
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "RevokeAgentRuntimeTokenForOwner", run: func() error {
+			_, err := q.RevokeAgentRuntimeTokenForOwner(ctx, RevokeAgentRuntimeTokenForOwnerParams{ID: id, UserID: id})
+			return err
+		}},
+		{name: "ConfirmAgentApproval", run: func() error {
+			_, err := q.ConfirmAgentApproval(ctx, ConfirmAgentApprovalParams{ID: id, CreatorID: id, DecisionNote: &message})
+			return err
+		}},
+		{name: "RejectAgentApproval", run: func() error {
+			_, err := q.RejectAgentApproval(ctx, RejectAgentApprovalParams{ID: id, CreatorID: id, DecisionNote: &message})
+			return err
+		}},
+		{name: "ExpireAgentApprovals", run: func() error {
+			_, err := q.ExpireAgentApprovals(ctx)
+			return err
+		}},
+		{name: "RevokeAgentRegistrationTokenForCreator", run: func() error {
+			_, err := q.RevokeAgentRegistrationTokenForCreator(ctx, RevokeAgentRegistrationTokenForCreatorParams{ID: id, CreatorUserID: id})
+			return err
+		}},
+		{name: "DisableAgent", run: func() error {
+			_, err := q.DisableAgent(ctx, DisableAgentParams{ID: id, CreatorID: id})
+			return err
+		}},
+		{name: "RequestCertification", run: func() error {
+			_, err := q.RequestCertification(ctx, RequestCertificationParams{ID: id, CreatorID: id})
+			return err
+		}},
+		{name: "CertifyAgent", run: func() error {
+			_, err := q.CertifyAgent(ctx, id)
+			return err
+		}},
+		{name: "RejectCertification", run: func() error {
+			_, err := q.RejectCertification(ctx, RejectCertificationParams{ID: id, RejectionReason: message})
+			return err
+		}},
+		{name: "MarkBenchmarkRunSuccess", run: func() error {
+			_, err := q.MarkBenchmarkRunSuccess(ctx, MarkBenchmarkRunSuccessParams{ID: id, Score: 95, RawOutput: []byte(`{"ok":true}`), JudgeReasoning: "pass"})
+			return err
+		}},
+		{name: "MarkBenchmarkRunFailed", run: func() error {
+			_, err := q.MarkBenchmarkRunFailed(ctx, MarkBenchmarkRunFailedParams{ID: id, ErrorMessage: message})
+			return err
+		}},
+		{name: "DeleteAgentExampleForOwner", run: func() error {
+			_, err := q.DeleteAgentExampleForOwner(ctx, DeleteAgentExampleForOwnerParams{ID: id, AgentID: id, CreatorID: id})
+			return err
+		}},
+		{name: "MarkCapabilitiesSet", run: func() error {
+			_, err := q.MarkCapabilitiesSet(ctx, id)
+			return err
+		}},
+		{name: "MarkExamplesSet", run: func() error {
+			_, err := q.MarkExamplesSet(ctx, MarkExamplesSetParams{AgentID: id, ExamplesSet: true})
+			return err
+		}},
+		{name: "UpdateDryRunResult", run: func() error {
+			_, err := q.UpdateDryRunResult(ctx, UpdateDryRunResultParams{AgentID: id, Result: "fail", Error: &message})
+			return err
+		}},
+		{name: "DeleteDeliveryTarget", run: func() error {
+			_, err := q.DeleteDeliveryTarget(ctx, DeleteDeliveryTargetParams{ID: id, UserID: id})
+			return err
+		}},
+		{name: "SetDeliveryTargetDefault", run: func() error {
+			_, err := q.SetDeliveryTargetDefault(ctx, SetDeliveryTargetDefaultParams{ID: id, UserID: id})
+			return err
+		}},
+		{name: "ResetRunDeliveryForRetry", run: func() error {
+			_, err := q.ResetRunDeliveryForRetry(ctx, ResetRunDeliveryForRetryParams{ID: id, UserID: id})
+			return err
+		}},
+		{name: "MarkRunSuccess", run: func() error {
+			return q.MarkRunSuccess(ctx, MarkRunSuccessParams{ID: id, Output: []byte(`{"ok":true}`), DurationMs: 100})
+		}},
+		{name: "MarkRunFailed", run: func() error {
+			return q.MarkRunFailed(ctx, MarkRunFailedParams{ID: id, Status: "failed", ErrorMessage: &message, DurationMs: 100})
+		}},
+		{name: "UpdateUserBecomeCreator", run: func() error {
+			_, err := q.UpdateUserBecomeCreator(ctx, id)
+			return err
+		}},
+		{name: "SetAgentWebhook", run: func() error {
+			_, err := q.SetAgentWebhook(ctx, SetAgentWebhookParams{ID: id, WebhookURL: &url, WebhookSecret: &secret, CreatorID: id})
+			return err
+		}},
+		{name: "ClearAgentWebhook", run: func() error {
+			_, err := q.ClearAgentWebhook(ctx, ClearAgentWebhookParams{ID: id, CreatorID: id})
+			return err
+		}},
+		{name: "RequeueStaleWorkflowRuns", run: func() error {
+			_, err := q.RequeueStaleWorkflowRuns(ctx, time.Date(2026, 6, 20, 20, 0, 0, 0, time.UTC))
+			return err
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.run(); !errors.Is(err, sentinel) {
+				t.Fatalf("error = %v, want %v", err, sentinel)
+			}
+		})
+	}
+}
+
 func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	userID := uuid.New()
 	workflowID := uuid.New()
