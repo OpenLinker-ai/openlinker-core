@@ -52,6 +52,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -335,6 +336,104 @@ type runEventRow struct {
 	EventType   string
 	ParentRunID *uuid.UUID
 	Payload     map[string]any
+}
+
+type recordedWebhookDelivery struct {
+	RunID     uuid.UUID
+	AgentSlug string
+	Output    map[string]interface{}
+}
+
+type recordingRuntimeWebhookEnqueuer struct {
+	deliveries chan recordedWebhookDelivery
+	err        error
+}
+
+func (r *recordingRuntimeWebhookEnqueuer) EnqueueDelivery(_ context.Context, run *db.Run, agentSlug string, output map[string]interface{}) error {
+	if run != nil {
+		r.deliveries <- recordedWebhookDelivery{RunID: run.ID, AgentSlug: agentSlug, Output: output}
+	}
+	return r.err
+}
+
+type recordingRuntimeDeliveryEnqueuer struct {
+	runs chan uuid.UUID
+	err  error
+}
+
+func (r *recordingRuntimeDeliveryEnqueuer) EnqueueIfDefault(_ context.Context, run *db.Run) error {
+	if run != nil {
+		r.runs <- run.ID
+	}
+	return r.err
+}
+
+type recordedWalletOp struct {
+	Kind   string
+	UserID uuid.UUID
+	Amount int64
+}
+
+type recordingRuntimeWalletCharger struct {
+	ops       chan recordedWalletOp
+	chargeOK  bool
+	chargeErr error
+	creditErr error
+	refundErr error
+}
+
+func (r *recordingRuntimeWalletCharger) Charge(_ context.Context, _ pgx.Tx, userID uuid.UUID, amountCents int64) (bool, error) {
+	if r.ops != nil {
+		r.ops <- recordedWalletOp{Kind: "charge", UserID: userID, Amount: amountCents}
+	}
+	return r.chargeOK, r.chargeErr
+}
+
+func (r *recordingRuntimeWalletCharger) CreditCreator(_ context.Context, _ pgx.Tx, creatorID uuid.UUID, amountCents int64) error {
+	if r.ops != nil {
+		r.ops <- recordedWalletOp{Kind: "credit", UserID: creatorID, Amount: amountCents}
+	}
+	return r.creditErr
+}
+
+func (r *recordingRuntimeWalletCharger) Refund(_ context.Context, _ pgx.Tx, userID uuid.UUID, amountCents int64) error {
+	if r.ops != nil {
+		r.ops <- recordedWalletOp{Kind: "refund", UserID: userID, Amount: amountCents}
+	}
+	return r.refundErr
+}
+
+func waitRecordedWebhookDelivery(t *testing.T, ch <-chan recordedWebhookDelivery) recordedWebhookDelivery {
+	t.Helper()
+	select {
+	case got := <-ch:
+		return got
+	case <-time.After(3 * time.Second):
+		t.Fatal("webhook delivery was not enqueued")
+		return recordedWebhookDelivery{}
+	}
+}
+
+func waitRecordedDelivery(t *testing.T, ch <-chan uuid.UUID) uuid.UUID {
+	t.Helper()
+	select {
+	case got := <-ch:
+		return got
+	case <-time.After(3 * time.Second):
+		t.Fatal("delivery was not enqueued")
+		return uuid.Nil
+	}
+}
+
+func waitRecordedWalletOp(t *testing.T, ch <-chan recordedWalletOp) recordedWalletOp {
+	t.Helper()
+	select {
+	case got := <-ch:
+		return got
+	case <-time.After(3 * time.Second):
+		t.Fatal("wallet operation was not recorded")
+		return recordedWalletOp{}
+	}
 }
 
 // readRunEvents 读 run_events 的事件类型和 payload，按 sequence 正序。
@@ -1599,6 +1698,39 @@ func TestGetRun_NotOwner(t *testing.T) {
 	assertHTTPStatus(t, err, http.StatusNotFound)
 }
 
+func TestGetRun_MissingAndDelegatedChildContext(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	callerCreatorID := insertCreator(t, pool)
+	targetCreatorID := insertCreator(t, pool)
+	callerAgentID := insertAgent(t, pool, callerCreatorID, "https://example.com/caller", 10, "approved")
+	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"answer":"delegated ok"}}`))
+	targetAgentID := insertAgent(t, pool, targetCreatorID, endpoint, 25, "approved")
+	parentRunID := insertRunningRun(t, pool, userID, callerAgentID)
+
+	_, err := svc.GetRun(ctx, userID, uuid.New())
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	resp, err := svc.RunDelegated(ctx, userID, runtime.Delegation{
+		ParentRunID:   parentRunID,
+		CallerAgentID: callerAgentID,
+		Reason:        "delegate to specialist",
+	}, makeRunReq(targetAgentID, map[string]any{"q": "finish child"}))
+	require.NoError(t, err)
+
+	got, err := svc.GetRun(ctx, userID, mustParseUUID(t, resp.RunID))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, parentRunID.String(), got.ParentRunID)
+	assert.Equal(t, callerAgentID.String(), got.CallerAgentID)
+	assert.Equal(t, "free_delegation", got.BillingMode)
+	require.NotNil(t, got.NextAction)
+	assert.Equal(t, "none", got.EvidenceSummary.CoverageStatus)
+}
+
 func TestListRunEvents_NotOwner(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
@@ -1615,6 +1747,180 @@ func TestListRunEvents_NotOwner(t *testing.T) {
 
 	_, err = svc.ListRunEvents(ctx, userB, mustParseUUID(t, created.RunID), 0, 10)
 	assertHTTPStatus(t, err, http.StatusNotFound)
+}
+
+func TestRunReadEndpointsRejectMissingInvalidAndNonOwner(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userA := insertUserWithBalance(t, pool, 1000)
+	userB := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/agent", 10, "approved")
+	runID := insertRunningRun(t, pool, userA, agentID)
+	missingRunID := uuid.New()
+
+	_, err := svc.ListRunEvents(ctx, userA, missingRunID, 0, 10)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.ListRunEvents(ctx, userA, runID, -1, 10)
+	assertHTTPStatus(t, err, http.StatusBadRequest)
+	events, err := svc.ListRunEvents(ctx, userA, runID, 0, 9999)
+	require.NoError(t, err)
+	assert.Empty(t, events)
+
+	_, err = svc.ListRunArtifacts(ctx, userA, missingRunID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.ListRunArtifacts(ctx, userB, runID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+	artifacts, err := svc.ListRunArtifacts(ctx, userA, runID)
+	require.NoError(t, err)
+	assert.Empty(t, artifacts)
+
+	_, err = svc.ListRunMessages(ctx, userA, missingRunID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.ListRunMessages(ctx, userB, runID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+	messages, err := svc.ListRunMessages(ctx, userA, runID)
+	require.NoError(t, err)
+	assert.Empty(t, messages)
+}
+
+func TestReportRunEvent_RejectsRequestAndLookupEdges(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/agent", 10, "approved")
+	runID := insertRunningRun(t, pool, userID, agentID)
+
+	_, err := svc.ReportRunEvent(ctx, runID, "agent-secret", nil)
+	assertHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.ReportRunEvent(ctx, runID, " ", &runtime.ReportRunEventRequest{EventType: "run.message.delta"})
+	assertHTTPStatus(t, err, http.StatusUnauthorized)
+	_, err = svc.ReportRunEvent(ctx, uuid.New(), "agent-secret", &runtime.ReportRunEventRequest{EventType: "run.message.delta"})
+	assertHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.ReportRunEvent(ctx, runID, "agent-secret", &runtime.ReportRunEventRequest{EventType: "run.message.delta"})
+	assertHTTPStatus(t, err, http.StatusUnauthorized)
+	assert.Empty(t, readRunEvents(t, pool, runID))
+}
+
+func TestRunTriggersWebhookAndDeliveryForTerminalRuns(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	webhookRecorder := &recordingRuntimeWebhookEnqueuer{deliveries: make(chan recordedWebhookDelivery, 4)}
+	deliveryRecorder := &recordingRuntimeDeliveryEnqueuer{runs: make(chan uuid.UUID, 4)}
+	svc.SetWebhookEnqueuer(webhookRecorder)
+	svc.SetDeliveryEnqueuer(deliveryRecorder)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	successEndpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"answer":"ok"}}`))
+	successAgentID := insertAgent(t, pool, creatorID, successEndpoint, 10, "approved")
+
+	successResp, err := svc.Run(ctx, userID, makeRunReq(successAgentID, map[string]any{"q": "success"}), "")
+	require.NoError(t, err)
+	require.Equal(t, "success", successResp.Status)
+	successRunID := mustParseUUID(t, successResp.RunID)
+	successWebhook := waitRecordedWebhookDelivery(t, webhookRecorder.deliveries)
+	assert.Equal(t, successRunID, successWebhook.RunID)
+	assert.NotEmpty(t, successWebhook.AgentSlug)
+	require.NotNil(t, successWebhook.Output)
+	assert.Equal(t, "ok", successWebhook.Output["answer"])
+	assert.Equal(t, successRunID, waitRecordedDelivery(t, deliveryRecorder.runs))
+
+	failureEndpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusBadGateway, `{"error":{"code":"AGENT_FAIL","message":"boom"}}`))
+	failureAgentID := insertAgent(t, pool, creatorID, failureEndpoint, 10, "approved")
+
+	failureResp, err := svc.Run(ctx, userID, makeRunReq(failureAgentID, map[string]any{"q": "fail"}), "")
+	require.NoError(t, err)
+	require.Equal(t, "failed", failureResp.Status)
+	failureRunID := mustParseUUID(t, failureResp.RunID)
+	failureWebhook := waitRecordedWebhookDelivery(t, webhookRecorder.deliveries)
+	assert.Equal(t, failureRunID, failureWebhook.RunID)
+	assert.NotEmpty(t, failureWebhook.AgentSlug)
+	assert.Nil(t, failureWebhook.Output)
+	assert.Equal(t, failureRunID, waitRecordedDelivery(t, deliveryRecorder.runs))
+}
+
+func TestRunWithWalletChargerSettlesSuccessFailureAndInsufficientBalance(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	t.Run("success credits creator after charging user", func(t *testing.T) {
+		svc := newTestService(t, pool)
+		wallet := &recordingRuntimeWalletCharger{ops: make(chan recordedWalletOp, 4), chargeOK: true}
+		svc.SetWalletCharger(wallet)
+		userID := insertUserWithBalance(t, pool, 1000)
+		creatorID := insertCreator(t, pool)
+		endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"paid ok"}}`))
+		agentID := insertAgent(t, pool, creatorID, endpoint, 20, "approved")
+
+		resp, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "paid"}), "")
+		require.NoError(t, err)
+		require.Equal(t, "success", resp.Status)
+		require.Equal(t, int32(20), resp.CostCents)
+		require.Equal(t, "paid ok", resp.Output["text"])
+
+		charge := waitRecordedWalletOp(t, wallet.ops)
+		assert.Equal(t, "charge", charge.Kind)
+		assert.Equal(t, userID, charge.UserID)
+		assert.Equal(t, int64(20), charge.Amount)
+		credit := waitRecordedWalletOp(t, wallet.ops)
+		assert.Equal(t, "credit", credit.Kind)
+		assert.Equal(t, creatorID, credit.UserID)
+		assert.Equal(t, int64(15), credit.Amount)
+	})
+
+	t.Run("failure refunds charged user", func(t *testing.T) {
+		svc := newTestService(t, pool)
+		wallet := &recordingRuntimeWalletCharger{ops: make(chan recordedWalletOp, 4), chargeOK: true}
+		svc.SetWalletCharger(wallet)
+		userID := insertUserWithBalance(t, pool, 1000)
+		creatorID := insertCreator(t, pool)
+		endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusBadGateway, `{"error":{"code":"AGENT_FAIL","message":"boom"}}`))
+		agentID := insertAgent(t, pool, creatorID, endpoint, 20, "approved")
+
+		resp, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "fail"}), "")
+		require.NoError(t, err)
+		require.Equal(t, "failed", resp.Status)
+		require.Equal(t, int32(0), resp.CostCents)
+		require.Equal(t, "AGENT_FAIL", resp.ErrorCode)
+
+		charge := waitRecordedWalletOp(t, wallet.ops)
+		assert.Equal(t, "charge", charge.Kind)
+		assert.Equal(t, userID, charge.UserID)
+		assert.Equal(t, int64(20), charge.Amount)
+		refund := waitRecordedWalletOp(t, wallet.ops)
+		assert.Equal(t, "refund", refund.Kind)
+		assert.Equal(t, userID, refund.UserID)
+		assert.Equal(t, int64(20), refund.Amount)
+	})
+
+	t.Run("insufficient balance stops before creating run", func(t *testing.T) {
+		svc := newTestService(t, pool)
+		wallet := &recordingRuntimeWalletCharger{ops: make(chan recordedWalletOp, 2), chargeOK: false}
+		svc.SetWalletCharger(wallet)
+		userID := insertUserWithBalance(t, pool, 0)
+		creatorID := insertCreator(t, pool)
+		endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"unreached"}}`))
+		agentID := insertAgent(t, pool, creatorID, endpoint, 20, "approved")
+
+		_, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "paid"}), "")
+		assertHTTPStatus(t, err, http.StatusPaymentRequired)
+		charge := waitRecordedWalletOp(t, wallet.ops)
+		assert.Equal(t, "charge", charge.Kind)
+		assert.Equal(t, userID, charge.UserID)
+		assert.Equal(t, int64(20), charge.Amount)
+		select {
+		case op := <-wallet.ops:
+			t.Fatalf("unexpected wallet op after insufficient balance: %#v", op)
+		default:
+		}
+	})
 }
 
 // ensureMockServerSilenced 让 httptest 的默认 ErrorLog 别打扰测试输出。

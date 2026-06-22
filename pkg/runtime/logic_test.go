@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -155,6 +156,141 @@ func TestRuntimeMCPAndLowLevelHelpers(t *testing.T) {
 	require.True(t, isTimeoutErr(fakeTimeoutErr{timeout: true}))
 	require.False(t, isTimeoutErr(fakeTimeoutErr{timeout: false}))
 	require.False(t, isTimeoutErr(errors.New("plain error")))
+}
+
+func TestRuntimeCallAgentDispatchAndDryRun(t *testing.T) {
+	runID := uuid.New()
+	userID := uuid.New()
+	parentRunID := uuid.New()
+	callerAgentID := uuid.New()
+	token := "shared-secret"
+	var gotDirect AgentRequest
+	directClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		require.Equal(t, "shared-secret", r.Header.Get("X-OpenLinker-Token"))
+		require.NotEmpty(t, r.Header.Get("X-OpenLinker-Run-Id"))
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotDirect))
+		return testHTTPResponse(http.StatusOK, `{"output":{"answer":"direct-ok"},"events":[{"event_type":"run.message.delta","payload":{"text":"working"}}]}`), nil
+	})}
+
+	svc := NewService(nil, &config.Config{APIURL: "https://api.example.com"})
+	svc.SetHTTPClient(directClient)
+	agent := &db.Agent{
+		ID:                 uuid.New(),
+		EndpointURL:        "https://agent.example/run",
+		EndpointAuthHeader: &token,
+		ConnectionMode:     connectionModeDirectHTTP,
+	}
+	output, events, agentErr, callErr := svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{
+		Input:    map[string]interface{}{"question": "status"},
+		Metadata: map[string]interface{}{"trace_id": "trace-1"},
+	}, &Delegation{ParentRunID: parentRunID, CallerAgentID: callerAgentID})
+	require.NoError(t, callErr)
+	require.Nil(t, agentErr)
+	require.Equal(t, "direct-ok", output["answer"])
+	require.Len(t, events, 1)
+	require.Equal(t, parentRunID.String(), gotDirect.ParentRunID)
+	require.Equal(t, callerAgentID.String(), gotDirect.CallerAgentID)
+	require.NotNil(t, gotDirect.A2A)
+	require.Equal(t, "https://api.example.com/api/v1/agent-runtime/call-agent", gotDirect.A2A.CallAgentEndpoint)
+
+	dryOutput, dryErr := svc.DryRun(context.Background(), agent, map[string]interface{}{"ping": true})
+	require.Empty(t, dryErr)
+	require.Equal(t, "direct-ok", dryOutput["answer"])
+
+	agent.EndpointURL = "://bad-url"
+	dryOutput, dryErr = svc.DryRun(context.Background(), agent, map[string]interface{}{"ping": true})
+	require.Nil(t, dryOutput)
+	require.Contains(t, dryErr, "endpoint 调用失败")
+
+	svc.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return testHTTPResponse(http.StatusBadGateway, `{"error":{"code":"UPSTREAM_BAD","message":"upstream refused"}}`), nil
+	})})
+	agent.EndpointURL = "https://agent.example/error"
+	dryOutput, dryErr = svc.DryRun(context.Background(), agent, map[string]interface{}{"ping": true})
+	require.Nil(t, dryOutput)
+	require.Equal(t, "UPSTREAM_BAD: upstream refused", dryErr)
+
+	agent.ConnectionMode = connectionModeRuntimePull
+	_, _, agentErr, callErr = svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{}, nil)
+	require.Error(t, callErr)
+	require.Nil(t, agentErr)
+	require.Contains(t, callErr.Error(), "runtime_pull")
+
+	agent.ConnectionMode = connectionModeRuntimeWS
+	_, _, agentErr, callErr = svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{}, nil)
+	require.Error(t, callErr)
+	require.Nil(t, agentErr)
+	require.Contains(t, callErr.Error(), "runtime_ws")
+
+	agent.ConnectionMode = "unsupported"
+	_, _, agentErr, callErr = svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{}, nil)
+	require.NoError(t, callErr)
+	require.NotNil(t, agentErr)
+	require.Equal(t, "UNSUPPORTED_CONNECTION_MODE", agentErr.Code)
+}
+
+func TestRuntimeMCPServerProtocolEdges(t *testing.T) {
+	runID := uuid.New()
+	userID := uuid.New()
+	toolName := "lookup"
+	bearer := "Bearer mcp-token"
+	var got mcpToolCallRequest
+	mcpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		require.Equal(t, bearer, r.Header.Get("Authorization"))
+		require.Empty(t, r.Header.Get("X-OpenLinker-Token"))
+		require.Equal(t, runID.String(), r.Header.Get("X-OpenLinker-Run-Id"))
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+		return testHTTPResponse(http.StatusOK, `{"result":{"structuredContent":{"answer":"mcp-ok"}}}`), nil
+	})}
+
+	svc := NewService(nil, &config.Config{APIURL: "https://api.example.com"})
+	svc.SetHTTPClient(mcpClient)
+	agent := &db.Agent{
+		ID:                 uuid.New(),
+		EndpointURL:        "https://mcp.example/rpc",
+		EndpointAuthHeader: &bearer,
+		ConnectionMode:     connectionModeMCPServer,
+		MCPToolName:        &toolName,
+	}
+	output, events, agentErr, callErr := svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{
+		Input:    map[string]interface{}{"city": "shanghai"},
+		Metadata: map[string]interface{}{"trace_id": "trace-mcp"},
+	}, &Delegation{ParentRunID: uuid.New(), CallerAgentID: uuid.New()})
+	require.NoError(t, callErr)
+	require.Nil(t, agentErr)
+	require.Nil(t, events)
+	require.Equal(t, "mcp-ok", output["answer"])
+	require.Equal(t, "2.0", got.JSONRPC)
+	require.Equal(t, "tools/call", got.Method)
+	require.Equal(t, toolName, got.Params.Name)
+	require.Equal(t, "shanghai", got.Params.Arguments["city"])
+	require.Equal(t, "trace-mcp", got.Params.Metadata["trace_id"])
+	require.NotNil(t, got.Params.Metadata["a2a"])
+
+	agent.MCPToolName = nil
+	_, _, agentErr, callErr = svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{}, nil)
+	require.NoError(t, callErr)
+	require.NotNil(t, agentErr)
+	require.Equal(t, "MCP_TOOL_MISSING", agentErr.Code)
+
+	svc.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return testHTTPResponse(http.StatusOK, `{"error":{"code":-32001,"message":"tool failed"}}`), nil
+	})})
+	agent.MCPToolName = &toolName
+	agent.EndpointURL = "https://mcp.example/error"
+	_, _, agentErr, callErr = svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{}, nil)
+	require.NoError(t, callErr)
+	require.NotNil(t, agentErr)
+	require.Equal(t, "MCP_-32001", agentErr.Code)
+
+	svc.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return testHTTPResponse(http.StatusServiceUnavailable, `not-json`), nil
+	})})
+	agent.EndpointURL = "https://mcp.example/invalid"
+	_, _, agentErr, callErr = svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{}, nil)
+	require.NoError(t, callErr)
+	require.NotNil(t, agentErr)
+	require.Equal(t, "INVALID_MCP_RESPONSE", agentErr.Code)
 }
 
 func TestA2AContextAndRequirementEvidenceHelpers(t *testing.T) {
@@ -816,6 +952,20 @@ func runtimeJSONRequest(method, target, body string) *http.Request {
 	req := httptest.NewRequest(method, target, bytes.NewBufferString(body))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	return req
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func testHTTPResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
 }
 
 func TestRuntimeJSONHelperIsValid(t *testing.T) {
