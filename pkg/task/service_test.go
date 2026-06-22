@@ -2,8 +2,10 @@ package task_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -226,6 +229,11 @@ func assertTaskHTTPStatus(t *testing.T, err error, want int) {
 	var he *httpx.HTTPError
 	require.True(t, errors.As(err, &he), "expected *httpx.HTTPError, got %T (%v)", err, err)
 	assert.Equal(t, want, he.Status)
+}
+
+func decodeTaskHandlerJSON(t *testing.T, rec *httptest.ResponseRecorder, out any) {
+	t.Helper()
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), out))
 }
 
 func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
@@ -575,6 +583,73 @@ func TestPublicTaskBoundariesAndCatalogFallback(t *testing.T) {
 		PublicSummary: "completed task cannot publish",
 	})
 	assertTaskHTTPStatus(t, err, http.StatusConflict)
+}
+
+func TestTaskHandlersListBoardAndMineSuccess(t *testing.T) {
+	pool := setupTaskTestDB(t)
+	ownerID := insertTaskUser(t, pool)
+	otherID := insertTaskUser(t, pool)
+	creatorID := insertTaskCreator(t, pool)
+	agentID := insertTaskAgent(t, pool, creatorID, "task-handler-"+uuid.NewString()[:8], "approved")
+	insertTaskAgentSkills(t, pool, agentID, "data/sql-query")
+
+	ctx := context.Background()
+	publicSummary := "公开任务广场摘要"
+	_, err := pool.Exec(ctx,
+		`INSERT INTO task_queries (
+			user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+			visibility, public_summary, published_at
+		) VALUES ($1, 'private board source', '{data/sql-query}', '{run_agent}', $2, 'public', $3, NOW())`,
+		ownerID, []uuid.UUID{agentID}, publicSummary)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx,
+		`INSERT INTO task_queries (
+			user_id, query, parsed_skills, mcp_tools, recommended_agent_ids
+		) VALUES ($1, 'owner private task', '{data/sql-query}', '{create_task}', $2)`,
+		ownerID, []uuid.UUID{agentID})
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx,
+		`INSERT INTO task_queries (
+			user_id, query, parsed_skills, mcp_tools, recommended_agent_ids
+		) VALUES ($1, 'other private task', '{data/sql-query}', '{}', $2)`,
+		otherID, []uuid.UUID{agentID})
+	require.NoError(t, err)
+
+	svc := task.NewService(pool, nil, &fakeSkillRecommender{skills: testSkills()})
+	h := task.NewHandler(svc)
+	e := echo.New()
+
+	boardRec := httptest.NewRecorder()
+	boardCtx := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/tasks/board?limit=99", nil), boardRec)
+	require.NoError(t, h.ListBoard(boardCtx))
+	require.Equal(t, http.StatusOK, boardRec.Code)
+	var boardBody struct {
+		Items []task.PublicTaskItem `json:"items"`
+	}
+	decodeTaskHandlerJSON(t, boardRec, &boardBody)
+	require.Len(t, boardBody.Items, 1)
+	assert.Equal(t, publicSummary, boardBody.Items[0].Query)
+	assert.Equal(t, "open", boardBody.Items[0].Status)
+	require.Len(t, boardBody.Items[0].ParsedSkillRefs, 1)
+	assert.Equal(t, "SQL 查询", boardBody.Items[0].ParsedSkillRefs[0].Name)
+
+	mineRec := httptest.NewRecorder()
+	mineCtx := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/tasks/me?limit=99", nil), mineRec)
+	mineCtx.Set(string(httpx.CtxKeyUserID), ownerID.String())
+	require.NoError(t, h.ListMine(mineCtx))
+	require.Equal(t, http.StatusOK, mineRec.Code)
+	var mineBody struct {
+		Items []task.HistoryItem `json:"items"`
+	}
+	decodeTaskHandlerJSON(t, mineRec, &mineBody)
+	require.Len(t, mineBody.Items, 2)
+	queries := map[string]bool{}
+	for _, item := range mineBody.Items {
+		queries[item.Query] = true
+		assert.NotEqual(t, "other private task", item.Query)
+	}
+	assert.True(t, queries["private board source"])
+	assert.True(t, queries["owner private task"])
 }
 
 func TestRunTaskUsesSelectedAgentAndTaskInput(t *testing.T) {
