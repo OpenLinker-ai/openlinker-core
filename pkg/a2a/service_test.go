@@ -549,6 +549,84 @@ func TestProtocolMessageAcceptsCurrentPartShapes(t *testing.T) {
 	assert.Equal(t, "text/csv", file["mimeType"])
 }
 
+func TestProtocolServiceValidationAndOwnershipEdges(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+	other := insertCreator(t, pool)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"summary":"edge task done"}}`))
+	}))
+	defer server.Close()
+
+	agentID := insertAgent(t, pool, owner, server.URL)
+	otherAgentID := insertAgent(t, pool, owner, server.URL)
+	slug := "a2a-" + agentID.String()[:8]
+	otherSlug := "a2a-" + otherAgentID.String()[:8]
+	params := &a2a.A2AMessageSendParams{Message: a2a.A2AMessage{
+		Kind:  "message",
+		Role:  "user",
+		Parts: []map[string]any{{"kind": "text", "text": "validate service edges"}},
+	}}
+
+	_, err := svc.SendProtocolMessage(context.Background(), owner, " ", params)
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.SendProtocolMessage(context.Background(), owner, slug, nil)
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.SendProtocolMessage(context.Background(), owner, "missing-agent", params)
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{Message: a2a.A2AMessage{Role: "user"}})
+	requireA2AServiceHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	_, err = svc.StartProtocolMessage(context.Background(), owner, " ", params)
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.StartProtocolMessage(context.Background(), owner, slug, nil)
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.StartProtocolMessage(context.Background(), owner, "missing-agent", params)
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
+
+	task, err := svc.SendProtocolMessage(context.Background(), owner, slug, params)
+	require.NoError(t, err)
+
+	_, err = svc.GetProtocolTask(context.Background(), owner, "", task.ID, nil)
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.GetProtocolTask(context.Background(), owner, slug, "not-a-uuid", nil)
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.GetProtocolTask(context.Background(), other, slug, task.ID, nil)
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.GetProtocolTask(context.Background(), owner, otherSlug, task.ID, nil)
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
+
+	_, err = svc.ListProtocolTasks(context.Background(), owner, slug, &a2a.A2ATaskListParams{PageToken: "bad-token"})
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.ListProtocolTasks(context.Background(), owner, slug, &a2a.A2ATaskListParams{StatusTimestampAfter: "not-time"})
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+
+	pushSvc := webhook.NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true})
+	svc.SetRunPushManager(pushSvc)
+	pushParams := a2a.A2ATaskPushConfigParams{
+		ID:                     "not-a-uuid",
+		PushNotificationConfig: a2a.A2APushNotificationConfig{URL: server.URL + "/push"},
+	}
+	_, err = svc.SetPushNotificationConfig(context.Background(), owner, slug, &pushParams)
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+
+	missingRunID := uuid.NewString()
+	_, err = svc.ListPushNotificationConfigs(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{ID: missingRunID})
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.GetPushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{
+		ID:                       missingRunID,
+		PushNotificationConfigID: uuid.NewString(),
+	})
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
+	err = svc.DeletePushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{
+		ID:                       missingRunID,
+		PushNotificationConfigID: uuid.NewString(),
+	})
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
+}
+
 func TestProtocolStreamEventsExposeStatusAndArtifactUpdates(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	owner := insertCreator(t, pool)

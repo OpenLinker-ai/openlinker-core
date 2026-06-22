@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -868,6 +870,66 @@ func TestA2APushServiceValidationBranches(t *testing.T) {
 		},
 	})
 	requireA2AHTTPStatus(t, err, http.StatusServiceUnavailable)
+}
+
+func TestA2AProtocolServiceValidationAndDBErrorMapping(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.New()
+	params := &A2AMessageSendParams{Message: A2AMessage{
+		Role:  "user",
+		Parts: []map[string]interface{}{{"kind": "text", "text": "hello"}},
+	}}
+
+	svc := NewService(nil, nil)
+	_, err := svc.SendProtocolMessage(ctx, userID, " ", params)
+	requireA2AHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.SendProtocolMessage(ctx, userID, "agent-one", nil)
+	requireA2AHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.StartProtocolMessage(ctx, userID, " ", params)
+	requireA2AHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.StartProtocolMessage(ctx, userID, "agent-one", nil)
+	requireA2AHTTPStatus(t, err, http.StatusBadRequest)
+
+	missingSvc := &Service{queries: db.New(&a2aErrorDBTX{rowErr: pgx.ErrNoRows})}
+	_, err = missingSvc.SendProtocolMessage(ctx, userID, "agent-one", params)
+	requireA2AHTTPStatus(t, err, http.StatusNotFound)
+	_, err = missingSvc.StartProtocolMessage(ctx, userID, "agent-one", params)
+	requireA2AHTTPStatus(t, err, http.StatusNotFound)
+	_, err = missingSvc.ListProtocolTasks(ctx, userID, "agent-one", nil)
+	requireA2AHTTPStatus(t, err, http.StatusNotFound)
+	_, err = missingSvc.GetProtocolTask(ctx, userID, "agent-one", uuid.NewString(), nil)
+	requireA2AHTTPStatus(t, err, http.StatusNotFound)
+
+	brokenSvc := &Service{queries: db.New(&a2aErrorDBTX{rowErr: errors.New("database offline")})}
+	_, err = brokenSvc.SendProtocolMessage(ctx, userID, "agent-one", params)
+	requireA2AHTTPStatus(t, err, http.StatusInternalServerError)
+	_, err = brokenSvc.StartProtocolMessage(ctx, userID, "agent-one", params)
+	requireA2AHTTPStatus(t, err, http.StatusInternalServerError)
+	_, err = brokenSvc.ListProtocolTasks(ctx, userID, "agent-one", nil)
+	requireA2AHTTPStatus(t, err, http.StatusInternalServerError)
+	_, err = brokenSvc.GetProtocolTask(ctx, userID, "agent-one", uuid.NewString(), nil)
+	requireA2AHTTPStatus(t, err, http.StatusInternalServerError)
+
+	_, err = svc.GetProtocolTask(ctx, userID, "", uuid.NewString(), nil)
+	requireA2AHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.GetProtocolTask(ctx, userID, "agent-one", "bad", nil)
+	requireA2AHTTPStatus(t, err, http.StatusBadRequest)
+}
+
+func TestA2AListPushSubscriptionsErrorMapping(t *testing.T) {
+	ctx := context.Background()
+	runID := uuid.New()
+	userID := uuid.New()
+
+	svc := &Service{queries: db.New(&a2aErrorDBTX{queryErr: pgx.ErrNoRows})}
+	items, err := svc.listPushSubscriptions(ctx, runID, userID)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("pgx.ErrNoRows should map to empty list, got %#v, %v", items, err)
+	}
+
+	svc = &Service{queries: db.New(&a2aErrorDBTX{queryErr: errors.New("database offline")})}
+	_, err = svc.listPushSubscriptions(ctx, runID, userID)
+	requireA2AHTTPStatus(t, err, http.StatusInternalServerError)
 }
 
 func TestA2AHTTPHandlersValidateBeforeServiceDispatch(t *testing.T) {
@@ -1902,6 +1964,31 @@ func requireA2AHTTPStatus(t *testing.T, err error, want int) {
 func userIDFromCtxOnly(c echo.Context) error {
 	_, err := userIDFromCtx(c)
 	return err
+}
+
+type a2aErrorDBTX struct {
+	rowErr   error
+	queryErr error
+}
+
+func (f *a2aErrorDBTX) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, errors.New("unexpected exec")
+}
+
+func (f *a2aErrorDBTX) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
+	return nil, f.queryErr
+}
+
+func (f *a2aErrorDBTX) QueryRow(context.Context, string, ...interface{}) pgx.Row {
+	return a2aErrorRow{err: f.rowErr}
+}
+
+type a2aErrorRow struct {
+	err error
+}
+
+func (r a2aErrorRow) Scan(...any) error {
+	return r.err
 }
 
 type fakeA2AService struct {
