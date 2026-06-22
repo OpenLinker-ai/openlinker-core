@@ -59,49 +59,8 @@ func main() {
 	defer pool.Close()
 	log.Info().Msg("database connected")
 
-	e := echo.New()
-	e.HideBanner = true
-	e.HidePort = true
-	e.Use(emw.Recover())
-	e.Use(emw.RequestID())
-	e.Use(emw.CORSWithConfig(emw.CORSConfig{
-		AllowOrigins:     allowedCORSOrigins(cfg),
-		AllowCredentials: true,
-		AllowHeaders:     []string{echo.HeaderContentType, echo.HeaderAuthorization},
-	}))
-	if cfg.IsProduction() {
-		e.Use(emw.RateLimiterWithConfig(rateLimiterConfig()))
-	}
-	e.Use(requestLogger())
-	e.HTTPErrorHandler = func(err error, c echo.Context) {
-		if c.Response().Committed {
-			return
-		}
-		_ = httpx.SendError(c, err)
-	}
-
-	e.GET("/healthz", func(c echo.Context) error {
-		return c.JSON(http.StatusOK, map[string]any{"status": "ok", "env": cfg.Env})
-	})
-	e.HEAD("/healthz", func(c echo.Context) error {
-		return c.NoContent(http.StatusOK)
-	})
-	e.GET("/healthz/db", func(c echo.Context) error {
-		ctx, cancel := context.WithTimeout(c.Request().Context(), 2*time.Second)
-		defer cancel()
-		if err := pool.Ping(ctx); err != nil {
-			return httpx.NewError(http.StatusServiceUnavailable, httpx.CodeServiceUnavailable, "database unavailable")
-		}
-		return c.JSON(http.StatusOK, map[string]string{"db": "ok"})
-	})
-	e.HEAD("/healthz/db", func(c echo.Context) error {
-		ctx, cancel := context.WithTimeout(c.Request().Context(), 2*time.Second)
-		defer cancel()
-		if err := pool.Ping(ctx); err != nil {
-			return httpx.NewError(http.StatusServiceUnavailable, httpx.CodeServiceUnavailable, "database unavailable")
-		}
-		return c.NoContent(http.StatusOK)
-	})
+	e := newEcho(cfg)
+	registerHealthRoutes(e, cfg, pool)
 	opts := coreapi.Options{
 		AdminMiddleware: auth.AdminMiddleware(dbgen.New(pool)),
 	}
@@ -111,10 +70,7 @@ func main() {
 	}
 	coreapi.Register(rootCtx, e, pool, cfg, opts)
 
-	srv := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.Port),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	srv := newHTTPServer(cfg.Port)
 	go func() {
 		if err := e.StartServer(srv); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatal().Err(err).Msg("server failed")
@@ -158,6 +114,66 @@ func requestLogger() echo.MiddlewareFunc {
 	}
 }
 
+type dbPinger interface {
+	Ping(context.Context) error
+}
+
+func newEcho(cfg *config.Config) *echo.Echo {
+	e := echo.New()
+	e.HideBanner = true
+	e.HidePort = true
+	e.Use(emw.Recover())
+	e.Use(emw.RequestID())
+	e.Use(emw.CORSWithConfig(emw.CORSConfig{
+		AllowOrigins:     allowedCORSOrigins(cfg),
+		AllowCredentials: true,
+		AllowHeaders:     []string{echo.HeaderContentType, echo.HeaderAuthorization},
+	}))
+	if cfg.IsProduction() {
+		e.Use(emw.RateLimiterWithConfig(rateLimiterConfig()))
+	}
+	e.Use(requestLogger())
+	e.HTTPErrorHandler = func(err error, c echo.Context) {
+		if c.Response().Committed {
+			return
+		}
+		_ = httpx.SendError(c, err)
+	}
+	return e
+}
+
+func registerHealthRoutes(e *echo.Echo, cfg *config.Config, pool dbPinger) {
+	e.GET("/healthz", func(c echo.Context) error {
+		return c.JSON(http.StatusOK, map[string]any{"status": "ok", "env": cfg.Env})
+	})
+	e.HEAD("/healthz", func(c echo.Context) error {
+		return c.NoContent(http.StatusOK)
+	})
+	e.GET("/healthz/db", func(c echo.Context) error {
+		ctx, cancel := context.WithTimeout(c.Request().Context(), 2*time.Second)
+		defer cancel()
+		if err := pool.Ping(ctx); err != nil {
+			return httpx.NewError(http.StatusServiceUnavailable, httpx.CodeServiceUnavailable, "database unavailable")
+		}
+		return c.JSON(http.StatusOK, map[string]string{"db": "ok"})
+	})
+	e.HEAD("/healthz/db", func(c echo.Context) error {
+		ctx, cancel := context.WithTimeout(c.Request().Context(), 2*time.Second)
+		defer cancel()
+		if err := pool.Ping(ctx); err != nil {
+			return httpx.NewError(http.StatusServiceUnavailable, httpx.CodeServiceUnavailable, "database unavailable")
+		}
+		return c.NoContent(http.StatusOK)
+	})
+}
+
+func newHTTPServer(port int) *http.Server {
+	return &http.Server{
+		Addr:              fmt.Sprintf(":%d", port),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+}
+
 func allowedCORSOrigins(cfg *config.Config) []string {
 	origins := []string{}
 	if origin := strings.TrimSpace(cfg.FrontendURL); origin != "" {
@@ -194,14 +210,10 @@ func runMigrate(args []string) {
 	}
 	cmd := args[0]
 
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		fmt.Fprintln(os.Stderr, "DATABASE_URL not set")
+	dbURL, src, err := migrationConfig(os.Getenv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
-	}
-	src := os.Getenv("MIGRATIONS_DIR")
-	if src == "" {
-		src = "./migrations"
 	}
 
 	m, err := migratecmd.New("file://"+src, dbURL)
@@ -235,4 +247,16 @@ func runMigrate(args []string) {
 		fmt.Fprintf(os.Stderr, "unknown migrate command: %s\n", cmd)
 		os.Exit(2)
 	}
+}
+
+func migrationConfig(getenv func(string) string) (dbURL string, src string, err error) {
+	dbURL = getenv("DATABASE_URL")
+	if dbURL == "" {
+		return "", "", errors.New("DATABASE_URL not set")
+	}
+	src = getenv("MIGRATIONS_DIR")
+	if src == "" {
+		src = "./migrations"
+	}
+	return dbURL, src, nil
 }
