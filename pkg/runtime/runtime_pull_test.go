@@ -557,6 +557,115 @@ func TestRuntimePull_RequiresPullScope(t *testing.T) {
 	assertHTTPStatus(t, err, 401)
 }
 
+func TestRuntimePull_HeartbeatRejectsInactiveAgentAndInvalidToken(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "disabled")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:pull"})
+
+	resp, err := svc.HeartbeatAgent(ctx, "not-a-runtime-token")
+	require.Nil(t, resp)
+	assertHTTPStatus(t, err, http.StatusUnauthorized)
+
+	resp, err = svc.HeartbeatAgent(ctx, token)
+	require.Nil(t, resp)
+	assertHTTPStatus(t, err, http.StatusForbidden)
+}
+
+func TestRuntimePull_ClaimRejectsNonQueuedAgentAndCanceledWait(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	creatorID := insertCreator(t, pool)
+	directAgentID := insertAgent(t, pool, creatorID, "https://example.com/direct", 10, "approved")
+	directToken := insertRuntimeToken(t, pool, directAgentID, creatorID, []string{"agent:pull"})
+
+	claimed, err := svc.ClaimRuntimePullRun(ctx, directToken)
+	require.Nil(t, claimed)
+	assertHTTPStatus(t, err, http.StatusConflict)
+
+	pullAgentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, pullAgentID)
+	pullToken := insertRuntimeToken(t, pool, pullAgentID, creatorID, []string{"agent:pull"})
+
+	waitCtx, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(500*time.Millisecond, cancel)
+	defer timer.Stop()
+	startedAt := time.Now()
+	claimed, err = svc.ClaimRuntimePullRun(waitCtx, pullToken, runtime.RuntimePullClaimOptions{Wait: time.Second})
+	require.Nil(t, claimed)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Less(t, time.Since(startedAt), time.Second)
+}
+
+func TestRuntimePull_CompleteRejectsInvalidStateModeAndStatus(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
+	markRuntimePullAvailable(t, svc, token)
+
+	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "completion edges"}), "")
+	require.NoError(t, err)
+	runID := mustParseUUID(t, started.RunID)
+
+	_, err = svc.CompleteRuntimePullRun(ctx, token, uuid.New(), &runtime.RuntimePullResultRequest{
+		Status: "success",
+		Output: map[string]interface{}{"answer": "missing"},
+	})
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	_, err = svc.CompleteRuntimePullRun(ctx, token, runID, &runtime.RuntimePullResultRequest{
+		Status: "success",
+		Output: map[string]interface{}{"answer": "unclaimed"},
+	})
+	assertHTTPStatus(t, err, http.StatusConflict)
+
+	claimed, err := svc.ClaimRuntimePullRun(ctx, token)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+
+	_, err = svc.CompleteRuntimePullRun(ctx, token, runID, &runtime.RuntimePullResultRequest{
+		Status: "paused",
+	})
+	assertHTTPStatus(t, err, http.StatusBadRequest)
+
+	_, err = pool.Exec(ctx,
+		`UPDATE agents SET connection_mode='direct_http', endpoint_url='https://example.com/direct' WHERE id=$1`,
+		agentID,
+	)
+	require.NoError(t, err)
+	_, err = svc.CompleteRuntimePullRun(ctx, token, runID, &runtime.RuntimePullResultRequest{
+		Status: "success",
+		Output: map[string]interface{}{"answer": "wrong mode"},
+	})
+	assertHTTPStatus(t, err, http.StatusConflict)
+
+	setRuntimePullMode(t, pool, agentID)
+	completed, err := svc.CompleteRuntimePullRun(ctx, token, runID, &runtime.RuntimePullResultRequest{
+		Status: "timeout",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "timeout", completed.Status)
+	assert.Equal(t, "TIMEOUT", completed.ErrorCode)
+
+	_, err = svc.CompleteRuntimePullRun(ctx, token, runID, &runtime.RuntimePullResultRequest{
+		Status: "success",
+		Output: map[string]interface{}{"answer": "duplicate"},
+	})
+	assertHTTPStatus(t, err, http.StatusConflict)
+}
+
 func TestRuntimePull_RunRequiresRecentPullHeartbeat(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
@@ -831,6 +940,53 @@ func TestRuntimePull_TimeoutsUnclaimedRun(t *testing.T) {
 		eventTypes = append(eventTypes, event.EventType)
 	}
 	assert.Contains(t, eventTypes, "run.failed")
+}
+
+func TestRuntimePull_TimeoutNoopsAndRefundsSettledRuns(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	timedOut, err := svc.TimeoutStaleRuntimePullRuns(ctx, runtime.RuntimePullRunTimeoutConfig{})
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), timedOut)
+
+	wallet := &recordingRuntimeWalletCharger{ops: make(chan recordedWalletOp, 4), chargeOK: true}
+	svc.SetWalletCharger(wallet)
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 20, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:pull"})
+	markRuntimePullAvailable(t, svc, token)
+
+	started, err := svc.StartRun(ctx, userID, makeRunReq(agentID, map[string]any{"q": "settled timeout"}), "api")
+	require.NoError(t, err)
+	require.Equal(t, "running", started.Status)
+	charge := waitRecordedWalletOp(t, wallet.ops)
+	assert.Equal(t, recordedWalletOp{Kind: "charge", UserID: userID, Amount: 20}, charge)
+	runID := mustParseUUID(t, started.RunID)
+
+	_, err = pool.Exec(ctx,
+		`UPDATE runs SET started_at=$2 WHERE id=$1`,
+		runID,
+		time.Now().Add(-3*time.Minute),
+	)
+	require.NoError(t, err)
+
+	timedOut, err = svc.TimeoutStaleRuntimePullRuns(ctx, runtime.RuntimePullRunTimeoutConfig{
+		DispatchTimeout: time.Minute,
+		ResultTimeout:   10 * time.Minute,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), timedOut)
+	refund := waitRecordedWalletOp(t, wallet.ops)
+	assert.Equal(t, recordedWalletOp{Kind: "refund", UserID: userID, Amount: 20}, refund)
+
+	reloaded, err := svc.GetRun(ctx, userID, runID)
+	require.NoError(t, err)
+	assert.Equal(t, "timeout", reloaded.Status)
+	assert.Equal(t, "RUNTIME_PULL_NOT_CLAIMED", reloaded.ErrorCode)
 }
 
 func TestRuntimePullWorker_TimeoutsStaleUnclaimedRun(t *testing.T) {

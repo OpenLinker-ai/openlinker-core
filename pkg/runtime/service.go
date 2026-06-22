@@ -1044,10 +1044,16 @@ func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken str
 			output = map[string]interface{}{}
 		}
 		resp = s.handleSuccess(ctx, runID, token.AgentID, agent.CreatorID, state.CostCents, state.CreatorRevenueCents, output, req.Events, duration, false, triggerExternalDelivery)
-	case "failed", "timeout":
+	case "failed":
 		agentErr := req.Error
 		if agentErr == nil {
-			agentErr = &AgentError{Code: "AGENT_REPORTED_FAILURE", Message: "Agent runtime reported " + req.Status}
+			agentErr = &AgentError{Code: "AGENT_REPORTED_FAILURE", Message: "Agent runtime reported failed"}
+		}
+		resp = s.handleFailure(ctx, runID, state.UserID, token.AgentID, state.CostCents, duration, nil, agentErr, false, triggerExternalDelivery)
+	case "timeout":
+		agentErr := req.Error
+		if agentErr == nil {
+			agentErr = &AgentError{Code: "TIMEOUT", Message: "Agent runtime reported timeout"}
 		}
 		resp = s.handleFailure(ctx, runID, state.UserID, token.AgentID, state.CostCents, duration, nil, agentErr, false, triggerExternalDelivery)
 	default:
@@ -1598,6 +1604,9 @@ func (s *Service) handleFailure(
 	case agentErr != nil:
 		errCode = agentErr.Code
 		errMsg = truncate(agentErr.Message, errMsgMaxLen)
+		if strings.EqualFold(errCode, "TIMEOUT") {
+			runStatus = "timeout"
+		}
 	}
 
 	codePtr := errCode
