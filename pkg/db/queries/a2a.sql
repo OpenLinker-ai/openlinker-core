@@ -140,15 +140,98 @@ LEFT JOIN LATERAL (
     WHERE agent_id = a.id AND revoked_at IS NULL
 ) token_stats ON TRUE
 WHERE p.user_id = $1
+  AND (
+      $2 = ''
+      OR p.id::text ILIKE '%' || $2 || '%'
+      OR a.slug ILIKE '%' || $2 || '%'
+      OR a.name ILIKE '%' || $2 || '%'
+      OR EXISTS (
+          SELECT 1
+          FROM unnest(a.tags) AS tag
+          WHERE tag ILIKE '%' || $2 || '%'
+      )
+      OR EXISTS (
+          SELECT 1
+          FROM agent_skills ag
+          JOIN skills s ON s.id = ag.skill_id
+          WHERE ag.agent_id = a.id
+            AND (s.id ILIKE '%' || $2 || '%' OR s.name ILIKE '%' || $2 || '%')
+      )
+      OR EXISTS (
+          SELECT 1
+          FROM run_delegations d2
+          JOIN runs c2 ON c2.id = d2.child_run_id
+          JOIN agents target ON target.id = c2.agent_id
+          WHERE d2.parent_run_id = p.id
+            AND (
+                target.slug ILIKE '%' || $2 || '%'
+                OR target.name ILIKE '%' || $2 || '%'
+                OR EXISTS (
+                    SELECT 1
+                    FROM unnest(target.tags) AS tag
+                    WHERE tag ILIKE '%' || $2 || '%'
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM agent_skills ag
+                    JOIN skills s ON s.id = ag.skill_id
+                    WHERE ag.agent_id = target.id
+                      AND (s.id ILIKE '%' || $2 || '%' OR s.name ILIKE '%' || $2 || '%')
+                )
+            )
+      )
+  )
 GROUP BY p.id, a.id, a.slug, a.name, a.tags, caller_skills.skill_ids,
          caller_skills.skill_names, token_stats.active_runtime_token_count,
          token_stats.last_runtime_token_used_at, p.source, p.status, p.duration_ms,
          p.started_at, p.finished_at
 ORDER BY p.started_at DESC
-LIMIT $2 OFFSET $3;
+LIMIT $3 OFFSET $4;
 
 -- name: CountParentRunsWithDelegationsByUser :one
 SELECT COUNT(DISTINCT d.parent_run_id)::int AS total
 FROM run_delegations d
 JOIN runs p ON p.id = d.parent_run_id
-WHERE p.user_id = $1;
+JOIN agents a ON a.id = p.agent_id
+WHERE p.user_id = $1
+  AND (
+      $2 = ''
+      OR p.id::text ILIKE '%' || $2 || '%'
+      OR a.slug ILIKE '%' || $2 || '%'
+      OR a.name ILIKE '%' || $2 || '%'
+      OR EXISTS (
+          SELECT 1
+          FROM unnest(a.tags) AS tag
+          WHERE tag ILIKE '%' || $2 || '%'
+      )
+      OR EXISTS (
+          SELECT 1
+          FROM agent_skills ag
+          JOIN skills s ON s.id = ag.skill_id
+          WHERE ag.agent_id = a.id
+            AND (s.id ILIKE '%' || $2 || '%' OR s.name ILIKE '%' || $2 || '%')
+      )
+      OR EXISTS (
+          SELECT 1
+          FROM run_delegations d2
+          JOIN runs c2 ON c2.id = d2.child_run_id
+          JOIN agents target ON target.id = c2.agent_id
+          WHERE d2.parent_run_id = p.id
+            AND (
+                target.slug ILIKE '%' || $2 || '%'
+                OR target.name ILIKE '%' || $2 || '%'
+                OR EXISTS (
+                    SELECT 1
+                    FROM unnest(target.tags) AS tag
+                    WHERE tag ILIKE '%' || $2 || '%'
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM agent_skills ag
+                    JOIN skills s ON s.id = ag.skill_id
+                    WHERE ag.agent_id = target.id
+                      AND (s.id ILIKE '%' || $2 || '%' OR s.name ILIKE '%' || $2 || '%')
+                )
+            )
+      )
+  );

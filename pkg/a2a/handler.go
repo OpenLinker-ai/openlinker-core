@@ -30,7 +30,7 @@ type service interface {
 	UpdateCallPolicy(ctx context.Context, userID, agentID uuid.UUID, req *UpdateCallPolicyRequest) (*CallPolicyResponse, error)
 	CallAgent(ctx context.Context, plaintextToken string, req *CallAgentRequest) (*runtime.RunResponse, error)
 	ListChildren(ctx context.Context, userID, parentRunID uuid.UUID) ([]ChildRunResponse, error)
-	ListParentRuns(ctx context.Context, userID uuid.UUID, page, size int32) (*ParentRunListResponse, error)
+	ListParentRuns(ctx context.Context, userID uuid.UUID, page, size int32, search string) (*ParentRunListResponse, error)
 	SendProtocolMessage(ctx context.Context, userID uuid.UUID, slug string, params *A2AMessageSendParams) (*A2ATask, error)
 	StartProtocolMessage(ctx context.Context, userID uuid.UUID, slug string, params *A2AMessageSendParams) (*A2ATask, error)
 	GetProtocolTask(ctx context.Context, userID uuid.UUID, slug, taskID string, historyLength *int) (*A2ATask, error)
@@ -252,6 +252,7 @@ func (h *Handler) ListParentRuns(c echo.Context) error {
 		userID,
 		parseInt32Query(c.QueryParam("page"), 1),
 		parseInt32Query(c.QueryParam("size"), 10),
+		parseSearchQuery(c),
 	)
 	if err != nil {
 		return err
@@ -268,6 +269,13 @@ func parseInt32Query(raw string, fallback int32) int32 {
 		return fallback
 	}
 	return int32(value)
+}
+
+func parseSearchQuery(c echo.Context) string {
+	if value := strings.TrimSpace(c.QueryParam("q")); value != "" {
+		return value
+	}
+	return strings.TrimSpace(c.QueryParam("search"))
 }
 
 func bearerToken(header string) (string, error) {

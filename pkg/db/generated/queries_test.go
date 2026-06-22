@@ -1392,7 +1392,7 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 		&lastUsedAt,
 	}}}
 	dbtx.queryRows = parentRows
-	parentRuns, err := q.ListParentRunsWithDelegationsByUser(context.Background(), ListParentRunsWithDelegationsByUserParams{UserID: userID, Limit: 20, Offset: 5})
+	parentRuns, err := q.ListParentRunsWithDelegationsByUser(context.Background(), ListParentRunsWithDelegationsByUserParams{UserID: userID, Search: "caller", Limit: 20, Offset: 5})
 	if err != nil {
 		t.Fatalf("ListParentRunsWithDelegationsByUser error = %v", err)
 	}
@@ -1400,16 +1400,19 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	if !parentRows.closed || len(parentRuns) != 1 || parentRuns[0].ChildCount != 2 || parentRuns[0].ActiveRuntimeTokenCount != 3 {
 		t.Fatalf("ListParentRunsWithDelegationsByUser scan = %#v closed=%v", parentRuns, parentRows.closed)
 	}
-	if !reflect.DeepEqual(dbtx.queryArgs, []any{userID, int32(20), int32(5)}) {
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{userID, "caller", int32(20), int32(5)}) {
 		t.Fatalf("ListParentRunsWithDelegationsByUser args = %#v", dbtx.queryArgs)
 	}
 
 	dbtx.row = fakeRow{values: []any{int32(6)}}
-	parentRunCount, err := q.CountParentRunsWithDelegationsByUser(context.Background(), userID)
+	parentRunCount, err := q.CountParentRunsWithDelegationsByUser(context.Background(), CountParentRunsWithDelegationsByUserParams{UserID: userID, Search: "caller"})
 	if err != nil || parentRunCount != 6 {
 		t.Fatalf("CountParentRunsWithDelegationsByUser = %d, %v", parentRunCount, err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "CountParentRunsWithDelegationsByUser")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{userID, "caller"}) {
+		t.Fatalf("CountParentRunsWithDelegationsByUser args = %#v", dbtx.queryRowArgs)
+	}
 
 	if rows, err := q.RevokeAgentRuntimeTokenForOwner(context.Background(), RevokeAgentRuntimeTokenForOwnerParams{ID: tokenID, UserID: userID}); err != nil || rows != 5 {
 		t.Fatalf("RevokeAgentRuntimeTokenForOwner = %d, %v", rows, err)

@@ -380,7 +380,7 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 	require.Len(t, children[0].TargetSkills, 1)
 	assert.Equal(t, "content/summarization", children[0].TargetSkills[0].ID)
 
-	parents, err := svc.ListParentRuns(context.Background(), owner, 1, 10)
+	parents, err := svc.ListParentRuns(context.Background(), owner, 1, 10, "")
 	require.NoError(t, err)
 	require.Len(t, parents.Items, 1)
 	assert.Equal(t, int32(1), parents.Total)
@@ -395,6 +395,21 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 	require.NotNil(t, parents.Items[0].LastRuntimeTokenUsedAt)
 	assert.Equal(t, int32(1), parents.Items[0].ChildCount)
 	assert.Equal(t, int32(1), parents.Items[0].SuccessfulChildCount)
+
+	callerFiltered, err := svc.ListParentRuns(context.Background(), owner, 1, 10, "orchestration")
+	require.NoError(t, err)
+	require.Len(t, callerFiltered.Items, 1)
+	assert.Equal(t, parent.RunID, callerFiltered.Items[0].ParentRunID)
+
+	targetFiltered, err := svc.ListParentRuns(context.Background(), owner, 1, 10, "worker")
+	require.NoError(t, err)
+	require.Len(t, targetFiltered.Items, 1)
+	assert.Equal(t, parent.RunID, targetFiltered.Items[0].ParentRunID)
+
+	missingFiltered, err := svc.ListParentRuns(context.Background(), owner, 1, 10, "agent-that-does-not-exist")
+	require.NoError(t, err)
+	require.Empty(t, missingFiltered.Items)
+	assert.Equal(t, int32(0), missingFiltered.Total)
 
 	events, err := runtimeSvc.ListRunEvents(context.Background(), owner, uuid.MustParse(parent.RunID), 0, 20)
 	require.NoError(t, err)

@@ -339,15 +339,57 @@ LEFT JOIN LATERAL (
     WHERE agent_id = a.id AND revoked_at IS NULL
 ) token_stats ON TRUE
 WHERE p.user_id = $1
+  AND (
+      $2 = ''
+      OR p.id::text ILIKE '%' || $2 || '%'
+      OR a.slug ILIKE '%' || $2 || '%'
+      OR a.name ILIKE '%' || $2 || '%'
+      OR EXISTS (
+          SELECT 1
+          FROM unnest(a.tags) AS tag
+          WHERE tag ILIKE '%' || $2 || '%'
+      )
+      OR EXISTS (
+          SELECT 1
+          FROM agent_skills ag
+          JOIN skills s ON s.id = ag.skill_id
+          WHERE ag.agent_id = a.id
+            AND (s.id ILIKE '%' || $2 || '%' OR s.name ILIKE '%' || $2 || '%')
+      )
+      OR EXISTS (
+          SELECT 1
+          FROM run_delegations d2
+          JOIN runs c2 ON c2.id = d2.child_run_id
+          JOIN agents target ON target.id = c2.agent_id
+          WHERE d2.parent_run_id = p.id
+            AND (
+                target.slug ILIKE '%' || $2 || '%'
+                OR target.name ILIKE '%' || $2 || '%'
+                OR EXISTS (
+                    SELECT 1
+                    FROM unnest(target.tags) AS tag
+                    WHERE tag ILIKE '%' || $2 || '%'
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM agent_skills ag
+                    JOIN skills s ON s.id = ag.skill_id
+                    WHERE ag.agent_id = target.id
+                      AND (s.id ILIKE '%' || $2 || '%' OR s.name ILIKE '%' || $2 || '%')
+                )
+            )
+      )
+  )
 GROUP BY p.id, a.id, a.slug, a.name, a.tags, caller_skills.skill_ids,
          caller_skills.skill_names, token_stats.active_runtime_token_count,
          token_stats.last_runtime_token_used_at, p.source, p.status, p.duration_ms,
          p.started_at, p.finished_at
 ORDER BY p.started_at DESC
-LIMIT $2 OFFSET $3`
+LIMIT $3 OFFSET $4`
 
 type ListParentRunsWithDelegationsByUserParams struct {
 	UserID uuid.UUID `db:"user_id" json:"user_id"`
+	Search string    `db:"search" json:"search"`
 	Limit  int32     `db:"limit" json:"limit"`
 	Offset int32     `db:"offset" json:"offset"`
 }
@@ -373,7 +415,7 @@ type ListParentRunsWithDelegationsByUserRow struct {
 }
 
 func (q *Queries) ListParentRunsWithDelegationsByUser(ctx context.Context, arg ListParentRunsWithDelegationsByUserParams) ([]ListParentRunsWithDelegationsByUserRow, error) {
-	rows, err := q.db.Query(ctx, listParentRunsWithDelegationsByUser, arg.UserID, arg.Limit, arg.Offset)
+	rows, err := q.db.Query(ctx, listParentRunsWithDelegationsByUser, arg.UserID, arg.Search, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
@@ -399,10 +441,57 @@ const countParentRunsWithDelegationsByUser = `-- name: CountParentRunsWithDelega
 SELECT COUNT(DISTINCT d.parent_run_id)::int AS total
 FROM run_delegations d
 JOIN runs p ON p.id = d.parent_run_id
-WHERE p.user_id = $1`
+JOIN agents a ON a.id = p.agent_id
+WHERE p.user_id = $1
+  AND (
+      $2 = ''
+      OR p.id::text ILIKE '%' || $2 || '%'
+      OR a.slug ILIKE '%' || $2 || '%'
+      OR a.name ILIKE '%' || $2 || '%'
+      OR EXISTS (
+          SELECT 1
+          FROM unnest(a.tags) AS tag
+          WHERE tag ILIKE '%' || $2 || '%'
+      )
+      OR EXISTS (
+          SELECT 1
+          FROM agent_skills ag
+          JOIN skills s ON s.id = ag.skill_id
+          WHERE ag.agent_id = a.id
+            AND (s.id ILIKE '%' || $2 || '%' OR s.name ILIKE '%' || $2 || '%')
+      )
+      OR EXISTS (
+          SELECT 1
+          FROM run_delegations d2
+          JOIN runs c2 ON c2.id = d2.child_run_id
+          JOIN agents target ON target.id = c2.agent_id
+          WHERE d2.parent_run_id = p.id
+            AND (
+                target.slug ILIKE '%' || $2 || '%'
+                OR target.name ILIKE '%' || $2 || '%'
+                OR EXISTS (
+                    SELECT 1
+                    FROM unnest(target.tags) AS tag
+                    WHERE tag ILIKE '%' || $2 || '%'
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM agent_skills ag
+                    JOIN skills s ON s.id = ag.skill_id
+                    WHERE ag.agent_id = target.id
+                      AND (s.id ILIKE '%' || $2 || '%' OR s.name ILIKE '%' || $2 || '%')
+                )
+            )
+      )
+  )`
 
-func (q *Queries) CountParentRunsWithDelegationsByUser(ctx context.Context, userID uuid.UUID) (int32, error) {
+type CountParentRunsWithDelegationsByUserParams struct {
+	UserID uuid.UUID `db:"user_id" json:"user_id"`
+	Search string    `db:"search" json:"search"`
+}
+
+func (q *Queries) CountParentRunsWithDelegationsByUser(ctx context.Context, arg CountParentRunsWithDelegationsByUserParams) (int32, error) {
 	var total int32
-	err := q.db.QueryRow(ctx, countParentRunsWithDelegationsByUser, userID).Scan(&total)
+	err := q.db.QueryRow(ctx, countParentRunsWithDelegationsByUser, arg.UserID, arg.Search).Scan(&total)
 	return total, err
 }

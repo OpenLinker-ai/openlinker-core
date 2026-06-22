@@ -24,6 +24,7 @@ const (
 	defaultParentPage     = 1
 	defaultParentPageSize = 10
 	maxParentPageSize     = 50
+	maxParentSearchLen    = 120
 )
 
 type Service struct {
@@ -470,7 +471,7 @@ func (s *Service) ListChildren(ctx context.Context, userID, parentRunID uuid.UUI
 	return items, nil
 }
 
-func (s *Service) ListParentRuns(ctx context.Context, userID uuid.UUID, page, size int32) (*ParentRunListResponse, error) {
+func (s *Service) ListParentRuns(ctx context.Context, userID uuid.UUID, page, size int32, search string) (*ParentRunListResponse, error) {
 	if page < 1 {
 		page = defaultParentPage
 	}
@@ -480,8 +481,10 @@ func (s *Service) ListParentRuns(ctx context.Context, userID uuid.UUID, page, si
 	if size > maxParentPageSize {
 		size = maxParentPageSize
 	}
+	search = normalizeParentSearch(search)
 	rows, err := s.queries.ListParentRunsWithDelegationsByUser(ctx, db.ListParentRunsWithDelegationsByUserParams{
 		UserID: userID,
+		Search: search,
 		Limit:  size,
 		Offset: (page - 1) * size,
 	})
@@ -489,7 +492,10 @@ func (s *Service) ListParentRuns(ctx context.Context, userID uuid.UUID, page, si
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("a2a.ListParentRuns: list")
 		return nil, httpx.Internal("查询 Parent 调用链失败")
 	}
-	total, err := s.queries.CountParentRunsWithDelegationsByUser(ctx, userID)
+	total, err := s.queries.CountParentRunsWithDelegationsByUser(ctx, db.CountParentRunsWithDelegationsByUserParams{
+		UserID: userID,
+		Search: search,
+	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("a2a.ListParentRuns: count")
 		return nil, httpx.Internal("查询 Parent 调用链失败")
@@ -516,6 +522,15 @@ func (s *Service) ListParentRuns(ctx context.Context, userID uuid.UUID, page, si
 		items = append(items, item)
 	}
 	return &ParentRunListResponse{Items: items, Total: total, Page: page, Size: size}, nil
+}
+
+func normalizeParentSearch(search string) string {
+	search = strings.TrimSpace(search)
+	runes := []rune(search)
+	if len(runes) > maxParentSearchLen {
+		return string(runes[:maxParentSearchLen])
+	}
+	return search
 }
 
 func skillRefs(ids, names []string) []SkillRef {

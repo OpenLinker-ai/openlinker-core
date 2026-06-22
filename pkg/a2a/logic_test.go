@@ -1223,7 +1223,7 @@ func TestA2AControlHTTPHandlersDispatchService(t *testing.T) {
 
 		c = newA2ATestContext(&a2aHandlerRequest{
 			method: http.MethodGet,
-			target: "/a2a/parents?page=3&size=25",
+			target: "/a2a/parents?page=3&size=25&q=caller",
 			userID: userID.String(),
 		})
 
@@ -1231,6 +1231,7 @@ func TestA2AControlHTTPHandlersDispatchService(t *testing.T) {
 		assert.Equal(t, http.StatusOK, c.(*a2ATestContext).rec.Code)
 		assert.Equal(t, int32(3), svc.page)
 		assert.Equal(t, int32(25), svc.size)
+		assert.Equal(t, "caller", svc.search)
 		assert.Contains(t, c.(*a2ATestContext).rec.Body.String(), "child_count")
 	})
 }
@@ -2315,6 +2316,7 @@ type controlA2AService struct {
 	parentRunID     uuid.UUID
 	page            int32
 	size            int32
+	search          string
 	createReq       CreateRuntimeTokenRequest
 	updatePolicyReq UpdateCallPolicyRequest
 	callToken       string
@@ -2465,9 +2467,10 @@ func (f *controlA2AService) ListChildren(_ context.Context, userID, parentRunID 
 	}}, nil
 }
 
-func (f *controlA2AService) ListParentRuns(_ context.Context, userID uuid.UUID, page, size int32) (*ParentRunListResponse, error) {
+func (f *controlA2AService) ListParentRuns(_ context.Context, userID uuid.UUID, page, size int32, search string) (*ParentRunListResponse, error) {
 	f.page = page
 	f.size = size
+	f.search = search
 	if err := f.recordControl("list-parent-runs", userID); err != nil {
 		return nil, err
 	}
