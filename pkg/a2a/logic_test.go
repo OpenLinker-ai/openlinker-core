@@ -18,6 +18,7 @@ import (
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 	runtimepkg "github.com/kinzhi/openlinker-core/pkg/runtime"
+	"github.com/kinzhi/openlinker-core/pkg/webhook"
 )
 
 func TestA2AVersionJSONRPCAndQueryHelpers(t *testing.T) {
@@ -573,6 +574,21 @@ func TestA2ARunTaskArtifactAndEventMapping(t *testing.T) {
 	if part := artifactPartFromPayload(map[string]interface{}{"parts": []interface{}{map[string]interface{}{"url": "https://files.example/a.txt"}}}); part["kind"] != "file" {
 		t.Fatalf("artifactPartFromPayload file = %#v", part)
 	}
+	if part := artifactPartFromPayload(map[string]interface{}{"file": map[string]interface{}{"uri": "https://files.example/direct.txt"}}); part["kind"] != "file" {
+		t.Fatalf("artifactPartFromPayload direct file = %#v", part)
+	}
+	if part := artifactPartFromPayload(map[string]interface{}{"parts": []interface{}{
+		"skip",
+		map[string]interface{}{"kind": "file", "file": map[string]interface{}{"uri": "https://files.example/nested.txt"}},
+	}}); part["kind"] != "file" || part["file"].(map[string]interface{})["uri"] != "https://files.example/nested.txt" {
+		t.Fatalf("artifactPartFromPayload nested file = %#v", part)
+	}
+	if part := artifactPartFromPayload(map[string]interface{}{"data": map[string]interface{}{"ok": true}}); part["kind"] != "data" {
+		t.Fatalf("artifactPartFromPayload data = %#v", part)
+	}
+	if part := artifactPartFromPayload(map[string]interface{}{"unknown": "kept"}); part["kind"] != "data" {
+		t.Fatalf("artifactPartFromPayload fallback = %#v", part)
+	}
 	if payloadString(nil, "x") != "" || payloadString(map[string]interface{}{"x": "  y  "}, "x") != "y" {
 		t.Fatalf("payloadString failed")
 	}
@@ -607,7 +623,47 @@ func TestA2ARunTaskArtifactAndEventMapping(t *testing.T) {
 	}
 }
 
+func TestA2ARunEventMessageFallbacks(t *testing.T) {
+	eventAt := time.Date(2026, 6, 20, 3, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		eventType string
+		wantState string
+		wantText  string
+		wantFinal bool
+	}{
+		{eventType: "run.created", wantState: a2aTaskStateSubmitted, wantText: "OpenLinker task created"},
+		{eventType: "run.started", wantState: a2aTaskStateWorking, wantText: "OpenLinker task started"},
+		{eventType: "run.dispatch.pending", wantState: a2aTaskStateWorking, wantText: "OpenLinker task is waiting for a runtime worker"},
+		{eventType: "run.dispatch.claimed", wantState: a2aTaskStateWorking, wantText: "OpenLinker task was claimed by a runtime worker"},
+		{eventType: "run.completed", wantState: a2aTaskStateCompleted, wantText: "OpenLinker task completed", wantFinal: true},
+		{eventType: "run.failed", wantState: a2aTaskStateFailed, wantText: "OpenLinker task failed", wantFinal: true},
+		{eventType: "run.canceled", wantState: a2aTaskStateCanceled, wantText: "OpenLinker task canceled", wantFinal: true},
+	} {
+		t.Run(tc.eventType, func(t *testing.T) {
+			event := runtimepkg.RunEventResponse{EventID: "evt", Sequence: 1, EventType: tc.eventType, Payload: map[string]interface{}{}, CreatedAt: eventAt}
+			update := statusUpdateFromRunEvent("task", "ctx", event)
+			if update.ContextID != "ctx" || update.Status.State != tc.wantState || update.Final != tc.wantFinal {
+				t.Fatalf("statusUpdateFromRunEvent = %#v", update)
+			}
+			if update.Status.Message == nil || update.Status.Message.Parts[0]["text"] != tc.wantText {
+				t.Fatalf("status message = %#v, want %q", update.Status.Message, tc.wantText)
+			}
+		})
+	}
+
+	explicit := messageFromRunEvent(runtimepkg.RunEventResponse{EventType: "custom", Payload: map[string]interface{}{"message": "from payload"}})
+	if explicit == nil || explicit.Parts[0]["text"] != "from payload" {
+		t.Fatalf("messageFromRunEvent payload message = %#v", explicit)
+	}
+	if got := messageFromRunEvent(runtimepkg.RunEventResponse{EventType: "custom", Payload: map[string]interface{}{}}); got != nil {
+		t.Fatalf("unknown event without text should not produce a message: %#v", got)
+	}
+}
+
 func TestA2ARuntimeWorkbenchTokenAndPushHelpers(t *testing.T) {
+	if svc := NewService(nil, nil); svc == nil || svc.queries == nil {
+		t.Fatalf("NewService did not initialize queries: %#v", svc)
+	}
 	if got := runtimeTokenScopesForAgent(db.Agent{ConnectionMode: "direct_http"}); !reflect.DeepEqual(got, []string{"agent:call"}) {
 		t.Fatalf("direct token scopes = %#v", got)
 	}
@@ -616,6 +672,9 @@ func TestA2ARuntimeWorkbenchTokenAndPushHelpers(t *testing.T) {
 	}
 	if got := runtimeTokenScopesForAgent(db.Agent{ConnectionMode: "runtime_ws"}); !reflect.DeepEqual(got, []string{"agent:call", "agent:pull"}) {
 		t.Fatalf("runtime ws token scopes = %#v", got)
+	}
+	if !isQueuedRuntimeConnectionMode("runtime_pull") || !isQueuedRuntimeConnectionMode("runtime_ws") || isQueuedRuntimeConnectionMode("direct_http") {
+		t.Fatalf("isQueuedRuntimeConnectionMode failed")
 	}
 
 	lastUsed := "2026-06-20T01:02:03Z"
@@ -756,6 +815,57 @@ func TestA2ARuntimeWorkbenchTokenAndPushHelpers(t *testing.T) {
 	if metadata["openlinker_subscription_status"] != "active" || metadata["openlinker_consecutive_failures"] != int32(2) || metadata["client"] != "test" {
 		t.Fatalf("pushMetadataFromSubscription = %#v", metadata)
 	}
+
+	sub.PushMetadata = []byte(`{`)
+	metadata = pushMetadataFromSubscription(sub)
+	if metadata["openlinker_subscription_status"] != "active" || metadata["openlinker_consecutive_failures"] != int32(2) {
+		t.Fatalf("pushMetadataFromSubscription invalid json = %#v", metadata)
+	}
+	scheme, credentials = pushAuthFromConfig(A2APushNotificationConfig{Authentication: &A2APushAuthenticationInfo{Scheme: " HMAC "}})
+	if scheme != "" || credentials != "" {
+		t.Fatalf("incomplete push auth should be ignored, got %q %q", scheme, credentials)
+	}
+}
+
+func TestA2APushServiceValidationBranches(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.New()
+	svc := NewService(nil, nil)
+
+	_, err := svc.SetPushNotificationConfig(ctx, userID, "agent", &A2ATaskPushConfigParams{ID: uuid.NewString()})
+	requireA2AHTTPStatus(t, err, http.StatusServiceUnavailable)
+	err = svc.DeletePushNotificationConfig(ctx, userID, "agent", &A2ATaskPushConfigParams{ID: uuid.NewString()})
+	requireA2AHTTPStatus(t, err, http.StatusServiceUnavailable)
+
+	svc.SetRunPushManager(noopRunPushManager{})
+	_, err = svc.SetPushNotificationConfig(ctx, userID, "agent", nil)
+	requireA2AHTTPStatus(t, err, http.StatusBadRequest)
+	err = svc.DeletePushNotificationConfig(ctx, userID, "agent", nil)
+	requireA2AHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.GetPushNotificationConfig(ctx, userID, "agent", nil)
+	requireA2AHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.ListPushNotificationConfigs(ctx, userID, "agent", nil)
+	requireA2AHTTPStatus(t, err, http.StatusBadRequest)
+
+	if err := svc.createInlinePushConfig(ctx, userID, "agent", "task", nil); err != nil {
+		t.Fatalf("nil params should skip inline push config: %v", err)
+	}
+	if err := svc.createInlinePushConfig(ctx, userID, "agent", "task", &A2AMessageSendParams{}); err != nil {
+		t.Fatalf("nil configuration should skip inline push config: %v", err)
+	}
+	if err := svc.createInlinePushConfig(ctx, userID, "agent", "task", &A2AMessageSendParams{Configuration: &A2ASendConfiguration{}}); err != nil {
+		t.Fatalf("empty configuration should skip inline push config: %v", err)
+	}
+
+	noPush := NewService(nil, nil)
+	err = noPush.createInlinePushConfig(ctx, userID, "agent", "task", &A2AMessageSendParams{
+		Configuration: &A2ASendConfiguration{
+			TaskPushNotificationConfig: &A2ATaskPushNotificationConfig{
+				PushNotificationConfig: A2APushNotificationConfig{URL: "https://hooks.example/a2a"},
+			},
+		},
+	})
+	requireA2AHTTPStatus(t, err, http.StatusServiceUnavailable)
 }
 
 func TestA2AHTTPHandlersValidateBeforeServiceDispatch(t *testing.T) {
@@ -1302,6 +1412,16 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 			tt.assert(t, c, svc, cards)
 		})
 	}
+}
+
+type noopRunPushManager struct{}
+
+func (noopRunPushManager) CreateRunWebhookSubscription(context.Context, uuid.UUID, uuid.UUID, *webhook.CreateRunWebhookRequest) (*webhook.RunWebhookSubscriptionResponse, error) {
+	return nil, errors.New("unexpected CreateRunWebhookSubscription call")
+}
+
+func (noopRunPushManager) DeleteRunWebhookSubscription(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
+	return errors.New("unexpected DeleteRunWebhookSubscription call")
 }
 
 type a2aHandlerRequest struct {
