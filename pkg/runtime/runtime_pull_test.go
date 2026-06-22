@@ -163,6 +163,99 @@ func TestRuntimePull_ClaimAndCompleteSuccess(t *testing.T) {
 	assert.Contains(t, eventTypes, "run.completed")
 }
 
+func TestRuntimePull_RunDelegatedQueuesFreeChildAndCompletesParent(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	callerCreatorID := insertCreator(t, pool)
+	targetCreatorID := insertCreator(t, pool)
+	callerAgentID := insertAgent(t, pool, callerCreatorID, "https://example.com/caller", 10, "approved")
+	targetAgentID := insertAgent(t, pool, targetCreatorID, "https://example.com/not-used", 25, "approved")
+	setRuntimePullMode(t, pool, targetAgentID)
+	token := insertRuntimeToken(t, pool, targetAgentID, targetCreatorID, []string{"agent:call", "agent:pull"})
+	markRuntimePullAvailable(t, svc, token)
+	parentRunID := insertRunningRun(t, pool, userID, callerAgentID)
+
+	started, err := svc.RunDelegated(ctx, userID, runtime.Delegation{
+		ParentRunID:   parentRunID,
+		CallerAgentID: callerAgentID,
+		Reason:        "delegate queued runtime",
+	}, makeRunReq(targetAgentID, map[string]any{"q": "queued child"}))
+	require.NoError(t, err)
+	require.Equal(t, "running", started.Status)
+	assert.Equal(t, int32(0), started.CostCents)
+	assert.Equal(t, parentRunID.String(), started.ParentRunID)
+	assert.Equal(t, callerAgentID.String(), started.CallerAgentID)
+	assert.Equal(t, "free_delegation", started.BillingMode)
+	childRunID := mustParseUUID(t, started.RunID)
+
+	child := readRun(t, pool, childRunID)
+	assert.Equal(t, "running", child.Status)
+	assert.Equal(t, int32(0), child.CostCents)
+	assert.Equal(t, int32(0), child.PlatformFeeCents)
+	assert.Equal(t, int32(0), child.CreatorRevenueCents)
+
+	claimed, err := svc.ClaimRuntimePullRun(ctx, token)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	assert.Equal(t, started.RunID, claimed.RunID)
+	assert.Equal(t, "api", claimed.Source)
+	require.NotNil(t, claimed.A2A)
+	assert.Equal(t, started.RunID, claimed.A2A.CurrentRunID)
+	assert.Equal(t, parentRunID.String(), claimed.A2A.ParentRunID)
+	assert.Equal(t, callerAgentID.String(), claimed.A2A.CallerAgentID)
+	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", claimed.A2A.CallAgentEndpoint)
+	assert.Contains(t, claimed.A2A.RuntimeScopes, "agent:call")
+
+	completed, err := svc.CompleteRuntimePullRun(ctx, token, childRunID, &runtime.RuntimePullResultRequest{
+		Status: "success",
+		Output: map[string]interface{}{"answer": "delegated runtime ok"},
+		Events: []runtime.AgentEvent{{
+			EventType: "run.message.delta",
+			Payload:   map[string]interface{}{"text": "queued child progress"},
+		}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "success", completed.Status)
+	assert.Equal(t, int32(0), completed.CostCents)
+	assert.Equal(t, parentRunID.String(), completed.ParentRunID)
+	assert.Equal(t, callerAgentID.String(), completed.CallerAgentID)
+	assert.Equal(t, "free_delegation", completed.BillingMode)
+	assert.Equal(t, "delegated runtime ok", completed.Output["answer"])
+
+	reloaded, err := svc.GetRun(ctx, userID, childRunID)
+	require.NoError(t, err)
+	assert.Equal(t, "success", reloaded.Status)
+	assert.Equal(t, parentRunID.String(), reloaded.ParentRunID)
+	assert.Equal(t, callerAgentID.String(), reloaded.CallerAgentID)
+	assert.Equal(t, "free_delegation", reloaded.BillingMode)
+
+	parentEvents := readRunEvents(t, pool, parentRunID)
+	var parentEventTypes []string
+	for _, event := range parentEvents {
+		parentEventTypes = append(parentEventTypes, event.EventType)
+	}
+	assert.Contains(t, parentEventTypes, "run.child.created")
+	assert.Contains(t, parentEventTypes, "run.child.completed")
+	assert.Equal(t, started.RunID, parentEvents[0].Payload["child_run_id"])
+	assert.Equal(t, "success", parentEvents[len(parentEvents)-1].Payload["status"])
+
+	childEvents := readRunEvents(t, pool, childRunID)
+	var childEventTypes []string
+	for _, event := range childEvents {
+		childEventTypes = append(childEventTypes, event.EventType)
+	}
+	assert.Contains(t, childEventTypes, "run.dispatch.pending")
+	assert.Contains(t, childEventTypes, "run.dispatch.claimed")
+	assert.Contains(t, childEventTypes, "run.message.delta")
+	assert.Contains(t, childEventTypes, "run.completed")
+	require.NotNil(t, childEvents[0].ParentRunID)
+	assert.Equal(t, parentRunID, *childEvents[0].ParentRunID)
+	assert.Equal(t, "free_delegation", childEvents[0].Payload["billing_mode"])
+}
+
 func TestRuntimeWS_AssignsRunAndAcceptsResultOverOpenConnection(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
