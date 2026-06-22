@@ -236,6 +236,23 @@ func decodeTaskHandlerJSON(t *testing.T, rec *httptest.ResponseRecorder, out any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), out))
 }
 
+func newTaskHandlerContext(e *echo.Echo, method, path, body string, userID, taskID uuid.UUID) (echo.Context, *httptest.ResponseRecorder) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	if body != "" {
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	}
+	c := e.NewContext(req, rec)
+	if userID != uuid.Nil {
+		c.Set(string(httpx.CtxKeyUserID), userID.String())
+	}
+	if taskID != uuid.Nil {
+		c.SetParamNames("id")
+		c.SetParamValues(taskID.String())
+	}
+	return c, rec
+}
+
 func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	pool := setupTaskTestDB(t)
 	userID := insertTaskUser(t, pool)
@@ -650,6 +667,105 @@ func TestTaskHandlersListBoardAndMineSuccess(t *testing.T) {
 	}
 	assert.True(t, queries["private board source"])
 	assert.True(t, queries["owner private task"])
+}
+
+func TestTaskHandlersWorkLifecycleSuccess(t *testing.T) {
+	pool := setupTaskTestDB(t)
+	ownerID := insertTaskUser(t, pool)
+	creatorID := insertTaskCreator(t, pool)
+	agentID := insertTaskAgent(t, pool, creatorID, "task-handler-flow-"+uuid.NewString()[:8], "approved")
+	insertTaskAgentSkills(t, pool, agentID, "data/sql-query")
+
+	var taskID uuid.UUID
+	err := pool.QueryRow(context.Background(),
+		`INSERT INTO task_queries (user_id, query, parsed_skills, mcp_tools, recommended_agent_ids)
+		 VALUES ($1, '请分析订单 SQL 趋势', '{data/sql-query}', '{run_agent}', $2)
+		 RETURNING id`,
+		ownerID, []uuid.UUID{agentID}).Scan(&taskID)
+	require.NoError(t, err)
+
+	runner := &fakeRuntimeStarter{}
+	svc := task.NewService(pool, nil, &fakeSkillRecommender{skills: testSkills()})
+	svc.SetRunStarter(runner)
+	h := task.NewHandler(svc)
+	e := echo.New()
+
+	c, rec := newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/publish",
+		`{"public_summary":"公开 handler 工作流任务"}`, ownerID, taskID)
+	require.NoError(t, h.Publish(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var published task.DetailResponse
+	decodeTaskHandlerJSON(t, rec, &published)
+	assert.Equal(t, "public", published.Visibility)
+	require.NotNil(t, published.PublicSummary)
+	assert.Equal(t, "公开 handler 工作流任务", *published.PublicSummary)
+
+	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/claim",
+		`{"agent_id":"`+agentID.String()+`"}`, creatorID, taskID)
+	require.NoError(t, h.Claim(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var claimed task.WorkResponse
+	decodeTaskHandlerJSON(t, rec, &claimed)
+	assert.Equal(t, "in_progress", claimed.Status)
+	assert.Equal(t, agentID.String(), claimed.AgentID)
+
+	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/run",
+		`{"agent_id":"`+agentID.String()+`","input":{"text":"按公开任务执行 SQL 分析"}}`, creatorID, taskID)
+	require.NoError(t, h.Run(c))
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	var runResp task.RunTaskResponse
+	decodeTaskHandlerJSON(t, rec, &runResp)
+	assert.Equal(t, taskID.String(), runResp.TaskID)
+	assert.Equal(t, "in_progress", runResp.Status)
+	require.NotNil(t, runner.gotReq)
+	assert.Equal(t, "按公开任务执行 SQL 分析", runner.gotReq.Input["text"])
+
+	firstRunID := insertSuccessfulTaskRun(t, pool, creatorID, agentID, "handler 分析完成")
+	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/complete",
+		`{"agent_id":"`+agentID.String()+`","run_id":"`+firstRunID.String()+`","result_summary":"handler 分析完成","delivery_visibility":"shared","result_artifact":{"summary":"handler 分析完成"}}`,
+		creatorID, taskID)
+	require.NoError(t, h.Complete(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var completed task.WorkResponse
+	decodeTaskHandlerJSON(t, rec, &completed)
+	assert.Equal(t, "completed", completed.Status)
+	assert.Equal(t, "submitted", completed.DeliveryStatus)
+	assert.Equal(t, "shared", completed.DeliveryVisibility)
+
+	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/revision",
+		`{"note":"请补充 SQL 口径"}`, ownerID, taskID)
+	require.NoError(t, h.RequestRevision(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var revision task.WorkResponse
+	decodeTaskHandlerJSON(t, rec, &revision)
+	assert.Equal(t, "revision_requested", revision.Status)
+	require.NotNil(t, revision.RevisionNote)
+	assert.Equal(t, "请补充 SQL 口径", *revision.RevisionNote)
+
+	secondRunID := insertSuccessfulTaskRun(t, pool, creatorID, agentID, "handler 补充完成")
+	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/complete",
+		`{"agent_id":"`+agentID.String()+`","run_id":"`+secondRunID.String()+`","result_summary":"handler 补充完成"}`,
+		creatorID, taskID)
+	require.NoError(t, h.Complete(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/accept", "", ownerID, taskID)
+	require.NoError(t, h.Accept(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var accepted task.WorkResponse
+	decodeTaskHandlerJSON(t, rec, &accepted)
+	assert.Equal(t, "accepted", accepted.Status)
+	assert.Equal(t, "accepted", accepted.DeliveryStatus)
+
+	c, rec = newTaskHandlerContext(e, http.MethodGet, "/api/v1/tasks/"+taskID.String(), "", ownerID, taskID)
+	require.NoError(t, h.GetByID(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var detail task.DetailResponse
+	decodeTaskHandlerJSON(t, rec, &detail)
+	assert.Equal(t, "accepted", detail.Status)
+	assert.Equal(t, "accepted", detail.DeliveryStatus)
+	require.NotNil(t, detail.CompletionSummary)
+	assert.Equal(t, "handler 补充完成", *detail.CompletionSummary)
 }
 
 func TestRunTaskUsesSelectedAgentAndTaskInput(t *testing.T) {
