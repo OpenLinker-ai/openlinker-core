@@ -266,6 +266,141 @@ func TestRuntimeWS_AssignsRunAndAcceptsResultOverOpenConnection(t *testing.T) {
 	assert.Contains(t, eventTypes, "run.completed")
 }
 
+func TestRuntimeWS_HeartbeatClaimAndProtocolMessages(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimeWSMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
+
+	e := echo.New()
+	e.HTTPErrorHandler = func(err error, c echo.Context) {
+		if c.Response().Committed {
+			return
+		}
+		_ = httpx.SendError(c, err)
+	}
+	runtime.NewHandler(svc).RegisterAgentRuntime(e.Group("/api/v1"))
+	server := httptest.NewServer(e)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/agent-runtime/ws"
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+token)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+	require.NoError(t, err)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	defer conn.Close()
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(3*time.Second)))
+
+	var ready runtime.RuntimeWSServerMessage
+	require.NoError(t, conn.ReadJSON(&ready))
+	require.Equal(t, "runtime.ready", ready.Type)
+	require.Equal(t, agentID.String(), ready.AgentID)
+	require.NotNil(t, ready.Heartbeat)
+
+	require.NoError(t, conn.WriteJSON(runtime.RuntimeWSClientMessage{
+		Type: "heartbeat",
+		ID:   "heartbeat-1",
+	}))
+	var heartbeat runtime.RuntimeWSServerMessage
+	require.NoError(t, conn.ReadJSON(&heartbeat))
+	require.Equal(t, "runtime.heartbeat", heartbeat.Type)
+	require.Equal(t, "heartbeat-1", heartbeat.ID)
+	require.Equal(t, agentID.String(), heartbeat.AgentID)
+	require.NotNil(t, heartbeat.Heartbeat)
+	require.Equal(t, int32(0), heartbeat.Heartbeat.PendingRunCount)
+
+	require.NoError(t, conn.WriteJSON(runtime.RuntimeWSClientMessage{
+		Type: "runtime.claim",
+		ID:   "claim-empty",
+	}))
+	var empty runtime.RuntimeWSServerMessage
+	require.NoError(t, conn.ReadJSON(&empty))
+	require.Equal(t, "run.empty", empty.Type)
+	require.Equal(t, "claim-empty", empty.ID)
+	require.Equal(t, agentID.String(), empty.AgentID)
+	require.Greater(t, empty.RetryAfterSeconds, int32(0))
+
+	require.NoError(t, conn.WriteJSON(runtime.RuntimeWSClientMessage{
+		Type: "not-supported",
+		ID:   "unknown-1",
+	}))
+	var unknown runtime.RuntimeWSServerMessage
+	require.NoError(t, conn.ReadJSON(&unknown))
+	require.Equal(t, "error", unknown.Type)
+	require.Equal(t, "unknown-1", unknown.ID)
+	require.NotNil(t, unknown.Error)
+	require.Equal(t, "UNKNOWN_WS_MESSAGE", unknown.Error.Code)
+}
+
+func TestRuntimePull_ReportRuntimeTokenRunEventValidationAndArtifactDelta(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	claimingToken := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
+	otherToken := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
+	markRuntimePullAvailable(t, svc, claimingToken)
+
+	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "stream events"}), "")
+	require.NoError(t, err)
+	runID := mustParseUUID(t, started.RunID)
+	claimed, err := svc.ClaimRuntimePullRun(ctx, claimingToken)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+
+	_, err = svc.ReportRuntimeTokenRunEvent(ctx, claimingToken, runID, nil)
+	assertHTTPStatus(t, err, http.StatusBadRequest)
+
+	_, err = svc.ReportRuntimeTokenRunEvent(ctx, claimingToken, runID, &runtime.ReportRunEventRequest{
+		EventType: "run.unsupported",
+	})
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	_, err = svc.ReportRuntimeTokenRunEvent(ctx, otherToken, runID, &runtime.ReportRunEventRequest{
+		EventType: "run.message.delta",
+		Payload:   map[string]interface{}{"text": "wrong token"},
+	})
+	assertHTTPStatus(t, err, http.StatusConflict)
+
+	_, err = svc.ReportRuntimeTokenRunEvent(ctx, claimingToken, runID, &runtime.ReportRunEventRequest{
+		EventType: "run.message.delta",
+		Payload:   map[string]interface{}{"bad": func() {}},
+	})
+	assertHTTPStatus(t, err, http.StatusBadRequest)
+
+	event, err := svc.ReportRuntimeTokenRunEvent(ctx, claimingToken, runID, &runtime.ReportRunEventRequest{
+		EventType: "run.artifact.delta",
+		Payload: map[string]interface{}{
+			"artifact_id":   "artifact-stream",
+			"artifact_type": "text",
+			"title":         "Streaming Artifact",
+			"text":          "partial artifact content",
+			"last_chunk":    true,
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	assert.Equal(t, "run.artifact.delta", event.EventType)
+
+	events := readRunEvents(t, pool, runID)
+	var eventTypes []string
+	for _, event := range events {
+		eventTypes = append(eventTypes, event.EventType)
+	}
+	assert.Contains(t, eventTypes, "run.dispatch.claimed")
+	assert.Contains(t, eventTypes, "run.artifact.delta")
+}
+
 func TestRuntimePull_OnlyClaimingTokenCanComplete(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
