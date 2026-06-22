@@ -106,9 +106,17 @@ type endpointConfig struct {
 }
 
 func main() {
-	apiURL := flag.String("api", "http://localhost:8080", "OpenLinker API base URL")
-	serve := flag.Bool("serve", false, "Keep demo endpoints online for repeated Playground calls")
-	flag.Parse()
+	os.Exit(runMain(os.Args[1:], os.Stdout, os.Stderr, waitForSignal))
+}
+
+func runMain(args []string, stdout, stderr io.Writer, waitForStop func()) int {
+	fs := flag.NewFlagSet("a2a-demo", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	apiURL := fs.String("api", "http://localhost:8080", "OpenLinker API base URL")
+	serve := fs.Bool("serve", false, "Keep demo endpoints online for repeated Playground calls")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
 
 	cfg := &endpointConfig{apiURL: strings.TrimRight(*apiURL, "/")}
 	worker := httptest.NewServer(http.HandlerFunc(workerEndpoint))
@@ -121,19 +129,28 @@ func main() {
 	api := &client{baseURL: cfg.apiURL, http: &http.Client{Timeout: 10 * time.Second}}
 	result, err := run(api, cfg, caller.URL, worker.URL, reviewer.URL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "A2A demo failed: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "A2A demo failed: %v\n", err)
+		return 1
 	}
 	if *serve {
-		fmt.Println("Local demo endpoints are online until interrupted.")
-		fmt.Printf("playground: /playground/%s\n", result.ParentAgent.Slug)
-		fmt.Printf("task: /tasks/%s\n", result.TaskID)
-		fmt.Printf("a2a trace: /a2a?run_id=%s\n", result.ParentRunID)
-		stop := make(chan os.Signal, 1)
-		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-		<-stop
-		fmt.Println("Stopping local demo endpoints.")
+		printServeInstructions(stdout, result)
+		waitForStop()
+		fmt.Fprintln(stdout, "Stopping local demo endpoints.")
 	}
+	return 0
+}
+
+func waitForSignal() {
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+}
+
+func printServeInstructions(w io.Writer, result *demoResult) {
+	fmt.Fprintln(w, "Local demo endpoints are online until interrupted.")
+	fmt.Fprintf(w, "playground: /playground/%s\n", result.ParentAgent.Slug)
+	fmt.Fprintf(w, "task: /tasks/%s\n", result.TaskID)
+	fmt.Fprintf(w, "a2a trace: /a2a?run_id=%s\n", result.ParentRunID)
 }
 
 func run(api *client, cfg *endpointConfig, callerURL, workerURL, reviewerURL string) (*demoResult, error) {
