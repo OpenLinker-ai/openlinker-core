@@ -627,6 +627,193 @@ func TestRegistryPeerRoutesRemoteProxyRunWithoutRepeatingCredentials(t *testing.
 	require.Len(t, peers, 1)
 }
 
+func TestRegistryNodePeerAndRemoteRouteBoundaries(t *testing.T) {
+	pool := setupRegistryBridgeDB(t)
+	svc := registry.NewService(pool)
+	ctx := context.Background()
+
+	ownerID := insertRegistryOwner(t, pool)
+	otherOwnerID := insertRegistryOwner(t, pool)
+	agentID := insertRegistryAgent(t, pool, ownerID)
+
+	limitedNode, err := svc.CreateNode(ctx, ownerID, &registry.CreateNodeRequest{
+		NodeName: "Heartbeat Only",
+		NodeType: "bridge_proxy",
+		Scopes:   []string{"heartbeat"},
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"heartbeat"}, limitedNode.Scopes)
+
+	heartbeat, err := svc.Heartbeat(ctx, limitedNode.NodeSecret)
+	require.NoError(t, err)
+	assert.Equal(t, limitedNode.ID, heartbeat.NodeID)
+	_, err = svc.SyncNodeMetadata(ctx, limitedNode.NodeSecret)
+	requireHTTPStatus(t, err, http.StatusUnauthorized)
+	_, err = svc.ClaimProxyRun(ctx, limitedNode.NodeSecret)
+	requireHTTPStatus(t, err, http.StatusUnauthorized)
+
+	node, err := svc.CreateNode(ctx, ownerID, &registry.CreateNodeRequest{
+		NodeName: "Boundary Bridge",
+		NodeType: "bridge_proxy",
+	})
+	require.NoError(t, err)
+	nodeID := uuid.MustParse(node.ID)
+
+	_, err = svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+		RegistryNodeID: "not-a-uuid",
+		AgentID:        agentID.String(),
+	})
+	requireHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+		RegistryNodeID: node.ID,
+		AgentID:        "not-a-uuid",
+	})
+	requireHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = svc.CreateCloudListing(ctx, otherOwnerID, &registry.CreateCloudListingRequest{
+		RegistryNodeID: node.ID,
+		AgentID:        agentID.String(),
+	})
+	requireHTTPStatus(t, err, http.StatusNotFound)
+
+	listing, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+		RegistryNodeID: node.ID,
+		AgentID:        agentID.String(),
+		PayloadPolicy:  "metadata_only",
+	})
+	require.NoError(t, err)
+	listingID := uuid.MustParse(listing.CloudListingID)
+
+	_, err = svc.SyncCloudListingMetadata(ctx, otherOwnerID, listingID)
+	requireHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.UpdateCloudListingStatus(ctx, otherOwnerID, listingID, &registry.UpdateCloudListingStatusRequest{
+		SyncStatus: "paused",
+	})
+	requireHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.UpdateCloudListingStatus(ctx, ownerID, listingID, &registry.UpdateCloudListingStatusRequest{
+		SyncStatus: "archived",
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	peers, err := svc.ListRegistryPeers(ctx, ownerID)
+	require.NoError(t, err)
+	assert.Empty(t, peers)
+	_, err = svc.CreateRegistryPeer(ctx, ownerID, &registry.CreateRegistryPeerRequest{
+		Name:        "X",
+		APIBaseURL:  "https://remote.example",
+		BearerToken: "short",
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	pausedPeer, err := svc.CreateRegistryPeer(ctx, ownerID, &registry.CreateRegistryPeerRequest{
+		Name:          "Paused Peer",
+		APIBaseURL:    "https://remote.example",
+		BearerToken:   "paused-token-123",
+		InitialStatus: "paused",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "paused", pausedPeer.Status)
+	_, err = svc.CreateRemoteProxyRun(ctx, ownerID, &registry.CreateRemoteProxyRunRequest{
+		RegistryPeerID:       pausedPeer.ID,
+		RemoteCloudListingID: uuid.NewString(),
+		IdempotencyKey:       "remote-paused-peer",
+	})
+	requireHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.CreateRemoteProxyRun(ctx, ownerID, &registry.CreateRemoteProxyRunRequest{
+		RegistryPeerID:       pausedPeer.ID,
+		RemoteAPIBaseURL:     "https://remote.example",
+		RemoteBearerToken:    "explicit-token-123",
+		RemoteCloudListingID: uuid.NewString(),
+		IdempotencyKey:       "remote-peer-mixed",
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	_, err = svc.CreateRemoteProxyRun(ctx, ownerID, &registry.CreateRemoteProxyRunRequest{
+		RemoteCloudListingID: uuid.NewString(),
+		IdempotencyKey:       "remote-no-active-peer",
+	})
+	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	err = svc.DeleteRegistryPeer(ctx, otherOwnerID, uuid.MustParse(pausedPeer.ID))
+	requireHTTPStatus(t, err, http.StatusNotFound)
+	require.NoError(t, svc.DeleteRegistryPeer(ctx, ownerID, uuid.MustParse(pausedPeer.ID)))
+	err = svc.DeleteRegistryPeer(ctx, ownerID, uuid.MustParse(pausedPeer.ID))
+	requireHTTPStatus(t, err, http.StatusNotFound)
+
+	_, err = svc.RevokeNode(ctx, otherOwnerID, nodeID)
+	requireHTTPStatus(t, err, http.StatusNotFound)
+	_, err = svc.RotateNodeSecret(ctx, otherOwnerID, nodeID)
+	requireHTTPStatus(t, err, http.StatusNotFound)
+	revoked, err := svc.RevokeNode(ctx, ownerID, nodeID)
+	require.NoError(t, err)
+	assert.Equal(t, "revoked", revoked.HeartbeatStatus)
+	require.NotEmpty(t, revoked.RevokedAt)
+	_, err = svc.Heartbeat(ctx, node.NodeSecret)
+	requireHTTPStatus(t, err, http.StatusUnauthorized)
+	_, err = svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+		RegistryNodeID: node.ID,
+		AgentID:        agentID.String(),
+	})
+	requireHTTPStatus(t, err, http.StatusConflict)
+}
+
+func TestCreateRemoteProxyRunHandlesRemoteFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		want    int
+	}{
+		{
+			name: "non_2xx_status_maps_to_bad_gateway",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodPost, r.Method)
+				assert.Equal(t, "/api/v1/proxy/runs", r.URL.Path)
+				assert.Equal(t, "Bearer explicit-token-123", r.Header.Get("Authorization"))
+				http.Error(w, "remote queue saturated", http.StatusTooManyRequests)
+			},
+			want: http.StatusBadGateway,
+		},
+		{
+			name: "invalid_json_maps_to_service_unavailable",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodPost, r.Method)
+				assert.Equal(t, "/api/v1/proxy/runs", r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte("{"))
+			},
+			want: http.StatusServiceUnavailable,
+		},
+		{
+			name: "missing_remote_identifiers_maps_to_service_unavailable",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodPost, r.Method)
+				assert.Equal(t, "/api/v1/proxy/runs", r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				require.NoError(t, json.NewEncoder(w).Encode(registry.ProxyRunResponse{
+					Status: "pending",
+				}))
+			},
+			want: http.StatusServiceUnavailable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remote := httptest.NewServer(tt.handler)
+			defer remote.Close()
+
+			svc := registry.NewService(nil)
+			_, err := svc.CreateRemoteProxyRun(context.Background(), uuid.Nil, &registry.CreateRemoteProxyRunRequest{
+				RemoteAPIBaseURL:     remote.URL,
+				RemoteBearerToken:    "explicit-token-123",
+				RemoteCloudListingID: uuid.NewString(),
+				IdempotencyKey:       "remote-failure-" + tt.name,
+				Input:                map[string]any{"task": "remote failure"},
+			})
+			requireHTTPStatus(t, err, tt.want)
+		})
+	}
+}
+
 func TestRegistryFederationInviteExchangeCreatesPeer(t *testing.T) {
 	pool := setupRegistryBridgeDB(t)
 	svc := registry.NewService(pool)
