@@ -247,10 +247,24 @@ func TestA2AHandlerUtilityHelpers(t *testing.T) {
 	if first := firstQueryParam(c, "missing", "context_id"); first != "ctx" {
 		t.Fatalf("firstQueryParam = %q", first)
 	}
+	for _, target := range []string{
+		"/?pageSize=-1",
+		"/?historyLength=bad",
+		"/?includeArtifacts=maybe",
+	} {
+		c = newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: target})
+		if _, err := a2aTaskListParamsFromQuery(c); err == nil {
+			t.Fatalf("a2aTaskListParamsFromQuery(%q) should fail", target)
+		}
+	}
 
 	c = newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/?after_sequence=-1"})
 	if _, err := afterSequenceFromA2ASSE(c); err == nil {
 		t.Fatalf("negative after_sequence should fail")
+	}
+	c = newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", headers: map[string]string{"Last-Event-ID": "42"}})
+	if got, err := afterSequenceFromA2ASSE(c); err != nil || got != 42 {
+		t.Fatalf("Last-Event-ID after sequence = %d, %v", got, err)
 	}
 
 	c = newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/tasks/task-1/cancel", params: map[string]string{"*": "tasks/task-1/cancel"}})
@@ -272,6 +286,14 @@ func TestA2AHandlerUtilityHelpers(t *testing.T) {
 	if got := sequenceFromStreamItem(statusEvent); got != 8 {
 		t.Fatalf("sequenceFromStreamItem(float64) = %d", got)
 	}
+	statusEvent = &A2ATaskStatusUpdateEvent{Metadata: map[string]interface{}{"openlinker_sequence": int32(10)}}
+	if got := sequenceFromStreamItem(statusEvent); got != 10 {
+		t.Fatalf("sequenceFromStreamItem(int32) = %d", got)
+	}
+	statusEvent = &A2ATaskStatusUpdateEvent{Metadata: map[string]interface{}{"openlinker_sequence": "bad"}}
+	if got := sequenceFromStreamItem(statusEvent); got != 0 {
+		t.Fatalf("sequenceFromStreamItem(unsupported) = %d", got)
+	}
 	artifactEvent := A2ATaskArtifactUpdateEvent{Metadata: map[string]interface{}{"openlinker_sequence": int(9)}}
 	if got := sequenceFromStreamItem(artifactEvent); got != 9 {
 		t.Fatalf("sequenceFromStreamItem(int) = %d", got)
@@ -286,8 +308,29 @@ func TestA2AHandlerUtilityHelpers(t *testing.T) {
 	if got := streamResponseForResult(A2ATask{ID: "task-1"}); got.Task == nil {
 		t.Fatalf("streamResponseForResult task = %#v", got)
 	}
+	statusUpdate := &A2ATaskStatusUpdateEvent{Status: A2ATaskStatus{State: a2aTaskStateWorking}}
+	if got := streamResponseForResult(statusUpdate); got.StatusUpdate != statusUpdate {
+		t.Fatalf("streamResponseForResult status update = %#v", got)
+	}
+	if got := streamResponseForResult(A2ATaskStatusUpdateEvent{Status: A2ATaskStatus{State: a2aTaskStateCompleted}}); got.StatusUpdate == nil || got.StatusUpdate.Status.State != a2aTaskStateCompleted {
+		t.Fatalf("streamResponseForResult status update value = %#v", got)
+	}
+	artifactUpdate := &A2ATaskArtifactUpdateEvent{Artifact: A2AArtifact{ArtifactID: "artifact-1"}}
+	if got := streamResponseForResult(artifactUpdate); got.ArtifactUpdate != artifactUpdate {
+		t.Fatalf("streamResponseForResult artifact update = %#v", got)
+	}
+	if got := streamResponseForResult(A2ATaskArtifactUpdateEvent{Artifact: A2AArtifact{ArtifactID: "artifact-2"}}); got.ArtifactUpdate == nil || got.ArtifactUpdate.Artifact.ArtifactID != "artifact-2" {
+		t.Fatalf("streamResponseForResult artifact update value = %#v", got)
+	}
 	if got := streamResponseForResult(map[string]interface{}{"ok": true}); got.Message == nil || got.Message.Parts[0]["kind"] != "data" {
 		t.Fatalf("streamResponseForResult default = %#v", got)
+	}
+	rec := httptest.NewRecorder()
+	if err := writeA2ASSEPayload(rec, 7, json.RawMessage(`"stream"`), *statusUpdate, true, a2aProtocolVersionLegacy); err != nil {
+		t.Fatalf("writeA2ASSEPayload legacy JSON-RPC: %v", err)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `id: 7`) || !strings.Contains(body, `event: status-update`) {
+		t.Fatalf("legacy JSON-RPC SSE payload = %s", body)
 	}
 	for _, tc := range []struct {
 		item interface{}
@@ -304,7 +347,7 @@ func TestA2AHandlerUtilityHelpers(t *testing.T) {
 		}
 	}
 
-	rec := httptest.NewRecorder()
+	rec = httptest.NewRecorder()
 	if err := writeA2ASSEError(rec, json.RawMessage(`"id"`), httpx.NotFound("missing"), true); err != nil {
 		t.Fatalf("writeA2ASSEError jsonrpc: %v", err)
 	}
@@ -430,8 +473,22 @@ func TestA2AProtocolServiceInputCursorAndStatusHelpers(t *testing.T) {
 	if err != nil || legacyFile["uri"] != "http://files.example/a.txt" || legacyFile["bytes"] != "Zm9v" || legacyFile["name"] != "a.txt" {
 		t.Fatalf("legacy file input = %#v, %v", legacyFile, err)
 	}
+	rawFileInput, err := filePartInput(map[string]interface{}{
+		"raw":       "Zm9v",
+		"filename":  "raw.txt",
+		"mediaType": "text/plain",
+		"sha256":    "abc",
+		"sizeBytes": float64(3),
+		"metadata":  map[string]interface{}{"source": "inline"},
+	})
+	if err != nil || rawFileInput["raw"] != "Zm9v" || rawFileInput["name"] != "raw.txt" || rawFileInput["metadata"].(map[string]interface{})["source"] != "inline" {
+		t.Fatalf("raw file input = %#v, %v", rawFileInput, err)
+	}
 	if partKind(map[string]interface{}{"bytes": "abc"}) != "file" || partKind(map[string]interface{}{"text": "abc"}) != "text" || partKind(map[string]interface{}{"data": "abc"}) != "data" {
 		t.Fatalf("partKind inference failed")
+	}
+	if partKind(map[string]interface{}{"type": "TEXT"}) != "text" || partKind(map[string]interface{}{"file": map[string]interface{}{}}) != "file" || partKind(map[string]interface{}{"mimeType": "text/plain"}) != "file" || partKind(map[string]interface{}{}) != "" {
+		t.Fatalf("partKind explicit/current shape inference failed")
 	}
 	if err := validateA2AFileURI("https://files.example/a.txt"); err != nil {
 		t.Fatalf("valid file uri rejected: %v", err)
@@ -574,6 +631,11 @@ func TestA2ARunTaskArtifactAndEventMapping(t *testing.T) {
 	artifact, ok := artifactUpdate.(*A2ATaskArtifactUpdateEvent)
 	if !ok || artifact.ContextID != "task" || !artifact.LastChunk || artifact.Artifact.Parts[0]["kind"] != "text" {
 		t.Fatalf("artifact event = %#v", artifactUpdate)
+	}
+	unknownUpdate := streamEventFromRunEvent("task", "", runtimepkg.RunEventResponse{EventID: "evt-unknown", Sequence: 7, EventType: "run.custom", Payload: map[string]interface{}{"text": "custom"}, CreatedAt: eventAt})
+	unknownStatus, ok := unknownUpdate.(*A2ATaskStatusUpdateEvent)
+	if !ok || unknownStatus.ContextID != "task" || unknownStatus.Status.Message.Parts[0]["text"] != "custom" {
+		t.Fatalf("unknown stream event = %#v", unknownUpdate)
 	}
 	if part := artifactPartFromPayload(map[string]interface{}{"parts": []interface{}{map[string]interface{}{"url": "https://files.example/a.txt"}}}); part["kind"] != "file" {
 		t.Fatalf("artifactPartFromPayload file = %#v", part)
@@ -964,10 +1026,19 @@ func TestA2AHTTPHandlersValidateBeforeServiceDispatch(t *testing.T) {
 		{name: "extended card missing scope", method: h.GetExtendedAgentCardHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", authMethod: "apikey", userID: userID}, want: http.StatusForbidden},
 		{name: "send message invalid json", method: h.SendMessageHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: "{"}, want: http.StatusBadRequest},
 		{name: "stream message invalid json", method: h.StreamMessageHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: "{"}, want: http.StatusBadRequest},
+		{name: "list tasks missing user", method: h.ListTasksHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/"}, want: http.StatusUnauthorized},
+		{name: "list tasks invalid include artifacts", method: h.ListTasksHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/?includeArtifacts=maybe", userID: userID}, want: http.StatusBadRequest},
+		{name: "get task missing scope", method: h.GetTaskHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, authMethod: "apikey", params: map[string]string{"taskID": runID}}, want: http.StatusForbidden},
 		{name: "get task bad history", method: h.GetTaskHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/?historyLength=-1", userID: userID, params: map[string]string{"taskID": runID}}, want: http.StatusBadRequest},
+		{name: "subscribe missing scope", method: h.SubscribeTaskHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, authMethod: "apikey", params: map[string]string{"taskID": runID}}, want: http.StatusForbidden},
 		{name: "subscribe missing task", method: h.SubscribeTaskHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID}, want: http.StatusBadRequest},
+		{name: "cancel missing scope", method: h.CancelTaskHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, authMethod: "apikey", params: map[string]string{"taskID": runID}}, want: http.StatusForbidden},
 		{name: "cancel missing task", method: h.CancelTaskHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID}, want: http.StatusBadRequest},
+		{name: "set push missing scope", method: h.SetTaskPushNotificationHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, authMethod: "apikey", body: `{}`, params: map[string]string{"taskID": runID}}, want: http.StatusForbidden},
 		{name: "set push invalid json", method: h.SetTaskPushNotificationHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: "{", params: map[string]string{"taskID": runID}}, want: http.StatusBadRequest},
+		{name: "list push missing user", method: h.ListTaskPushNotificationsHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", params: map[string]string{"taskID": runID}}, want: http.StatusUnauthorized},
+		{name: "get push missing scope", method: h.GetTaskPushNotificationHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, authMethod: "apikey", params: map[string]string{"taskID": runID, "configID": uuid.NewString()}}, want: http.StatusForbidden},
+		{name: "delete push missing user", method: h.DeleteTaskPushNotificationHTTP, req: &a2aHandlerRequest{method: http.MethodDelete, target: "/", params: map[string]string{"taskID": runID, "configID": uuid.NewString()}}, want: http.StatusUnauthorized},
 		{name: "message unknown action", method: h.MessageHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/message:bad", params: map[string]string{"action": ":bad"}}, want: http.StatusNotFound},
 		{name: "task action unknown", method: h.TaskActionHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/tasks/x:bad", params: map[string]string{"*": "x:bad"}}, want: http.StatusNotFound},
 	} {
@@ -1284,6 +1355,86 @@ func TestA2AJSONRPCHandlerValidationBeforeServiceDispatch(t *testing.T) {
 	}
 	if !strings.Contains(c.(*a2ATestContext).rec.Body.String(), `-32601`) {
 		t.Fatalf("unknown method JSONRPC body = %s", c.(*a2ATestContext).rec.Body.String())
+	}
+}
+
+func TestA2AJSONRPCHandlerAdditionalErrorAndNullParamEdges(t *testing.T) {
+	userID := uuid.MustParse("8582c7a4-0f02-4895-8570-7c7cce357e5f")
+	taskID := uuid.MustParse("c93dbab2-404f-4460-bcb7-0f17ece85567").String()
+	const slug = "agent-one"
+
+	h := NewHandler(newFakeA2AService(taskID))
+	c := newA2ATestContext(&a2aHandlerRequest{
+		method: http.MethodPost,
+		target: "/",
+		body:   `{"jsonrpc":"2.0","id":"no-user","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}`,
+		params: map[string]string{"slug": slug},
+	})
+	require.NoError(t, h.JSONRPC(c))
+	if body := c.(*a2ATestContext).rec.Body.String(); !strings.Contains(body, `-32001`) {
+		t.Fatalf("missing user JSON-RPC body = %s", body)
+	}
+
+	svc := newFakeA2AService(taskID)
+	h = NewHandler(svc)
+	c = newA2ATestContext(&a2aHandlerRequest{
+		method:     http.MethodPost,
+		target:     "/?version=1.0",
+		body:       `{"jsonrpc":"2.0","id":"list-null","method":"tasks/list","params":null}`,
+		userID:     userID.String(),
+		authMethod: "apikey",
+		scopes:     []string{"runs:read"},
+		params:     map[string]string{"slug": slug},
+	})
+	require.NoError(t, h.JSONRPC(c))
+	if !svc.called("tasks/list") {
+		t.Fatalf("tasks/list with null params did not dispatch: %v", svc.calls)
+	}
+
+	h = NewHandler(newFakeA2AService(taskID))
+	c = newA2ATestContext(&a2aHandlerRequest{
+		method:     http.MethodPost,
+		target:     "/",
+		body:       `{"jsonrpc":"2.0","id":"card","method":"agent/getExtendedCard","params":{}}`,
+		userID:     userID.String(),
+		authMethod: "apikey",
+		scopes:     []string{"runs:read"},
+		params:     map[string]string{"slug": slug},
+	})
+	require.NoError(t, h.JSONRPC(c))
+	if body := c.(*a2ATestContext).rec.Body.String(); !strings.Contains(body, `-32603`) {
+		t.Fatalf("missing card provider JSON-RPC body = %s", body)
+	}
+
+	for _, tc := range []struct {
+		method string
+		scope  string
+	}{
+		{method: "message/stream", scope: "agents:run"},
+		{method: "tasks/get", scope: "runs:read"},
+		{method: "tasks/list", scope: "runs:read"},
+		{method: "tasks/cancel", scope: "agents:run"},
+		{method: "tasks/resubscribe", scope: "runs:read"},
+		{method: "tasks/pushNotificationConfig/set", scope: "runs:read"},
+		{method: "tasks/pushNotificationConfig/get", scope: "runs:read"},
+		{method: "tasks/pushNotificationConfig/list", scope: "runs:read"},
+		{method: "tasks/pushNotificationConfig/delete", scope: "runs:read"},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			c := newA2ATestContext(&a2aHandlerRequest{
+				method:     http.MethodPost,
+				target:     "/",
+				body:       `{"jsonrpc":"2.0","id":"bad-params","method":"` + tc.method + `","params":[]}`,
+				userID:     userID.String(),
+				authMethod: "apikey",
+				scopes:     []string{tc.scope},
+				params:     map[string]string{"slug": slug},
+			})
+			require.NoError(t, NewHandler(newFakeA2AService(taskID)).JSONRPC(c))
+			if body := c.(*a2ATestContext).rec.Body.String(); !strings.Contains(body, `-32602`) {
+				t.Fatalf("%s invalid params body = %s", tc.method, body)
+			}
+		})
 	}
 }
 
@@ -1785,6 +1936,33 @@ func TestA2AHTTPJSONStreamingAliasesDispatch(t *testing.T) {
 	}
 }
 
+func TestA2AHTTPJSONStreamingWritesSSEErrorsAndResumesAfterLastEventID(t *testing.T) {
+	userID := uuid.MustParse("8582c7a4-0f02-4895-8570-7c7cce357e5f")
+	taskID := uuid.MustParse("c93dbab2-404f-4460-bcb7-0f17ece85567").String()
+	const slug = "agent-one"
+
+	svc := newFakeA2AService(taskID)
+	svc.errs["events"] = httpx.ServiceUnavailable("events down")
+	c := newA2ATestContext(&a2aHandlerRequest{
+		method:     http.MethodGet,
+		target:     "/tasks/" + taskID + "/subscribe?version=1.0",
+		userID:     userID.String(),
+		authMethod: "apikey",
+		scopes:     []string{"runs:read"},
+		params:     map[string]string{"slug": slug, "taskID": taskID},
+		headers:    map[string]string{"Last-Event-ID": "41"},
+	})
+
+	require.NoError(t, NewHandler(svc).SubscribeTaskHTTP(c))
+	assert.Equal(t, int32(41), svc.afterSequence)
+	rec := c.(*a2ATestContext).rec
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, "event: task")
+	assert.Contains(t, body, "event: task.stream.error")
+	assert.Contains(t, body, "events down")
+}
+
 func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 	userID := uuid.MustParse("8582c7a4-0f02-4895-8570-7c7cce357e5f")
 	taskID := uuid.MustParse("c93dbab2-404f-4460-bcb7-0f17ece85567").String()
@@ -2003,6 +2181,7 @@ type fakeA2AService struct {
 	streamParams  A2AMessageSendParams
 	listParams    A2ATaskListParams
 	pushParams    A2ATaskPushConfigParams
+	afterSequence int32
 }
 
 func newFakeA2AService(taskID string) *fakeA2AService {
@@ -2080,6 +2259,7 @@ func (f *fakeA2AService) CancelProtocolTask(_ context.Context, userID uuid.UUID,
 func (f *fakeA2AService) ListProtocolTaskEvents(_ context.Context, userID uuid.UUID, slug, taskID string, afterSequence int32) ([]interface{}, bool, int32, error) {
 	f.record("events", userID, slug)
 	f.taskID = taskID
+	f.afterSequence = afterSequence
 	if err := f.maybeProtocolErr("events"); err != nil {
 		return nil, false, afterSequence, err
 	}
