@@ -78,6 +78,8 @@ func TestValidateCapabilitySchemaBranches(t *testing.T) {
 }
 
 func TestValidateJSONAgainstSchema(t *testing.T) {
+	require.NoError(t, validateJSONAgainstSchema(map[string]interface{}{"anything": true}, nil, "input_json"))
+
 	schema := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -165,6 +167,14 @@ func TestValidateJSONAgainstSchemaExtendedTypes(t *testing.T) {
 	require.True(t, valueMatchesJSONType(true, "boolean"))
 	require.True(t, valueMatchesJSONType(nil, "null"))
 	require.True(t, valueMatchesJSONType("anything", "future-type"))
+	require.True(t, valueMatchesJSONType(int64(3), "number"))
+	require.True(t, valueMatchesJSONType(float32(4), "integer"))
 	require.True(t, isJSONNumber(int(1)))
 	require.False(t, isJSONNumber("1"))
+
+	_, err := schemaTypes(7)
+	require.Error(t, err)
+	_, err = stringArray([]interface{}{"ok", 2})
+	require.Error(t, err)
+	require.False(t, schemaAllowsType(map[string]interface{}{"type": 7}, "object"))
 }

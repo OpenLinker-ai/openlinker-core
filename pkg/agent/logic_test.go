@@ -357,6 +357,25 @@ func TestAgentDTOAvailabilityAndAlertHelpers(t *testing.T) {
 	if alert.AgentSlug != "dto-agent" || alert.ReadAt == nil || *alert.ReadAt != "2026-06-19T19:04:05Z" || alert.LastError == nil {
 		t.Fatalf("unexpected alert response: %#v", alert)
 	}
+	rowAlert := availabilityAlertRowToResponse(&db.ListAgentAvailabilityAlertsByCreatorRow{
+		AgentAvailabilityAlert: db.AgentAvailabilityAlert{
+			ID:                  uuid.New(),
+			AgentID:             agentID,
+			AlertType:           "availability_recovered",
+			Severity:            "info",
+			AvailabilityStatus:  "healthy",
+			ConsecutiveFailures: 0,
+			Title:               "recovered",
+			Message:             "ok",
+			CreatedAt:           certifiedAt,
+			UpdatedAt:           createdAt,
+		},
+		AgentSlug: "row-agent",
+		AgentName: "Row Agent",
+	})
+	if rowAlert.AgentSlug != "row-agent" || rowAlert.AgentName != "Row Agent" || rowAlert.Type != "availability_recovered" {
+		t.Fatalf("unexpected row alert response: %#v", rowAlert)
+	}
 	if got := stringPtrOrNil(""); got != nil {
 		t.Fatalf("stringPtrOrNil(empty) = %#v, want nil", got)
 	}
@@ -404,6 +423,9 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 	unreachableAvailability := availabilityResponse("unreachable", nil, &runAt, nil, 5)
 	if unreachableAvailability.Status != "unreachable" || unreachableAvailability.Label != "不可达" || unreachableAvailability.LastSuccessfulRunAt != nil {
 		t.Fatalf("unexpected unreachable availability: %#v", unreachableAvailability)
+	}
+	if !isQueuedRuntimeConnectionMode(ConnectionModeRuntimePull) || !isQueuedRuntimeConnectionMode(ConnectionModeRuntimeWS) || isQueuedRuntimeConnectionMode(ConnectionModeDirectHTTP) {
+		t.Fatalf("queued runtime connection mode detection failed")
 	}
 
 	for _, tc := range []struct {
@@ -472,6 +494,10 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 	t.Setenv("OPENLINKER_AGENT_CARD_SIGNING_SEED", base64.RawURLEncoding.EncodeToString(seed))
 	if got := agentCardSigningSeed(); !bytes.Equal(got, seed) {
 		t.Fatalf("raw-url base64 seed = %x, want %x", got, seed)
+	}
+	t.Setenv("OPENLINKER_AGENT_CARD_SIGNING_SEED", base64.StdEncoding.EncodeToString(seed))
+	if got := agentCardSigningSeed(); !bytes.Equal(got, seed) {
+		t.Fatalf("standard base64 seed = %x, want %x", got, seed)
 	}
 	t.Setenv("OPENLINKER_AGENT_CARD_SIGNING_SEED", "")
 	t.Setenv("JWT_SECRET", "fallback-secret")
