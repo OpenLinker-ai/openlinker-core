@@ -917,6 +917,104 @@ func TestPushNotificationConfigMapsToRunWebhook(t *testing.T) {
 	assert.Empty(t, list.Items)
 }
 
+func TestPushNotificationConfigLookupAndValidationEdges(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+	pushSvc := webhook.NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true})
+	svc.SetRunPushManager(pushSvc)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"summary":"push edge task done"}}`))
+	}))
+	defer server.Close()
+
+	agentID := insertAgent(t, pool, owner, server.URL)
+	slug := "a2a-" + agentID.String()[:8]
+	task, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			Kind:  "message",
+			Role:  "user",
+			Parts: []map[string]any{{"kind": "text", "text": "exercise push lookup edges"}},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = svc.SetPushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{
+		ID:                     task.ID,
+		PushNotificationConfig: a2a.A2APushNotificationConfig{URL: " "},
+	})
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+
+	_, err = svc.GetPushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{ID: task.ID})
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+
+	cfg1, err := svc.SetPushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{
+		ID: task.ID,
+		PushNotificationConfig: a2a.A2APushNotificationConfig{
+			URL:        server.URL + "/push-1",
+			EventTypes: []string{"run.completed"},
+			Authentication: &a2a.A2APushAuthenticationInfo{
+				Scheme:      "HMAC",
+				Credentials: "secret-1",
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "HMAC", cfg1.PushNotificationConfig.Authentication.Scheme)
+	assert.Empty(t, cfg1.PushNotificationConfig.Authentication.Credentials)
+
+	auto, err := svc.GetPushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{ID: task.ID})
+	require.NoError(t, err)
+	assert.Equal(t, cfg1.PushNotificationConfig.ID, auto.PushNotificationConfig.ID)
+
+	byEmbeddedID, err := svc.GetPushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{
+		ID: task.ID,
+		PushNotificationConfig: a2a.A2APushNotificationConfig{
+			ID: cfg1.PushNotificationConfig.ID,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, cfg1.PushNotificationConfig.ID, byEmbeddedID.PushNotificationConfig.ID)
+
+	cfg2, err := svc.SetPushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{
+		ID: task.ID,
+		PushNotificationConfig: a2a.A2APushNotificationConfig{
+			URL:   server.URL + "/push-2",
+			Token: "token-2",
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = svc.GetPushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{ID: task.ID})
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+
+	_, err = svc.GetPushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{
+		ID:                       task.ID,
+		PushNotificationConfigID: uuid.NewString(),
+	})
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
+
+	err = svc.DeletePushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{
+		ID:                       task.ID,
+		PushNotificationConfigID: "bad",
+	})
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+
+	err = svc.DeletePushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{
+		ID: task.ID,
+		PushNotificationConfig: a2a.A2APushNotificationConfig{
+			ID: cfg2.PushNotificationConfig.ID,
+		},
+	})
+	require.NoError(t, err)
+
+	list, err := svc.ListPushNotificationConfigs(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{ID: task.ID})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, cfg1.PushNotificationConfig.ID, list.Items[0].PushNotificationConfig.ID)
+}
+
 func TestCallAgent_RespectsPrivateTargetPolicy(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	callerOwner := insertCreator(t, pool)
