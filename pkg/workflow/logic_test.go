@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	runtimemod "github.com/kinzhi/openlinker-core/pkg/runtime"
 )
 
 func TestWorkflowGraphAndEdgeHelpers(t *testing.T) {
@@ -498,6 +500,679 @@ func TestWorkflowFailureStatusMarking(t *testing.T) {
 	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
 }
 
+func TestWorkflowRunOwnershipAndDBErrorEdges(t *testing.T) {
+	runID := uuid.New()
+	workflowID := uuid.New()
+	userID := uuid.New()
+
+	notFoundSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{err: pgx.ErrNoRows}}})}
+	_, err := notFoundSvc.GetWorkflowRun(context.Background(), userID, runID)
+	requireWorkflowHTTPStatus(t, err, http.StatusNotFound)
+
+	dbErrSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{err: errors.New("db down")}}})}
+	_, err = dbErrSvc.GetWorkflowRun(context.Background(), userID, runID)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	foreignSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{
+		values: workflowFakeRunValues(runID, workflowID, uuid.New(), workflowRunStatusPending, nil),
+	}}})}
+	_, err = foreignSvc.GetWorkflowRun(context.Background(), userID, runID)
+	requireWorkflowHTTPStatus(t, err, http.StatusNotFound)
+
+	stepErrSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{{
+			values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusPending, nil),
+		}},
+		queryResults: []workflowFakeQueryResult{{err: errors.New("steps unavailable")}},
+	})}
+	_, err = stepErrSvc.GetWorkflowRun(context.Background(), userID, runID)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+}
+
+func TestWorkflowStateControlErrorEdges(t *testing.T) {
+	runID := uuid.New()
+	workflowID := uuid.New()
+	userID := uuid.New()
+
+	for _, tc := range []struct {
+		name   string
+		status string
+		call   func(*Service) (*WorkflowRunResponse, error)
+	}{
+		{
+			name:   "pause rejects terminal run",
+			status: workflowRunStatusSuccess,
+			call: func(s *Service) (*WorkflowRunResponse, error) {
+				return s.PauseWorkflowRun(context.Background(), userID, runID)
+			},
+		},
+		{
+			name:   "resume rejects non paused run",
+			status: workflowRunStatusPending,
+			call: func(s *Service) (*WorkflowRunResponse, error) {
+				return s.ResumeWorkflowRun(context.Background(), userID, runID)
+			},
+		},
+		{
+			name:   "cancel rejects terminal run",
+			status: workflowRunStatusSuccess,
+			call: func(s *Service) (*WorkflowRunResponse, error) {
+				return s.CancelWorkflowRun(context.Background(), userID, runID)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{
+				values: workflowFakeRunValues(runID, workflowID, userID, tc.status, nil),
+			}}})}
+			_, err := tc.call(svc)
+			requireWorkflowHTTPStatus(t, err, http.StatusConflict)
+		})
+	}
+
+	for _, tc := range []struct {
+		name   string
+		status string
+		call   func(*Service) (*WorkflowRunResponse, error)
+	}{
+		{
+			name:   "pause update fails",
+			status: workflowRunStatusPending,
+			call: func(s *Service) (*WorkflowRunResponse, error) {
+				return s.PauseWorkflowRun(context.Background(), userID, runID)
+			},
+		},
+		{
+			name:   "resume update fails",
+			status: workflowRunStatusPaused,
+			call: func(s *Service) (*WorkflowRunResponse, error) {
+				return s.ResumeWorkflowRun(context.Background(), userID, runID)
+			},
+		},
+		{
+			name:   "cancel update fails",
+			status: workflowRunStatusRunning,
+			call: func(s *Service) (*WorkflowRunResponse, error) {
+				return s.CancelWorkflowRun(context.Background(), userID, runID)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{
+				{values: workflowFakeRunValues(runID, workflowID, userID, tc.status, nil)},
+				{err: errors.New("state update failed")},
+			}})}
+			_, err := tc.call(svc)
+			requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+		})
+	}
+
+	for _, tc := range []struct {
+		name       string
+		status     string
+		statusBack string
+		call       func(*Service) (*WorkflowRunResponse, error)
+	}{
+		{
+			name:       "pause lost update reloads current run",
+			status:     workflowRunStatusPending,
+			statusBack: workflowRunStatusPending,
+			call: func(s *Service) (*WorkflowRunResponse, error) {
+				return s.PauseWorkflowRun(context.Background(), userID, runID)
+			},
+		},
+		{
+			name:       "resume lost update reloads current run",
+			status:     workflowRunStatusPaused,
+			statusBack: workflowRunStatusPaused,
+			call: func(s *Service) (*WorkflowRunResponse, error) {
+				return s.ResumeWorkflowRun(context.Background(), userID, runID)
+			},
+		},
+		{
+			name:       "cancel lost update reloads current run",
+			status:     workflowRunStatusRunning,
+			statusBack: workflowRunStatusRunning,
+			call: func(s *Service) (*WorkflowRunResponse, error) {
+				return s.CancelWorkflowRun(context.Background(), userID, runID)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &Service{queries: db.New(&workflowFakeDBTX{
+				queryRowRows: []workflowFakeRow{
+					{values: workflowFakeRunValues(runID, workflowID, userID, tc.status, nil)},
+					{err: pgx.ErrNoRows},
+					{values: workflowFakeRunValues(runID, workflowID, userID, tc.statusBack, nil)},
+				},
+				queryResults: []workflowFakeQueryResult{{}},
+			})}
+			resp, err := tc.call(svc)
+			if err != nil || resp.Status != tc.statusBack {
+				t.Fatalf("%s response = %#v, %v", tc.name, resp, err)
+			}
+		})
+	}
+}
+
+func TestWorkflowQueueAndDefinitionErrorEdges(t *testing.T) {
+	workflowID := uuid.New()
+	userID := uuid.New()
+
+	claimed, err := (&Service{}).ClaimAndRunPendingWorkflow(context.Background())
+	if claimed {
+		t.Fatalf("ClaimAndRunPendingWorkflow without runtime claimed work")
+	}
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	noWorkSvc := &Service{
+		runtime: &runtimemod.Service{},
+		queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{err: pgx.ErrNoRows}}}),
+	}
+	claimed, err = noWorkSvc.ClaimAndRunPendingWorkflow(context.Background())
+	if err != nil || claimed {
+		t.Fatalf("ClaimAndRunPendingWorkflow no rows = %v, %v", claimed, err)
+	}
+
+	claimErrSvc := &Service{
+		runtime: &runtimemod.Service{},
+		queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{err: errors.New("claim failed")}}}),
+	}
+	claimed, err = claimErrSvc.ClaimAndRunPendingWorkflow(context.Background())
+	if claimed {
+		t.Fatalf("ClaimAndRunPendingWorkflow claimed on DB error")
+	}
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	requeueSvc := &Service{queries: db.New(&workflowFakeDBTX{execRowsAffected: 2})}
+	requeued, err := requeueSvc.RequeueStaleWorkflowRuns(context.Background(), -time.Second)
+	if err != nil || requeued != 2 {
+		t.Fatalf("RequeueStaleWorkflowRuns = %d, %v", requeued, err)
+	}
+
+	requeueErrSvc := &Service{queries: db.New(&workflowFakeDBTX{execErr: errors.New("requeue failed")})}
+	_, err = requeueErrSvc.RequeueStaleWorkflowRuns(context.Background(), time.Minute)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	notFoundSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{err: pgx.ErrNoRows}}})}
+	_, _, err = notFoundSvc.getWorkflowDefinition(context.Background(), workflowID)
+	requireWorkflowHTTPStatus(t, err, http.StatusNotFound)
+
+	dbErrSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{err: errors.New("workflow lookup failed")}}})}
+	_, _, err = dbErrSvc.getWorkflowDefinition(context.Background(), workflowID)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	nodeErrSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{{
+			values: workflowFakeWorkflowValues(workflowID, userID),
+		}},
+		queryResults: []workflowFakeQueryResult{{err: errors.New("node lookup failed")}},
+	})}
+	_, _, err = nodeErrSvc.getWorkflowDefinition(context.Background(), workflowID)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+}
+
+func TestWorkflowListCompareAndPrepareErrorEdges(t *testing.T) {
+	workflowID := uuid.New()
+	userID := uuid.New()
+	agentID := uuid.New()
+	baseRunID := uuid.New()
+	candidateRunID := uuid.New()
+
+	listErrSvc := &Service{queries: db.New(&workflowFakeDBTX{queryResults: []workflowFakeQueryResult{{err: errors.New("list failed")}}})}
+	_, err := listErrSvc.ListWorkflows(context.Background(), userID, 999)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	countErrSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryResults: []workflowFakeQueryResult{{rows: []workflowFakeRow{{values: workflowFakeWorkflowValues(workflowID, userID)}}}},
+		queryRowRows: []workflowFakeRow{{err: errors.New("count failed")}},
+	})}
+	_, err = countErrSvc.ListWorkflows(context.Background(), userID, 10)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	nodeListErrSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryResults: []workflowFakeQueryResult{
+			{rows: []workflowFakeRow{{values: workflowFakeWorkflowValues(workflowID, userID)}}},
+			{err: errors.New("nodes failed")},
+		},
+		queryRowRows: []workflowFakeRow{{values: []any{int32(1)}}},
+	})}
+	_, err = nodeListErrSvc.ListWorkflows(context.Background(), userID, 10)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	compareConflictSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{
+		{values: workflowFakeRunValues(baseRunID, workflowID, userID, workflowRunStatusSuccess, nil)},
+		{values: workflowFakeRunValues(candidateRunID, uuid.New(), userID, workflowRunStatusSuccess, nil)},
+	}})}
+	_, err = compareConflictSvc.CompareWorkflowRuns(context.Background(), userID, baseRunID, candidateRunID)
+	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
+
+	compareBaseStepsErrSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{
+			{values: workflowFakeRunValues(baseRunID, workflowID, userID, workflowRunStatusSuccess, nil)},
+			{values: workflowFakeRunValues(candidateRunID, workflowID, userID, workflowRunStatusSuccess, nil)},
+		},
+		queryResults: []workflowFakeQueryResult{{err: errors.New("base steps failed")}},
+	})}
+	_, err = compareBaseStepsErrSvc.CompareWorkflowRuns(context.Background(), userID, baseRunID, candidateRunID)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	compareCandidateStepsErrSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{
+			{values: workflowFakeRunValues(baseRunID, workflowID, userID, workflowRunStatusSuccess, nil)},
+			{values: workflowFakeRunValues(candidateRunID, workflowID, userID, workflowRunStatusSuccess, nil)},
+		},
+		queryResults: []workflowFakeQueryResult{
+			{},
+			{err: errors.New("candidate steps failed")},
+		},
+	})}
+	_, err = compareCandidateStepsErrSvc.CompareWorkflowRuns(context.Background(), userID, baseRunID, candidateRunID)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	noNodeSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{{values: workflowFakeWorkflowValues(workflowID, userID)}},
+		queryResults: []workflowFakeQueryResult{{}},
+	})}
+	_, _, _, _, _, _, err = noNodeSvc.prepareWorkflowExecution(context.Background(), userID, workflowID, nil)
+	requireWorkflowHTTPStatus(t, err, http.StatusBadRequest)
+
+	validNodeRows := []workflowFakeRow{{values: workflowFakeNodeValues(workflowID, agentID, "extract", 0)}}
+	maxAttemptsSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{{values: workflowFakeWorkflowValues(workflowID, userID)}},
+		queryResults: []workflowFakeQueryResult{{rows: validNodeRows}},
+	})}
+	_, _, _, _, _, _, err = maxAttemptsSvc.prepareWorkflowExecution(context.Background(), userID, workflowID, &RunWorkflowRequest{MaxAttempts: 11})
+	requireWorkflowHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	badInputSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{{values: workflowFakeWorkflowValues(workflowID, userID)}},
+		queryResults: []workflowFakeQueryResult{{rows: validNodeRows}},
+	})}
+	_, _, _, _, _, _, err = badInputSvc.prepareWorkflowExecution(context.Background(), userID, workflowID, &RunWorkflowRequest{
+		Input: map[string]interface{}{"bad": make(chan int)},
+	})
+	requireWorkflowHTTPStatus(t, err, http.StatusBadRequest)
+}
+
+func TestWorkflowExecutionEntrypointErrorEdges(t *testing.T) {
+	workflowID := uuid.New()
+	userID := uuid.New()
+	agentID := uuid.New()
+
+	nilRuntimeSvc := &Service{}
+	_, err := nilRuntimeSvc.RunWorkflow(context.Background(), userID, workflowID, nil)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+	_, err = nilRuntimeSvc.StartWorkflowRun(context.Background(), userID, workflowID, nil)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	validNodeRows := []workflowFakeRow{{values: workflowFakeNodeValues(workflowID, agentID, "extract", 0)}}
+	runCreateErrSvc := &Service{
+		runtime: &runtimemod.Service{},
+		queries: db.New(&workflowFakeDBTX{
+			queryRowRows: []workflowFakeRow{
+				{values: workflowFakeWorkflowValues(workflowID, userID)},
+				{err: errors.New("create run failed")},
+			},
+			queryResults: []workflowFakeQueryResult{{rows: validNodeRows}},
+		}),
+	}
+	_, err = runCreateErrSvc.RunWorkflow(context.Background(), userID, workflowID, nil)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	startCreateErrSvc := &Service{
+		runtime: &runtimemod.Service{},
+		queries: db.New(&workflowFakeDBTX{
+			queryRowRows: []workflowFakeRow{
+				{values: workflowFakeWorkflowValues(workflowID, userID)},
+				{err: errors.New("create pending run failed")},
+			},
+			queryResults: []workflowFakeQueryResult{{rows: validNodeRows}},
+		}),
+	}
+	_, err = startCreateErrSvc.StartWorkflowRun(context.Background(), userID, workflowID, nil)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+}
+
+func TestWorkflowListRunsAndOwnerErrorEdges(t *testing.T) {
+	workflowID := uuid.New()
+	runID := uuid.New()
+	userID := uuid.New()
+	agentID := uuid.New()
+	nodeRows := []workflowFakeRow{{values: workflowFakeNodeValues(workflowID, agentID, "extract", 0)}}
+	runRows := []workflowFakeRow{{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusPending, nil)}}
+
+	for _, tc := range []struct {
+		name string
+		row  workflowFakeRow
+		want int
+	}{
+		{name: "not found", row: workflowFakeRow{err: pgx.ErrNoRows}, want: http.StatusNotFound},
+		{name: "db error", row: workflowFakeRow{err: errors.New("workflow lookup failed")}, want: http.StatusInternalServerError},
+		{name: "foreign owner", row: workflowFakeRow{values: workflowFakeWorkflowValues(workflowID, uuid.New())}, want: http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{tc.row}})}
+			_, _, err := svc.getWorkflowForOwner(context.Background(), userID, workflowID)
+			requireWorkflowHTTPStatus(t, err, tc.want)
+		})
+	}
+
+	nodeErrSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{{values: workflowFakeWorkflowValues(workflowID, userID)}},
+		queryResults: []workflowFakeQueryResult{{err: errors.New("nodes failed")}},
+	})}
+	_, _, err := nodeErrSvc.getWorkflowForOwner(context.Background(), userID, workflowID)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	runsQueryErrSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{{values: workflowFakeWorkflowValues(workflowID, userID)}},
+		queryResults: []workflowFakeQueryResult{
+			{rows: nodeRows},
+			{err: errors.New("runs failed")},
+		},
+	})}
+	_, err = runsQueryErrSvc.ListWorkflowRuns(context.Background(), userID, workflowID, 999)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	countErrSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{
+			{values: workflowFakeWorkflowValues(workflowID, userID)},
+			{err: errors.New("count failed")},
+		},
+		queryResults: []workflowFakeQueryResult{
+			{rows: nodeRows},
+			{rows: runRows},
+		},
+	})}
+	_, err = countErrSvc.ListWorkflowRuns(context.Background(), userID, workflowID, 10)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	stepErrSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{
+			{values: workflowFakeWorkflowValues(workflowID, userID)},
+			{values: []any{int32(1)}},
+		},
+		queryResults: []workflowFakeQueryResult{
+			{rows: nodeRows},
+			{rows: runRows},
+			{err: errors.New("steps failed")},
+		},
+	})}
+	_, err = stepErrSvc.ListWorkflowRuns(context.Background(), userID, workflowID, 10)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+}
+
+func TestWorkflowRetryRerunWaitAndClaimedRunErrorEdges(t *testing.T) {
+	workflowID := uuid.New()
+	runID := uuid.New()
+	userID := uuid.New()
+	agentID := uuid.New()
+	nodeRows := []workflowFakeRow{{values: workflowFakeNodeValues(workflowID, agentID, "extract", 0)}}
+
+	retryConflictSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{
+		values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusSuccess, nil),
+	}}})}
+	_, err := retryConflictSvc.RetryWorkflowRun(context.Background(), userID, runID)
+	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
+
+	badInputRun := workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusFailed, nil)
+	badInputRun[4] = []byte(`{bad`)
+	retryBadInputSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{values: badInputRun}}})}
+	_, err = retryBadInputSvc.RetryWorkflowRun(context.Background(), userID, runID)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	_, err = (&Service{}).RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "extract"})
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+	rerunValidationSvc := &Service{runtime: &runtimemod.Service{}}
+	_, err = rerunValidationSvc.RerunWorkflowStep(context.Background(), userID, runID, nil)
+	requireWorkflowHTTPStatus(t, err, http.StatusBadRequest)
+	_, err = rerunValidationSvc.RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "   "})
+	requireWorkflowHTTPStatus(t, err, http.StatusBadRequest)
+
+	_, err = (&Service{}).waitForRuntimeRunCompletion(context.Background(), userID, uuid.Nil)
+	if err == nil || !strings.Contains(err.Error(), "runID") {
+		t.Fatalf("waitForRuntimeRunCompletion nil runID error = %v", err)
+	}
+
+	claimedBadInput := db.WorkflowRun{
+		ID:           runID,
+		WorkflowID:   workflowID,
+		UserID:       userID,
+		Status:       workflowRunStatusRunning,
+		Input:        []byte(`{bad`),
+		AttemptCount: 1,
+		MaxAttempts:  3,
+	}
+	claimedBadInputSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{
+			{values: workflowFakeWorkflowValues(workflowID, userID)},
+			{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusFailed, nil)},
+		},
+		queryResults: []workflowFakeQueryResult{{rows: nodeRows}},
+	})}
+	err = claimedBadInputSvc.executeClaimedWorkflowRun(context.Background(), claimedBadInput)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	claimedRetry := claimedBadInput
+	claimedRetry.Input = []byte(`{"prompt":"retry"}`)
+	claimedRetry.AttemptCount = 2
+	deleteErrSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{
+			{values: workflowFakeWorkflowValues(workflowID, userID)},
+			{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusFailed, nil)},
+		},
+		queryResults: []workflowFakeQueryResult{{rows: nodeRows}},
+		execErr:      errors.New("delete steps failed"),
+	})}
+	err = deleteErrSvc.executeClaimedWorkflowRun(context.Background(), claimedRetry)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+}
+
+func TestWorkflowRerunStepPlanningErrorEdges(t *testing.T) {
+	workflowID := uuid.New()
+	runID := uuid.New()
+	userID := uuid.New()
+	agentID := uuid.New()
+	extractNodeRows := []workflowFakeRow{{values: workflowFakeNodeValues(workflowID, agentID, "extract", 0)}}
+	twoNodeRows := []workflowFakeRow{
+		{values: workflowFakeNodeValues(workflowID, agentID, "extract", 0)},
+		{values: workflowFakeNodeValues(workflowID, agentID, "review", 1)},
+	}
+	reviewStep := workflowFakeStepValues(runID, twoNodeRows[1].values[0].(uuid.UUID), agentID, "review", workflowRunStatusSuccess)
+	extractStep := workflowFakeStepValues(runID, twoNodeRows[0].values[0].(uuid.UUID), agentID, "extract", workflowRunStatusSuccess)
+
+	statusConflictSvc := &Service{
+		runtime: &runtimemod.Service{},
+		queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{
+			values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusPending, nil),
+		}}}),
+	}
+	_, err := statusConflictSvc.RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "extract"})
+	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
+
+	workflowLookupErrSvc := &Service{
+		runtime: &runtimemod.Service{},
+		queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{
+			{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusSuccess, nil)},
+			{err: pgx.ErrNoRows},
+		}}),
+	}
+	_, err = workflowLookupErrSvc.RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "extract"})
+	requireWorkflowHTTPStatus(t, err, http.StatusNotFound)
+
+	missingNodeSvc := &Service{
+		runtime: &runtimemod.Service{},
+		queries: db.New(&workflowFakeDBTX{
+			queryRowRows: []workflowFakeRow{
+				{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusSuccess, nil)},
+				{values: workflowFakeWorkflowValues(workflowID, userID)},
+			},
+			queryResults: []workflowFakeQueryResult{{rows: extractNodeRows}},
+		}),
+	}
+	_, err = missingNodeSvc.RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "missing"})
+	requireWorkflowHTTPStatus(t, err, http.StatusNotFound)
+
+	stepsErrSvc := &Service{
+		runtime: &runtimemod.Service{},
+		queries: db.New(&workflowFakeDBTX{
+			queryRowRows: []workflowFakeRow{
+				{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusSuccess, nil)},
+				{values: workflowFakeWorkflowValues(workflowID, userID)},
+			},
+			queryResults: []workflowFakeQueryResult{
+				{rows: extractNodeRows},
+				{err: errors.New("steps failed")},
+			},
+		}),
+	}
+	_, err = stepsErrSvc.RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "extract"})
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	sourceStepMissingSvc := &Service{
+		runtime: &runtimemod.Service{},
+		queries: db.New(&workflowFakeDBTX{
+			queryRowRows: []workflowFakeRow{
+				{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusSuccess, nil)},
+				{values: workflowFakeWorkflowValues(workflowID, userID)},
+			},
+			queryResults: []workflowFakeQueryResult{
+				{rows: extractNodeRows},
+				{},
+			},
+		}),
+	}
+	_, err = sourceStepMissingSvc.RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "extract"})
+	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
+
+	badInputRun := workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusSuccess, nil)
+	badInputRun[4] = []byte(`{bad`)
+	badInputSvc := &Service{
+		runtime: &runtimemod.Service{},
+		queries: db.New(&workflowFakeDBTX{
+			queryRowRows: []workflowFakeRow{
+				{values: badInputRun},
+				{values: workflowFakeWorkflowValues(workflowID, userID)},
+			},
+			queryResults: []workflowFakeQueryResult{
+				{rows: extractNodeRows},
+				{rows: []workflowFakeRow{{values: extractStep}}},
+			},
+		}),
+	}
+	_, err = badInputSvc.RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "extract"})
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	createRunErrSvc := &Service{
+		runtime: &runtimemod.Service{},
+		queries: db.New(&workflowFakeDBTX{
+			queryRowRows: []workflowFakeRow{
+				{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusSuccess, nil)},
+				{values: workflowFakeWorkflowValues(workflowID, userID)},
+				{err: errors.New("create rerun failed")},
+			},
+			queryResults: []workflowFakeQueryResult{
+				{rows: extractNodeRows},
+				{rows: []workflowFakeRow{{values: extractStep}}},
+			},
+		}),
+	}
+	_, err = createRunErrSvc.RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "extract"})
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	failedExtractStep := append([]any(nil), extractStep...)
+	failedExtractStep[6] = workflowRunStatusFailed
+	unaffectedFailedSvc := &Service{
+		runtime: &runtimemod.Service{},
+		queries: db.New(&workflowFakeDBTX{
+			queryRowRows: []workflowFakeRow{
+				{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusSuccess, nil)},
+				{values: workflowFakeWorkflowValues(workflowID, userID)},
+			},
+			queryResults: []workflowFakeQueryResult{
+				{rows: twoNodeRows},
+				{rows: []workflowFakeRow{{values: failedExtractStep}, {values: reviewStep}}},
+			},
+		}),
+	}
+	_, err = unaffectedFailedSvc.RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "review"})
+	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
+}
+
+func TestWorkflowStoppedAndWorkerTickErrorEdges(t *testing.T) {
+	runID := uuid.New()
+	workflowID := uuid.New()
+	userID := uuid.New()
+
+	statusErrSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{err: errors.New("status failed")}}})}
+	stopped, resp, err := statusErrSvc.workflowRunStopped(context.Background(), userID, runID)
+	if stopped || resp != nil {
+		t.Fatalf("workflowRunStopped DB error returned stopped=%v resp=%#v", stopped, resp)
+	}
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	pausedSvc := &Service{queries: db.New(&workflowFakeDBTX{
+		queryRowRows: []workflowFakeRow{
+			{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusPaused, nil)},
+			{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusPaused, nil)},
+		},
+		queryResults: []workflowFakeQueryResult{{}},
+	})}
+	stopped, resp, err = pausedSvc.workflowRunStopped(context.Background(), userID, runID)
+	if err != nil || !stopped || resp == nil || resp.Status != workflowRunStatusPaused {
+		t.Fatalf("workflowRunStopped paused = stopped=%v resp=%#v err=%v", stopped, resp, err)
+	}
+
+	runWorkflowWorkerTick(context.Background(), &Service{
+		runtime: &runtimemod.Service{},
+		queries: db.New(&workflowFakeDBTX{execErr: errors.New("requeue failed")}),
+	}, RunWorkerConfig{ClaimBurst: 1})
+}
+
+func TestWorkflowStepCopyAndRunNodeErrorEdges(t *testing.T) {
+	runID := uuid.New()
+	workflowID := uuid.New()
+	userID := uuid.New()
+	nodeID := uuid.New()
+	agentID := uuid.New()
+	sourceStep := db.WorkflowRunStep{
+		ID:             uuid.New(),
+		WorkflowRunID:  runID,
+		WorkflowNodeID: nodeID,
+		NodeKey:        "extract",
+		AgentID:        agentID,
+		Input:          []byte(`{"node_key":"extract"}`),
+		Output:         []byte(`{"summary":"ok"}`),
+		Sequence:       1,
+	}
+
+	createErrSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{err: errors.New("create step failed")}}})}
+	err := createErrSvc.copyWorkflowRunStep(context.Background(), runID, sourceStep)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	successErrSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{
+		{values: workflowFakeStepValues(runID, nodeID, agentID, "extract", workflowRunStatusRunning)},
+		{err: errors.New("mark success failed")},
+	}})}
+	err = successErrSvc.copyWorkflowRunStep(context.Background(), runID, sourceStep)
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
+
+	runNodeSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{err: errors.New("create step failed")}}})}
+	result := runNodeSvc.runWorkflowNode(
+		context.Background(),
+		userID,
+		db.Workflow{ID: workflowID},
+		db.WorkflowRun{ID: runID, UserID: userID},
+		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
+		map[string]interface{}{"node_key": "extract"},
+		0,
+	)
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "创建 step 失败") {
+		t.Fatalf("runWorkflowNode error = %#v", result)
+	}
+}
+
 func TestStartRunWorkerNoopsWithoutService(t *testing.T) {
 	StartRunWorker(context.Background(), nil, RunWorkerConfig{})
 }
@@ -640,23 +1315,60 @@ func userIDFromCtxOnly(c echo.Context) error {
 }
 
 type workflowFakeDBTX struct {
-	row          workflowFakeRow
-	queryRowSQL  string
-	queryRowArgs []any
+	row              workflowFakeRow
+	queryRowRows     []workflowFakeRow
+	queryRowCalls    int
+	queryResults     []workflowFakeQueryResult
+	queryCalls       int
+	execErr          error
+	execRowsAffected int64
+	queryRowSQL      string
+	queryRowArgs     []any
+	querySQL         string
+	queryArgs        []any
+	execSQL          string
+	execArgs         []any
 }
 
-func (f *workflowFakeDBTX) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
-	return pgconn.CommandTag{}, nil
+func (f *workflowFakeDBTX) Exec(_ context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+	f.execSQL = sql
+	f.execArgs = append([]any(nil), args...)
+	if f.execErr != nil {
+		return pgconn.CommandTag{}, f.execErr
+	}
+	return pgconn.NewCommandTag(fmt.Sprintf("UPDATE %d", f.execRowsAffected)), nil
 }
 
-func (f *workflowFakeDBTX) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
-	return nil, errors.New("workflow fake query is not implemented")
+func (f *workflowFakeDBTX) Query(_ context.Context, sql string, args ...interface{}) (pgx.Rows, error) {
+	f.querySQL = sql
+	f.queryArgs = append([]any(nil), args...)
+	result := workflowFakeQueryResult{err: errors.New("workflow fake query is not implemented")}
+	if f.queryCalls < len(f.queryResults) {
+		result = f.queryResults[f.queryCalls]
+	}
+	f.queryCalls++
+	if result.err != nil {
+		return nil, result.err
+	}
+	return &workflowFakeRows{rows: result.rows, err: result.rowsErr}, nil
 }
 
 func (f *workflowFakeDBTX) QueryRow(_ context.Context, sql string, args ...interface{}) pgx.Row {
 	f.queryRowSQL = sql
 	f.queryRowArgs = append([]any(nil), args...)
+	if f.queryRowCalls < len(f.queryRowRows) {
+		row := f.queryRowRows[f.queryRowCalls]
+		f.queryRowCalls++
+		return row
+	}
+	f.queryRowCalls++
 	return f.row
+}
+
+type workflowFakeQueryResult struct {
+	rows    []workflowFakeRow
+	err     error
+	rowsErr error
 }
 
 type workflowFakeRow struct {
@@ -693,6 +1405,117 @@ func (r workflowFakeRow) Scan(dest ...any) error {
 		return errors.New("workflow fake row scan value type mismatch")
 	}
 	return nil
+}
+
+type workflowFakeRows struct {
+	rows    []workflowFakeRow
+	current int
+	closed  bool
+	err     error
+}
+
+func (r *workflowFakeRows) Close() {
+	r.closed = true
+}
+
+func (r *workflowFakeRows) Err() error {
+	if !r.closed {
+		return nil
+	}
+	return r.err
+}
+
+func (r *workflowFakeRows) CommandTag() pgconn.CommandTag {
+	return pgconn.CommandTag{}
+}
+
+func (r *workflowFakeRows) FieldDescriptions() []pgconn.FieldDescription {
+	return nil
+}
+
+func (r *workflowFakeRows) Next() bool {
+	if r.current >= len(r.rows) {
+		r.Close()
+		return false
+	}
+	r.current++
+	return true
+}
+
+func (r *workflowFakeRows) Scan(dest ...any) error {
+	if r.current == 0 || r.current > len(r.rows) {
+		return errors.New("workflow fake rows scan without current row")
+	}
+	if err := r.rows[r.current-1].Scan(dest...); err != nil {
+		r.Close()
+		return err
+	}
+	return nil
+}
+
+func (r *workflowFakeRows) Values() ([]any, error) {
+	if r.current == 0 || r.current > len(r.rows) {
+		return nil, errors.New("workflow fake rows values without current row")
+	}
+	return append([]any(nil), r.rows[r.current-1].values...), nil
+}
+
+func (r *workflowFakeRows) RawValues() [][]byte {
+	return nil
+}
+
+func (r *workflowFakeRows) Conn() *pgx.Conn {
+	return nil
+}
+
+func workflowFakeWorkflowValues(workflowID, userID uuid.UUID) []any {
+	now := time.Date(2026, 6, 22, 9, 30, 0, 0, time.UTC)
+	return []any{
+		workflowID,
+		userID,
+		"Workflow",
+		"test workflow",
+		"active",
+		[]byte(`[]`),
+		now,
+		now,
+	}
+}
+
+func workflowFakeNodeValues(workflowID, agentID uuid.UUID, key string, position int32) []any {
+	now := time.Date(2026, 6, 22, 9, 30, 0, 0, time.UTC)
+	return []any{
+		uuid.New(),
+		workflowID,
+		key,
+		"agent",
+		agentID,
+		"Node " + key,
+		[]byte(`{}`),
+		position,
+		now,
+	}
+}
+
+func workflowFakeStepValues(runID, nodeID, agentID uuid.UUID, key, status string) []any {
+	now := time.Date(2026, 6, 22, 9, 30, 0, 0, time.UTC)
+	return []any{
+		uuid.New(),
+		runID,
+		nodeID,
+		key,
+		agentID,
+		nil,
+		status,
+		[]byte(`{"node_key":"` + key + `"}`),
+		[]byte(`{}`),
+		nil,
+		int32(0),
+		now,
+		nil,
+		now,
+		now,
+	}
 }
 
 func workflowFakeRunValues(runID, workflowID, userID uuid.UUID, status string, errorMessage *string) []any {
