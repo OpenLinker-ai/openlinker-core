@@ -1637,6 +1637,192 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 	}
 }
 
+func TestA2AHTTPJSONStreamingAliasesDispatch(t *testing.T) {
+	userID := uuid.MustParse("8582c7a4-0f02-4895-8570-7c7cce357e5f")
+	taskID := uuid.MustParse("c93dbab2-404f-4460-bcb7-0f17ece85567").String()
+	const slug = "agent-one"
+
+	for _, tc := range []struct {
+		name   string
+		method func(*Handler, echo.Context) error
+		req    *a2aHandlerRequest
+		calls  []string
+	}{
+		{
+			name: "message stream path fallback",
+			method: func(h *Handler, c echo.Context) error {
+				return h.MessageHTTP(c)
+			},
+			req: &a2aHandlerRequest{
+				method:     http.MethodPost,
+				target:     "/message:stream?version=1.0",
+				body:       `{"message":{"messageId":"msg-http-stream","role":"user","parts":[{"kind":"text","text":"stream"}]}}`,
+				userID:     userID.String(),
+				authMethod: "apikey",
+				scopes:     []string{"agents:run"},
+				params:     map[string]string{"slug": slug},
+			},
+			calls: []string{"message/stream", "events"},
+		},
+		{
+			name: "task get subscribe suffix",
+			method: func(h *Handler, c echo.Context) error {
+				return h.GetTaskHTTP(c)
+			},
+			req: &a2aHandlerRequest{
+				method:     http.MethodGet,
+				target:     "/tasks/" + taskID + ":subscribe?version=1.0",
+				userID:     userID.String(),
+				authMethod: "apikey",
+				scopes:     []string{"runs:read"},
+				params:     map[string]string{"slug": slug, "taskID": taskID + ":subscribe"},
+			},
+			calls: []string{"tasks/get", "events"},
+		},
+		{
+			name: "task action subscribe slash suffix",
+			method: func(h *Handler, c echo.Context) error {
+				return h.TaskActionHTTP(c)
+			},
+			req: &a2aHandlerRequest{
+				method:     http.MethodGet,
+				target:     "/tasks/" + taskID + "/subscribe?version=1.0",
+				userID:     userID.String(),
+				authMethod: "apikey",
+				scopes:     []string{"runs:read"},
+				params:     map[string]string{"slug": slug, "*": "tasks/" + taskID + "/subscribe"},
+			},
+			calls: []string{"tasks/get", "events"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newFakeA2AService(taskID)
+			h := NewHandler(svc)
+			c := newA2ATestContext(tc.req)
+
+			if err := tc.method(h, c); err != nil {
+				t.Fatalf("%s returned error: %v", tc.name, err)
+			}
+			rec := c.(*a2ATestContext).rec
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s status = %d body=%s", tc.name, rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, "event: task") || !strings.Contains(body, "event: status-update") {
+				t.Fatalf("%s stream body missing expected events: %s", tc.name, body)
+			}
+			for _, call := range tc.calls {
+				if !svc.called(call) {
+					t.Fatalf("%s missing call %s in %v", tc.name, call, svc.calls)
+				}
+			}
+			if got := c.Response().Header().Get(a2aVersionHeader); got != a2aProtocolVersionCurrent {
+				t.Fatalf("%s A2A version header = %q", tc.name, got)
+			}
+		})
+	}
+}
+
+func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
+	userID := uuid.MustParse("8582c7a4-0f02-4895-8570-7c7cce357e5f")
+	taskID := uuid.MustParse("c93dbab2-404f-4460-bcb7-0f17ece85567").String()
+	configID := uuid.MustParse("2f151345-b29a-463b-90fc-7e20e27fbf20").String()
+	const slug = "agent-one"
+	serviceDown := httpx.ServiceUnavailable("service down")
+
+	for _, tc := range []struct {
+		name   string
+		key    string
+		method func(*Handler, echo.Context) error
+		req    *a2aHandlerRequest
+	}{
+		{
+			name: "send message",
+			key:  "message/send",
+			method: func(h *Handler, c echo.Context) error {
+				return h.SendMessageHTTP(c)
+			},
+			req: &a2aHandlerRequest{method: http.MethodPost, target: "/message:send", body: `{"message":{"messageId":"msg","role":"user","parts":[{"kind":"text","text":"hi"}]}}`, userID: userID.String(), authMethod: "apikey", scopes: []string{"agents:run"}, params: map[string]string{"slug": slug}},
+		},
+		{
+			name: "stream message before SSE",
+			key:  "message/stream",
+			method: func(h *Handler, c echo.Context) error {
+				return h.StreamMessageHTTP(c)
+			},
+			req: &a2aHandlerRequest{method: http.MethodPost, target: "/message:stream", body: `{"message":{"messageId":"msg","role":"user","parts":[{"kind":"text","text":"hi"}]}}`, userID: userID.String(), authMethod: "apikey", scopes: []string{"agents:run"}, params: map[string]string{"slug": slug}},
+		},
+		{
+			name: "list tasks",
+			key:  "tasks/list",
+			method: func(h *Handler, c echo.Context) error {
+				return h.ListTasksHTTP(c)
+			},
+			req: &a2aHandlerRequest{method: http.MethodGet, target: "/tasks", userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug}},
+		},
+		{
+			name: "get task",
+			key:  "tasks/get",
+			method: func(h *Handler, c echo.Context) error {
+				return h.GetTaskHTTP(c)
+			},
+			req: &a2aHandlerRequest{method: http.MethodGet, target: "/tasks/" + taskID, userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID}},
+		},
+		{
+			name: "cancel task",
+			key:  "tasks/cancel",
+			method: func(h *Handler, c echo.Context) error {
+				return h.CancelTaskHTTP(c)
+			},
+			req: &a2aHandlerRequest{method: http.MethodPost, target: "/tasks/" + taskID + ":cancel", userID: userID.String(), authMethod: "apikey", scopes: []string{"agents:run"}, params: map[string]string{"slug": slug, "taskID": taskID}},
+		},
+		{
+			name: "set push",
+			key:  "push/set",
+			method: func(h *Handler, c echo.Context) error {
+				return h.SetTaskPushNotificationHTTP(c)
+			},
+			req: &a2aHandlerRequest{method: http.MethodPost, target: "/tasks/" + taskID + "/pushNotificationConfig", body: `{"pushNotificationConfig":{"url":"https://hooks.example/a2a"}}`, userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID}},
+		},
+		{
+			name: "list push",
+			key:  "push/list",
+			method: func(h *Handler, c echo.Context) error {
+				return h.ListTaskPushNotificationsHTTP(c)
+			},
+			req: &a2aHandlerRequest{method: http.MethodGet, target: "/tasks/" + taskID + "/pushNotificationConfig", userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID}},
+		},
+		{
+			name: "get push",
+			key:  "push/get",
+			method: func(h *Handler, c echo.Context) error {
+				return h.GetTaskPushNotificationHTTP(c)
+			},
+			req: &a2aHandlerRequest{method: http.MethodGet, target: "/tasks/" + taskID + "/pushNotificationConfig/" + configID, userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID, "configID": configID}},
+		},
+		{
+			name: "delete push",
+			key:  "push/delete",
+			method: func(h *Handler, c echo.Context) error {
+				return h.DeleteTaskPushNotificationHTTP(c)
+			},
+			req: &a2aHandlerRequest{method: http.MethodDelete, target: "/tasks/" + taskID + "/pushNotificationConfig/" + configID, userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID, "configID": configID}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newFakeA2AService(taskID)
+			svc.errs[tc.key] = serviceDown
+			requireA2AHTTPStatus(t, tc.method(NewHandler(svc), newA2ATestContext(tc.req)), http.StatusServiceUnavailable)
+		})
+	}
+}
+
+func TestA2AAgentCardHandlersUnavailableWithoutProvider(t *testing.T) {
+	h := NewHandler(newFakeA2AService(uuid.NewString()))
+	requireA2AHTTPStatus(t, h.GetPublicAgentCardHTTP(newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", params: map[string]string{"slug": "agent-one"}})), http.StatusServiceUnavailable)
+	requireA2AHTTPStatus(t, h.GetExtendedAgentCardHTTP(newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", userID: uuid.NewString(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": "agent-one"}})), http.StatusServiceUnavailable)
+}
+
 type noopRunPushManager struct{}
 
 func (noopRunPushManager) CreateRunWebhookSubscription(context.Context, uuid.UUID, uuid.UUID, *webhook.CreateRunWebhookRequest) (*webhook.RunWebhookSubscriptionResponse, error) {
@@ -1721,6 +1907,7 @@ func userIDFromCtxOnly(c echo.Context) error {
 type fakeA2AService struct {
 	*Service
 	calls         []string
+	errs          map[string]error
 	userID        uuid.UUID
 	slug          string
 	taskID        string
@@ -1732,7 +1919,7 @@ type fakeA2AService struct {
 }
 
 func newFakeA2AService(taskID string) *fakeA2AService {
-	return &fakeA2AService{taskID: taskID}
+	return &fakeA2AService{taskID: taskID, errs: map[string]error{}}
 }
 
 func (f *fakeA2AService) called(name string) bool {
@@ -1750,15 +1937,28 @@ func (f *fakeA2AService) record(name string, userID uuid.UUID, slug string) {
 	f.slug = slug
 }
 
+func (f *fakeA2AService) maybeProtocolErr(name string) error {
+	if f.errs == nil {
+		return nil
+	}
+	return f.errs[name]
+}
+
 func (f *fakeA2AService) SendProtocolMessage(_ context.Context, userID uuid.UUID, slug string, params *A2AMessageSendParams) (*A2ATask, error) {
 	f.record("message/send", userID, slug)
 	f.sendParams = *params
+	if err := f.maybeProtocolErr("message/send"); err != nil {
+		return nil, err
+	}
 	return fakeA2ATask(f.taskID, a2aTaskStateCompleted), nil
 }
 
 func (f *fakeA2AService) StartProtocolMessage(_ context.Context, userID uuid.UUID, slug string, params *A2AMessageSendParams) (*A2ATask, error) {
 	f.record("message/stream", userID, slug)
 	f.streamParams = *params
+	if err := f.maybeProtocolErr("message/stream"); err != nil {
+		return nil, err
+	}
 	return fakeA2ATask(f.taskID, a2aTaskStateWorking), nil
 }
 
@@ -1766,24 +1966,36 @@ func (f *fakeA2AService) GetProtocolTask(_ context.Context, userID uuid.UUID, sl
 	f.record("tasks/get", userID, slug)
 	f.taskID = taskID
 	f.historyLength = historyLength
+	if err := f.maybeProtocolErr("tasks/get"); err != nil {
+		return nil, err
+	}
 	return fakeA2ATask(taskID, a2aTaskStateWorking), nil
 }
 
 func (f *fakeA2AService) ListProtocolTasks(_ context.Context, userID uuid.UUID, slug string, params *A2ATaskListParams) (*A2ATaskListResponse, error) {
 	f.record("tasks/list", userID, slug)
 	f.listParams = *params
+	if err := f.maybeProtocolErr("tasks/list"); err != nil {
+		return nil, err
+	}
 	return &A2ATaskListResponse{Tasks: []A2ATask{*fakeA2ATask(f.taskID, a2aTaskStateCompleted)}, PageSize: 1, TotalSize: 1}, nil
 }
 
 func (f *fakeA2AService) CancelProtocolTask(_ context.Context, userID uuid.UUID, slug, taskID string) (*A2ATask, error) {
 	f.record("tasks/cancel", userID, slug)
 	f.taskID = taskID
+	if err := f.maybeProtocolErr("tasks/cancel"); err != nil {
+		return nil, err
+	}
 	return fakeA2ATask(taskID, a2aTaskStateCanceled), nil
 }
 
 func (f *fakeA2AService) ListProtocolTaskEvents(_ context.Context, userID uuid.UUID, slug, taskID string, afterSequence int32) ([]interface{}, bool, int32, error) {
 	f.record("events", userID, slug)
 	f.taskID = taskID
+	if err := f.maybeProtocolErr("events"); err != nil {
+		return nil, false, afterSequence, err
+	}
 	return []interface{}{&A2ATaskStatusUpdateEvent{
 		Kind:      "status-update",
 		TaskID:    taskID,
@@ -1797,25 +2009,34 @@ func (f *fakeA2AService) ListProtocolTaskEvents(_ context.Context, userID uuid.U
 func (f *fakeA2AService) SetPushNotificationConfig(_ context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) (*A2ATaskPushNotificationConfig, error) {
 	f.record("push/set", userID, slug)
 	f.pushParams = *params
+	if err := f.maybeProtocolErr("push/set"); err != nil {
+		return nil, err
+	}
 	return fakeA2APushConfig(params), nil
 }
 
 func (f *fakeA2AService) GetPushNotificationConfig(_ context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) (*A2ATaskPushNotificationConfig, error) {
 	f.record("push/get", userID, slug)
 	f.pushParams = *params
+	if err := f.maybeProtocolErr("push/get"); err != nil {
+		return nil, err
+	}
 	return fakeA2APushConfig(params), nil
 }
 
 func (f *fakeA2AService) ListPushNotificationConfigs(_ context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) (*A2ATaskPushConfigList, error) {
 	f.record("push/list", userID, slug)
 	f.pushParams = *params
+	if err := f.maybeProtocolErr("push/list"); err != nil {
+		return nil, err
+	}
 	return &A2ATaskPushConfigList{Items: []A2ATaskPushNotificationConfig{*fakeA2APushConfig(params)}}, nil
 }
 
 func (f *fakeA2AService) DeletePushNotificationConfig(_ context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) error {
 	f.record("push/delete", userID, slug)
 	f.pushParams = *params
-	return nil
+	return f.maybeProtocolErr("push/delete")
 }
 
 type controlA2AService struct {
