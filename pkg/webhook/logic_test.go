@@ -17,11 +17,25 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	"github.com/kinzhi/openlinker-core/pkg/config"
 	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
 	"github.com/kinzhi/openlinker-core/pkg/httpx"
 )
 
 func TestWebhookPureHelpers(t *testing.T) {
+	cfg := &config.Config{AllowLocalHTTPEndpoints: true}
+	svc := NewService(nil, cfg)
+	if svc == nil || svc.pool != nil || svc.httpClient == nil || !svc.allowLocalHTTP {
+		t.Fatalf("NewService did not preserve optional config: %+v", svc)
+	}
+	if withoutCfg := NewService(nil); withoutCfg == nil || withoutCfg.allowLocalHTTP {
+		t.Fatalf("NewService without config should keep local HTTP disabled: %+v", withoutCfg)
+	}
+	handler := NewHandler(nil, cfg)
+	if handler == nil || handler.validator == nil || handler.cfg != cfg {
+		t.Fatalf("NewHandler did not preserve optional config: %+v", handler)
+	}
+
 	for _, tc := range []struct {
 		attempt int
 		want    time.Duration
@@ -137,6 +151,9 @@ func TestRunWebhookNormalizationAndPayloads(t *testing.T) {
 	if scheme, creds := normalizePushAuth("Bearer", " "); scheme != nil || creds != nil {
 		t.Fatalf("empty credentials should omit auth: %#v %#v", scheme, creds)
 	}
+	if scheme, creds := normalizePushAuth(" ", "token"); scheme != nil || creds != nil {
+		t.Fatalf("empty scheme should omit auth: %#v %#v", scheme, creds)
+	}
 
 	for _, tc := range []struct {
 		action string
@@ -195,6 +212,11 @@ func TestRunWebhookNormalizationAndPayloads(t *testing.T) {
 	if sub.EventTypes[0] != "run.completed" {
 		t.Fatalf("response should copy event types")
 	}
+	sub.PushAuthScheme = nil
+	noAuthResp := runWebhookSubscriptionToResponse(sub)
+	if noAuthResp.PushAuthScheme != "" {
+		t.Fatalf("nil push auth scheme should serialize empty: %+v", noAuthResp)
+	}
 
 	event := db.RunEvent{
 		ID:          uuid.New(),
@@ -214,6 +236,12 @@ func TestRunWebhookNormalizationAndPayloads(t *testing.T) {
 	if rawPayload.Payload["raw"] != "not-json" {
 		t.Fatalf("invalid payload should be preserved as raw: %+v", rawPayload.Payload)
 	}
+	event.ParentRunID = nil
+	event.Payload = nil
+	emptyPayload := runWebhookPayload(sub, event)
+	if emptyPayload.ParentRunID != "" || len(emptyPayload.Payload) != 0 {
+		t.Fatalf("nil parent/payload should stay empty: %+v", emptyPayload)
+	}
 
 	status := int32(202)
 	errMsg := "accepted"
@@ -232,6 +260,10 @@ func TestRunWebhookNormalizationAndPayloads(t *testing.T) {
 	})
 	if item.NextRetryAt == nil || *item.NextRetryAt != nextRetry.Format(time.RFC3339) || item.ResponseStatus == nil || *item.ResponseStatus != status {
 		t.Fatalf("delivery list item = %+v", item)
+	}
+	minimalItem := toDeliveryListItem(db.WebhookDelivery{ID: uuid.New(), RunID: uuid.New(), CreatedAt: now, UpdatedAt: now})
+	if minimalItem.NextRetryAt != nil || minimalItem.ResponseStatus != nil || minimalItem.CreatedAt != now.Format(time.RFC3339) {
+		t.Fatalf("minimal delivery list item = %+v", minimalItem)
 	}
 }
 
@@ -327,13 +359,19 @@ func TestWebhookHandlerValidationAndRoutes(t *testing.T) {
 		{name: "set invalid id", method: h.Set, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
 		{name: "set invalid json", method: h.Set, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": id}, body: "{"}, want: http.StatusBadRequest},
 		{name: "set validation", method: h.Set, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": id}, body: `{}`}, want: http.StatusUnprocessableEntity},
+		{name: "clear missing user", method: h.Clear, req: &webhookHandlerRequest{method: http.MethodDelete, target: "/", params: map[string]string{"id": id}}, want: http.StatusUnauthorized},
+		{name: "rotate invalid id", method: h.Rotate, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
 		{name: "list deliveries bad limit", method: h.ListDeliveries, req: &webhookHandlerRequest{method: http.MethodGet, target: "/?limit=bad", userID: userID, params: map[string]string{"id": id}}, want: http.StatusBadRequest},
 		{name: "create run webhook validation", method: h.CreateRunWebhook, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": id}, body: `{}`}, want: http.StatusUnprocessableEntity},
+		{name: "list run webhooks invalid id", method: h.ListRunWebhooks, req: &webhookHandlerRequest{method: http.MethodGet, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
+		{name: "managed list missing user", method: h.ListManagedRunWebhooks, req: &webhookHandlerRequest{method: http.MethodGet, target: "/"}, want: http.StatusUnauthorized},
 		{name: "managed list bad limit", method: h.ListManagedRunWebhooks, req: &webhookHandlerRequest{method: http.MethodGet, target: "/?limit=bad", userID: userID}, want: http.StatusBadRequest},
 		{name: "batch invalid json", method: h.BatchManageRunWebhooks, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: "{"}, want: http.StatusBadRequest},
 		{name: "batch validation", method: h.BatchManageRunWebhooks, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: `{}`}, want: http.StatusUnprocessableEntity},
+		{name: "delete bad run id", method: h.DeleteRunWebhook, req: &webhookHandlerRequest{method: http.MethodDelete, target: "/", userID: userID, params: map[string]string{"id": "bad", "webhookID": webhookID}}, want: http.StatusBadRequest},
 		{name: "delete bad webhook id", method: h.DeleteRunWebhook, req: &webhookHandlerRequest{method: http.MethodDelete, target: "/", userID: userID, params: map[string]string{"id": id, "webhookID": "bad"}}, want: http.StatusBadRequest},
 		{name: "pause bad run id", method: h.PauseRunWebhook, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": "bad", "webhookID": webhookID}}, want: http.StatusBadRequest},
+		{name: "pause bad webhook id", method: h.PauseRunWebhook, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": id, "webhookID": "bad"}}, want: http.StatusBadRequest},
 		{name: "resume bad webhook id", method: h.ResumeRunWebhook, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": id, "webhookID": "bad"}}, want: http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
