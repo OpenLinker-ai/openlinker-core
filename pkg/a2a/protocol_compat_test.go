@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"encoding/json"
+	"math"
 	"net/http/httptest"
 	"testing"
 
@@ -66,6 +67,67 @@ func TestNormalizeA2AResultForCurrentVersionRemovesLegacyDiscriminators(t *testi
 	assert.Equal(t, "report.csv", filePart["filename"])
 	assert.Equal(t, "text/csv", filePart["mediaType"])
 	assert.Equal(t, "internal", body["metadata"].(map[string]interface{})["openlinker"].(map[string]interface{})["kind"])
+}
+
+func TestNormalizeA2AResultForVersionCompatibilityEdges(t *testing.T) {
+	legacy := map[string]interface{}{
+		"kind":  "task",
+		"state": "completed",
+	}
+	assert.Equal(t, legacy, normalizeA2AResultForVersion(legacy, a2aProtocolVersionLegacy))
+	assert.Nil(t, normalizeA2AResultForVersion(nil, a2aProtocolVersionCurrent))
+
+	unmarshalable := map[string]interface{}{"bad": math.Inf(1)}
+	assert.Equal(t, unmarshalable, normalizeA2AResultForVersion(unmarshalable, a2aProtocolVersionCurrent))
+
+	normalized := normalizeA2AResultForVersion([]interface{}{
+		map[string]interface{}{
+			"kind": "message",
+			"parts": []interface{}{
+				"loose-part",
+				map[string]interface{}{"kind": "file", "url": "https://files.example/raw.bin", "fileWithBytes": "Ymlu", "fileName": "raw.bin"},
+			},
+			"nested": map[string]interface{}{"state": "input-required"},
+			"data":   map[string]interface{}{"state": "custom-data-state"},
+		},
+		map[string]interface{}{"kind": "task", "taskId": "task-1", "artifact": map[string]interface{}{}},
+		map[string]interface{}{"kind": "task-status", "id": "task-2", "status": map[string]interface{}{}},
+	}, a2aProtocolVersionCurrent)
+
+	items, ok := normalized.([]interface{})
+	require.True(t, ok)
+	message := items[0].(map[string]interface{})
+	assert.NotContains(t, message, "kind")
+	assert.Equal(t, "TASK_STATE_INPUT_REQUIRED", message["nested"].(map[string]interface{})["state"])
+	assert.Equal(t, "custom-data-state", message["data"].(map[string]interface{})["state"])
+	parts := message["parts"].([]interface{})
+	assert.Equal(t, "loose-part", parts[0])
+	file := parts[1].(map[string]interface{})
+	assert.Equal(t, "https://files.example/raw.bin", file["url"])
+	assert.Equal(t, "Ymlu", file["raw"])
+	assert.Equal(t, "raw.bin", file["filename"])
+	assert.NotContains(t, items[1].(map[string]interface{}), "kind")
+	assert.NotContains(t, items[2].(map[string]interface{}), "kind")
+}
+
+func TestNormalizeA2ATaskStateForCurrentCoversStandardStates(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want string
+	}{
+		{raw: " submitted ", want: "TASK_STATE_SUBMITTED"},
+		{raw: "WORKING", want: "TASK_STATE_WORKING"},
+		{raw: "task_state_completed", want: "TASK_STATE_COMPLETED"},
+		{raw: "task_state_cancelled", want: "TASK_STATE_CANCELED"},
+		{raw: "failed", want: "TASK_STATE_FAILED"},
+		{raw: "task_state_rejected", want: "TASK_STATE_REJECTED"},
+		{raw: "input_required", want: "TASK_STATE_INPUT_REQUIRED"},
+		{raw: "task_state_auth_required", want: "TASK_STATE_AUTH_REQUIRED"},
+		{raw: "unspecified", want: "TASK_STATE_UNSPECIFIED"},
+		{raw: "vendor_state", want: "vendor_state"},
+	} {
+		assert.Equal(t, tc.want, normalizeA2ATaskStateForCurrent(tc.raw))
+	}
 }
 
 func TestNormalizeA2AJSONRPCMethodAcceptsStandardAliases(t *testing.T) {
