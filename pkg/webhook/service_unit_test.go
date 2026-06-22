@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -266,6 +268,208 @@ func TestWebhookServiceProcessPendingDeliversAgentAndRunQueues(t *testing.T) {
 	}
 }
 
+func TestWebhookServiceQueueAndDeliveryErrorEdges(t *testing.T) {
+	userID := uuid.New()
+	agentID := uuid.New()
+	runID := uuid.New()
+	deliveryID := uuid.New()
+	subscriptionID := uuid.New()
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	url := "https://client.example/hook"
+	secret := "webhook-secret"
+	sentinel := errors.New("database stopped")
+	run := &db.Run{
+		ID:         runID,
+		UserID:     userID,
+		AgentID:    agentID,
+		Input:      []byte(`{"prompt":"hi"}`),
+		Status:     "success",
+		CostCents:  42,
+		StartedAt:  now,
+		FinishedAt: &now,
+	}
+
+	if err := (&Service{queries: &fakeWebhookQueries{agentCfgErr: pgx.ErrNoRows}}).
+		EnqueueDelivery(context.Background(), run, "agent-one", map[string]interface{}{"ok": true}); err != nil {
+		t.Fatalf("EnqueueDelivery missing agent = %v", err)
+	}
+	if err := (&Service{queries: &fakeWebhookQueries{agentCfgErr: sentinel}}).
+		EnqueueDelivery(context.Background(), run, "agent-one", nil); err == nil {
+		t.Fatalf("EnqueueDelivery config error should propagate")
+	}
+	if err := (&Service{queries: &fakeWebhookQueries{agentCfg: db.GetAgentWebhookConfigRow{ID: agentID, CreatorID: userID}}}).
+		EnqueueDelivery(context.Background(), run, "agent-one", nil); err != nil {
+		t.Fatalf("EnqueueDelivery without url = %v", err)
+	}
+
+	createErrQ := &fakeWebhookQueries{
+		agentCfg:          db.GetAgentWebhookConfigRow{ID: agentID, CreatorID: userID, WebhookURL: &url, WebhookSecret: &secret},
+		createDeliveryErr: sentinel,
+	}
+	if err := (&Service{queries: createErrQ}).
+		EnqueueDelivery(context.Background(), run, "agent-one", map[string]interface{}{"ok": true}); err == nil {
+		t.Fatalf("EnqueueDelivery create error should propagate")
+	}
+	if createErrQ.createDeliveryArg.AgentID != agentID || createErrQ.createDeliveryArg.URL != url {
+		t.Fatalf("create delivery arg = %#v", createErrQ.createDeliveryArg)
+	}
+
+	createQ := &fakeWebhookQueries{
+		agentCfg: db.GetAgentWebhookConfigRow{ID: agentID, CreatorID: userID, WebhookURL: &url, WebhookSecret: &secret},
+		createDelivery: db.WebhookDelivery{
+			ID:        deliveryID,
+			AgentID:   agentID,
+			RunID:     runID,
+			URL:       url,
+			Status:    "pending",
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+	if err := (&Service{queries: createQ, httpClient: webhookHTTPClient(http.StatusNoContent, "", nil)}).
+		EnqueueDelivery(context.Background(), run, "agent-one", map[string]interface{}{"ok": true}); err != nil {
+		t.Fatalf("EnqueueDelivery success = %v", err)
+	}
+	var payload WebhookPayload
+	if err := json.Unmarshal(createQ.createDeliveryArg.Payload, &payload); err != nil || payload.AgentSlug != "agent-one" || payload.RunID != runID.String() {
+		t.Fatalf("delivery payload = %#v %v", payload, err)
+	}
+
+	if err := (&Service{queries: &fakeWebhookQueries{deliveryErr: pgx.ErrNoRows}}).
+		AttemptDelivery(context.Background(), deliveryID); err != nil {
+		t.Fatalf("AttemptDelivery missing = %v", err)
+	}
+	if err := (&Service{queries: &fakeWebhookQueries{deliveryErr: sentinel}}).
+		AttemptDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptDelivery query error should propagate")
+	}
+	if err := (&Service{queries: &fakeWebhookQueries{deliveryRow: db.GetWebhookDeliveryRow{WebhookDelivery: db.WebhookDelivery{ID: deliveryID, Status: "success"}}}}).
+		AttemptDelivery(context.Background(), deliveryID); err != nil {
+		t.Fatalf("AttemptDelivery terminal = %v", err)
+	}
+
+	successErrQ := &fakeWebhookQueries{
+		deliveryRow: db.GetWebhookDeliveryRow{
+			WebhookDelivery: db.WebhookDelivery{ID: deliveryID, URL: url, Payload: []byte(`{}`), Status: "pending"},
+			WebhookSecret:   &secret,
+		},
+		successErr: sentinel,
+	}
+	if err := (&Service{queries: successErrQ, httpClient: webhookHTTPClient(http.StatusAccepted, "ok", nil)}).
+		AttemptDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptDelivery success mark error should propagate")
+	}
+
+	retryErrQ := &fakeWebhookQueries{
+		deliveryRow: db.GetWebhookDeliveryRow{
+			WebhookDelivery: db.WebhookDelivery{ID: deliveryID, URL: url, Payload: []byte(`{}`), Status: "pending"},
+			WebhookSecret:   &secret,
+		},
+		retryErr: sentinel,
+	}
+	if err := (&Service{queries: retryErrQ, httpClient: webhookHTTPClient(http.StatusInternalServerError, "temporary", nil)}).
+		AttemptDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptDelivery retry mark error should propagate")
+	}
+
+	finalErrQ := &fakeWebhookQueries{
+		deliveryRow: db.GetWebhookDeliveryRow{
+			WebhookDelivery: db.WebhookDelivery{ID: deliveryID, URL: url, Payload: []byte(`{}`), Status: "pending", AttemptCount: 2},
+			WebhookSecret:   &secret,
+		},
+		finalErr: sentinel,
+	}
+	if err := (&Service{queries: finalErrQ, httpClient: webhookHTTPClient(0, "", errors.New("dial failed"))}).
+		AttemptDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptDelivery final mark error should propagate")
+	}
+
+	if err := (&Service{queries: &fakeWebhookQueries{runDeliveryErr: pgx.ErrNoRows}}).
+		AttemptRunWebhookDelivery(context.Background(), deliveryID); err != nil {
+		t.Fatalf("AttemptRunWebhookDelivery missing = %v", err)
+	}
+	if err := (&Service{queries: &fakeWebhookQueries{runDeliveryErr: sentinel}}).
+		AttemptRunWebhookDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptRunWebhookDelivery query error should propagate")
+	}
+	if err := (&Service{queries: &fakeWebhookQueries{runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{RunWebhookDelivery: db.RunWebhookDelivery{ID: deliveryID, Status: "failed"}}}}).
+		AttemptRunWebhookDelivery(context.Background(), deliveryID); err != nil {
+		t.Fatalf("AttemptRunWebhookDelivery terminal = %v", err)
+	}
+
+	runRetryQ := &fakeWebhookQueries{
+		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
+			RunWebhookDelivery: db.RunWebhookDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending"},
+			TargetURL:          url,
+			Secret:             secret,
+			EventType:          "run.completed",
+		},
+	}
+	if err := (&Service{queries: runRetryQ, httpClient: webhookHTTPClient(http.StatusTooManyRequests, "slow down", nil)}).
+		AttemptRunWebhookDelivery(context.Background(), deliveryID); err != nil {
+		t.Fatalf("AttemptRunWebhookDelivery retry = %v", err)
+	}
+	if runRetryQ.runRetryArg.ID != deliveryID || runRetryQ.runRetryArg.NextRetryAt.IsZero() {
+		t.Fatalf("run retry arg = %#v", runRetryQ.runRetryArg)
+	}
+
+	runSuccessErrQ := &fakeWebhookQueries{
+		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
+			RunWebhookDelivery: db.RunWebhookDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending"},
+			TargetURL:          url,
+			Secret:             secret,
+			EventType:          "run.completed",
+		},
+		runSuccessErr: sentinel,
+	}
+	if err := (&Service{queries: runSuccessErrQ, httpClient: webhookHTTPClient(http.StatusOK, "ok", nil)}).
+		AttemptRunWebhookDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptRunWebhookDelivery success mark error should propagate")
+	}
+
+	resetErrQ := &fakeWebhookQueries{
+		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
+			RunWebhookDelivery: db.RunWebhookDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending"},
+			TargetURL:          url,
+			Secret:             secret,
+			EventType:          "run.completed",
+		},
+		resetErr: sentinel,
+	}
+	if err := (&Service{queries: resetErrQ, httpClient: webhookHTTPClient(http.StatusOK, "ok", nil)}).
+		AttemptRunWebhookDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptRunWebhookDelivery reset error should propagate")
+	}
+
+	runFinalErrQ := &fakeWebhookQueries{
+		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
+			RunWebhookDelivery: db.RunWebhookDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending", AttemptCount: 2},
+			TargetURL:          url,
+			Secret:             secret,
+			EventType:          "run.completed",
+		},
+		runFinalErr: sentinel,
+	}
+	if err := (&Service{queries: runFinalErrQ, httpClient: webhookHTTPClient(http.StatusBadGateway, "bad", nil)}).
+		AttemptRunWebhookDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptRunWebhookDelivery final mark error should propagate")
+	}
+
+	incrementErrQ := &fakeWebhookQueries{
+		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
+			RunWebhookDelivery: db.RunWebhookDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending", AttemptCount: 2},
+			TargetURL:          url,
+			Secret:             secret,
+			EventType:          "run.completed",
+		},
+		incrementErr: sentinel,
+	}
+	if err := (&Service{queries: incrementErrQ, httpClient: webhookHTTPClient(http.StatusBadGateway, "bad", nil)}).
+		AttemptRunWebhookDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptRunWebhookDelivery increment error should propagate")
+	}
+}
+
 func TestWebhookRunSubscriptionManagement(t *testing.T) {
 	userID := uuid.New()
 	runID := uuid.New()
@@ -387,6 +591,10 @@ func TestWebhookServiceErrors(t *testing.T) {
 	otherUser := uuid.New()
 	url := "https://client.example/hook"
 	sentinel := errors.New("database stopped")
+	tooManyIDs := make([]string, 51)
+	for i := range tooManyIDs {
+		tooManyIDs[i] = uuid.NewString()
+	}
 
 	for _, tc := range []struct {
 		name string
@@ -431,6 +639,41 @@ func TestWebhookServiceErrors(t *testing.T) {
 			want: http.StatusInternalServerError,
 		},
 		{
+			name: "clear db error",
+			call: func(s *Service) error {
+				return s.ClearWebhook(context.Background(), agentID, userID)
+			},
+			q:    &fakeWebhookQueries{clearErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
+		{
+			name: "rotate missing agent",
+			call: func(s *Service) error {
+				_, err := s.RotateSecret(context.Background(), agentID, userID)
+				return err
+			},
+			q:    &fakeWebhookQueries{agentCfgErr: pgx.ErrNoRows},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "rotate query error",
+			call: func(s *Service) error {
+				_, err := s.RotateSecret(context.Background(), agentID, userID)
+				return err
+			},
+			q:    &fakeWebhookQueries{agentCfgErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
+		{
+			name: "rotate owner mismatch",
+			call: func(s *Service) error {
+				_, err := s.RotateSecret(context.Background(), agentID, userID)
+				return err
+			},
+			q:    &fakeWebhookQueries{agentCfg: db.GetAgentWebhookConfigRow{ID: agentID, CreatorID: otherUser}},
+			want: http.StatusNotFound,
+		},
+		{
 			name: "rotate without url",
 			call: func(s *Service) error {
 				_, err := s.RotateSecret(context.Background(), agentID, userID)
@@ -438,6 +681,24 @@ func TestWebhookServiceErrors(t *testing.T) {
 			},
 			q:    &fakeWebhookQueries{agentCfg: db.GetAgentWebhookConfigRow{ID: agentID, CreatorID: userID}},
 			want: http.StatusBadRequest,
+		},
+		{
+			name: "rotate save error",
+			call: func(s *Service) error {
+				_, err := s.RotateSecret(context.Background(), agentID, userID)
+				return err
+			},
+			q:    &fakeWebhookQueries{agentCfg: db.GetAgentWebhookConfigRow{ID: agentID, CreatorID: userID, WebhookURL: &url}, setErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
+		{
+			name: "rotate no rows",
+			call: func(s *Service) error {
+				_, err := s.RotateSecret(context.Background(), agentID, userID)
+				return err
+			},
+			q:    &fakeWebhookQueries{agentCfg: db.GetAgentWebhookConfigRow{ID: agentID, CreatorID: userID, WebhookURL: &url}},
+			want: http.StatusNotFound,
 		},
 		{
 			name: "clear missing",
@@ -448,6 +709,33 @@ func TestWebhookServiceErrors(t *testing.T) {
 			want: http.StatusNotFound,
 		},
 		{
+			name: "list deliveries missing agent",
+			call: func(s *Service) error {
+				_, err := s.ListDeliveries(context.Background(), agentID, userID, 20)
+				return err
+			},
+			q:    &fakeWebhookQueries{agentCfgErr: pgx.ErrNoRows},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "list deliveries query owner error",
+			call: func(s *Service) error {
+				_, err := s.ListDeliveries(context.Background(), agentID, userID, 20)
+				return err
+			},
+			q:    &fakeWebhookQueries{agentCfgErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
+		{
+			name: "list deliveries owner mismatch",
+			call: func(s *Service) error {
+				_, err := s.ListDeliveries(context.Background(), agentID, userID, 20)
+				return err
+			},
+			q:    &fakeWebhookQueries{agentCfg: db.GetAgentWebhookConfigRow{ID: agentID, CreatorID: otherUser}},
+			want: http.StatusNotFound,
+		},
+		{
 			name: "list deliveries query error",
 			call: func(s *Service) error {
 				_, err := s.ListDeliveries(context.Background(), agentID, userID, 20)
@@ -455,6 +743,33 @@ func TestWebhookServiceErrors(t *testing.T) {
 			},
 			q:    &fakeWebhookQueries{agentCfg: db.GetAgentWebhookConfigRow{ID: agentID, CreatorID: userID}, listDeliveriesErr: sentinel},
 			want: http.StatusInternalServerError,
+		},
+		{
+			name: "create run webhook nil request",
+			call: func(s *Service) error {
+				_, err := s.CreateRunWebhookSubscription(context.Background(), runID, userID, nil)
+				return err
+			},
+			q:    &fakeWebhookQueries{},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "create run webhook invalid url",
+			call: func(s *Service) error {
+				_, err := s.CreateRunWebhookSubscription(context.Background(), runID, userID, &CreateRunWebhookRequest{URL: "http://127.0.0.1/hook"})
+				return err
+			},
+			q:    &fakeWebhookQueries{},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "create run webhook invalid metadata",
+			call: func(s *Service) error {
+				_, err := s.CreateRunWebhookSubscription(context.Background(), runID, userID, &CreateRunWebhookRequest{URL: url, PushMetadata: map[string]interface{}{"bad": func() {}}})
+				return err
+			},
+			q:    &fakeWebhookQueries{},
+			want: http.StatusBadRequest,
 		},
 		{
 			name: "create run webhook missing run",
@@ -475,6 +790,33 @@ func TestWebhookServiceErrors(t *testing.T) {
 			want: http.StatusNotFound,
 		},
 		{
+			name: "create run webhook query error",
+			call: func(s *Service) error {
+				_, err := s.CreateRunWebhookSubscription(context.Background(), runID, userID, &CreateRunWebhookRequest{URL: url})
+				return err
+			},
+			q:    &fakeWebhookQueries{runErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
+		{
+			name: "create run webhook insert error",
+			call: func(s *Service) error {
+				_, err := s.CreateRunWebhookSubscription(context.Background(), runID, userID, &CreateRunWebhookRequest{URL: url})
+				return err
+			},
+			q:    &fakeWebhookQueries{run: db.Run{ID: runID, UserID: userID}, createSubErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
+		{
+			name: "list run webhooks query error",
+			call: func(s *Service) error {
+				_, err := s.ListRunWebhookSubscriptions(context.Background(), runID, userID)
+				return err
+			},
+			q:    &fakeWebhookQueries{run: db.Run{ID: runID, UserID: userID}, listSubsErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
+		{
 			name: "managed list invalid status",
 			call: func(s *Service) error {
 				_, err := s.ListRunWebhookSubscriptionsForOwner(context.Background(), userID, "deleted", 20)
@@ -482,6 +824,69 @@ func TestWebhookServiceErrors(t *testing.T) {
 			},
 			q:    &fakeWebhookQueries{},
 			want: http.StatusBadRequest,
+		},
+		{
+			name: "managed list query error",
+			call: func(s *Service) error {
+				_, err := s.ListRunWebhookSubscriptionsForOwner(context.Background(), userID, "active", 20)
+				return err
+			},
+			q:    &fakeWebhookQueries{listOwnerErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
+		{
+			name: "batch nil request",
+			call: func(s *Service) error {
+				_, err := s.BatchManageRunWebhookSubscriptions(context.Background(), userID, nil)
+				return err
+			},
+			q:    &fakeWebhookQueries{},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "batch invalid action",
+			call: func(s *Service) error {
+				_, err := s.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{SubscriptionIDs: []string{subID.String()}, Action: "archive"})
+				return err
+			},
+			q:    &fakeWebhookQueries{},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "batch empty ids",
+			call: func(s *Service) error {
+				_, err := s.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{Action: "pause"})
+				return err
+			},
+			q:    &fakeWebhookQueries{},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "batch invalid id",
+			call: func(s *Service) error {
+				_, err := s.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{SubscriptionIDs: []string{"bad"}, Action: "pause"})
+				return err
+			},
+			q:    &fakeWebhookQueries{},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "batch too many ids",
+			call: func(s *Service) error {
+				_, err := s.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{SubscriptionIDs: tooManyIDs, Action: "pause"})
+				return err
+			},
+			q:    &fakeWebhookQueries{},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "batch update error",
+			call: func(s *Service) error {
+				_, err := s.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{SubscriptionIDs: []string{subID.String()}, Action: "resume"})
+				return err
+			},
+			q:    &fakeWebhookQueries{batchErr: sentinel},
+			want: http.StatusInternalServerError,
 		},
 		{
 			name: "update invalid status",
@@ -493,6 +898,24 @@ func TestWebhookServiceErrors(t *testing.T) {
 			want: http.StatusBadRequest,
 		},
 		{
+			name: "update missing subscription",
+			call: func(s *Service) error {
+				_, err := s.UpdateRunWebhookSubscriptionStatus(context.Background(), runID, subID, userID, "paused")
+				return err
+			},
+			q:    &fakeWebhookQueries{run: db.Run{ID: runID, UserID: userID}, updateErr: pgx.ErrNoRows},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "update query error",
+			call: func(s *Service) error {
+				_, err := s.UpdateRunWebhookSubscriptionStatus(context.Background(), runID, subID, userID, "paused")
+				return err
+			},
+			q:    &fakeWebhookQueries{run: db.Run{ID: runID, UserID: userID}, updateErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
+		{
 			name: "delete missing subscription",
 			call: func(s *Service) error {
 				return s.DeleteRunWebhookSubscription(context.Background(), runID, subID, userID)
@@ -500,11 +923,39 @@ func TestWebhookServiceErrors(t *testing.T) {
 			q:    &fakeWebhookQueries{run: db.Run{ID: runID, UserID: userID}},
 			want: http.StatusNotFound,
 		},
+		{
+			name: "delete query error",
+			call: func(s *Service) error {
+				return s.DeleteRunWebhookSubscription(context.Background(), runID, subID, userID)
+			},
+			q:    &fakeWebhookQueries{run: db.Run{ID: runID, UserID: userID}, deleteErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requireWebhookHTTPStatus(t, tc.call(&Service{queries: tc.q, httpClient: http.DefaultClient}), tc.want)
 		})
 	}
+}
+
+type webhookRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f webhookRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func webhookHTTPClient(status int, body string, err error) *http.Client {
+	return &http.Client{Transport: webhookRoundTripper(func(*http.Request) (*http.Response, error) {
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode:    status,
+			Header:        make(http.Header),
+			Body:          io.NopCloser(strings.NewReader(body)),
+			ContentLength: int64(len(body)),
+		}, nil
+	})}
 }
 
 type fakeWebhookQueries struct {
