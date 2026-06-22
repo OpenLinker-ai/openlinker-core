@@ -38,6 +38,15 @@ func TestWorkflowGraphAndEdgeHelpers(t *testing.T) {
 	if len(edges) != 1 || edges[0]["from"] != "extract" || edges[0]["to"] != "summarize" || edges[0]["label"] != "handoff" {
 		t.Fatalf("normalized edges = %#v", edges)
 	}
+	if got := workflowEdgeEndpoint(map[string]interface{}{"from": 123, "sourceKey": " fallback "}, "from", "sourceKey"); got != "fallback" {
+		t.Fatalf("workflowEdgeEndpoint fallback = %q", got)
+	}
+	if workflowEdgeEndpoint(map[string]interface{}{"from": 123}, "from") != "" {
+		t.Fatalf("workflowEdgeEndpoint should ignore non-string endpoints")
+	}
+	if !isWorkflowEndpointKey("sourceKey") || isWorkflowEndpointKey("label") {
+		t.Fatalf("isWorkflowEndpointKey failed")
+	}
 
 	for _, tc := range []struct {
 		name     string
@@ -98,6 +107,16 @@ func TestWorkflowGraphAndEdgeHelpers(t *testing.T) {
 	}); err == nil {
 		t.Fatalf("cycle should fail")
 	}
+	if _, err := buildWorkflowGraph(dagNodes, []map[string]interface{}{{"from": "missing", "to": "analyze"}}); err == nil {
+		t.Fatalf("direct graph build with unknown from should fail")
+	}
+	if _, err := buildWorkflowGraph(dagNodes, []map[string]interface{}{{"from": "collect", "to": "missing"}}); err == nil {
+		t.Fatalf("direct graph build with unknown to should fail")
+	}
+	emptyGraph, err := buildWorkflowGraph(nil, nil)
+	if err != nil || len(emptyGraph.Levels) != 0 || len(emptyGraph.Sinks) != 0 {
+		t.Fatalf("empty graph = %+v %v", emptyGraph, err)
+	}
 
 	requestNodes := []WorkflowNodeRequest{
 		{Key: " collect ", AgentID: uuid.New()},
@@ -128,6 +147,10 @@ func TestWorkflowGraphAndEdgeHelpers(t *testing.T) {
 	}
 	if _, err := workflowGraphFromDefinition(db.Workflow{Edges: []byte(`[{"from":"collect","to":"missing"}]`)}, dagNodes); err == nil {
 		t.Fatalf("stored workflow edges with unknown endpoint should fail")
+	}
+	singleDefined, err := workflowGraphFromDefinition(db.Workflow{}, []db.WorkflowNode{{NodeKey: "only", Position: 0}})
+	if err != nil || !reflect.DeepEqual(singleDefined.Sinks, []string{"only"}) {
+		t.Fatalf("single node definition graph = %+v %v", singleDefined, err)
 	}
 }
 
@@ -238,6 +261,14 @@ func TestWorkflowResponseAndDataHelpers(t *testing.T) {
 	if workflowResp.Edges[0]["from"] != "extract" || workflowResp.CreatedAt != now.Format(time.RFC3339) {
 		t.Fatalf("workflow response edges/time = %+v", workflowResp)
 	}
+	invalidWorkflowResp := workflowToResponse(db.Workflow{ID: workflowID, Edges: []byte(`bad`), CreatedAt: now, UpdatedAt: now}, nil)
+	if len(invalidWorkflowResp.Edges) != 0 {
+		t.Fatalf("invalid workflow edges should be dropped, got %+v", invalidWorkflowResp.Edges)
+	}
+	invalidNodeResp := workflowNodeToResponse(db.WorkflowNode{ID: uuid.New(), AgentID: agentID, Config: []byte(`bad`)})
+	if len(invalidNodeResp.Config) != 0 {
+		t.Fatalf("invalid node config should decode to empty map, got %+v", invalidNodeResp.Config)
+	}
 
 	errMsg := "failed once"
 	nextRetry := now.Add(time.Minute)
@@ -284,6 +315,28 @@ func TestWorkflowResponseAndDataHelpers(t *testing.T) {
 	}
 	if runResp.Steps[0].RunID != childRunID.String() || runResp.Steps[0].Error != stepErr || runResp.Steps[0].Output["summary"] != "partial" {
 		t.Fatalf("step response = %+v", runResp.Steps[0])
+	}
+	invalidRunResp := workflowRunToResponse(db.WorkflowRun{
+		ID:         uuid.New(),
+		WorkflowID: workflowID,
+		Status:     "running",
+		Input:      []byte(`bad`),
+		Output:     []byte(`bad`),
+		StartedAt:  now,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}, []db.WorkflowRunStep{{
+		ID:             uuid.New(),
+		WorkflowNodeID: uuid.New(),
+		NodeKey:        "bad",
+		AgentID:        agentID,
+		Status:         "running",
+		Input:          []byte(`bad`),
+		Output:         []byte(`bad`),
+		StartedAt:      now,
+	}})
+	if len(invalidRunResp.Input) != 0 || len(invalidRunResp.Output) != 0 || invalidRunResp.Steps[0].RunID != "" || len(invalidRunResp.Steps[0].Input) != 0 || len(invalidRunResp.Steps[0].Output) != 0 {
+		t.Fatalf("invalid run/step JSON response = %+v", invalidRunResp)
 	}
 
 	stepOutput, err := workflowStepOutputMap(db.WorkflowRunStep{NodeKey: "extract", Output: []byte(`{"ok":true}`)})
@@ -386,6 +439,15 @@ func TestWorkflowComparisonAndRerunHelpers(t *testing.T) {
 	}
 	if len(comparison.Steps) != 3 || comparison.Steps[0].Changed || !comparison.Steps[1].StatusChanged || !comparison.Steps[1].RunChanged || !comparison.Steps[1].OutputChanged || !comparison.Steps[1].ErrorChanged || !comparison.Steps[2].Changed {
 		t.Fatalf("unexpected step comparison = %+v", comparison.Steps)
+	}
+	missingCandidate := compareWorkflowRuns(
+		db.WorkflowRun{ID: baseRunID, WorkflowID: workflowID, Status: "success", Output: []byte(`{"ok":true}`)},
+		db.WorkflowRun{ID: candidateRunID, WorkflowID: workflowID, Status: "failed", Output: []byte(`{"ok":false}`)},
+		[]db.WorkflowRunStep{{NodeKey: "archive", Status: "success", RunID: &baseChildRunID, Output: []byte(`{"done":true}`)}},
+		nil,
+	)
+	if !missingCandidate.StatusChanged || !missingCandidate.OutputChanged || !reflect.DeepEqual(missingCandidate.ChangedNodeKeys, []string{"archive"}) || len(missingCandidate.Steps) != 1 || !missingCandidate.Steps[0].Changed {
+		t.Fatalf("missing candidate comparison = %+v", missingCandidate)
 	}
 
 	if workflowRunIDString(nil) != "" || workflowRunIDString(&baseChildRunID) != baseChildRunID.String() {
