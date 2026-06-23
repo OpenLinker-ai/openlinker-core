@@ -343,6 +343,33 @@ func TestFindOrCreateOAuthUser_MissingProvider(t *testing.T) {
 	assertHTTPStatus(t, err, http.StatusBadRequest)
 }
 
+func TestOAuthCodeExchangeIsOneTime(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	resp, err := svc.FindOrCreateOAuthUser(ctx,
+		"google",
+		"google-code-"+uuid.NewString()[:8],
+		uniqueEmail("oauth-code"),
+		"OAuth Code",
+		"",
+	)
+	require.NoError(t, err)
+
+	code, err := svc.IssueOAuthCode(ctx, resp)
+	require.NoError(t, err)
+	require.Len(t, code, 64)
+
+	exchanged, err := svc.ExchangeOAuthCode(ctx, code)
+	require.NoError(t, err)
+	assert.Equal(t, resp.UserID, exchanged.UserID)
+	assert.Equal(t, resp.JWT, exchanged.JWT)
+
+	_, err = svc.ExchangeOAuthCode(ctx, code)
+	assertHTTPStatus(t, err, http.StatusUnauthorized)
+}
+
 // ─────────────────────────────────────────────────────────
 // GetMe
 // ─────────────────────────────────────────────────────────

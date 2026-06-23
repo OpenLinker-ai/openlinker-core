@@ -475,6 +475,8 @@ func sourceFromCtx(c echo.Context) string {
 }
 
 func requireAPIKeyScope(c echo.Context, scope string) error {
+	// Runtime endpoints are intentionally dual-use: browser JWT sessions act as
+	// the first-party user, while API-key callers must prove the narrower scope.
 	if httpx.AuthMethodFrom(c) == "apikey" && !httpx.HasScope(c, scope) {
 		return httpx.Forbidden("访问令牌缺少 scope: " + scope)
 	}

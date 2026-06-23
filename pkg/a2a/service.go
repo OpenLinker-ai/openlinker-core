@@ -3,6 +3,7 @@ package a2a
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"time"
 
@@ -21,6 +22,8 @@ import (
 const (
 	runtimeTokenPrefixLen = credential.PrefixLen
 	maxRuntimeTokens      = 10
+	maxDelegationDepth    = 8
+	maxRunningDelegations = 500
 	defaultParentPage     = 1
 	defaultParentPageSize = 10
 	maxParentPageSize     = 50
@@ -28,13 +31,27 @@ const (
 )
 
 type Service struct {
-	queries *db.Queries
-	runtime *runtime.Service
-	runPush runPushManager
+	queries               *db.Queries
+	pool                  *pgxpool.Pool
+	runtime               *runtime.Service
+	runPush               runPushManager
+	maxDelegationDepth    int
+	maxRunningDelegations int
 }
 
 func NewService(pool *pgxpool.Pool, runtimeSvc *runtime.Service) *Service {
-	return &Service{queries: db.New(pool), runtime: runtimeSvc}
+	return &Service{
+		queries:               db.New(pool),
+		pool:                  pool,
+		runtime:               runtimeSvc,
+		maxDelegationDepth:    maxDelegationDepth,
+		maxRunningDelegations: maxRunningDelegations,
+	}
+}
+
+func (s *Service) SetDelegationLimits(maxDepth, maxRunning int) {
+	s.maxDelegationDepth = maxDepth
+	s.maxRunningDelegations = maxRunning
 }
 
 func (s *Service) CreateRuntimeToken(ctx context.Context, userID, agentID uuid.UUID, req *CreateRuntimeTokenRequest) (*RuntimeTokenResponse, error) {
@@ -55,7 +72,7 @@ func (s *Service) CreateRuntimeToken(ctx context.Context, userID, agentID uuid.U
 	if err != nil {
 		return nil, httpx.Internal("生成访问令牌失败")
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), credential.BcryptCost)
 	if err != nil {
 		return nil, httpx.Internal("加密访问令牌失败")
 	}
@@ -410,6 +427,9 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 	if policy == "private" || (policy == "same_creator" && caller.CreatorID != target.CreatorID) {
 		return nil, httpx.Forbidden("目标 Agent 不接受当前 Agent 的调用")
 	}
+	if err := s.enforceDelegationLimits(ctx, parentRunID, targetAgentID); err != nil {
+		return nil, err
+	}
 
 	_ = s.queries.TouchAgentRuntimeToken(ctx, callerToken.ID)
 	return s.runtime.RunDelegated(ctx, parent.UserID, runtime.Delegation{
@@ -421,6 +441,79 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 		Input:    req.Input,
 		Metadata: req.Metadata,
 	})
+}
+
+func (s *Service) enforceDelegationLimits(ctx context.Context, parentRunID, targetAgentID uuid.UUID) error {
+	if s.maxDelegationDepth > 0 {
+		lineage, err := s.delegationLineage(ctx, parentRunID)
+		if err != nil {
+			log.Error().Err(err).Str("parent_run_id", parentRunID.String()).Msg("a2a.enforceDelegationLimits: lineage")
+			return httpx.Internal("检查 Agent 调用链失败")
+		}
+		for _, agentID := range lineage {
+			if agentID == targetAgentID {
+				return httpx.Unprocessable("A2A 调用链不能形成循环")
+			}
+		}
+		if len(lineage) > s.maxDelegationDepth {
+			return httpx.Unprocessable("A2A 调用链深度超过限制")
+		}
+	}
+	if s.maxRunningDelegations > 0 {
+		count, err := s.runningDelegationCount(ctx)
+		if err != nil {
+			log.Error().Err(err).Msg("a2a.enforceDelegationLimits: running count")
+			return httpx.Internal("检查 Agent 委派并发失败")
+		}
+		if count >= s.maxRunningDelegations {
+			return httpx.NewError(http.StatusTooManyRequests, httpx.CodeRateLimited, "A2A 委派并发已达上限，请稍后再试")
+		}
+	}
+	return nil
+}
+
+func (s *Service) delegationLineage(ctx context.Context, runID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := s.pool.Query(ctx, `
+WITH RECURSIVE lineage AS (
+    SELECT r.id, r.agent_id, 0 AS depth
+    FROM runs r
+    WHERE r.id = $1
+  UNION ALL
+    SELECT p.id, p.agent_id, lineage.depth + 1
+    FROM lineage
+    JOIN run_delegations d ON d.child_run_id = lineage.id
+    JOIN runs p ON p.id = d.parent_run_id
+    WHERE lineage.depth < $2
+)
+SELECT agent_id
+FROM lineage
+ORDER BY depth ASC
+`, runID, s.maxDelegationDepth+1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var lineage []uuid.UUID
+	for rows.Next() {
+		var agentID uuid.UUID
+		if err := rows.Scan(&agentID); err != nil {
+			return nil, err
+		}
+		lineage = append(lineage, agentID)
+	}
+	return lineage, rows.Err()
+}
+
+func (s *Service) runningDelegationCount(ctx context.Context) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `
+SELECT COUNT(*)::int
+FROM run_delegations d
+JOIN runs r ON r.id = d.child_run_id
+WHERE r.status = 'running'
+`).Scan(&count)
+	return count, err
 }
 
 func currentRunIDFromRequest(req *CallAgentRequest) (uuid.UUID, error) {

@@ -44,6 +44,9 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 		cfg.DBMaxConnIdleTimeMinutes != 5 || cfg.DBHealthCheckPeriodSeconds != 60 {
 		t.Fatalf("unexpected db pool defaults: %#v", cfg)
 	}
+	if cfg.RunBillingMode != "free" {
+		t.Fatalf("RunBillingMode default = %q, want free", cfg.RunBillingMode)
+	}
 	if !cfg.AllowLocalHTTPEndpoints {
 		t.Fatalf("expected AllowLocalHTTPEndpoints from env")
 	}

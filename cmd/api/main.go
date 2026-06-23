@@ -32,10 +32,12 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/db"
 	dbgen "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/llm"
 	openlinkerlog "github.com/OpenLinker-ai/openlinker-core/pkg/log"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/ratelimit"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/redisx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/wallet"
 )
 
 func main() {
@@ -80,7 +82,20 @@ func main() {
 	registerHealthRoutes(e, cfg, pool)
 	opts := coreapi.Options{
 		AdminMiddleware: auth.AdminMiddleware(dbgen.New(pool)),
+		LLMClient:       llm.NewAnthropicClient(cfg.AnthropicAPIKey),
 		RuntimeLimiter:  runtimeLimiter,
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.RunBillingMode)) {
+	case "", "free":
+		log.Info().Msg("runtime wallet billing disabled; runs are free")
+	case "wallet":
+		opts.WalletCharger = wallet.NewCharger()
+		log.Info().Msg("runtime wallet billing enabled")
+	default:
+		log.Fatal().Str("mode", cfg.RunBillingMode).Msg("invalid RUN_BILLING_MODE; expected free or wallet")
+	}
+	if opts.LLMClient != nil {
+		log.Info().Msg("anthropic llm client configured")
 	}
 	if verifier := auth.NewRemoteAPIKeyVerifier(cfg.APIKeyVerifyURL); verifier != nil {
 		opts.APIKeyVerifier = verifier

@@ -54,8 +54,8 @@ type Config struct {
 
 	// 业务参数
 	PlatformFeeRate         float64 `envconfig:"PLATFORM_FEE_RATE" default:"0.25"`
+	RunBillingMode          string  `envconfig:"RUN_BILLING_MODE" default:"free"`
 	RunTimeoutSeconds       int     `envconfig:"RUN_TIMEOUT_SECONDS" default:"60"`
-	MinWithdrawalCents      int     `envconfig:"MIN_WITHDRAWAL_CENTS" default:"5000"`
 	AllowLocalHTTPEndpoints bool    `envconfig:"ALLOW_LOCAL_HTTP_ENDPOINTS" default:"false"`
 
 	// Agent availability monitor.

@@ -14,6 +14,9 @@ const (
 	LegacyAPIKeyPrefix       = "sk_live_"
 	LegacyRegistrationPrefix = "br_live_"
 	LegacyAgentPrefix        = "rt_live_"
+
+	// BcryptCost matches user passwords and cloud API keys.
+	BcryptCost = 12
 )
 
 func GenerateAccessToken() (plaintext, prefix string, err error) {

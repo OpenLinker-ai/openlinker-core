@@ -65,6 +65,27 @@ func TestAuthHandlerDispatchesServiceSuccess(t *testing.T) {
 		}
 	})
 
+	t.Run("oauth exchange", func(t *testing.T) {
+		code := strings.Repeat("a", 64)
+		mock := &mockAuthService{exchangeResp: authResp}
+		c, rec := newAuthRecorderContext(http.MethodPost, "/auth/oauth/exchange", `{"code":"`+code+`"}`, "")
+
+		if err := NewHandler(mock).PostOAuthExchange(c); err != nil {
+			t.Fatalf("PostOAuthExchange error = %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		if mock.exchangeCode != code {
+			t.Fatalf("captured exchange code = %q", mock.exchangeCode)
+		}
+		var body AuthResponse
+		decodeAuthDispatchJSON(t, rec, &body)
+		if body.UserID != userID.String() || body.JWT == "" {
+			t.Fatalf("body = %#v", body)
+		}
+	})
+
 	t.Run("get me", func(t *testing.T) {
 		mock := &mockAuthService{getMeResp: meResp}
 		c, rec := newAuthRecorderContext(http.MethodGet, "/me", "", userID.String())
@@ -140,6 +161,12 @@ func TestAuthHandlerPropagatesServiceErrors(t *testing.T) {
 		requireAuthHTTPStatus(t, NewHandler(mock).PostLogin(c), http.StatusUnauthorized)
 	})
 
+	t.Run("oauth exchange", func(t *testing.T) {
+		mock := &mockAuthService{exchangeErr: httpx.Unauthorized("bad code")}
+		c, _ := newAuthRecorderContext(http.MethodPost, "/auth/oauth/exchange", `{"code":"`+strings.Repeat("a", 64)+`"}`, "")
+		requireAuthHTTPStatus(t, NewHandler(mock).PostOAuthExchange(c), http.StatusUnauthorized)
+	})
+
 	t.Run("get me", func(t *testing.T) {
 		mock := &mockAuthService{getMeErr: httpx.NotFound("missing")}
 		c, _ := newAuthRecorderContext(http.MethodGet, "/me", "", userID.String())
@@ -180,6 +207,12 @@ type mockAuthService struct {
 	oauthAvatarURL   string
 	oauthResp        *AuthResponse
 	oauthErr         error
+	issuedOAuthResp  *AuthResponse
+	issuedOAuthCode  string
+	issuedOAuthErr   error
+	exchangeCode     string
+	exchangeResp     *AuthResponse
+	exchangeErr      error
 
 	getMeUserID uuid.UUID
 	getMeResp   *MeResponse
@@ -212,6 +245,16 @@ func (m *mockAuthService) FindOrCreateOAuthUser(_ context.Context, provider, oau
 	m.oauthDisplayName = displayName
 	m.oauthAvatarURL = avatarURL
 	return m.oauthResp, m.oauthErr
+}
+
+func (m *mockAuthService) IssueOAuthCode(_ context.Context, resp *AuthResponse) (string, error) {
+	m.issuedOAuthResp = resp
+	return m.issuedOAuthCode, m.issuedOAuthErr
+}
+
+func (m *mockAuthService) ExchangeOAuthCode(_ context.Context, code string) (*AuthResponse, error) {
+	m.exchangeCode = code
+	return m.exchangeResp, m.exchangeErr
 }
 
 func (m *mockAuthService) GetMe(_ context.Context, userID uuid.UUID) (*MeResponse, error) {

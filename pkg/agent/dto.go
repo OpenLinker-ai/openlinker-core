@@ -10,7 +10,7 @@ type CreateAgentRequest struct {
 	Description        string   `json:"description" validate:"max=500"`
 	EndpointURL        string   `json:"endpoint_url" validate:"max=500"`
 	EndpointAuthHeader string   `json:"endpoint_auth_header" validate:"max=500"`
-	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"max=1000000"`
+	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"min=0,max=1000000"`
 	Tags               []string `json:"tags" validate:"required,min=1,max=5,dive,min=2,max=30"`
 	Visibility         string   `json:"visibility" validate:"omitempty,oneof=public unlisted private"`
 	ConnectionMode     string   `json:"connection_mode" validate:"omitempty,oneof=direct_http mcp_server runtime_pull runtime_ws"`
@@ -24,7 +24,7 @@ type UpdateAgentRequest struct {
 	Description        string   `json:"description" validate:"max=500"`
 	EndpointURL        string   `json:"endpoint_url" validate:"max=500"`
 	EndpointAuthHeader string   `json:"endpoint_auth_header" validate:"max=500"`
-	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"max=1000000"`
+	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"min=0,max=1000000"`
 	Tags               []string `json:"tags" validate:"required,min=1,max=5,dive,min=2,max=30"`
 	Visibility         string   `json:"visibility" validate:"omitempty,oneof=public unlisted private"`
 	ConnectionMode     string   `json:"connection_mode" validate:"omitempty,oneof=direct_http mcp_server runtime_pull runtime_ws"`

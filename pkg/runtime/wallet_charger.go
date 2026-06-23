@@ -9,7 +9,7 @@ import (
 
 // WalletCharger 钱包扣费 / 退款接口。
 //
-// 实现在 cloud 侧(internal/wallet.Charger),通过 SetWalletCharger 注入。
+// 实现通过 SetWalletCharger 注入；生产 wallet 模式使用 core/pkg/wallet.Charger。
 // 之所以走接口:wallets 表归 cloud,core 单独部署时没有钱包系统,
 // charger == nil 表示当前免费阶段，不扣费且 runs 财务字段记录为 0。
 //

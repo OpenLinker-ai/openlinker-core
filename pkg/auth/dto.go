@@ -22,6 +22,11 @@ type LoginRequest struct {
 	Password string `json:"password" validate:"required"`
 }
 
+// OAuthExchangeRequest exchanges the short-lived OAuth redirect code for a JWT.
+type OAuthExchangeRequest struct {
+	Code string `json:"code" validate:"required,len=64"`
+}
+
 // AuthResponse 注册 / 登录 / OAuth 成功响应。
 type AuthResponse struct {
 	UserID      string `json:"user_id"`

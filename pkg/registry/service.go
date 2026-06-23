@@ -21,6 +21,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/credential"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
@@ -111,7 +112,7 @@ func (s *Service) CreateNode(ctx context.Context, ownerID uuid.UUID, req *Create
 		log.Error().Err(err).Msg("registry.CreateNode: generate secret")
 		return nil, httpx.Internal("生成节点密钥失败")
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(secret), credential.BcryptCost)
 	if err != nil {
 		log.Error().Err(err).Msg("registry.CreateNode: hash secret")
 		return nil, httpx.Internal("生成节点密钥失败")
@@ -169,7 +170,7 @@ func (s *Service) RotateNodeSecret(ctx context.Context, ownerID, nodeID uuid.UUI
 		log.Error().Err(err).Msg("registry.RotateNodeSecret: generate secret")
 		return nil, httpx.Internal("生成节点密钥失败")
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(secret), credential.BcryptCost)
 	if err != nil {
 		log.Error().Err(err).Msg("registry.RotateNodeSecret: hash secret")
 		return nil, httpx.Internal("生成节点密钥失败")
@@ -534,7 +535,7 @@ func (s *Service) CreateRegistryFederationInvite(ctx context.Context, ownerID uu
 		log.Error().Err(err).Msg("registry.CreateRegistryFederationInvite: generate token")
 		return nil, httpx.Internal("生成 Federation Token 失败")
 	}
-	tokenHash, err := bcrypt.GenerateFromPassword([]byte(federationToken), bcrypt.DefaultCost)
+	tokenHash, err := bcrypt.GenerateFromPassword([]byte(federationToken), credential.BcryptCost)
 	if err != nil {
 		log.Error().Err(err).Msg("registry.CreateRegistryFederationInvite: hash token")
 		return nil, httpx.Internal("生成 Federation Token 失败")

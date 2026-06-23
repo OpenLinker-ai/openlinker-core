@@ -35,6 +35,8 @@ type authService interface {
 	Register(context.Context, *RegisterRequest) (*AuthResponse, error)
 	Login(context.Context, *LoginRequest) (*AuthResponse, error)
 	FindOrCreateOAuthUser(context.Context, string, string, string, string, string) (*AuthResponse, error)
+	IssueOAuthCode(context.Context, *AuthResponse) (string, error)
+	ExchangeOAuthCode(context.Context, string) (*AuthResponse, error)
 	GetMe(context.Context, uuid.UUID) (*MeResponse, error)
 	UpdateMe(context.Context, uuid.UUID, *UpdateMeRequest) (*MeResponse, error)
 	ChangePassword(context.Context, uuid.UUID, *ChangePasswordRequest) error
@@ -72,6 +74,7 @@ func (h *Handler) Register(api *echo.Group) {
 	auth := api.Group("/auth")
 	auth.POST("/register", h.PostRegister)
 	auth.POST("/login", h.PostLogin)
+	auth.POST("/oauth/exchange", h.PostOAuthExchange)
 	auth.GET("/google", h.GoogleStart)
 	auth.GET("/google/callback", h.GoogleCallback)
 	auth.GET("/github", h.GithubStart)
@@ -167,11 +170,8 @@ func (h *Handler) oauthStart(c echo.Context, provider string, configured bool) e
 
 // oauthCallback 处理任意 OAuth provider 回调。
 //
-// 成功 -> 重定向到 FrontendURL/auth/callback?token=<jwt>
+// 成功 -> 重定向到 FrontendURL/auth/callback?code=<short-lived-code>
 // 失败 -> 重定向到 FrontendURL/auth/callback?error=<msg>
-//
-// Phase 1 简化版：token 直接放 URL（同源 redirect 到前端域，前端立即清除）。
-// 阶段 3 整合时可改为短期 code + 后端换 token，参考 docs/13。
 func (h *Handler) oauthCallback(c echo.Context, provider string, configured bool) error {
 	if h.cfg == nil {
 		return httpx.Internal(provider + " OAuth 未配置")
@@ -203,8 +203,28 @@ func (h *Handler) oauthCallback(c echo.Context, provider string, configured bool
 		return h.redirectAuthError(c, "登录失败")
 	}
 
-	target := h.cfg.FrontendURL + "/auth/callback?token=" + url.QueryEscape(resp.JWT)
+	code, err := h.svc.IssueOAuthCode(c.Request().Context(), resp)
+	if err != nil {
+		return err
+	}
+
+	target := h.cfg.FrontendURL + "/auth/callback?code=" + url.QueryEscape(code)
 	return c.Redirect(http.StatusTemporaryRedirect, target)
+}
+
+func (h *Handler) PostOAuthExchange(c echo.Context) error {
+	var req OAuthExchangeRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.ExchangeOAuthCode(c.Request().Context(), req.Code)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 // GetMe 当前登录用户信息。

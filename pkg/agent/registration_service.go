@@ -83,7 +83,7 @@ func (s *RegistrationService) MintBootstrapToken(ctx context.Context, creatorID 
 	if err != nil {
 		return nil, httpx.Internal("生成访问令牌失败")
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), credential.BcryptCost)
 	if err != nil {
 		return nil, httpx.Internal("加密访问令牌失败")
 	}
@@ -228,7 +228,7 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 	if err != nil {
 		return nil, httpx.Internal("生成访问令牌失败")
 	}
-	rtHash, err := bcrypt.GenerateFromPassword([]byte(rtPlain), bcrypt.DefaultCost)
+	rtHash, err := bcrypt.GenerateFromPassword([]byte(rtPlain), credential.BcryptCost)
 	if err != nil {
 		return nil, httpx.Internal("加密访问令牌失败")
 	}

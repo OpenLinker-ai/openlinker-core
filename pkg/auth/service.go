@@ -2,6 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -19,6 +22,11 @@ import (
 
 // bcryptCost = 12（生产配置；测试环境若想加速可单独覆盖）。
 const bcryptCost = 12
+
+const (
+	oauthCodeBytes = 32
+	oauthCodeTTL   = 2 * time.Minute
+)
 
 // UserProvisioner 是用户创建后的可选扩展点。
 //
@@ -204,6 +212,77 @@ func (s *Service) FindOrCreateOAuthUser(
 	return s.respondWithToken(&created)
 }
 
+// IssueOAuthCode stores a one-time redirect code for OAuth callback handoff.
+func (s *Service) IssueOAuthCode(ctx context.Context, resp *AuthResponse) (string, error) {
+	if resp == nil || strings.TrimSpace(resp.UserID) == "" || strings.TrimSpace(resp.JWT) == "" {
+		return "", httpx.Internal("创建 OAuth 登录 code 失败")
+	}
+	userID, err := uuid.Parse(resp.UserID)
+	if err != nil {
+		return "", httpx.Internal("创建 OAuth 登录 code 失败")
+	}
+	code, err := randomOAuthCode()
+	if err != nil {
+		log.Error().Err(err).Msg("auth.IssueOAuthCode: random")
+		return "", httpx.Internal("创建 OAuth 登录 code 失败")
+	}
+	codeHash := hashOAuthCode(code)
+	_, _ = s.pool.Exec(ctx, `
+DELETE FROM oauth_login_codes
+WHERE expires_at < NOW() - INTERVAL '1 hour'
+   OR consumed_at < NOW() - INTERVAL '1 hour'
+`)
+	_, err = s.pool.Exec(ctx, `
+INSERT INTO oauth_login_codes (code_hash, user_id, jwt, expires_at)
+VALUES ($1, $2, $3, $4)
+`, codeHash, userID, resp.JWT, time.Now().UTC().Add(oauthCodeTTL))
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID.String()).Msg("auth.IssueOAuthCode: insert")
+		return "", httpx.Internal("创建 OAuth 登录 code 失败")
+	}
+	return code, nil
+}
+
+// ExchangeOAuthCode consumes an OAuth redirect code and returns the stored JWT.
+func (s *Service) ExchangeOAuthCode(ctx context.Context, code string) (*AuthResponse, error) {
+	code = strings.TrimSpace(code)
+	if len(code) != oauthCodeBytes*2 {
+		return nil, httpx.Unauthorized("OAuth code 无效或已过期")
+	}
+	var userID uuid.UUID
+	var jwt string
+	err := s.pool.QueryRow(ctx, `
+UPDATE oauth_login_codes
+SET consumed_at = NOW()
+WHERE code_hash = $1
+  AND consumed_at IS NULL
+  AND expires_at > NOW()
+RETURNING user_id, jwt
+`, hashOAuthCode(code)).Scan(&userID, &jwt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.Unauthorized("OAuth code 无效或已过期")
+	}
+	if err != nil {
+		log.Error().Err(err).Msg("auth.ExchangeOAuthCode: consume")
+		return nil, httpx.Internal("交换 OAuth code 失败")
+	}
+
+	user, err := s.queries.GetUserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.Unauthorized("OAuth code 无效或已过期")
+		}
+		log.Error().Err(err).Str("user_id", userID.String()).Msg("auth.ExchangeOAuthCode: user")
+		return nil, httpx.Internal("交换 OAuth code 失败")
+	}
+	return &AuthResponse{
+		UserID:      user.ID.String(),
+		Email:       user.Email,
+		DisplayName: user.DisplayName,
+		JWT:         jwt,
+	}, nil
+}
+
 // GetMe 当前用户信息。
 func (s *Service) GetMe(ctx context.Context, userID uuid.UUID) (*MeResponse, error) {
 	user, err := s.queries.GetUserByID(ctx, userID)
@@ -328,6 +407,19 @@ func (s *Service) respondWithToken(user *db.User) (*AuthResponse, error) {
 		DisplayName: user.DisplayName,
 		JWT:         token,
 	}, nil
+}
+
+func randomOAuthCode() (string, error) {
+	raw := make([]byte, oauthCodeBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw), nil
+}
+
+func hashOAuthCode(code string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(code)))
+	return hex.EncodeToString(sum[:])
 }
 
 // isUniqueViolation 检测 Postgres UNIQUE 约束冲突（SQLSTATE 23505）。

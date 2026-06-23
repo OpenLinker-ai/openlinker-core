@@ -49,6 +49,8 @@ func TestAuthHandlerValidationOAuthHelpersAndRoutes(t *testing.T) {
 		{name: "register validation", method: h.PostRegister, req: &authHandlerRequest{method: http.MethodPost, target: "/", body: `{}`}, want: http.StatusUnprocessableEntity},
 		{name: "login invalid json", method: h.PostLogin, req: &authHandlerRequest{method: http.MethodPost, target: "/", body: "{"}, want: http.StatusBadRequest},
 		{name: "login validation", method: h.PostLogin, req: &authHandlerRequest{method: http.MethodPost, target: "/", body: `{}`}, want: http.StatusUnprocessableEntity},
+		{name: "oauth exchange invalid json", method: h.PostOAuthExchange, req: &authHandlerRequest{method: http.MethodPost, target: "/", body: "{"}, want: http.StatusBadRequest},
+		{name: "oauth exchange validation", method: h.PostOAuthExchange, req: &authHandlerRequest{method: http.MethodPost, target: "/", body: `{}`}, want: http.StatusUnprocessableEntity},
 		{name: "me missing user", method: h.GetMe, req: &authHandlerRequest{method: http.MethodGet, target: "/"}, want: http.StatusUnauthorized},
 		{name: "me invalid user", method: h.GetMe, req: &authHandlerRequest{method: http.MethodGet, target: "/", userID: "bad"}, want: http.StatusUnauthorized},
 		{name: "patch missing user", method: h.PatchMe, req: &authHandlerRequest{method: http.MethodPatch, target: "/"}, want: http.StatusUnauthorized},
@@ -105,6 +107,7 @@ func TestAuthHandlerValidationOAuthHelpersAndRoutes(t *testing.T) {
 	for _, route := range []string{
 		"POST /api/v1/auth/register",
 		"POST /api/v1/auth/login",
+		"POST /api/v1/auth/oauth/exchange",
 		"GET /api/v1/auth/google",
 		"GET /api/v1/auth/google/callback",
 		"GET /api/v1/auth/github",

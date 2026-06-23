@@ -42,3 +42,9 @@ func TestHasAnyPrefixTrimsAndMatchesKnownPrefixes(t *testing.T) {
 		t.Fatalf("unexpected prefix match")
 	}
 }
+
+func TestBcryptCostMatchesPasswordPolicy(t *testing.T) {
+	if BcryptCost != 12 {
+		t.Fatalf("BcryptCost = %d, want 12", BcryptCost)
+	}
+}

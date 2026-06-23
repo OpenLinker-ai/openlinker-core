@@ -106,6 +106,24 @@ func insertParentRun(t *testing.T, pool *pgxpool.Pool, userID, callerAgentID uui
 	return id
 }
 
+func insertDelegatedRun(t *testing.T, pool *pgxpool.Pool, userID, childAgentID, parentRunID, callerAgentID uuid.UUID) uuid.UUID {
+	t.Helper()
+	childRunID := uuid.New()
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO runs (
+		  id, user_id, agent_id, input, status, cost_cents, platform_fee_cents,
+		  creator_revenue_cents, source
+		) VALUES ($1, $2, $3, '{}'::jsonb, 'running', 0, 0, 0, 'a2a')`,
+		childRunID, userID, childAgentID)
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(),
+		`INSERT INTO run_delegations (child_run_id, parent_run_id, caller_agent_id, reason)
+		 VALUES ($1, $2, $3, 'test chain')`,
+		childRunID, parentRunID, callerAgentID)
+	require.NoError(t, err)
+	return childRunID
+}
+
 func makeRuntimePullAgent(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(),
@@ -303,6 +321,46 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 		Scan(&parentEvents)
 	require.NoError(t, err)
 	assert.Equal(t, 2, parentEvents)
+}
+
+func TestCallAgentRejectsDelegationCycle(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+	agentA := insertAgent(t, pool, owner, "https://example.com/a")
+	agentB := insertAgent(t, pool, owner, "https://example.com/b")
+	rootRun := insertParentRun(t, pool, owner, agentA)
+	childRun := insertDelegatedRun(t, pool, owner, agentB, rootRun, agentA)
+
+	tokenB, err := svc.CreateRuntimeToken(context.Background(), owner, agentB, &a2a.CreateRuntimeTokenRequest{Name: "b-worker"})
+	require.NoError(t, err)
+
+	_, err = svc.CallAgent(context.Background(), tokenB.PlaintextToken, &a2a.CallAgentRequest{
+		CurrentRunID:  childRun.String(),
+		TargetAgentID: agentA.String(),
+		Input:         map[string]any{"q": "loop back"},
+	})
+	requireA2AServiceHTTPStatus(t, err, http.StatusUnprocessableEntity)
+}
+
+func TestCallAgentRejectsWhenRunningDelegationLimitReached(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	svc.SetDelegationLimits(8, 1)
+	owner := insertCreator(t, pool)
+	agentA := insertAgent(t, pool, owner, "https://example.com/a")
+	agentB := insertAgent(t, pool, owner, "https://example.com/b")
+	agentC := insertAgent(t, pool, owner, "https://example.com/c")
+	rootRun := insertParentRun(t, pool, owner, agentA)
+	_ = insertDelegatedRun(t, pool, owner, agentB, rootRun, agentA)
+
+	tokenA, err := svc.CreateRuntimeToken(context.Background(), owner, agentA, &a2a.CreateRuntimeTokenRequest{Name: "a-worker"})
+	require.NoError(t, err)
+
+	_, err = svc.CallAgent(context.Background(), tokenA.PlaintextToken, &a2a.CallAgentRequest{
+		CurrentRunID:  rootRun.String(),
+		TargetAgentID: agentC.String(),
+		Input:         map[string]any{"q": "over limit"},
+	})
+	requireA2AServiceHTTPStatus(t, err, http.StatusTooManyRequests)
 }
 
 func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
