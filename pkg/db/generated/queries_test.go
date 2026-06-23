@@ -222,6 +222,19 @@ func TestAgentQueriesScanRowsAndAffectedRows(t *testing.T) {
 		t.Fatalf("ListAgentsByCreator scan = %#v", listed)
 	}
 
+	dbtx.row = fakeRow{values: []any{0.15}}
+	feeRate, err := q.GetAgentPlatformFeeRate(context.Background(), GetAgentPlatformFeeRateParams{
+		ID:           agentID,
+		FallbackRate: 0.25,
+	})
+	if err != nil || feeRate != 0.15 {
+		t.Fatalf("GetAgentPlatformFeeRate = %f, %v", feeRate, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentPlatformFeeRate")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, 0.25}) {
+		t.Fatalf("GetAgentPlatformFeeRate args = %#v", dbtx.queryRowArgs)
+	}
+
 	affected, err := q.DisableAgent(context.Background(), DisableAgentParams{ID: agentID, CreatorID: creatorID})
 	if err != nil || affected != 3 {
 		t.Fatalf("DisableAgent = %d, %v", affected, err)

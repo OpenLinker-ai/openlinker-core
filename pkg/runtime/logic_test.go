@@ -109,6 +109,26 @@ func TestRuntimeAuthScopeAndParsingHelpers(t *testing.T) {
 	require.Equal(t, int32(0), n)
 }
 
+func TestPlatformFeeCents(t *testing.T) {
+	tests := []struct {
+		name string
+		cost int32
+		rate float64
+		want int32
+	}{
+		{name: "floors fraction", cost: 99, rate: 0.25, want: 24},
+		{name: "zero cost", cost: 0, rate: 0.25, want: 0},
+		{name: "negative rate clamps zero", cost: 100, rate: -0.5, want: 0},
+		{name: "rate above one clamps cost", cost: 100, rate: 1.5, want: 100},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, platformFeeCents(tt.cost, tt.rate))
+		})
+	}
+}
+
 func TestRuntimePullAndTimeoutOptionHelpers(t *testing.T) {
 	wait, err := runtimePullClaimWait("")
 	require.NoError(t, err)

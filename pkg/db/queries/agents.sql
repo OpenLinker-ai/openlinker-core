@@ -75,6 +75,11 @@ SELECT id, creator_id, slug, name, description, endpoint_url,
 FROM agents
 WHERE id = $1;
 
+-- name: GetAgentPlatformFeeRate :one
+SELECT COALESCE(platform_fee_rate_override, $2)::double precision AS platform_fee_rate
+FROM agents
+WHERE id = $1;
+
 -- name: ListAgentsByCreator :many
 SELECT id, creator_id, slug, name, description, endpoint_url,
        endpoint_auth_header, price_per_call_cents, tags,

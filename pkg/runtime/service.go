@@ -392,15 +392,13 @@ func (s *Service) createRunningRun(
 		return nil, nil, err
 	}
 
-	// 2. 计算费用：抽成 = floor(cost × rate)，creator_revenue = cost - fee
+	// 2. 计算费用：抽成 = floor(cost × effective_rate)，creator_revenue = cost - fee
 	cost := agent.PricePerCallCents
-	fee := int32(float64(cost) * s.cfg.PlatformFeeRate)
-	if fee < 0 {
-		fee = 0
+	feeRate, err := s.effectivePlatformFeeRate(ctx, agent.ID)
+	if err != nil {
+		return nil, nil, err
 	}
-	if fee > cost {
-		fee = cost
-	}
+	fee := platformFeeCents(cost, feeRate)
 	revenue := cost - fee
 	if !opts.settle {
 		cost = 0
@@ -531,6 +529,29 @@ func (s *Service) createRunningRun(
 	s.attachRunRequirementEvidence(ctx, runID, resp)
 	decorateNextAction(resp)
 	return invocation, resp, nil
+}
+
+func (s *Service) effectivePlatformFeeRate(ctx context.Context, agentID uuid.UUID) (float64, error) {
+	rate, err := s.queries.GetAgentPlatformFeeRate(ctx, db.GetAgentPlatformFeeRateParams{
+		ID:           agentID,
+		FallbackRate: s.cfg.PlatformFeeRate,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("runtime.Run: GetAgentPlatformFeeRate")
+		return 0, httpx.Internal("查询 Agent 费率失败")
+	}
+	return rate, nil
+}
+
+func platformFeeCents(cost int32, rate float64) int32 {
+	fee := int32(float64(cost) * rate)
+	if fee < 0 {
+		return 0
+	}
+	if fee > cost {
+		return cost
+	}
+	return fee
 }
 
 func (s *Service) executeRunAsync(invocation *runInvocation) {

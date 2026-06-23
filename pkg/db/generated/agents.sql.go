@@ -224,6 +224,23 @@ func (q *Queries) GetAgentByID(ctx context.Context, id uuid.UUID) (Agent, error)
 	return a, err
 }
 
+const getAgentPlatformFeeRate = `-- name: GetAgentPlatformFeeRate :one
+SELECT COALESCE(platform_fee_rate_override, $2)::double precision AS platform_fee_rate
+FROM agents
+WHERE id = $1`
+
+type GetAgentPlatformFeeRateParams struct {
+	ID           uuid.UUID `db:"id" json:"id"`
+	FallbackRate float64   `db:"fallback_rate" json:"fallback_rate"`
+}
+
+func (q *Queries) GetAgentPlatformFeeRate(ctx context.Context, arg GetAgentPlatformFeeRateParams) (float64, error) {
+	row := q.db.QueryRow(ctx, getAgentPlatformFeeRate, arg.ID, arg.FallbackRate)
+	var rate float64
+	err := row.Scan(&rate)
+	return rate, err
+}
+
 const listAgentsByCreator = `-- name: ListAgentsByCreator :many
 SELECT id, creator_id, slug, name, description, endpoint_url,
        endpoint_auth_header, price_per_call_cents, tags,
