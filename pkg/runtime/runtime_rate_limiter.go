@@ -12,6 +12,13 @@ const runtimeMalformedAuthMinInterval = time.Second
 const runtimePullHeartbeatMinInterval = 10 * time.Second
 const runtimePullConcurrentClaimRetryAfter = 5 * time.Second
 
+type EndpointLimiter interface {
+	allowMalformedAuth(key string) time.Duration
+	allowHeartbeat(key string) time.Duration
+	beginClaim(key string, wait time.Duration) (time.Duration, func())
+	markEmptyClaim(key string, wait time.Duration)
+}
+
 type runtimeEndpointLimiter struct {
 	mu        sync.Mutex
 	now       func() time.Time

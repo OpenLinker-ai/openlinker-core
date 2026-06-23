@@ -33,6 +33,9 @@ import (
 	dbgen "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	openlinkerlog "github.com/OpenLinker-ai/openlinker-core/pkg/log"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/ratelimit"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/redisx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 func main() {
@@ -53,17 +56,31 @@ func main() {
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pool, err := db.Connect(rootCtx, cfg.DatabaseURL)
+	pool, err := db.Connect(rootCtx, cfg.DatabaseURL, dbPoolOptions(cfg))
 	if err != nil {
 		log.Fatal().Err(err).Msg("connect database failed")
 	}
 	defer pool.Close()
 	log.Info().Msg("database connected")
 
-	e := newEcho(cfg)
+	var runtimeLimiter runtime.EndpointLimiter
+	var rateLimiterStore emw.RateLimiterStore
+	if cfg.IsProduction() {
+		redisClient, err := redisx.Connect(rootCtx, cfg.RedisURL)
+		if err != nil {
+			log.Fatal().Err(err).Msg("connect redis failed")
+		}
+		defer func() { _ = redisClient.Close() }()
+		rateLimiterStore = ratelimit.NewRedisStore(redisClient, "openlinker:core:http", 50, 200, time.Second, time.Second)
+		runtimeLimiter = runtime.NewRedisEndpointLimiter(redisClient, "openlinker:core:runtime", time.Second)
+		log.Info().Msg("redis-backed rate limiters configured")
+	}
+
+	e := newEcho(cfg, rateLimiterStore)
 	registerHealthRoutes(e, cfg, pool)
 	opts := coreapi.Options{
 		AdminMiddleware: auth.AdminMiddleware(dbgen.New(pool)),
+		RuntimeLimiter:  runtimeLimiter,
 	}
 	if verifier := auth.NewRemoteAPIKeyVerifier(cfg.APIKeyVerifyURL); verifier != nil {
 		opts.APIKeyVerifier = verifier
@@ -119,7 +136,7 @@ type dbPinger interface {
 	Ping(context.Context) error
 }
 
-func newEcho(cfg *config.Config) *echo.Echo {
+func newEcho(cfg *config.Config, stores ...emw.RateLimiterStore) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
@@ -131,7 +148,7 @@ func newEcho(cfg *config.Config) *echo.Echo {
 		AllowHeaders:     []string{echo.HeaderContentType, echo.HeaderAuthorization},
 	}))
 	if cfg.IsProduction() {
-		e.Use(emw.RateLimiterWithConfig(rateLimiterConfig()))
+		e.Use(emw.RateLimiterWithConfig(rateLimiterConfig(stores...)))
 	}
 	e.Use(requestLogger())
 	e.HTTPErrorHandler = func(err error, c echo.Context) {
@@ -171,7 +188,10 @@ func registerHealthRoutes(e *echo.Echo, cfg *config.Config, pool dbPinger) {
 func newHTTPServer(port int) *http.Server {
 	return &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
+		ReadTimeout:       15 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 }
 
@@ -186,20 +206,34 @@ func allowedCORSOrigins(cfg *config.Config) []string {
 	return origins
 }
 
-func rateLimiterConfig() emw.RateLimiterConfig {
+func rateLimiterConfig(stores ...emw.RateLimiterStore) emw.RateLimiterConfig {
+	var store emw.RateLimiterStore = emw.NewRateLimiterMemoryStoreWithConfig(emw.RateLimiterMemoryStoreConfig{
+		Rate:      50,
+		Burst:     200,
+		ExpiresIn: 3 * time.Minute,
+	})
+	if len(stores) > 0 && stores[0] != nil {
+		store = stores[0]
+	}
 	return emw.RateLimiterConfig{
 		Skipper: func(c echo.Context) bool {
 			path := c.Request().URL.Path
 			return path == "/healthz" || path == "/healthz/db"
 		},
-		Store: emw.NewRateLimiterMemoryStoreWithConfig(emw.RateLimiterMemoryStoreConfig{
-			Rate:      50,
-			Burst:     200,
-			ExpiresIn: 3 * time.Minute,
-		}),
+		Store: store,
 		DenyHandler: func(c echo.Context, _ string, _ error) error {
 			return httpx.NewError(http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁，请稍后再试")
 		},
+	}
+}
+
+func dbPoolOptions(cfg *config.Config) db.PoolOptions {
+	return db.PoolOptions{
+		MaxConns:          cfg.DBMaxConns,
+		MinConns:          cfg.DBMinConns,
+		MaxConnLifetime:   time.Duration(cfg.DBMaxConnLifetimeMinutes) * time.Minute,
+		MaxConnIdleTime:   time.Duration(cfg.DBMaxConnIdleTimeMinutes) * time.Minute,
+		HealthCheckPeriod: time.Duration(cfg.DBHealthCheckPeriodSeconds) * time.Second,
 	}
 }
 

@@ -4,6 +4,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestConnectRejectsInvalidDatabaseURL(t *testing.T) {
@@ -35,5 +38,25 @@ func TestConnectClosesPoolWhenPingFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "db ping") && !strings.Contains(err.Error(), "new pgx pool") {
 		t.Fatalf("Connect error = %v, want db ping or pool creation context", err)
+	}
+}
+
+func TestApplyPoolOptions(t *testing.T) {
+	cfg, err := pgxpool.ParseConfig("postgres://user:pass@localhost/db")
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	applyPoolOptions(cfg, PoolOptions{
+		MaxConns:          8,
+		MinConns:          12,
+		MaxConnLifetime:   11 * time.Minute,
+		MaxConnIdleTime:   7 * time.Minute,
+		HealthCheckPeriod: 13 * time.Second,
+	})
+	if cfg.MaxConns != 8 || cfg.MinConns != 8 {
+		t.Fatalf("pool conn bounds = max %d min %d", cfg.MaxConns, cfg.MinConns)
+	}
+	if cfg.MaxConnLifetime != 11*time.Minute || cfg.MaxConnIdleTime != 7*time.Minute || cfg.HealthCheckPeriod != 13*time.Second {
+		t.Fatalf("pool durations = %#v", cfg)
 	}
 }

@@ -40,6 +40,10 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	if cfg.RedisURL != "redis://localhost:6379/0" {
 		t.Fatalf("unexpected default RedisURL: %q", cfg.RedisURL)
 	}
+	if cfg.DBMaxConns != 20 || cfg.DBMinConns != 2 || cfg.DBMaxConnLifetimeMinutes != 30 ||
+		cfg.DBMaxConnIdleTimeMinutes != 5 || cfg.DBHealthCheckPeriodSeconds != 60 {
+		t.Fatalf("unexpected db pool defaults: %#v", cfg)
+	}
 	if !cfg.AllowLocalHTTPEndpoints {
 		t.Fatalf("expected AllowLocalHTTPEndpoints from env")
 	}

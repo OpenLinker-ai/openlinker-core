@@ -39,6 +39,7 @@ type Options struct {
 	AdminMiddleware echo.MiddlewareFunc
 	UserProvisioner auth.UserProvisioner
 	WalletCharger   runtime.WalletCharger
+	RuntimeLimiter  runtime.EndpointLimiter
 }
 
 type Services struct {
@@ -121,6 +122,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 		runtimeSvc.SetWalletCharger(opts.WalletCharger)
 	}
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
+	runtimeHandler.SetEndpointLimiter(opts.RuntimeLimiter)
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
 	runtimeHandler.RegisterAgentRuntime(api)
 	agentSvc.SetDryRunner(runtimeSvc)

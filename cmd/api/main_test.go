@@ -71,6 +71,29 @@ func TestRateLimiterConfigSkipsHealthAndDeniesWithStandardError(t *testing.T) {
 	}
 }
 
+type fakeRateLimiterStore struct{}
+
+func (fakeRateLimiterStore) Allow(string) (bool, error) { return true, nil }
+
+func TestRateLimiterConfigUsesInjectedStore(t *testing.T) {
+	store := fakeRateLimiterStore{}
+	cfg := rateLimiterConfig(store)
+	if cfg.Store != store {
+		t.Fatalf("rateLimiterConfig should use injected distributed store")
+	}
+}
+
+func TestNewHTTPServerSetsConnectionTimeouts(t *testing.T) {
+	srv := newHTTPServer(9090)
+	if srv.ReadTimeout != 15*time.Second ||
+		srv.ReadHeaderTimeout != 10*time.Second ||
+		srv.WriteTimeout != 120*time.Second ||
+		srv.IdleTimeout != 120*time.Second {
+		t.Fatalf("server timeouts = read %s header %s write %s idle %s",
+			srv.ReadTimeout, srv.ReadHeaderTimeout, srv.WriteTimeout, srv.IdleTimeout)
+	}
+}
+
 func TestRequestLoggerReturnsHandlerError(t *testing.T) {
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)

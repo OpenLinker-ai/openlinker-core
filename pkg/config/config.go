@@ -17,8 +17,13 @@ type Config struct {
 	LogLevel string `envconfig:"LOG_LEVEL" default:"info"`
 
 	// 数据库 / 缓存
-	DatabaseURL string `envconfig:"DATABASE_URL" required:"true"`
-	RedisURL    string `envconfig:"REDIS_URL" default:"redis://localhost:6379/0"`
+	DatabaseURL                string `envconfig:"DATABASE_URL" required:"true"`
+	RedisURL                   string `envconfig:"REDIS_URL" default:"redis://localhost:6379/0"`
+	DBMaxConns                 int32  `envconfig:"DB_MAX_CONNS" default:"20"`
+	DBMinConns                 int32  `envconfig:"DB_MIN_CONNS" default:"2"`
+	DBMaxConnLifetimeMinutes   int    `envconfig:"DB_MAX_CONN_LIFETIME_MINUTES" default:"30"`
+	DBMaxConnIdleTimeMinutes   int    `envconfig:"DB_MAX_CONN_IDLE_TIME_MINUTES" default:"5"`
+	DBHealthCheckPeriodSeconds int    `envconfig:"DB_HEALTH_CHECK_PERIOD_SECONDS" default:"60"`
 
 	// 鉴权
 	JWTSecret      string `envconfig:"JWT_SECRET" required:"true"`

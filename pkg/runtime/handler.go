@@ -28,7 +28,7 @@ type Handler struct {
 	svc            runtimeService
 	validator      *validator.Validate
 	cfg            *config.Config
-	runtimeLimiter *runtimeEndpointLimiter
+	runtimeLimiter EndpointLimiter
 }
 
 type runtimeService interface {
@@ -56,6 +56,12 @@ func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 		h.cfg = cfg[0]
 	}
 	return h
+}
+
+func (h *Handler) SetEndpointLimiter(limiter EndpointLimiter) {
+	if limiter != nil {
+		h.runtimeLimiter = limiter
+	}
 }
 
 // RegisterProtected 注册需要鉴权的端点，分别接收 /run 与 /runs/:id 的 middleware。
