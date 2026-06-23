@@ -432,3 +432,199 @@ func (q *Queries) IncrementAgentStats(ctx context.Context, arg IncrementAgentSta
 	_, err := q.db.Exec(ctx, incrementAgentStats, arg.ID, arg.RevenueCents)
 	return err
 }
+
+const listAdminAgents = `-- name: ListAdminAgents :many
+SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
+       a.endpoint_auth_header, a.price_per_call_cents, a.tags,
+       a.lifecycle_status, a.visibility, a.certification_status,
+       a.rejection_reason, a.certified_at,
+       a.total_calls, a.total_revenue_cents,
+       a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
+       u.email AS creator_email,
+       u.display_name AS creator_name
+FROM agents a
+JOIN users u ON u.id = a.creator_id
+WHERE (
+    $1::text = ''
+    OR a.slug ILIKE '%' || $1 || '%'
+    OR a.name ILIKE '%' || $1 || '%'
+    OR a.description ILIKE '%' || $1 || '%'
+    OR u.email ILIKE '%' || $1 || '%'
+    OR u.display_name ILIKE '%' || $1 || '%'
+  )
+  AND ($2::text = '' OR a.lifecycle_status = $2)
+  AND ($3::text = '' OR a.visibility = $3)
+  AND ($4::text = '' OR a.certification_status = $4)
+ORDER BY a.updated_at DESC, a.created_at DESC
+LIMIT $5 OFFSET $6`
+
+type ListAdminAgentsParams struct {
+	Query               string `db:"query" json:"query"`
+	LifecycleStatus     string `db:"lifecycle_status" json:"lifecycle_status"`
+	Visibility          string `db:"visibility" json:"visibility"`
+	CertificationStatus string `db:"certification_status" json:"certification_status"`
+	Limit               int32  `db:"limit" json:"limit"`
+	Offset              int32  `db:"offset" json:"offset"`
+}
+
+type ListAdminAgentsRow struct {
+	Agent
+	CreatorEmail string `db:"creator_email" json:"creator_email"`
+	CreatorName  string `db:"creator_name" json:"creator_name"`
+}
+
+// ListAdminAgents 管理台 Agent 列表。
+func (q *Queries) ListAdminAgents(ctx context.Context, arg ListAdminAgentsParams) ([]ListAdminAgentsRow, error) {
+	rows, err := q.db.Query(ctx, listAdminAgents, arg.Query, arg.LifecycleStatus, arg.Visibility, arg.CertificationStatus, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAdminAgentsRow
+	for rows.Next() {
+		var r ListAdminAgentsRow
+		if err := rows.Scan(
+			&r.ID,
+			&r.CreatorID,
+			&r.Slug,
+			&r.Name,
+			&r.Description,
+			&r.EndpointURL,
+			&r.EndpointAuthHeader,
+			&r.PricePerCallCents,
+			&r.Tags,
+			&r.LifecycleStatus,
+			&r.Visibility,
+			&r.CertificationStatus,
+			&r.RejectionReason,
+			&r.CertifiedAt,
+			&r.TotalCalls,
+			&r.TotalRevenueCents,
+			&r.WebhookURL,
+			&r.ConnectionMode,
+			&r.MCPToolName,
+			&r.CreatedAt,
+			&r.UpdatedAt,
+			&r.CreatorEmail,
+			&r.CreatorName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const countAdminAgents = `-- name: CountAdminAgents :one
+SELECT COUNT(*)::int AS total
+FROM agents a
+JOIN users u ON u.id = a.creator_id
+WHERE (
+    $1::text = ''
+    OR a.slug ILIKE '%' || $1 || '%'
+    OR a.name ILIKE '%' || $1 || '%'
+    OR a.description ILIKE '%' || $1 || '%'
+    OR u.email ILIKE '%' || $1 || '%'
+    OR u.display_name ILIKE '%' || $1 || '%'
+  )
+  AND ($2::text = '' OR a.lifecycle_status = $2)
+  AND ($3::text = '' OR a.visibility = $3)
+  AND ($4::text = '' OR a.certification_status = $4)`
+
+type CountAdminAgentsParams struct {
+	Query               string `db:"query" json:"query"`
+	LifecycleStatus     string `db:"lifecycle_status" json:"lifecycle_status"`
+	Visibility          string `db:"visibility" json:"visibility"`
+	CertificationStatus string `db:"certification_status" json:"certification_status"`
+}
+
+func (q *Queries) CountAdminAgents(ctx context.Context, arg CountAdminAgentsParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countAdminAgents, arg.Query, arg.LifecycleStatus, arg.Visibility, arg.CertificationStatus)
+	var total int32
+	err := row.Scan(&total)
+	return total, err
+}
+
+const updateAdminAgentModeration = `-- name: UpdateAdminAgentModeration :one
+UPDATE agents
+SET lifecycle_status = $2,
+    visibility = $3,
+    certification_status = $4,
+    rejection_reason = CASE
+        WHEN $4 = 'rejected' THEN NULLIF($5, '')
+        WHEN $4 IN ('unreviewed', 'pending', 'certified') THEN NULL
+        ELSE rejection_reason
+    END,
+    certified_at = CASE
+        WHEN $4 = 'certified' THEN COALESCE(certified_at, NOW())
+        WHEN $4 IN ('unreviewed', 'pending', 'rejected') THEN NULL
+        ELSE certified_at
+    END,
+    updated_at = NOW()
+WHERE id = $1
+RETURNING id, creator_id, slug, name, description, endpoint_url,
+          endpoint_auth_header, price_per_call_cents, tags,
+          lifecycle_status, visibility, certification_status,
+          rejection_reason, certified_at,
+          total_calls, total_revenue_cents,
+          webhook_url, connection_mode, mcp_tool_name, created_at, updated_at`
+
+type UpdateAdminAgentModerationParams struct {
+	ID                  uuid.UUID `db:"id" json:"id"`
+	LifecycleStatus     string    `db:"lifecycle_status" json:"lifecycle_status"`
+	Visibility          string    `db:"visibility" json:"visibility"`
+	CertificationStatus string    `db:"certification_status" json:"certification_status"`
+	RejectionReason     string    `db:"rejection_reason" json:"rejection_reason"`
+}
+
+// UpdateAdminAgentModeration 管理台调整 Agent 三维状态。
+func (q *Queries) UpdateAdminAgentModeration(ctx context.Context, arg UpdateAdminAgentModerationParams) (Agent, error) {
+	row := q.db.QueryRow(ctx, updateAdminAgentModeration, arg.ID, arg.LifecycleStatus, arg.Visibility, arg.CertificationStatus, arg.RejectionReason)
+	var a Agent
+	err := scanAgent(row, &a)
+	return a, err
+}
+
+const getAdminSummary = `-- name: GetAdminSummary :one
+SELECT
+  (SELECT COUNT(*)::int FROM users WHERE deleted_at IS NULL) AS total_users,
+  (SELECT COUNT(*)::int FROM users WHERE deleted_at IS NULL AND is_admin) AS admin_users,
+  (SELECT COUNT(*)::int FROM users WHERE deleted_at IS NULL AND is_creator) AS creator_users,
+  (SELECT COUNT(*)::int FROM users WHERE deleted_at IS NULL AND creator_verified) AS verified_creators,
+  (SELECT COUNT(*)::int FROM agents) AS total_agents,
+  (SELECT COUNT(*)::int FROM agents WHERE lifecycle_status = 'active') AS active_agents,
+  (SELECT COUNT(*)::int FROM agents WHERE lifecycle_status = 'disabled') AS disabled_agents,
+  (SELECT COUNT(*)::int FROM agents WHERE certification_status = 'pending') AS pending_agents,
+  (SELECT COUNT(*)::int FROM agents WHERE certification_status = 'certified') AS certified_agents`
+
+type GetAdminSummaryRow struct {
+	TotalUsers       int32 `db:"total_users" json:"total_users"`
+	AdminUsers       int32 `db:"admin_users" json:"admin_users"`
+	CreatorUsers     int32 `db:"creator_users" json:"creator_users"`
+	VerifiedCreators int32 `db:"verified_creators" json:"verified_creators"`
+	TotalAgents      int32 `db:"total_agents" json:"total_agents"`
+	ActiveAgents     int32 `db:"active_agents" json:"active_agents"`
+	DisabledAgents   int32 `db:"disabled_agents" json:"disabled_agents"`
+	PendingAgents    int32 `db:"pending_agents" json:"pending_agents"`
+	CertifiedAgents  int32 `db:"certified_agents" json:"certified_agents"`
+}
+
+func (q *Queries) GetAdminSummary(ctx context.Context) (GetAdminSummaryRow, error) {
+	row := q.db.QueryRow(ctx, getAdminSummary)
+	var r GetAdminSummaryRow
+	err := row.Scan(
+		&r.TotalUsers,
+		&r.AdminUsers,
+		&r.CreatorUsers,
+		&r.VerifiedCreators,
+		&r.TotalAgents,
+		&r.ActiveAgents,
+		&r.DisabledAgents,
+		&r.PendingAgents,
+		&r.CertifiedAgents,
+	)
+	return r, err
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/kinzhi/openlinker-core/pkg/a2a"
+	coreadmin "github.com/kinzhi/openlinker-core/pkg/admin"
 	"github.com/kinzhi/openlinker-core/pkg/agent"
 	"github.com/kinzhi/openlinker-core/pkg/auth"
 	"github.com/kinzhi/openlinker-core/pkg/cloudbridge"
@@ -42,6 +43,7 @@ type Options struct {
 
 type Services struct {
 	Auth        *auth.Service
+	Admin       *coreadmin.Service
 	AgentMarket *agent.MarketService
 	Agent       *agent.Service
 	Skill       *skill.Service
@@ -68,6 +70,11 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	jwtMiddleware := auth.JWTMiddleware(cfg.JWTSecret)
 	authHandler.Register(api)
 	authHandler.RegisterProtected(api, jwtMiddleware)
+	var adminSvc *coreadmin.Service
+	if opts.AdminMiddleware != nil {
+		adminSvc = coreadmin.NewService(pool)
+		coreadmin.NewHandler(adminSvc).Register(api, jwtMiddleware, opts.AdminMiddleware)
+	}
 	cloudBridgeHandler := cloudbridge.NewHandler(cloudbridge.NewService(pool))
 	cloudBridgeHandler.Register(e, jwtMiddleware)
 	cloudBridgeHandler.RegisterCoreAPI(api, jwtMiddleware)
@@ -191,6 +198,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	return &Services{
 		Auth:        authSvc,
 		AgentMarket: agentMarketSvc,
+		Admin:       adminSvc,
 		Agent:       agentSvc,
 		Skill:       skillSvc,
 		Runtime:     runtimeSvc,

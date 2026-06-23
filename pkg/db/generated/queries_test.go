@@ -59,6 +59,42 @@ func TestUserQueriesScanRowsAndUseExpectedArgs(t *testing.T) {
 		t.Fatalf("UpdateUserBecomeCreator = %d, %v", affected, err)
 	}
 	requireSQLName(t, dbtx.execSQL, "UpdateUserBecomeCreator")
+
+	adminRows := &fakeRows{rows: [][]any{userRow(userID, now, &passwordHash, &provider, &oauthID, &avatar, nil)}}
+	dbtx.queryRows = adminRows
+	adminUsers, err := q.ListAdminUsers(context.Background(), ListAdminUsersParams{Query: "user", Role: "admin", Limit: 25, Offset: 5})
+	if err != nil {
+		t.Fatalf("ListAdminUsers error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAdminUsers")
+	if !adminRows.closed || len(adminUsers) != 1 || adminUsers[0].ID != userID {
+		t.Fatalf("ListAdminUsers scan = %#v closed=%v", adminUsers, adminRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{"user", "admin", int32(25), int32(5)}) {
+		t.Fatalf("ListAdminUsers args = %#v", dbtx.queryArgs)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(7)}}
+	totalUsers, err := q.CountAdminUsers(context.Background(), CountAdminUsersParams{Query: "user", Role: "creator"})
+	if err != nil || totalUsers != 7 {
+		t.Fatalf("CountAdminUsers = %d, %v", totalUsers, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountAdminUsers")
+
+	dbtx.row = fakeRow{values: userRow(userID, now, &passwordHash, &provider, &oauthID, &avatar, nil)}
+	updated, err := q.UpdateAdminUserFlags(context.Background(), UpdateAdminUserFlagsParams{
+		ID:              userID,
+		IsAdmin:         true,
+		IsCreator:       true,
+		CreatorVerified: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateAdminUserFlags error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpdateAdminUserFlags")
+	if updated.ID != userID || !reflect.DeepEqual(dbtx.queryRowArgs, []any{userID, true, true, true}) {
+		t.Fatalf("UpdateAdminUserFlags scan/args = %#v args=%#v", updated, dbtx.queryRowArgs)
+	}
 }
 
 func TestRunQueriesScanRowsAndGuardAffectedRows(t *testing.T) {
@@ -191,6 +227,59 @@ func TestAgentQueriesScanRowsAndAffectedRows(t *testing.T) {
 		t.Fatalf("DisableAgent = %d, %v", affected, err)
 	}
 	requireSQLName(t, dbtx.execSQL, "DisableAgent")
+
+	adminAgentRows := &fakeRows{rows: [][]any{append(append([]any{}, agentValues...), "creator@example.com", "Creator Name")}}
+	dbtx.queryRows = adminAgentRows
+	adminAgents, err := q.ListAdminAgents(context.Background(), ListAdminAgentsParams{
+		Query:               "agent",
+		LifecycleStatus:     "active",
+		Visibility:          "public",
+		CertificationStatus: "certified",
+		Limit:               50,
+		Offset:              10,
+	})
+	if err != nil {
+		t.Fatalf("ListAdminAgents error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAdminAgents")
+	if !adminAgentRows.closed || len(adminAgents) != 1 || adminAgents[0].CreatorEmail != "creator@example.com" {
+		t.Fatalf("ListAdminAgents scan = %#v closed=%v", adminAgents, adminAgentRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(8)}}
+	totalAgents, err := q.CountAdminAgents(context.Background(), CountAdminAgentsParams{
+		Query:               "agent",
+		LifecycleStatus:     "active",
+		Visibility:          "public",
+		CertificationStatus: "pending",
+	})
+	if err != nil || totalAgents != 8 {
+		t.Fatalf("CountAdminAgents = %d, %v", totalAgents, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountAdminAgents")
+
+	dbtx.row = fakeRow{values: agentValues}
+	moderated, err := q.UpdateAdminAgentModeration(context.Background(), UpdateAdminAgentModerationParams{
+		ID:                  agentID,
+		LifecycleStatus:     "active",
+		Visibility:          "unlisted",
+		CertificationStatus: "rejected",
+		RejectionReason:     "missing dry run",
+	})
+	if err != nil {
+		t.Fatalf("UpdateAdminAgentModeration error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpdateAdminAgentModeration")
+	if moderated.ID != agentID || !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, "active", "unlisted", "rejected", "missing dry run"}) {
+		t.Fatalf("UpdateAdminAgentModeration scan/args = %#v args=%#v", moderated, dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(12), int32(2), int32(5), int32(3), int32(9), int32(8), int32(1), int32(4), int32(6)}}
+	summary, err := q.GetAdminSummary(context.Background())
+	if err != nil || summary.TotalUsers != 12 || summary.PendingAgents != 4 {
+		t.Fatalf("GetAdminSummary = %#v, %v", summary, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAdminSummary")
 }
 
 func TestSkillQueriesScanRowsAndMatches(t *testing.T) {
@@ -1477,6 +1566,14 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 		}},
 		{name: "ListAgentsByCreator", run: func() error {
 			_, err := q.ListAgentsByCreator(ctx, id)
+			return err
+		}},
+		{name: "ListAdminUsers", run: func() error {
+			_, err := q.ListAdminUsers(ctx, ListAdminUsersParams{Query: "user", Role: "admin", Limit: 10})
+			return err
+		}},
+		{name: "ListAdminAgents", run: func() error {
+			_, err := q.ListAdminAgents(ctx, ListAdminAgentsParams{Query: "agent", LifecycleStatus: "active", Limit: 10})
 			return err
 		}},
 		{name: "ListPendingAgents", run: func() error {

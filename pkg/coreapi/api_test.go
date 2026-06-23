@@ -110,7 +110,7 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 	if services == nil {
 		t.Fatalf("Register returned nil services")
 	}
-	if services.Auth == nil || services.AgentMarket == nil || services.Agent == nil || services.Skill == nil ||
+	if services.Auth == nil || services.Admin == nil || services.AgentMarket == nil || services.Agent == nil || services.Skill == nil ||
 		services.Runtime == nil || services.Webhook == nil || services.A2A == nil || services.Workflow == nil ||
 		services.Registry == nil || services.Benchmark == nil || services.Task == nil || services.MCP == nil ||
 		services.Delivery == nil {
@@ -134,6 +134,11 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		"GET /api/v1/me",
 		"GET /api/v1/agents",
 		"POST /api/v1/creator/agents",
+		"GET /api/v1/admin/summary",
+		"GET /api/v1/admin/users",
+		"PATCH /api/v1/admin/users/:id/flags",
+		"GET /api/v1/admin/agents",
+		"PATCH /api/v1/admin/agents/:id/moderation",
 		"GET /api/v1/admin/agents/pending",
 		"POST /api/v1/agent-registration/agents",
 		"POST /api/v1/agent-runtime/heartbeat",

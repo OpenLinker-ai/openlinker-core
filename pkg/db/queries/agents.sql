@@ -153,6 +153,85 @@ SET total_calls = total_calls + 1,
     updated_at = NOW()
 WHERE id = $1;
 
+-- name: ListAdminAgents :many
+-- 管理台 Agent 列表：可搜索 Agent / 创作者，可按三维状态筛选。
+SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
+       a.endpoint_auth_header, a.price_per_call_cents, a.tags,
+       a.lifecycle_status, a.visibility, a.certification_status,
+       a.rejection_reason, a.certified_at,
+       a.total_calls, a.total_revenue_cents,
+       a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
+       u.email AS creator_email,
+       u.display_name AS creator_name
+FROM agents a
+JOIN users u ON u.id = a.creator_id
+WHERE (
+    $1::text = ''
+    OR a.slug ILIKE '%' || $1 || '%'
+    OR a.name ILIKE '%' || $1 || '%'
+    OR a.description ILIKE '%' || $1 || '%'
+    OR u.email ILIKE '%' || $1 || '%'
+    OR u.display_name ILIKE '%' || $1 || '%'
+  )
+  AND ($2::text = '' OR a.lifecycle_status = $2)
+  AND ($3::text = '' OR a.visibility = $3)
+  AND ($4::text = '' OR a.certification_status = $4)
+ORDER BY a.updated_at DESC, a.created_at DESC
+LIMIT $5 OFFSET $6;
+
+-- name: CountAdminAgents :one
+SELECT COUNT(*)::int AS total
+FROM agents a
+JOIN users u ON u.id = a.creator_id
+WHERE (
+    $1::text = ''
+    OR a.slug ILIKE '%' || $1 || '%'
+    OR a.name ILIKE '%' || $1 || '%'
+    OR a.description ILIKE '%' || $1 || '%'
+    OR u.email ILIKE '%' || $1 || '%'
+    OR u.display_name ILIKE '%' || $1 || '%'
+  )
+  AND ($2::text = '' OR a.lifecycle_status = $2)
+  AND ($3::text = '' OR a.visibility = $3)
+  AND ($4::text = '' OR a.certification_status = $4);
+
+-- name: UpdateAdminAgentModeration :one
+-- 管理台调整 Agent 生命周期、可见性、认证状态。
+UPDATE agents
+SET lifecycle_status = $2,
+    visibility = $3,
+    certification_status = $4,
+    rejection_reason = CASE
+        WHEN $4 = 'rejected' THEN NULLIF($5, '')
+        WHEN $4 IN ('unreviewed', 'pending', 'certified') THEN NULL
+        ELSE rejection_reason
+    END,
+    certified_at = CASE
+        WHEN $4 = 'certified' THEN COALESCE(certified_at, NOW())
+        WHEN $4 IN ('unreviewed', 'pending', 'rejected') THEN NULL
+        ELSE certified_at
+    END,
+    updated_at = NOW()
+WHERE id = $1
+RETURNING id, creator_id, slug, name, description, endpoint_url,
+          endpoint_auth_header, price_per_call_cents, tags,
+          lifecycle_status, visibility, certification_status,
+          rejection_reason, certified_at,
+          total_calls, total_revenue_cents,
+          webhook_url, connection_mode, mcp_tool_name, created_at, updated_at;
+
+-- name: GetAdminSummary :one
+SELECT
+  (SELECT COUNT(*)::int FROM users WHERE deleted_at IS NULL) AS total_users,
+  (SELECT COUNT(*)::int FROM users WHERE deleted_at IS NULL AND is_admin) AS admin_users,
+  (SELECT COUNT(*)::int FROM users WHERE deleted_at IS NULL AND is_creator) AS creator_users,
+  (SELECT COUNT(*)::int FROM users WHERE deleted_at IS NULL AND creator_verified) AS verified_creators,
+  (SELECT COUNT(*)::int FROM agents) AS total_agents,
+  (SELECT COUNT(*)::int FROM agents WHERE lifecycle_status = 'active') AS active_agents,
+  (SELECT COUNT(*)::int FROM agents WHERE lifecycle_status = 'disabled') AS disabled_agents,
+  (SELECT COUNT(*)::int FROM agents WHERE certification_status = 'pending') AS pending_agents,
+  (SELECT COUNT(*)::int FROM agents WHERE certification_status = 'certified') AS certified_agents;
+
 -- ## 模块 3（市场查询 + 详情）
 
 -- name: ListPublicAgents :many

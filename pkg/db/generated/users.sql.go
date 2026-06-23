@@ -197,3 +197,135 @@ func (q *Queries) UpdateUserBecomeCreator(ctx context.Context, id uuid.UUID) (in
 	}
 	return tag.RowsAffected(), nil
 }
+
+const listAdminUsers = `-- name: ListAdminUsers :many
+SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,
+       avatar_url, is_creator, creator_verified, is_admin,
+       created_at, updated_at, deleted_at
+FROM users
+WHERE deleted_at IS NULL
+  AND (
+    $1::text = ''
+    OR email ILIKE '%' || $1 || '%'
+    OR display_name ILIKE '%' || $1 || '%'
+  )
+  AND (
+    $2::text = ''
+    OR ($2 = 'admin' AND is_admin)
+    OR ($2 = 'creator' AND is_creator)
+    OR ($2 = 'creator_verified' AND creator_verified)
+    OR ($2 = 'regular' AND NOT is_admin AND NOT is_creator)
+  )
+ORDER BY created_at DESC
+LIMIT $3 OFFSET $4`
+
+type ListAdminUsersParams struct {
+	Query  string `db:"query" json:"query"`
+	Role   string `db:"role" json:"role"`
+	Limit  int32  `db:"limit" json:"limit"`
+	Offset int32  `db:"offset" json:"offset"`
+}
+
+// ListAdminUsers 管理台用户列表。
+func (q *Queries) ListAdminUsers(ctx context.Context, arg ListAdminUsersParams) ([]User, error) {
+	rows, err := q.db.Query(ctx, listAdminUsers, arg.Query, arg.Role, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(
+			&u.ID,
+			&u.Email,
+			&u.PasswordHash,
+			&u.OauthProvider,
+			&u.OauthID,
+			&u.DisplayName,
+			&u.AvatarURL,
+			&u.IsCreator,
+			&u.CreatorVerified,
+			&u.IsAdmin,
+			&u.CreatedAt,
+			&u.UpdatedAt,
+			&u.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const countAdminUsers = `-- name: CountAdminUsers :one
+SELECT COUNT(*)::int AS total
+FROM users
+WHERE deleted_at IS NULL
+  AND (
+    $1::text = ''
+    OR email ILIKE '%' || $1 || '%'
+    OR display_name ILIKE '%' || $1 || '%'
+  )
+  AND (
+    $2::text = ''
+    OR ($2 = 'admin' AND is_admin)
+    OR ($2 = 'creator' AND is_creator)
+    OR ($2 = 'creator_verified' AND creator_verified)
+    OR ($2 = 'regular' AND NOT is_admin AND NOT is_creator)
+  )`
+
+type CountAdminUsersParams struct {
+	Query string `db:"query" json:"query"`
+	Role  string `db:"role" json:"role"`
+}
+
+func (q *Queries) CountAdminUsers(ctx context.Context, arg CountAdminUsersParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countAdminUsers, arg.Query, arg.Role)
+	var total int32
+	err := row.Scan(&total)
+	return total, err
+}
+
+const updateAdminUserFlags = `-- name: UpdateAdminUserFlags :one
+UPDATE users
+SET is_admin = $2,
+    is_creator = $3,
+    creator_verified = $4,
+    updated_at = NOW()
+WHERE id = $1 AND deleted_at IS NULL
+RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
+          avatar_url, is_creator, creator_verified, is_admin,
+          created_at, updated_at, deleted_at`
+
+type UpdateAdminUserFlagsParams struct {
+	ID              uuid.UUID `db:"id" json:"id"`
+	IsAdmin         bool      `db:"is_admin" json:"is_admin"`
+	IsCreator       bool      `db:"is_creator" json:"is_creator"`
+	CreatorVerified bool      `db:"creator_verified" json:"creator_verified"`
+}
+
+// UpdateAdminUserFlags 管理台调整用户身份标志。
+func (q *Queries) UpdateAdminUserFlags(ctx context.Context, arg UpdateAdminUserFlagsParams) (User, error) {
+	row := q.db.QueryRow(ctx, updateAdminUserFlags, arg.ID, arg.IsAdmin, arg.IsCreator, arg.CreatorVerified)
+	var u User
+	err := row.Scan(
+		&u.ID,
+		&u.Email,
+		&u.PasswordHash,
+		&u.OauthProvider,
+		&u.OauthID,
+		&u.DisplayName,
+		&u.AvatarURL,
+		&u.IsCreator,
+		&u.CreatorVerified,
+		&u.IsAdmin,
+		&u.CreatedAt,
+		&u.UpdatedAt,
+		&u.DeletedAt,
+	)
+	return u, err
+}

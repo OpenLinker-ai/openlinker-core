@@ -52,3 +52,54 @@ UPDATE users
 SET is_creator = TRUE,
     updated_at = NOW()
 WHERE id = $1 AND deleted_at IS NULL;
+
+-- name: ListAdminUsers :many
+-- 管理台用户列表：按邮箱 / 昵称搜索，可筛角色。
+SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,
+       avatar_url, is_creator, creator_verified, is_admin,
+       created_at, updated_at, deleted_at
+FROM users
+WHERE deleted_at IS NULL
+  AND (
+    $1::text = ''
+    OR email ILIKE '%' || $1 || '%'
+    OR display_name ILIKE '%' || $1 || '%'
+  )
+  AND (
+    $2::text = ''
+    OR ($2 = 'admin' AND is_admin)
+    OR ($2 = 'creator' AND is_creator)
+    OR ($2 = 'creator_verified' AND creator_verified)
+    OR ($2 = 'regular' AND NOT is_admin AND NOT is_creator)
+  )
+ORDER BY created_at DESC
+LIMIT $3 OFFSET $4;
+
+-- name: CountAdminUsers :one
+SELECT COUNT(*)::int AS total
+FROM users
+WHERE deleted_at IS NULL
+  AND (
+    $1::text = ''
+    OR email ILIKE '%' || $1 || '%'
+    OR display_name ILIKE '%' || $1 || '%'
+  )
+  AND (
+    $2::text = ''
+    OR ($2 = 'admin' AND is_admin)
+    OR ($2 = 'creator' AND is_creator)
+    OR ($2 = 'creator_verified' AND creator_verified)
+    OR ($2 = 'regular' AND NOT is_admin AND NOT is_creator)
+  );
+
+-- name: UpdateAdminUserFlags :one
+-- 管理台调整用户身份标志。
+UPDATE users
+SET is_admin = $2,
+    is_creator = $3,
+    creator_verified = $4,
+    updated_at = NOW()
+WHERE id = $1 AND deleted_at IS NULL
+RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
+          avatar_url, is_creator, creator_verified, is_admin,
+          created_at, updated_at, deleted_at;
