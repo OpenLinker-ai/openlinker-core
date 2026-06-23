@@ -44,8 +44,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/kinzhi/openlinker-core/pkg/agent"
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 // assertHTTPStatus 用 errors.As 断言 *httpx.HTTPError 的 status。

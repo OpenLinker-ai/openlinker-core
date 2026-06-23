@@ -20,10 +20,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
-	"github.com/kinzhi/openlinker-core/pkg/config"
-	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
-	"github.com/kinzhi/openlinker-core/pkg/endpointurl"
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/endpointurl"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 // 投递相关常量。

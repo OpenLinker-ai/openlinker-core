@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/kinzhi/openlinker-core/pkg/config"
-	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
 func TestCallAgentEndpointSendsDirectHTTPEnvelope(t *testing.T) {

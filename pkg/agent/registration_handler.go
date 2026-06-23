@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 // RegistrationHandler Agent 自注册访问令牌 HTTP 入口。

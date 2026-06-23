@@ -15,9 +15,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog/log"
 
-	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
-	"github.com/kinzhi/openlinker-core/pkg/llm"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/llm"
 )
 
 // 模块 B：Skill Benchmark 执行器。

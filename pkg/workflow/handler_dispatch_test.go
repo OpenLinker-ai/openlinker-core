@@ -12,7 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 func TestWorkflowHandlerDispatchesServiceSuccess(t *testing.T) {

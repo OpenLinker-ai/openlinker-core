@@ -15,10 +15,10 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/kinzhi/openlinker-core/pkg/config"
-	"github.com/kinzhi/openlinker-core/pkg/credential"
-	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/credential"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 const (

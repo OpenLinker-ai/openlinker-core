@@ -19,8 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
-	"github.com/kinzhi/openlinker-core/pkg/runtime"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 func setRuntimePullMode(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {

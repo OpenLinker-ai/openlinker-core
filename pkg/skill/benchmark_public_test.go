@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
-	"github.com/kinzhi/openlinker-core/pkg/skill"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/skill"
 )
 
 // 覆盖 Phase 2 缺口 3：benchmark 公开 GET 路径（docs/29 §四）。

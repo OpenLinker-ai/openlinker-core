@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
-	"github.com/kinzhi/openlinker-core/pkg/llm"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/llm"
 )
 
 // llmParse 调用 Anthropic 把用户描述映射到 1-3 个 skill_id。

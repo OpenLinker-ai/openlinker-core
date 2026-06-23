@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 // BenchmarkHandler HTTP 入口。Service 是 nil 时不挂路由（main.go 兜底）。

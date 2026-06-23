@@ -9,7 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 
-	"github.com/kinzhi/openlinker-core/pkg/config"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 )
 
 func TestNewManifestUsesStablePublicEntrypoints(t *testing.T) {

@@ -11,8 +11,8 @@ import (
 	"github.com/markbates/goth/gothic"
 	"github.com/rs/zerolog/log"
 
-	"github.com/kinzhi/openlinker-core/pkg/config"
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 // providerGoogle / providerGithub OAuth provider 名（goth 用作 key）。

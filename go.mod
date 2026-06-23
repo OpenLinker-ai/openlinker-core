@@ -1,4 +1,4 @@
-module github.com/kinzhi/openlinker-core
+module github.com/OpenLinker-ai/openlinker-core
 
 go 1.25.0
 

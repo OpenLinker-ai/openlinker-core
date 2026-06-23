@@ -3,8 +3,8 @@ package agent
 import (
 	"strings"
 
-	"github.com/kinzhi/openlinker-core/pkg/endpointurl"
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/endpointurl"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 const (

@@ -16,9 +16,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/labstack/echo/v4"
 
-	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
-	runtimemod "github.com/kinzhi/openlinker-core/pkg/runtime"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	runtimemod "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 func TestWorkflowGraphAndEdgeHelpers(t *testing.T) {

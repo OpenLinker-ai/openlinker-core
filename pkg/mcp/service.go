@@ -5,9 +5,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/kinzhi/openlinker-core/pkg/agent"
-	"github.com/kinzhi/openlinker-core/pkg/runtime"
-	"github.com/kinzhi/openlinker-core/pkg/task"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/task"
 )
 
 // 默认 search 分页：MCP 客户端不希望一次拿太多，给个保守上限。

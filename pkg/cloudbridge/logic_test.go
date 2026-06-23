@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
-	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
 func TestNormalizePage(t *testing.T) {

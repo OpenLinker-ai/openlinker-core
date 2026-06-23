@@ -18,11 +18,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/kinzhi/openlinker-core/pkg/agent"
-	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
-	runtimepkg "github.com/kinzhi/openlinker-core/pkg/runtime"
-	"github.com/kinzhi/openlinker-core/pkg/webhook"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	runtimepkg "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/webhook"
 )
 
 func TestA2AVersionJSONRPCAndQueryHelpers(t *testing.T) {

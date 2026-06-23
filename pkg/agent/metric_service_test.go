@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
-	"github.com/kinzhi/openlinker-core/pkg/agent"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
 )
 
 // 覆盖 Phase 2 缺口 2：metric snapshots（docs/29 §3.4）。

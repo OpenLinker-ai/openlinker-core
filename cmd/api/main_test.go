@@ -15,8 +15,8 @@ import (
 	migratecmd "github.com/golang-migrate/migrate/v4"
 	"github.com/labstack/echo/v4"
 
-	"github.com/kinzhi/openlinker-core/pkg/config"
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 func TestAllowedCORSOrigins(t *testing.T) {

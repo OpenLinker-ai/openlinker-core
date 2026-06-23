@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
 const truncateWebhookTables = "TRUNCATE run_webhook_deliveries, run_webhook_subscriptions, webhook_deliveries, api_keys, wallets, runs, charges, withdrawals, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"

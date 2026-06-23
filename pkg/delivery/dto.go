@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
-	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
 // CreateTargetRequest POST /api/v1/delivery-targets。

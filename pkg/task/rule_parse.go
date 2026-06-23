@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode"
 
-	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
 // ruleParse 在无 LLM 时的兜底：对 query 切词后与每个 skill 的 name/description

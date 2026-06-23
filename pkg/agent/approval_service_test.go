@@ -7,7 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/kinzhi/openlinker-core/pkg/agent"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
 )
 
 // 覆盖 Phase 2 缺口 2：审批 CRUD（docs/29 §3.4）。

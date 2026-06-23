@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	db "github.com/kinzhi/openlinker-core/pkg/db/generated"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
 type benchmarkStatusFakeRunner struct{}

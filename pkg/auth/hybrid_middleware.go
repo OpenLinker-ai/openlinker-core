@@ -7,8 +7,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
-	"github.com/kinzhi/openlinker-core/pkg/credential"
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/credential"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 // ApiKeyVerifier 抽象访问令牌鉴权能力，避免 internal/auth import internal/apikey 形成循环。

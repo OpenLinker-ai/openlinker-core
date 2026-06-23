@@ -10,7 +10,7 @@ import (
 	"github.com/markbates/goth"
 	"github.com/markbates/goth/gothic"
 
-	"github.com/kinzhi/openlinker-core/pkg/config"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 )
 
 func TestConfigureGothSetsSessionStoreAndProviders(t *testing.T) {

@@ -3,8 +3,8 @@ package workflow_test
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,9 +18,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/kinzhi/openlinker-core/pkg/config"
-	runtimemod "github.com/kinzhi/openlinker-core/pkg/runtime"
-	"github.com/kinzhi/openlinker-core/pkg/workflow"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	runtimemod "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/workflow"
 )
 
 func TestWorkflowRunExecutesAgentNodesAndPersistsChildRuns(t *testing.T) {

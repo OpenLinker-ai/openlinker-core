@@ -26,13 +26,13 @@ import (
 	emw "github.com/labstack/echo/v4/middleware"
 	"github.com/rs/zerolog/log"
 
-	"github.com/kinzhi/openlinker-core/pkg/auth"
-	"github.com/kinzhi/openlinker-core/pkg/config"
-	"github.com/kinzhi/openlinker-core/pkg/coreapi"
-	"github.com/kinzhi/openlinker-core/pkg/db"
-	dbgen "github.com/kinzhi/openlinker-core/pkg/db/generated"
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
-	openlinkerlog "github.com/kinzhi/openlinker-core/pkg/log"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/coreapi"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/db"
+	dbgen "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	openlinkerlog "github.com/OpenLinker-ai/openlinker-core/pkg/log"
 )
 
 func main() {

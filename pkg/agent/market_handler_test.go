@@ -39,9 +39,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/kinzhi/openlinker-core/pkg/agent"
-	"github.com/kinzhi/openlinker-core/pkg/auth"
-	"github.com/kinzhi/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 // setupTestServer 启动 echo + MarketHandler，返回测试 server + pool（已 setup）。
