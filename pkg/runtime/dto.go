@@ -20,7 +20,13 @@ type RunRequest struct {
 // Source: 'web' / 'mcp' / 'api'，由 handler 从鉴权方式推导。
 type RunResponse struct {
 	RunID               string                          `json:"run_id"`
+	AgentID             string                          `json:"agent_id,omitempty"`
+	AgentSlug           string                          `json:"agent_slug,omitempty"`
+	AgentName           string                          `json:"agent_name,omitempty"`
+	AgentWebhookSet     bool                            `json:"agent_webhook_set,omitempty"`
+	AgentConnectionMode string                          `json:"agent_connection_mode,omitempty"`
 	Status              string                          `json:"status"`
+	Input               map[string]interface{}          `json:"input,omitempty"`
 	Output              map[string]interface{}          `json:"output,omitempty"`
 	ErrorCode           string                          `json:"error_code,omitempty"`
 	ErrorMsg            string                          `json:"error_message,omitempty"`

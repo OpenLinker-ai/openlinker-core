@@ -651,6 +651,7 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 		return nil, httpx.NotFound("调用记录不存在")
 	}
 	resp := runToResponse(&r)
+	s.attachRunAgentSummary(ctx, r.AgentID, resp)
 	s.attachRunRequirementEvidence(ctx, runID, resp)
 	s.attachRunEvidenceSummary(ctx, runID, resp)
 	delegation, err := s.queries.GetRunDelegationByChild(ctx, runID)
@@ -667,6 +668,22 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 		return nil, httpx.Internal("查询调用关系失败")
 	}
 	return resp, nil
+}
+
+func (s *Service) attachRunAgentSummary(ctx context.Context, agentID uuid.UUID, resp *RunResponse) {
+	if resp == nil {
+		return
+	}
+	resp.AgentID = agentID.String()
+	agent, err := s.queries.GetAgentByID(ctx, agentID)
+	if err != nil {
+		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("runtime.attachRunAgentSummary: GetAgentByID")
+		return
+	}
+	resp.AgentSlug = agent.Slug
+	resp.AgentName = agent.Name
+	resp.AgentWebhookSet = agent.WebhookURL != nil && strings.TrimSpace(*agent.WebhookURL) != ""
+	resp.AgentConnectionMode = agent.ConnectionMode
 }
 
 func (s *Service) attachRunEvidenceSummary(ctx context.Context, runID uuid.UUID, resp *RunResponse) {
@@ -2393,9 +2410,16 @@ func (s *Service) shouldTriggerExternalDelivery(ctx context.Context, runID uuid.
 // 这里取保守做法：失败时 CostCents = 0（已退款），与同步响应一致。
 func runToResponse(r *db.Run) *RunResponse {
 	resp := &RunResponse{
-		RunID:  r.ID.String(),
-		Status: r.Status,
-		Source: r.Source,
+		RunID:   r.ID.String(),
+		AgentID: r.AgentID.String(),
+		Status:  r.Status,
+		Source:  r.Source,
+	}
+	if len(r.Input) > 0 {
+		var in map[string]interface{}
+		if err := json.Unmarshal(r.Input, &in); err == nil {
+			resp.Input = in
+		}
 	}
 	if r.DurationMs != nil {
 		resp.DurationMs = *r.DurationMs
