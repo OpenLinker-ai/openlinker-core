@@ -3,6 +3,7 @@ package coreapi
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/gorilla/sessions"
@@ -53,6 +54,52 @@ func TestConfigureGothSetsSessionStoreAndProviders(t *testing.T) {
 	}
 	if provider, err := goth.GetProvider("github"); err != nil || provider.Name() != "github" {
 		t.Fatalf("github provider = %v, %v", provider, err)
+	}
+}
+
+func TestConfigureGothUsesOAuthCallbackBaseURLWhenSet(t *testing.T) {
+	resetGothGlobals(t)
+
+	ConfigureGoth(&config.Config{
+		JWTSecret:            "test-secret",
+		APIURL:               "https://api.openlinker.test",
+		OAuthCallbackBaseURL: " https://openlinker.test/ ",
+		GoogleClientID:       "google-id",
+		GoogleClientSecret:   "google-secret",
+		GithubClientID:       "github-id",
+		GithubClientSecret:   "github-secret",
+	})
+
+	googleProvider, err := goth.GetProvider("google")
+	if err != nil {
+		t.Fatalf("google provider: %v", err)
+	}
+	googleSession, err := googleProvider.BeginAuth("state")
+	if err != nil {
+		t.Fatalf("google BeginAuth: %v", err)
+	}
+	googleAuthURL, err := googleSession.GetAuthURL()
+	if err != nil {
+		t.Fatalf("google auth url: %v", err)
+	}
+	if !strings.Contains(googleAuthURL, "redirect_uri=https%3A%2F%2Fopenlinker.test%2Fapi%2Fv1%2Fauth%2Fgoogle%2Fcallback") {
+		t.Fatalf("google auth url does not use callback base: %s", googleAuthURL)
+	}
+
+	githubProvider, err := goth.GetProvider("github")
+	if err != nil {
+		t.Fatalf("github provider: %v", err)
+	}
+	githubSession, err := githubProvider.BeginAuth("state")
+	if err != nil {
+		t.Fatalf("github BeginAuth: %v", err)
+	}
+	githubAuthURL, err := githubSession.GetAuthURL()
+	if err != nil {
+		t.Fatalf("github auth url: %v", err)
+	}
+	if !strings.Contains(githubAuthURL, "redirect_uri=https%3A%2F%2Fopenlinker.test%2Fapi%2Fv1%2Fauth%2Fgithub%2Fcallback") {
+		t.Fatalf("github auth url does not use callback base: %s", githubAuthURL)
 	}
 }
 

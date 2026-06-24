@@ -3,6 +3,7 @@ package coreapi
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/sessions"
@@ -226,15 +227,28 @@ func ConfigureGoth(cfg *config.Config) {
 	gothic.Store = store
 
 	if cfg.GoogleClientID != "" && cfg.GoogleClientSecret != "" {
-		callback := cfg.APIURL + "/api/v1/auth/google/callback"
+		callback := oauthCallbackBaseURL(cfg) + "/api/v1/auth/google/callback"
 		goth.UseProviders(gothgoogle.New(cfg.GoogleClientID, cfg.GoogleClientSecret, callback, "email", "profile"))
 		log.Info().Str("callback", callback).Msg("google oauth configured")
 	}
 	if cfg.GithubClientID != "" && cfg.GithubClientSecret != "" {
-		callback := cfg.APIURL + "/api/v1/auth/github/callback"
+		callback := oauthCallbackBaseURL(cfg) + "/api/v1/auth/github/callback"
 		goth.UseProviders(gothgithub.New(cfg.GithubClientID, cfg.GithubClientSecret, callback, "user:email"))
 		log.Info().Str("callback", callback).Msg("github oauth configured")
 	}
+}
+
+func oauthCallbackBaseURL(cfg *config.Config) string {
+	if cfg == nil {
+		return "http://localhost:8080"
+	}
+	if value := strings.TrimRight(strings.TrimSpace(cfg.OAuthCallbackBaseURL), "/"); value != "" {
+		return value
+	}
+	if value := strings.TrimRight(strings.TrimSpace(cfg.APIURL), "/"); value != "" {
+		return value
+	}
+	return "http://localhost:8080"
 }
 
 type skillAdapter struct {

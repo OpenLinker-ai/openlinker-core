@@ -26,6 +26,7 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	t.Setenv("ENV", "production")
 	t.Setenv("PORT", "9090")
 	t.Setenv("ALLOW_LOCAL_HTTP_ENDPOINTS", "true")
+	t.Setenv("OAUTH_CALLBACK_BASE_URL", "https://openlinker.test")
 
 	cfg, err := Load()
 	if err != nil {
@@ -39,6 +40,9 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	}
 	if cfg.RedisURL != "redis://localhost:6379/0" {
 		t.Fatalf("unexpected default RedisURL: %q", cfg.RedisURL)
+	}
+	if cfg.OAuthCallbackBaseURL != "https://openlinker.test" {
+		t.Fatalf("OAuthCallbackBaseURL = %q", cfg.OAuthCallbackBaseURL)
 	}
 	if cfg.DBMaxConns != 20 || cfg.DBMinConns != 2 || cfg.DBMaxConnLifetimeMinutes != 30 ||
 		cfg.DBMaxConnIdleTimeMinutes != 5 || cfg.DBHealthCheckPeriodSeconds != 60 {

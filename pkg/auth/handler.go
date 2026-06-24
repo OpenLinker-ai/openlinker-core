@@ -2,8 +2,11 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
@@ -17,8 +20,9 @@ import (
 
 // providerGoogle / providerGithub OAuth provider 名（goth 用作 key）。
 const (
-	providerGoogle = "google"
-	providerGithub = "github"
+	providerGoogle    = "google"
+	providerGithub    = "github"
+	oauthStateVersion = "ol1"
 )
 
 // Handler 认证模块 HTTP 入口。
@@ -159,7 +163,12 @@ func (h *Handler) oauthStart(c echo.Context, provider string, configured bool) e
 	if !configured {
 		return httpx.Internal(provider + " OAuth 未配置")
 	}
-	req := gothic.GetContextWithProvider(c.Request(), provider)
+	state, err := newOAuthState(c.QueryParam("callbackUrl"))
+	if err != nil {
+		log.Error().Err(err).Str("provider", provider).Msg("auth.oauthStart: create state")
+		return httpx.Internal("启动 OAuth 失败")
+	}
+	req := gothic.GetContextWithProvider(requestWithOAuthState(c.Request(), state), provider)
 	authURL, err := gothic.GetAuthURL(c.Response().Writer, req)
 	if err != nil {
 		log.Error().Err(err).Str("provider", provider).Msg("auth.oauthStart: GetAuthURL")
@@ -170,20 +179,21 @@ func (h *Handler) oauthStart(c echo.Context, provider string, configured bool) e
 
 // oauthCallback 处理任意 OAuth provider 回调。
 //
-// 成功 -> 重定向到 FrontendURL/auth/callback?code=<short-lived-code>
-// 失败 -> 重定向到 FrontendURL/auth/callback?error=<msg>
+// 成功 -> 重定向到 FrontendURL/auth/callback?provider=<provider>&code=<short-lived-code>
+// 失败 -> 重定向到 FrontendURL/auth/callback?provider=<provider>&error=<msg>
 func (h *Handler) oauthCallback(c echo.Context, provider string, configured bool) error {
 	if h.cfg == nil {
 		return httpx.Internal(provider + " OAuth 未配置")
 	}
+	callbackPath := callbackFromOAuthState(c.QueryParam("state"))
 	if !configured {
-		return h.redirectAuthError(c, provider+" OAuth 未配置")
+		return h.redirectAuthError(c, provider, provider+" OAuth 未配置", callbackPath)
 	}
 	req := gothic.GetContextWithProvider(c.Request(), provider)
 	gu, err := gothic.CompleteUserAuth(c.Response().Writer, req)
 	if err != nil {
 		log.Warn().Err(err).Str("provider", provider).Msg("auth.oauthCallback: CompleteUserAuth")
-		return h.redirectAuthError(c, "OAuth 验证失败")
+		return h.redirectAuthError(c, provider, "OAuth 验证失败", callbackPath)
 	}
 
 	resp, err := h.svc.FindOrCreateOAuthUser(
@@ -197,10 +207,10 @@ func (h *Handler) oauthCallback(c echo.Context, provider string, configured bool
 	if err != nil {
 		// 业务错误（如 conflict）以友好消息回前端
 		if he, ok := err.(*httpx.HTTPError); ok {
-			return h.redirectAuthError(c, he.Message)
+			return h.redirectAuthError(c, provider, he.Message, callbackPath)
 		}
 		log.Error().Err(err).Str("provider", provider).Msg("auth.oauthCallback: FindOrCreateOAuthUser")
-		return h.redirectAuthError(c, "登录失败")
+		return h.redirectAuthError(c, provider, "登录失败", callbackPath)
 	}
 
 	code, err := h.svc.IssueOAuthCode(c.Request().Context(), resp)
@@ -208,7 +218,7 @@ func (h *Handler) oauthCallback(c echo.Context, provider string, configured bool
 		return err
 	}
 
-	target := h.cfg.FrontendURL + "/auth/callback?code=" + url.QueryEscape(code)
+	target := h.authCallbackURL(provider, code, "", callbackPath)
 	return c.Redirect(http.StatusTemporaryRedirect, target)
 }
 
@@ -296,9 +306,27 @@ func currentUserID(c echo.Context) (uuid.UUID, error) {
 }
 
 // redirectAuthError 把错误信息编码进 query 后重定向到前端。
-func (h *Handler) redirectAuthError(c echo.Context, msg string) error {
-	target := h.cfg.FrontendURL + "/auth/callback?error=" + url.QueryEscape(msg)
+func (h *Handler) redirectAuthError(c echo.Context, provider, msg, callbackPath string) error {
+	target := h.authCallbackURL(provider, "", msg, callbackPath)
 	return c.Redirect(http.StatusTemporaryRedirect, target)
+}
+
+func (h *Handler) authCallbackURL(provider, code, errorMessage, callbackPath string) string {
+	base := strings.TrimRight(h.cfg.FrontendURL, "/") + "/auth/callback"
+	q := url.Values{}
+	if code != "" {
+		q.Set("code", code)
+	}
+	if errorMessage != "" {
+		q.Set("error", errorMessage)
+	}
+	if provider != "" {
+		q.Set("provider", provider)
+	}
+	if safe := safeOAuthCallbackPath(callbackPath); safe != "/" {
+		q.Set("callbackUrl", safe)
+	}
+	return base + "?" + q.Encode()
 }
 
 // nonEmpty 选第一个非空字符串。
@@ -309,4 +337,44 @@ func nonEmpty(vs ...string) string {
 		}
 	}
 	return ""
+}
+
+func newOAuthState(callbackPath string) (string, error) {
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	noncePart := base64.RawURLEncoding.EncodeToString(nonce)
+	callbackPart := base64.RawURLEncoding.EncodeToString([]byte(safeOAuthCallbackPath(callbackPath)))
+	return strings.Join([]string{oauthStateVersion, noncePart, callbackPart}, "."), nil
+}
+
+func callbackFromOAuthState(state string) string {
+	parts := strings.Split(state, ".")
+	if len(parts) != 3 || parts[0] != oauthStateVersion {
+		return "/"
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return "/"
+	}
+	return safeOAuthCallbackPath(string(raw))
+}
+
+func safeOAuthCallbackPath(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" || !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") {
+		return "/"
+	}
+	return value
+}
+
+func requestWithOAuthState(req *http.Request, state string) *http.Request {
+	clone := req.Clone(req.Context())
+	copiedURL := *clone.URL
+	q := copiedURL.Query()
+	q.Set("state", state)
+	copiedURL.RawQuery = q.Encode()
+	clone.URL = &copiedURL
+	return clone
 }

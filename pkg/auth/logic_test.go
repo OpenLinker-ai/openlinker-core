@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,7 +14,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/sessions"
 	"github.com/labstack/echo/v4"
+	"github.com/markbates/goth"
+	"github.com/markbates/goth/gothic"
+	"golang.org/x/oauth2"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
@@ -119,6 +125,124 @@ func TestAuthHandlerValidationOAuthHelpersAndRoutes(t *testing.T) {
 		if !routes[route] {
 			t.Fatalf("missing route %s", route)
 		}
+	}
+}
+
+func TestOAuthStartAndCallbackRedirectWithCodeProviderAndCallbackURL(t *testing.T) {
+	goth.ClearProviders()
+	t.Cleanup(goth.ClearProviders)
+	gothic.Store = sessions.NewCookieStore([]byte(pureAuthSecret))
+	goth.UseProviders(&testOAuthProvider{
+		name:       providerGoogle,
+		userID:     "google-user-1",
+		email:      "oauth@example.com",
+		display:    "OAuth User",
+		avatarURL:  "https://cdn.example/avatar.png",
+		authOrigin: "https://accounts.example",
+	})
+
+	userID := uuid.New()
+	authResp := &AuthResponse{
+		UserID:      userID.String(),
+		Email:       "oauth@example.com",
+		DisplayName: "OAuth User",
+		JWT:         "jwt-token",
+	}
+	mock := &mockAuthService{
+		oauthResp:       authResp,
+		issuedOAuthCode: strings.Repeat("c", 64),
+	}
+	h := NewHandler(mock, &config.Config{
+		FrontendURL:        "https://app.example/",
+		GoogleClientID:     "google-id",
+		GoogleClientSecret: "google-secret",
+	})
+
+	e := echo.New()
+	startRec := httptest.NewRecorder()
+	startReq := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/auth/google?callbackUrl="+url.QueryEscape("/runs?tab=mine"),
+		nil,
+	)
+	startCtx := e.NewContext(startReq, startRec)
+	if err := h.GoogleStart(startCtx); err != nil {
+		t.Fatalf("GoogleStart error = %v", err)
+	}
+	if startRec.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("start status = %d body=%s", startRec.Code, startRec.Body.String())
+	}
+	startURL, err := url.Parse(startRec.Header().Get(echo.HeaderLocation))
+	if err != nil {
+		t.Fatalf("parse start redirect: %v", err)
+	}
+	state := startURL.Query().Get("state")
+	if startURL.Scheme != "https" || startURL.Host != "accounts.example" || callbackFromOAuthState(state) != "/runs?tab=mine" {
+		t.Fatalf("unexpected start redirect = %q state callback=%q", startURL.String(), callbackFromOAuthState(state))
+	}
+
+	callbackRec := httptest.NewRecorder()
+	callbackReq := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/auth/google/callback?state="+url.QueryEscape(state)+"&code=provider-code",
+		nil,
+	)
+	for _, cookie := range startRec.Result().Cookies() {
+		callbackReq.AddCookie(cookie)
+	}
+	callbackCtx := e.NewContext(callbackReq, callbackRec)
+	if err := h.GoogleCallback(callbackCtx); err != nil {
+		t.Fatalf("GoogleCallback error = %v", err)
+	}
+	if callbackRec.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("callback status = %d body=%s", callbackRec.Code, callbackRec.Body.String())
+	}
+
+	callbackURL, err := url.Parse(callbackRec.Header().Get(echo.HeaderLocation))
+	if err != nil {
+		t.Fatalf("parse callback redirect: %v", err)
+	}
+	if callbackURL.Scheme != "https" || callbackURL.Host != "app.example" || callbackURL.Path != "/auth/callback" {
+		t.Fatalf("unexpected frontend callback = %q", callbackURL.String())
+	}
+	if callbackURL.Query().Get("provider") != providerGoogle ||
+		callbackURL.Query().Get("code") != strings.Repeat("c", 64) ||
+		callbackURL.Query().Get("callbackUrl") != "/runs?tab=mine" {
+		t.Fatalf("unexpected frontend callback query = %s", callbackURL.RawQuery)
+	}
+	if mock.oauthProvider != providerGoogle ||
+		mock.oauthID != "google-user-1" ||
+		mock.oauthEmail != "oauth@example.com" ||
+		mock.oauthDisplayName != "OAuth User" ||
+		mock.oauthAvatarURL != "https://cdn.example/avatar.png" {
+		t.Fatalf("captured oauth user = provider=%q id=%q email=%q display=%q avatar=%q",
+			mock.oauthProvider, mock.oauthID, mock.oauthEmail, mock.oauthDisplayName, mock.oauthAvatarURL)
+	}
+	if mock.issuedOAuthResp != authResp {
+		t.Fatalf("issued oauth response = %#v", mock.issuedOAuthResp)
+	}
+}
+
+func TestOAuthStateHelpersSanitizeCallbackURL(t *testing.T) {
+	state, err := newOAuthState("/hub?tab=agents")
+	if err != nil {
+		t.Fatalf("newOAuthState: %v", err)
+	}
+	if got := callbackFromOAuthState(state); got != "/hub?tab=agents" {
+		t.Fatalf("callbackFromOAuthState = %q", got)
+	}
+
+	for _, raw := range []string{"https://evil.example", "//evil.example/path", "", "settings"} {
+		state, err := newOAuthState(raw)
+		if err != nil {
+			t.Fatalf("newOAuthState(%q): %v", raw, err)
+		}
+		if got := callbackFromOAuthState(state); got != "/" {
+			t.Fatalf("unsafe callback %q decoded as %q", raw, got)
+		}
+	}
+	if got := callbackFromOAuthState("not-a-valid-state"); got != "/" {
+		t.Fatalf("invalid state decoded as %q", got)
 	}
 }
 
@@ -277,6 +401,92 @@ func invokeHybridAuth(t *testing.T, secret string, verifier ApiKeyVerifier, auth
 		e.HTTPErrorHandler(err, c)
 	}
 	return rec, got
+}
+
+type testOAuthProvider struct {
+	name       string
+	userID     string
+	email      string
+	display    string
+	avatarURL  string
+	authOrigin string
+}
+
+func (p *testOAuthProvider) Name() string {
+	return p.name
+}
+
+func (p *testOAuthProvider) SetName(name string) {
+	p.name = name
+}
+
+func (p *testOAuthProvider) BeginAuth(state string) (goth.Session, error) {
+	return &testOAuthSession{
+		AuthURL: fmt.Sprintf("%s/auth?state=%s", p.authOrigin, url.QueryEscape(state)),
+		UserID:  p.userID,
+		Email:   p.email,
+		Name:    p.display,
+		Avatar:  p.avatarURL,
+	}, nil
+}
+
+func (p *testOAuthProvider) UnmarshalSession(data string) (goth.Session, error) {
+	var sess testOAuthSession
+	if err := json.Unmarshal([]byte(data), &sess); err != nil {
+		return nil, err
+	}
+	return &sess, nil
+}
+
+func (p *testOAuthProvider) FetchUser(session goth.Session) (goth.User, error) {
+	sess, ok := session.(*testOAuthSession)
+	if !ok {
+		return goth.User{}, errors.New("unexpected session")
+	}
+	if sess.AccessToken == "" {
+		return goth.User{}, errors.New("missing access token")
+	}
+	return goth.User{
+		UserID:      sess.UserID,
+		Email:       sess.Email,
+		Name:        sess.Name,
+		AvatarURL:   sess.Avatar,
+		Provider:    p.name,
+		AccessToken: sess.AccessToken,
+	}, nil
+}
+
+func (p *testOAuthProvider) Debug(bool) {}
+
+func (p *testOAuthProvider) RefreshToken(string) (*oauth2.Token, error) {
+	return nil, nil
+}
+
+func (p *testOAuthProvider) RefreshTokenAvailable() bool {
+	return false
+}
+
+type testOAuthSession struct {
+	AuthURL     string
+	UserID      string
+	Email       string
+	Name        string
+	Avatar      string
+	AccessToken string
+}
+
+func (s *testOAuthSession) GetAuthURL() (string, error) {
+	return s.AuthURL, nil
+}
+
+func (s *testOAuthSession) Marshal() string {
+	raw, _ := json.Marshal(s)
+	return string(raw)
+}
+
+func (s *testOAuthSession) Authorize(goth.Provider, goth.Params) (string, error) {
+	s.AccessToken = "test-access-token"
+	return s.AccessToken, nil
 }
 
 type fakeAPIKeyVerifier struct {

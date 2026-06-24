@@ -42,9 +42,10 @@ type Config struct {
 	GithubClientSecret string `envconfig:"GITHUB_OAUTH_CLIENT_SECRET"`
 
 	// 前端 URL
-	FrontendURL     string `envconfig:"FRONTEND_URL" default:"http://localhost:3000"`
-	APIURL          string `envconfig:"API_URL" default:"http://localhost:8080"`
-	APIKeyVerifyURL string `envconfig:"API_KEY_VERIFY_URL"`
+	FrontendURL          string `envconfig:"FRONTEND_URL" default:"http://localhost:3000"`
+	APIURL               string `envconfig:"API_URL" default:"http://localhost:8080"`
+	OAuthCallbackBaseURL string `envconfig:"OAUTH_CALLBACK_BASE_URL"`
+	APIKeyVerifyURL      string `envconfig:"API_KEY_VERIFY_URL"`
 
 	// LLM（任务驱动 A 形态。空 → 走规则 fallback）
 	AnthropicAPIKey string `envconfig:"ANTHROPIC_API_KEY"`
