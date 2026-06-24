@@ -813,7 +813,6 @@ func toAgentResponse(a *db.Agent) AgentResponse {
 		RejectionReason:     a.RejectionReason,
 		TotalCalls:          a.TotalCalls,
 		TotalRevenueCents:   a.TotalRevenueCents,
-		WebhookURL:          a.WebhookURL,
 		ConnectionMode:      a.ConnectionMode,
 		MCPToolName:         a.MCPToolName,
 		CreatedAt:           a.CreatedAt.UTC().Format(time.RFC3339),

@@ -17,7 +17,6 @@ import (
 
 func TestWebhookHandlerDispatchesServiceSuccess(t *testing.T) {
 	userID := uuid.New()
-	agentID := uuid.New()
 	runID := uuid.New()
 	callbackID := uuid.New()
 	createdAt := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
@@ -33,85 +32,6 @@ func TestWebhookHandlerDispatchesServiceSuccess(t *testing.T) {
 		CreatedAt:           createdAt,
 		UpdatedAt:           createdAt,
 	}
-
-	t.Run("set", func(t *testing.T) {
-		mock := &mockWebhookService{setResp: &SetWebhookResponse{URL: "https://client.example/hook", Secret: "secret"}}
-		c, rec := newWebhookRecorderContext(
-			http.MethodPost,
-			"/creator/agents/"+agentID.String()+"/webhook",
-			`{"webhook_url":"https://client.example/hook"}`,
-			userID.String(),
-			map[string]string{"id": agentID.String()},
-		)
-
-		if err := NewHandler(mock).Set(c); err != nil {
-			t.Fatalf("Set error = %v", err)
-		}
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
-		}
-		if mock.setAgentID != agentID || mock.setUserID != userID || mock.setURL != "https://client.example/hook" {
-			t.Fatalf("captured set = agent %s user %s url %q", mock.setAgentID, mock.setUserID, mock.setURL)
-		}
-		var body SetWebhookResponse
-		decodeWebhookJSON(t, rec, &body)
-		if body.URL == "" || body.Secret == "" {
-			t.Fatalf("body = %#v", body)
-		}
-	})
-
-	t.Run("clear", func(t *testing.T) {
-		mock := &mockWebhookService{}
-		c, rec := newWebhookRecorderContext(http.MethodDelete, "/creator/agents/"+agentID.String()+"/webhook", "", userID.String(), map[string]string{"id": agentID.String()})
-
-		if err := NewHandler(mock).Clear(c); err != nil {
-			t.Fatalf("Clear error = %v", err)
-		}
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
-		}
-		if mock.clearAgentID != agentID || mock.clearUserID != userID {
-			t.Fatalf("captured clear = agent %s user %s", mock.clearAgentID, mock.clearUserID)
-		}
-		assertWebhookStatusBody(t, rec, "cleared")
-	})
-
-	t.Run("rotate", func(t *testing.T) {
-		mock := &mockWebhookService{rotateResp: &SetWebhookResponse{URL: "https://client.example/hook", Secret: "new-secret"}}
-		c, rec := newWebhookRecorderContext(http.MethodPost, "/creator/agents/"+agentID.String()+"/webhook/rotate", "", userID.String(), map[string]string{"id": agentID.String()})
-
-		if err := NewHandler(mock).Rotate(c); err != nil {
-			t.Fatalf("Rotate error = %v", err)
-		}
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
-		}
-		if mock.rotateAgentID != agentID || mock.rotateUserID != userID {
-			t.Fatalf("captured rotate = agent %s user %s", mock.rotateAgentID, mock.rotateUserID)
-		}
-	})
-
-	t.Run("list deliveries nil becomes empty", func(t *testing.T) {
-		mock := &mockWebhookService{}
-		c, rec := newWebhookRecorderContext(http.MethodGet, "/creator/agents/"+agentID.String()+"/webhook/deliveries?limit=7", "", userID.String(), map[string]string{"id": agentID.String()})
-
-		if err := NewHandler(mock).ListDeliveries(c); err != nil {
-			t.Fatalf("ListDeliveries error = %v", err)
-		}
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
-		}
-		if mock.listDeliveriesAgentID != agentID || mock.listDeliveriesUserID != userID || mock.listDeliveriesLimit != 7 {
-			t.Fatalf("captured list deliveries = agent %s user %s limit %d", mock.listDeliveriesAgentID, mock.listDeliveriesUserID, mock.listDeliveriesLimit)
-		}
-		var body struct {
-			Items []DeliveryListItem `json:"items"`
-		}
-		decodeWebhookJSON(t, rec, &body)
-		if body.Items == nil || len(body.Items) != 0 {
-			t.Fatalf("body = %#v", body)
-		}
-	})
 
 	t.Run("create task callback", func(t *testing.T) {
 		mock := &mockWebhookService{createTaskCallbackResp: &subscription}
@@ -256,7 +176,6 @@ func TestWebhookHandlerDispatchesServiceSuccess(t *testing.T) {
 
 func TestWebhookHandlerPropagatesServiceErrors(t *testing.T) {
 	userID := uuid.New()
-	agentID := uuid.New()
 	runID := uuid.New()
 	callbackID := uuid.New()
 
@@ -267,34 +186,6 @@ func TestWebhookHandlerPropagatesServiceErrors(t *testing.T) {
 		ctx  echo.Context
 		want int
 	}{
-		{
-			name: "set",
-			call: (*Handler).Set,
-			mock: &mockWebhookService{setErr: httpx.BadRequest("bad url")},
-			ctx:  mustWebhookContext(http.MethodPost, "/creator/agents/"+agentID.String()+"/webhook", `{"webhook_url":"https://client.example/hook"}`, userID.String(), map[string]string{"id": agentID.String()}),
-			want: http.StatusBadRequest,
-		},
-		{
-			name: "clear",
-			call: (*Handler).Clear,
-			mock: &mockWebhookService{clearErr: httpx.NotFound("missing")},
-			ctx:  mustWebhookContext(http.MethodDelete, "/creator/agents/"+agentID.String()+"/webhook", "", userID.String(), map[string]string{"id": agentID.String()}),
-			want: http.StatusNotFound,
-		},
-		{
-			name: "rotate",
-			call: (*Handler).Rotate,
-			mock: &mockWebhookService{rotateErr: httpx.Internal("rotate failed")},
-			ctx:  mustWebhookContext(http.MethodPost, "/creator/agents/"+agentID.String()+"/webhook/rotate", "", userID.String(), map[string]string{"id": agentID.String()}),
-			want: http.StatusInternalServerError,
-		},
-		{
-			name: "list deliveries",
-			call: (*Handler).ListDeliveries,
-			mock: &mockWebhookService{listDeliveriesErr: httpx.NotFound("missing")},
-			ctx:  mustWebhookContext(http.MethodGet, "/creator/agents/"+agentID.String()+"/webhook/deliveries", "", userID.String(), map[string]string{"id": agentID.String()}),
-			want: http.StatusNotFound,
-		},
 		{
 			name: "create task callback",
 			call: (*Handler).CreateTaskCallback,
@@ -346,27 +237,6 @@ func TestWebhookHandlerPropagatesServiceErrors(t *testing.T) {
 }
 
 type mockWebhookService struct {
-	setAgentID uuid.UUID
-	setUserID  uuid.UUID
-	setURL     string
-	setResp    *SetWebhookResponse
-	setErr     error
-
-	clearAgentID uuid.UUID
-	clearUserID  uuid.UUID
-	clearErr     error
-
-	rotateAgentID uuid.UUID
-	rotateUserID  uuid.UUID
-	rotateResp    *SetWebhookResponse
-	rotateErr     error
-
-	listDeliveriesAgentID uuid.UUID
-	listDeliveriesUserID  uuid.UUID
-	listDeliveriesLimit   int
-	listDeliveriesResp    []DeliveryListItem
-	listDeliveriesErr     error
-
 	createTaskCallbackRunID  uuid.UUID
 	createTaskCallbackUserID uuid.UUID
 	createTaskCallbackReq    *CreateTaskCallbackRequest
@@ -400,32 +270,6 @@ type mockWebhookService struct {
 	updateStatus     string
 	updateStatusResp *TaskCallbackSubscriptionResponse
 	updateStatusErr  error
-}
-
-func (m *mockWebhookService) SetWebhook(_ context.Context, agentID, userID uuid.UUID, url string) (*SetWebhookResponse, error) {
-	m.setAgentID = agentID
-	m.setUserID = userID
-	m.setURL = url
-	return m.setResp, m.setErr
-}
-
-func (m *mockWebhookService) ClearWebhook(_ context.Context, agentID, userID uuid.UUID) error {
-	m.clearAgentID = agentID
-	m.clearUserID = userID
-	return m.clearErr
-}
-
-func (m *mockWebhookService) RotateSecret(_ context.Context, agentID, userID uuid.UUID) (*SetWebhookResponse, error) {
-	m.rotateAgentID = agentID
-	m.rotateUserID = userID
-	return m.rotateResp, m.rotateErr
-}
-
-func (m *mockWebhookService) ListDeliveries(_ context.Context, agentID, userID uuid.UUID, limit int) ([]DeliveryListItem, error) {
-	m.listDeliveriesAgentID = agentID
-	m.listDeliveriesUserID = userID
-	m.listDeliveriesLimit = limit
-	return m.listDeliveriesResp, m.listDeliveriesErr
 }
 
 func (m *mockWebhookService) CreateTaskCallbackSubscription(_ context.Context, runID, userID uuid.UUID, req *CreateTaskCallbackRequest) (*TaskCallbackSubscriptionResponse, error) {

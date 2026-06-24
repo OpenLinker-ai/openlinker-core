@@ -21,10 +21,6 @@ type Handler struct {
 }
 
 type webhookService interface {
-	SetWebhook(context.Context, uuid.UUID, uuid.UUID, string) (*SetWebhookResponse, error)
-	ClearWebhook(context.Context, uuid.UUID, uuid.UUID) error
-	RotateSecret(context.Context, uuid.UUID, uuid.UUID) (*SetWebhookResponse, error)
-	ListDeliveries(context.Context, uuid.UUID, uuid.UUID, int) ([]DeliveryListItem, error)
 	CreateTaskCallbackSubscription(context.Context, uuid.UUID, uuid.UUID, *CreateTaskCallbackRequest) (*TaskCallbackSubscriptionResponse, error)
 	ListTaskCallbackSubscriptions(context.Context, uuid.UUID, uuid.UUID) ([]TaskCallbackSubscriptionResponse, error)
 	ListTaskCallbackSubscriptionsForOwner(context.Context, uuid.UUID, string, int) ([]TaskCallbackSubscriptionResponse, error)
@@ -47,10 +43,6 @@ func NewHandler(svc webhookService, cfg ...*config.Config) *Handler {
 
 // RegisterProtected 注册创作者侧端点（需 JWT）。
 //
-//	POST   /creator/agents/:id/webhook            设置（生成新 secret）
-//	DELETE /creator/agents/:id/webhook            清除
-//	POST   /creator/agents/:id/webhook/rotate     重新生成 secret
-//	GET    /creator/agents/:id/webhook/deliveries 投递历史
 //	POST   /runs/:id/task-callbacks                      为单个 run 注册任务回调
 //	GET    /runs/:id/task-callbacks                      查看 run 任务回调
 //	POST   /runs/:id/task-callbacks/:callbackID/pause     暂停 run 任务回调
@@ -59,12 +51,6 @@ func NewHandler(svc webhookService, cfg ...*config.Config) *Handler {
 //	GET    /task-callbacks                                汇总当前用户的任务回调
 //	POST   /task-callbacks/batch                          批量 pause / resume / delete
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
-	g := api.Group("/creator/agents/:id/webhook", jwtMiddleware)
-	g.POST("", h.Set)
-	g.DELETE("", h.Clear)
-	g.POST("/rotate", h.Rotate)
-	g.GET("/deliveries", h.ListDeliveries)
-
 	taskCallbacks := api.Group("/runs/:id/task-callbacks", jwtMiddleware)
 	taskCallbacks.POST("", h.CreateTaskCallback)
 	taskCallbacks.GET("", h.ListTaskCallbacks)
@@ -75,93 +61,6 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	callbackManager := api.Group("/task-callbacks", jwtMiddleware)
 	callbackManager.GET("", h.ListManagedTaskCallbacks)
 	callbackManager.POST("/batch", h.BatchManageTaskCallbacks)
-}
-
-// Set 设置 webhook（生成新 secret，仅本次返回）。
-func (h *Handler) Set(c echo.Context) error {
-	uid, err := userIDFromCtx(c)
-	if err != nil {
-		return err
-	}
-	id, err := pathID(c)
-	if err != nil {
-		return err
-	}
-	var req SetWebhookRequest
-	if err := c.Bind(&req); err != nil {
-		return httpx.BadRequest("请求体格式错误")
-	}
-	if err := h.validator.Struct(&req); err != nil {
-		return httpx.Unprocessable(err.Error())
-	}
-	resp, err := h.svc.SetWebhook(c.Request().Context(), id, uid, req.URL)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, resp)
-}
-
-// Clear 清除 webhook。
-func (h *Handler) Clear(c echo.Context) error {
-	uid, err := userIDFromCtx(c)
-	if err != nil {
-		return err
-	}
-	id, err := pathID(c)
-	if err != nil {
-		return err
-	}
-	if err := h.svc.ClearWebhook(c.Request().Context(), id, uid); err != nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, map[string]string{"status": "cleared"})
-}
-
-// Rotate 重新生成 secret（保留 url）。
-func (h *Handler) Rotate(c echo.Context) error {
-	uid, err := userIDFromCtx(c)
-	if err != nil {
-		return err
-	}
-	id, err := pathID(c)
-	if err != nil {
-		return err
-	}
-	resp, err := h.svc.RotateSecret(c.Request().Context(), id, uid)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, resp)
-}
-
-// ListDeliveries 查询投递历史。
-//
-// query: ?limit=20（默认 20，最大 100）
-func (h *Handler) ListDeliveries(c echo.Context) error {
-	uid, err := userIDFromCtx(c)
-	if err != nil {
-		return err
-	}
-	id, err := pathID(c)
-	if err != nil {
-		return err
-	}
-	limit := 0
-	if v := c.QueryParam("limit"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return httpx.BadRequest("limit 必须是整数")
-		}
-		limit = n
-	}
-	items, err := h.svc.ListDeliveries(c.Request().Context(), id, uid, limit)
-	if err != nil {
-		return err
-	}
-	if items == nil {
-		items = []DeliveryListItem{}
-	}
-	return c.JSON(http.StatusOK, map[string]any{"items": items})
 }
 
 // CreateTaskCallback 为单个 run 注册调用方任务回调。secret 仅本次返回。

@@ -237,7 +237,6 @@ func TestAgentDTOAvailabilityAndAlertHelpers(t *testing.T) {
 	certifiedAt := time.Date(2026, 6, 20, 3, 4, 5, 0, time.FixedZone("CST", 8*3600))
 	createdAt := time.Date(2026, 6, 20, 4, 4, 5, 0, time.FixedZone("CST", 8*3600))
 	reason := "needs proof"
-	webhook := "https://example.com/hook"
 	tool := "lookup"
 	resp := toAgentResponse(&db.Agent{
 		ID:                  agentID,
@@ -255,7 +254,6 @@ func TestAgentDTOAvailabilityAndAlertHelpers(t *testing.T) {
 		CertifiedAt:         &certifiedAt,
 		TotalCalls:          7,
 		TotalRevenueCents:   99,
-		WebhookURL:          &webhook,
 		ConnectionMode:      ConnectionModeMCPServer,
 		MCPToolName:         &tool,
 		CreatedAt:           createdAt,
@@ -266,7 +264,7 @@ func TestAgentDTOAvailabilityAndAlertHelpers(t *testing.T) {
 	if resp.CertifiedAt == nil || *resp.CertifiedAt != "2026-06-19T19:04:05Z" {
 		t.Fatalf("CertifiedAt = %#v", resp.CertifiedAt)
 	}
-	if resp.Tags == nil || len(resp.Tags) != 0 || resp.WebhookURL == nil || *resp.WebhookURL != webhook || resp.MCPToolName == nil || *resp.MCPToolName != tool {
+	if resp.Tags == nil || len(resp.Tags) != 0 || resp.MCPToolName == nil || *resp.MCPToolName != tool {
 		t.Fatalf("unexpected optional fields in AgentResponse: %#v", resp)
 	}
 

@@ -23,7 +23,6 @@ type RunResponse struct {
 	AgentID             string                          `json:"agent_id,omitempty"`
 	AgentSlug           string                          `json:"agent_slug,omitempty"`
 	AgentName           string                          `json:"agent_name,omitempty"`
-	AgentWebhookSet     bool                            `json:"agent_webhook_set,omitempty"`
 	AgentConnectionMode string                          `json:"agent_connection_mode,omitempty"`
 	Status              string                          `json:"status"`
 	Input               map[string]interface{}          `json:"input,omitempty"`

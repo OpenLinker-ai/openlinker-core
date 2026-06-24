@@ -1,6 +1,6 @@
 package webhook
 
-// SetWebhookRequest POST /api/v1/creator/agents/:id/webhook 请求体。
+// SetWebhookRequest is kept for the legacy Agent webhook service path.
 //
 // URL 必须 https，由 schema CHECK 兜底（agents_webhook_https），同时这里前置校验。
 type SetWebhookRequest struct {
@@ -15,7 +15,7 @@ type SetWebhookResponse struct {
 	Secret string `json:"webhook_secret"`
 }
 
-// DeliveryListItem GET /api/v1/creator/agents/:id/webhook/deliveries 返回项。
+// DeliveryListItem describes legacy Agent webhook delivery rows.
 //
 // payload / response_body 不返回（避免巨大响应；如需 debug 可再加详情接口）。
 type DeliveryListItem struct {
@@ -81,7 +81,7 @@ type TaskCallbackPayload struct {
 	CreatedAt      string                 `json:"created_at"`
 }
 
-// WebhookPayload 投递给创作者 webhook_url 的 body。
+// WebhookPayload is the legacy Agent webhook body.
 //
 // 字段含义：
 //   - Event 固定 "run.completed"（成功 / 失败 / 超时 都是该事件，由 status 区分）

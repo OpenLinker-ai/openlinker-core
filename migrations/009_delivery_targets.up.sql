@@ -5,8 +5,8 @@
 --   - delivery_targets：用户拥有的投递目标（Phase 2 支持 webhook / slack）
 --   - run_deliveries：每次投递的记录，跑 webhook 同款 1min/5min/30min 重试
 --
--- 与 webhook_deliveries 共存而非替换：webhook_deliveries 服务创作者侧
--- agent.webhook_url；run_deliveries 服务用户侧自配 target。
+-- 与 webhook_deliveries 共存而非替换：webhook_deliveries 是旧创作者侧 webhook
+-- 队列表；run_deliveries 服务用户侧自配 target。
 
 BEGIN;
 

@@ -682,7 +682,6 @@ func (s *Service) attachRunAgentSummary(ctx context.Context, agentID uuid.UUID, 
 	}
 	resp.AgentSlug = agent.Slug
 	resp.AgentName = agent.Name
-	resp.AgentWebhookSet = agent.WebhookURL != nil && strings.TrimSpace(*agent.WebhookURL) != ""
 	resp.AgentConnectionMode = agent.ConnectionMode
 }
 

@@ -211,8 +211,7 @@ func TestWebhookServiceAttemptDeliveryStateMachine(t *testing.T) {
 	}
 }
 
-func TestWebhookServiceProcessPendingDeliversAgentAndRunQueues(t *testing.T) {
-	agentDeliveryID := uuid.New()
+func TestWebhookServiceProcessPendingDeliversTaskCallbackQueue(t *testing.T) {
 	runDeliveryID := uuid.New()
 	subscriptionID := uuid.New()
 	payload := []byte(`{"event":"run.completed"}`)
@@ -230,16 +229,6 @@ func TestWebhookServiceProcessPendingDeliversAgentAndRunQueues(t *testing.T) {
 	defer server.Close()
 
 	q := &fakeWebhookQueries{
-		pendingDeliveries: []db.WebhookDelivery{{ID: agentDeliveryID}},
-		deliveryRow: db.GetWebhookDeliveryRow{
-			WebhookDelivery: db.WebhookDelivery{
-				ID:      agentDeliveryID,
-				URL:     server.URL,
-				Payload: payload,
-				Status:  "pending",
-			},
-			WebhookSecret: &secret,
-		},
 		pendingRunDeliveries: []db.TaskCallbackDelivery{{ID: runDeliveryID}},
 		runDeliveryRow: db.GetTaskCallbackDeliveryByIDRow{
 			TaskCallbackDelivery: db.TaskCallbackDelivery{
@@ -257,9 +246,6 @@ func TestWebhookServiceProcessPendingDeliversAgentAndRunQueues(t *testing.T) {
 
 	svc.processPending(context.Background())
 
-	if q.successArg.ID != agentDeliveryID || q.successArg.ResponseStatus == nil || *q.successArg.ResponseStatus != http.StatusNoContent {
-		t.Fatalf("agent delivery success arg = %#v", q.successArg)
-	}
 	if q.runSuccessArg.ID != runDeliveryID || q.runSuccessArg.ResponseStatus == nil || *q.runSuccessArg.ResponseStatus != http.StatusNoContent {
 		t.Fatalf("run delivery success arg = %#v", q.runSuccessArg)
 	}

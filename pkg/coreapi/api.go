@@ -147,7 +147,6 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	webhookSvc := webhook.NewService(pool, cfg)
 	webhookHandler := webhook.NewHandler(webhookSvc, cfg)
 	webhookHandler.RegisterProtected(api, jwtMiddleware)
-	runtimeSvc.SetWebhookEnqueuer(webhookSvc)
 	runtimeSvc.SetTaskCallbackEnqueuer(webhookSvc)
 	go webhook.StartWorker(rootCtx, webhookSvc)
 

@@ -60,6 +60,7 @@ package agent_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -671,7 +672,7 @@ func TestListMyAgents_Empty(t *testing.T) {
 	assert.Empty(t, got, "no agents -> empty slice (not error)")
 }
 
-func TestListMyAgents_IncludesWebhookURL(t *testing.T) {
+func TestListMyAgents_DoesNotExposeWebhookURL(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
 	ctx := context.Background()
@@ -691,8 +692,10 @@ func TestListMyAgents_IncludesWebhookURL(t *testing.T) {
 	got, err := svc.ListMyAgents(ctx, uid)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NotNil(t, got[0].WebhookURL)
-	assert.Equal(t, webhookURL, *got[0].WebhookURL)
+	raw, err := json.Marshal(got[0])
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "webhook_url")
+	assert.NotContains(t, string(raw), webhookURL)
 }
 
 func TestGetMyAgentOnboardingAndDeleteExample(t *testing.T) {

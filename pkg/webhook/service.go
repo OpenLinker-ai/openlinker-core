@@ -99,7 +99,6 @@ type webhookQueries interface {
 	MarkDeliveryFailedRetry(context.Context, db.MarkDeliveryFailedRetryParams) error
 	MarkDeliveryFailedFinal(context.Context, db.MarkDeliveryFailedFinalParams) error
 	ListDeliveriesByAgent(context.Context, db.ListDeliveriesByAgentParams) ([]db.WebhookDelivery, error)
-	ListPendingDeliveries(context.Context) ([]db.WebhookDelivery, error)
 	GetRunByID(context.Context, uuid.UUID) (db.Run, error)
 	CreateTaskCallbackSubscription(context.Context, db.CreateTaskCallbackSubscriptionParams) (db.TaskCallbackSubscription, error)
 	GetLatestRunEventForTypes(context.Context, db.GetLatestRunEventForTypesParams) (db.RunEvent, error)
@@ -251,10 +250,10 @@ func (s *Service) RotateSecret(ctx context.Context, agentID, userID uuid.UUID) (
 	return &SetWebhookResponse{URL: url, Secret: secret}, nil
 }
 
-// EnqueueDelivery 在 run 完成后触发投递（runtime 调用，必须在 goroutine 中）。
+// EnqueueDelivery handles the legacy Agent webhook queue.
 //
 // 流程：
-//  1. 查 agent.webhook_url：NULL → 直接 return（不投递）
+//  1. 查 legacy Agent webhook URL：NULL → 直接 return（不投递）
 //  2. 构造 payload（event=run.completed）
 //  3. INSERT webhook_deliveries (status=pending, next_retry_at=NOW())
 //  4. 立即异步触发第一次投递（不等待）
@@ -721,28 +720,12 @@ func (s *Service) AttemptTaskCallbackDelivery(ctx context.Context, deliveryID uu
 
 // processPending worker 内部用：扫一批应重试的投递并逐个执行。
 func (s *Service) processPending(ctx context.Context) {
-	rows, err := s.queries.ListPendingDeliveries(ctx)
-	if err != nil {
-		log.Error().Err(err).Msg("webhook.processPending: ListPendingDeliveries")
-		return
-	}
-	for _, d := range rows {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		if err := s.AttemptDelivery(ctx, d.ID); err != nil {
-			log.Error().Err(err).Str("delivery_id", d.ID.String()).
-				Msg("webhook.processPending: AttemptDelivery")
-		}
-	}
-	runRows, err := s.queries.ListPendingTaskCallbackDeliveries(ctx)
+	rows, err := s.queries.ListPendingTaskCallbackDeliveries(ctx)
 	if err != nil {
 		log.Error().Err(err).Msg("webhook.processPending: ListPendingTaskCallbackDeliveries")
 		return
 	}
-	for _, d := range runRows {
+	for _, d := range rows {
 		select {
 		case <-ctx.Done():
 			return

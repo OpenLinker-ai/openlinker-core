@@ -58,7 +58,6 @@ type AgentResponse struct {
 	RejectionReason     *string  `json:"rejection_reason,omitempty"`
 	TotalCalls          int32    `json:"total_calls"`
 	TotalRevenueCents   int64    `json:"total_revenue_cents"`
-	WebhookURL          *string  `json:"webhook_url,omitempty"`
 	ConnectionMode      string   `json:"connection_mode"`
 	MCPToolName         *string  `json:"mcp_tool_name,omitempty"`
 	CreatedAt           string   `json:"created_at"`
