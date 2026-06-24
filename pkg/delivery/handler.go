@@ -3,6 +3,8 @@ package delivery
 import (
 	"context"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
@@ -24,6 +26,7 @@ type deliveryService interface {
 	SetDefault(context.Context, uuid.UUID, uuid.UUID) error
 	DeliverRun(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID) (*DeliveryItem, error)
 	ListByRun(context.Context, uuid.UUID, uuid.UUID) ([]DeliveryItem, error)
+	List(context.Context, uuid.UUID, DeliveryListFilter) ([]DeliveryItem, error)
 	RetryDelivery(context.Context, uuid.UUID, uuid.UUID) error
 }
 
@@ -42,6 +45,7 @@ func NewHandler(svc deliveryService) *Handler {
 //	POST   /delivery-targets/:id/default           设为默认
 //	POST   /runs/:id/deliver                       触发投递
 //	GET    /runs/:id/deliveries                    投递历史
+//	GET    /deliveries                             外部投递历史列表
 //	POST   /deliveries/:id/retry                   重试 failed
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
 	g := api.Group("", jwtMiddleware)
@@ -51,6 +55,7 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	g.POST("/delivery-targets/:id/default", h.SetDefault)
 	g.POST("/runs/:id/deliver", h.DeliverRun)
 	g.GET("/runs/:id/deliveries", h.ListDeliveries)
+	g.GET("/deliveries", h.ListAllDeliveries)
 	g.POST("/deliveries/:id/retry", h.RetryDelivery)
 }
 
@@ -160,6 +165,25 @@ func (h *Handler) ListDeliveries(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"items": items})
 }
 
+func (h *Handler) ListAllDeliveries(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	filter, err := deliveryListFilterFromQuery(c)
+	if err != nil {
+		return err
+	}
+	items, err := h.svc.List(c.Request().Context(), uid, filter)
+	if err != nil {
+		return err
+	}
+	if items == nil {
+		items = []DeliveryItem{}
+	}
+	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
 func (h *Handler) RetryDelivery(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
@@ -194,4 +218,46 @@ func pathID(c echo.Context) (uuid.UUID, error) {
 		return uuid.Nil, httpx.BadRequest("id 不是合法 uuid")
 	}
 	return id, nil
+}
+
+func deliveryListFilterFromQuery(c echo.Context) (DeliveryListFilter, error) {
+	limit := int32(defaultDeliveryHistoryLimit)
+	if raw := strings.TrimSpace(c.QueryParam("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return DeliveryListFilter{}, httpx.BadRequest("limit 必须是正整数")
+		}
+		if n > maxDeliveryHistoryLimit {
+			n = maxDeliveryHistoryLimit
+		}
+		limit = int32(n)
+	}
+
+	var agentID *string
+	if raw := strings.TrimSpace(c.QueryParam("agent_id")); raw != "" {
+		if _, err := uuid.Parse(raw); err != nil {
+			return DeliveryListFilter{}, httpx.BadRequest("agent_id 不是合法 uuid")
+		}
+		agentID = &raw
+	}
+
+	var runID *string
+	if raw := strings.TrimSpace(c.QueryParam("run_id")); raw != "" {
+		if _, err := uuid.Parse(raw); err != nil {
+			return DeliveryListFilter{}, httpx.BadRequest("run_id 不是合法 uuid")
+		}
+		runID = &raw
+	}
+
+	status := strings.TrimSpace(c.QueryParam("status"))
+	if status != "" && status != "pending" && status != "success" && status != "failed" {
+		return DeliveryListFilter{}, httpx.BadRequest("status 只能是 pending、success 或 failed")
+	}
+
+	return DeliveryListFilter{
+		AgentID: agentID,
+		RunID:   runID,
+		Status:  status,
+		Limit:   limit,
+	}, nil
 }

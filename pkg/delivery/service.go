@@ -42,6 +42,9 @@ const (
 
 	targetTypeWebhook = "webhook"
 	targetTypeSlack   = "slack"
+
+	defaultDeliveryHistoryLimit = 50
+	maxDeliveryHistoryLimit     = 100
 )
 
 // nextRetryDelay 1min / 5min / 30min 退避。
@@ -81,6 +84,7 @@ type deliveryQueries interface {
 	GetAgentByID(context.Context, uuid.UUID) (db.Agent, error)
 	CreateRunDelivery(context.Context, db.CreateRunDeliveryParams) (db.RunDelivery, error)
 	ListRunDeliveriesByRun(context.Context, uuid.UUID) ([]db.RunDelivery, error)
+	ListRunDeliveriesByUser(context.Context, db.ListRunDeliveriesByUserParams) ([]db.RunDelivery, error)
 	ResetRunDeliveryForRetry(context.Context, db.ResetRunDeliveryForRetryParams) (int64, error)
 	GetRunDeliveryByID(context.Context, uuid.UUID) (db.GetRunDeliveryRow, error)
 	MarkRunDeliverySuccess(context.Context, db.MarkRunDeliverySuccessParams) error
@@ -294,6 +298,63 @@ func (s *Service) ListByRun(ctx context.Context, runID, userID uuid.UUID) ([]Del
 	rows, err := s.queries.ListRunDeliveriesByRun(ctx, runID)
 	if err != nil {
 		log.Error().Err(err).Msg("delivery.ListByRun")
+		return nil, httpx.Internal("查询投递历史失败")
+	}
+	out := make([]DeliveryItem, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, toDeliveryItem(r))
+	}
+	return out, nil
+}
+
+// List 查询当前用户的外部投递历史，可选按 Agent / Run / 状态过滤。
+func (s *Service) List(ctx context.Context, userID uuid.UUID, filter DeliveryListFilter) ([]DeliveryItem, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = defaultDeliveryHistoryLimit
+	}
+	if limit > maxDeliveryHistoryLimit {
+		limit = maxDeliveryHistoryLimit
+	}
+
+	var agentID uuid.UUID
+	hasAgentID := false
+	if filter.AgentID != nil && strings.TrimSpace(*filter.AgentID) != "" {
+		id, err := uuid.Parse(strings.TrimSpace(*filter.AgentID))
+		if err != nil {
+			return nil, httpx.BadRequest("agent_id 不是合法 uuid")
+		}
+		agentID = id
+		hasAgentID = true
+	}
+
+	var runID uuid.UUID
+	hasRunID := false
+	if filter.RunID != nil && strings.TrimSpace(*filter.RunID) != "" {
+		id, err := uuid.Parse(strings.TrimSpace(*filter.RunID))
+		if err != nil {
+			return nil, httpx.BadRequest("run_id 不是合法 uuid")
+		}
+		runID = id
+		hasRunID = true
+	}
+
+	status := strings.TrimSpace(filter.Status)
+	if status != "" && status != "pending" && status != "success" && status != "failed" {
+		return nil, httpx.BadRequest("status 只能是 pending、success 或 failed")
+	}
+
+	rows, err := s.queries.ListRunDeliveriesByUser(ctx, db.ListRunDeliveriesByUserParams{
+		UserID:     userID,
+		HasAgentID: hasAgentID,
+		AgentID:    agentID,
+		HasRunID:   hasRunID,
+		RunID:      runID,
+		Status:     status,
+		Limit:      limit,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("delivery.List")
 		return nil, httpx.Internal("查询投递历史失败")
 	}
 	out := make([]DeliveryItem, 0, len(rows))

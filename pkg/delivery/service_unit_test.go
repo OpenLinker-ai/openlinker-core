@@ -325,6 +325,23 @@ func TestDeliveryServiceTargetCRUDAndHistory(t *testing.T) {
 	if len(history) != 1 || history[0].RunID != runID.String() {
 		t.Fatalf("history = %#v", history)
 	}
+
+	agentID := uuid.New()
+	agentIDString := agentID.String()
+	listedHistory, err := svc.List(context.Background(), userID, DeliveryListFilter{
+		AgentID: &agentIDString,
+		Status:  "success",
+		Limit:   25,
+	})
+	if err != nil {
+		t.Fatalf("List error = %v", err)
+	}
+	if len(listedHistory) != 1 || listedHistory[0].RunID != runID.String() {
+		t.Fatalf("listed history = %#v", listedHistory)
+	}
+	if queries.listByUserArg.UserID != userID || !queries.listByUserArg.HasAgentID || queries.listByUserArg.AgentID != agentID || queries.listByUserArg.Status != "success" || queries.listByUserArg.Limit != 25 {
+		t.Fatalf("list by user arg = %#v", queries.listByUserArg)
+	}
 }
 
 func TestDeliveryServiceEnqueueAndAttemptDelivery(t *testing.T) {
@@ -787,6 +804,7 @@ type fakeDeliveryQueries struct {
 
 	deliveries    []db.RunDelivery
 	deliveriesErr error
+	listByUserArg db.ListRunDeliveriesByUserParams
 
 	resetArg  db.ResetRunDeliveryForRetryParams
 	resetRows int64
@@ -884,6 +902,11 @@ func (q *fakeDeliveryQueries) CreateRunDelivery(_ context.Context, arg db.Create
 }
 
 func (q *fakeDeliveryQueries) ListRunDeliveriesByRun(context.Context, uuid.UUID) ([]db.RunDelivery, error) {
+	return q.deliveries, q.deliveriesErr
+}
+
+func (q *fakeDeliveryQueries) ListRunDeliveriesByUser(_ context.Context, arg db.ListRunDeliveriesByUserParams) ([]db.RunDelivery, error) {
+	q.listByUserArg = arg
 	return q.deliveries, q.deliveriesErr
 }
 

@@ -53,6 +53,16 @@ type DeliveryItem struct {
 	UpdatedAt      string  `json:"updated_at"`
 }
 
+// DeliveryListFilter GET /api/v1/deliveries 查询条件。
+//
+// 只列出当前用户自己的外部投递记录；AgentID / RunID / Status 都是可选过滤。
+type DeliveryListFilter struct {
+	AgentID *string
+	RunID   *string
+	Status  string
+	Limit   int32
+}
+
 // DeliveryPayload Run 完成后投递给用户 target 的 body。
 //
 // webhook target 直接收到该 JSON；slack target 由 service 层重新打包成 text。

@@ -33,6 +33,10 @@ func TestDeliveryHandlerValidationAndRoutes(t *testing.T) {
 		{name: "deliver invalid run id", method: h.DeliverRun, req: &deliveryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
 		{name: "deliver invalid target id", method: h.DeliverRun, req: &deliveryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: `{"target_id":"bad"}`, params: map[string]string{"id": id}}, want: http.StatusBadRequest},
 		{name: "list deliveries invalid run id", method: h.ListDeliveries, req: &deliveryHandlerRequest{method: http.MethodGet, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
+		{name: "list all deliveries invalid agent id", method: h.ListAllDeliveries, req: &deliveryHandlerRequest{method: http.MethodGet, target: "/?agent_id=bad", userID: userID}, want: http.StatusBadRequest},
+		{name: "list all deliveries invalid run id", method: h.ListAllDeliveries, req: &deliveryHandlerRequest{method: http.MethodGet, target: "/?run_id=bad", userID: userID}, want: http.StatusBadRequest},
+		{name: "list all deliveries invalid status", method: h.ListAllDeliveries, req: &deliveryHandlerRequest{method: http.MethodGet, target: "/?status=done", userID: userID}, want: http.StatusBadRequest},
+		{name: "list all deliveries invalid limit", method: h.ListAllDeliveries, req: &deliveryHandlerRequest{method: http.MethodGet, target: "/?limit=bad", userID: userID}, want: http.StatusBadRequest},
 		{name: "retry invalid id", method: h.RetryDelivery, req: &deliveryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -67,6 +71,7 @@ func TestDeliveryHandlerValidationAndRoutes(t *testing.T) {
 		"POST /api/v1/delivery-targets/:id/default",
 		"POST /api/v1/runs/:id/deliver",
 		"GET /api/v1/runs/:id/deliveries",
+		"GET /api/v1/deliveries",
 		"POST /api/v1/deliveries/:id/retry",
 	} {
 		if !routes[route] {

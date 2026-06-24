@@ -122,6 +122,21 @@ FROM run_deliveries
 WHERE run_id = $1
 ORDER BY created_at DESC;
 
+-- name: ListRunDeliveriesByUser :many
+-- 用户侧外部投递历史列表；仅返回当前用户自己的 run_deliveries。
+-- 可选按 agent/run/status 过滤，给独立历史页使用。
+SELECT d.id, d.run_id, d.target_id, d.user_id, d.target_type, d.target_url, d.payload,
+       d.status, d.response_status, d.response_body, d.error_message,
+       d.attempt_count, d.next_retry_at, d.created_at, d.updated_at
+FROM run_deliveries d
+JOIN runs r ON r.id = d.run_id
+WHERE d.user_id = $1
+  AND ($2 = FALSE OR r.agent_id = $3)
+  AND ($4 = FALSE OR d.run_id = $5)
+  AND ($6 = '' OR d.status = $6)
+ORDER BY d.created_at DESC
+LIMIT $7;
+
 -- name: ResetRunDeliveryForRetry :execrows
 -- 手动重试 failed 投递：清重试状态，立即可投递。
 UPDATE run_deliveries

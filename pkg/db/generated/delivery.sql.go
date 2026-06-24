@@ -372,6 +372,57 @@ func (q *Queries) ListRunDeliveriesByRun(ctx context.Context, runID uuid.UUID) (
 	return items, nil
 }
 
+const listRunDeliveriesByUser = `-- name: ListRunDeliveriesByUser :many
+SELECT d.id, d.run_id, d.target_id, d.user_id, d.target_type, d.target_url, d.payload,
+       d.status, d.response_status, d.response_body, d.error_message,
+       d.attempt_count, d.next_retry_at, d.created_at, d.updated_at
+FROM run_deliveries d
+JOIN runs r ON r.id = d.run_id
+WHERE d.user_id = $1
+  AND ($2 = FALSE OR r.agent_id = $3)
+  AND ($4 = FALSE OR d.run_id = $5)
+  AND ($6 = '' OR d.status = $6)
+ORDER BY d.created_at DESC
+LIMIT $7`
+
+type ListRunDeliveriesByUserParams struct {
+	UserID     uuid.UUID `db:"user_id" json:"user_id"`
+	HasAgentID bool      `db:"has_agent_id" json:"has_agent_id"`
+	AgentID    uuid.UUID `db:"agent_id" json:"agent_id"`
+	HasRunID   bool      `db:"has_run_id" json:"has_run_id"`
+	RunID      uuid.UUID `db:"run_id" json:"run_id"`
+	Status     string    `db:"status" json:"status"`
+	Limit      int32     `db:"limit" json:"limit"`
+}
+
+func (q *Queries) ListRunDeliveriesByUser(ctx context.Context, arg ListRunDeliveriesByUserParams) ([]RunDelivery, error) {
+	rows, err := q.db.Query(ctx, listRunDeliveriesByUser,
+		arg.UserID,
+		arg.HasAgentID,
+		arg.AgentID,
+		arg.HasRunID,
+		arg.RunID,
+		arg.Status,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RunDelivery
+	for rows.Next() {
+		var d RunDelivery
+		if err := scanRunDelivery(rows, &d); err != nil {
+			return nil, err
+		}
+		items = append(items, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const resetRunDeliveryForRetry = `-- name: ResetRunDeliveryForRetry :execrows
 UPDATE run_deliveries
 SET status = 'pending',

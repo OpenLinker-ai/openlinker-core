@@ -482,6 +482,7 @@ func TestDeliveryQueriesScanRowsAndAffectedRows(t *testing.T) {
 	userID := uuid.New()
 	targetID := uuid.New()
 	runID := uuid.New()
+	historyAgentID := uuid.New()
 	deliveryID := uuid.New()
 	now := time.Date(2026, 6, 20, 15, 0, 0, 0, time.UTC)
 	nextRetry := now.Add(time.Minute)
@@ -615,6 +616,28 @@ func TestDeliveryQueriesScanRowsAndAffectedRows(t *testing.T) {
 	}
 	if !reflect.DeepEqual(dbtx.queryArgs, []any{runID}) {
 		t.Fatalf("ListRunDeliveriesByRun args = %#v", dbtx.queryArgs)
+	}
+
+	runDeliveryRows = &fakeRows{rows: [][]any{runDeliveryValues}}
+	dbtx.queryRows = runDeliveryRows
+	byUser, err := q.ListRunDeliveriesByUser(context.Background(), ListRunDeliveriesByUserParams{
+		UserID:     userID,
+		HasAgentID: true,
+		AgentID:    historyAgentID,
+		HasRunID:   true,
+		RunID:      runID,
+		Status:     "failed",
+		Limit:      25,
+	})
+	if err != nil {
+		t.Fatalf("ListRunDeliveriesByUser error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRunDeliveriesByUser")
+	if !runDeliveryRows.closed || len(byUser) != 1 || byUser[0].UserID != userID {
+		t.Fatalf("ListRunDeliveriesByUser scan = %#v closed=%v", byUser, runDeliveryRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{userID, true, historyAgentID, true, runID, "failed", int32(25)}) {
+		t.Fatalf("ListRunDeliveriesByUser args = %#v", dbtx.queryArgs)
 	}
 
 	if rows, err := q.DeleteDeliveryTarget(context.Background(), DeleteDeliveryTargetParams{ID: targetID, UserID: userID}); err != nil || rows != 2 {

@@ -189,6 +189,44 @@ func TestDeliveryHandlerDispatchesServiceSuccess(t *testing.T) {
 		}
 	})
 
+	t.Run("list all deliveries filters", func(t *testing.T) {
+		mock := &mockDeliveryService{listResp: []DeliveryItem{{
+			ID:           deliveryID.String(),
+			RunID:        runID.String(),
+			TargetID:     targetID.String(),
+			TargetType:   targetTypeSlack,
+			TargetURL:    "https://hooks.slack.com/services/demo",
+			Status:       "failed",
+			AttemptCount: 3,
+			CreatedAt:    createdAt,
+			UpdatedAt:    createdAt,
+		}}}
+		c, rec := newDeliveryRecorderContext(
+			http.MethodGet,
+			"/deliveries?agent_id="+targetID.String()+"&run_id="+runID.String()+"&status=failed&limit=7",
+			"",
+			userID.String(),
+			nil,
+		)
+
+		if err := NewHandler(mock).ListAllDeliveries(c); err != nil {
+			t.Fatalf("ListAllDeliveries error = %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		if mock.listUserID != userID || mock.listFilter.AgentID == nil || *mock.listFilter.AgentID != targetID.String() || mock.listFilter.RunID == nil || *mock.listFilter.RunID != runID.String() || mock.listFilter.Status != "failed" || mock.listFilter.Limit != 7 {
+			t.Fatalf("captured list = user %s filter %#v", mock.listUserID, mock.listFilter)
+		}
+		var body struct {
+			Items []DeliveryItem `json:"items"`
+		}
+		decodeDeliveryJSON(t, rec, &body)
+		if len(body.Items) != 1 || body.Items[0].ID != deliveryID.String() {
+			t.Fatalf("body = %#v", body)
+		}
+	})
+
 	t.Run("retry delivery", func(t *testing.T) {
 		mock := &mockDeliveryService{}
 		c, rec := newDeliveryRecorderContext(http.MethodPost, "/deliveries/"+deliveryID.String()+"/retry", "", userID.String(), map[string]string{"id": deliveryID.String()})
@@ -262,6 +300,13 @@ func TestDeliveryHandlerPropagatesServiceErrors(t *testing.T) {
 			want: http.StatusNotFound,
 		},
 		{
+			name: "list all deliveries",
+			call: (*Handler).ListAllDeliveries,
+			mock: &mockDeliveryService{listErr: httpx.Internal("list failed")},
+			ctx:  mustDeliveryContext(http.MethodGet, "/deliveries", "", userID.String(), nil),
+			want: http.StatusInternalServerError,
+		},
+		{
 			name: "retry delivery",
 			call: (*Handler).RetryDelivery,
 			mock: &mockDeliveryService{retryDeliveryErr: httpx.NotFound("missing")},
@@ -305,6 +350,11 @@ type mockDeliveryService struct {
 	listByRunResp   []DeliveryItem
 	listByRunErr    error
 
+	listUserID uuid.UUID
+	listFilter DeliveryListFilter
+	listResp   []DeliveryItem
+	listErr    error
+
 	retryDeliveryID     uuid.UUID
 	retryDeliveryUserID uuid.UUID
 	retryDeliveryErr    error
@@ -344,6 +394,12 @@ func (m *mockDeliveryService) ListByRun(_ context.Context, runID, userID uuid.UU
 	m.listByRunID = runID
 	m.listByRunUserID = userID
 	return m.listByRunResp, m.listByRunErr
+}
+
+func (m *mockDeliveryService) List(_ context.Context, userID uuid.UUID, filter DeliveryListFilter) ([]DeliveryItem, error) {
+	m.listUserID = userID
+	m.listFilter = filter
+	return m.listResp, m.listErr
 }
 
 func (m *mockDeliveryService) RetryDelivery(_ context.Context, deliveryID, userID uuid.UUID) error {

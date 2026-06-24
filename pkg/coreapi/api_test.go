@@ -201,6 +201,7 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		"GET /api/v1/skills",
 		"GET /api/v1/benchmark/status",
 		"POST /api/v1/delivery-targets",
+		"GET /api/v1/deliveries",
 		"POST /api/v1/proxy/runs",
 	}
 	for _, key := range expected {
