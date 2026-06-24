@@ -18,7 +18,7 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
-const truncateWebhookTables = "TRUNCATE run_webhook_deliveries, run_webhook_subscriptions, webhook_deliveries, api_keys, wallets, runs, charges, withdrawals, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"
+const truncateWebhookTables = "TRUNCATE task_callback_deliveries, task_callback_subscriptions, webhook_deliveries, api_keys, wallets, runs, charges, withdrawals, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"
 
 func setupWebhookTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -190,12 +190,12 @@ func TestEnqueueDeliveryPostsSignedPayload(t *testing.T) {
 	}, 2*time.Second, 20*time.Millisecond)
 }
 
-func TestRunWebhookSubscriptionDeliversSignedRunEvent(t *testing.T) {
+func TestTaskCallbackSubscriptionDeliversSignedRunEvent(t *testing.T) {
 	pool := setupWebhookTestDB(t)
 	svc := NewService(pool)
 	userID := insertWebhookUser(t, pool, false)
 	creatorID := insertWebhookUser(t, pool, true)
-	agentID := insertWebhookAgent(t, pool, creatorID, "run-webhook-"+uuid.NewString()[:8])
+	agentID := insertWebhookAgent(t, pool, creatorID, "task-callback-"+uuid.NewString()[:8])
 	run := insertWebhookRun(t, pool, userID, agentID)
 
 	type receivedRequest struct {
@@ -218,7 +218,7 @@ func TestRunWebhookSubscriptionDeliversSignedRunEvent(t *testing.T) {
 	defer server.Close()
 	svc.httpClient = server.Client()
 
-	sub, err := svc.CreateRunWebhookSubscription(context.Background(), run.ID, userID, &CreateRunWebhookRequest{
+	sub, err := svc.CreateTaskCallbackSubscription(context.Background(), run.ID, userID, &CreateTaskCallbackRequest{
 		URL:        server.URL,
 		EventTypes: []string{"run.completed"},
 	})
@@ -237,13 +237,13 @@ func TestRunWebhookSubscriptionDeliversSignedRunEvent(t *testing.T) {
 	select {
 	case got = <-gotCh:
 	case <-time.After(2 * time.Second):
-		t.Fatal("run webhook endpoint was not called")
+		t.Fatal("task callback endpoint was not called")
 	}
 	assert.Equal(t, "run.completed", got.event)
 	assert.NotEmpty(t, got.delivery)
 	assert.Equal(t, "sha256="+signPayload(got.body, sub.Secret), got.signature)
 
-	var payload RunWebhookPayload
+	var payload TaskCallbackPayload
 	require.NoError(t, json.Unmarshal(got.body, &payload))
 	assert.Equal(t, event.ID.String(), payload.EventID)
 	assert.Equal(t, run.ID.String(), payload.RunID)
@@ -254,18 +254,18 @@ func TestRunWebhookSubscriptionDeliversSignedRunEvent(t *testing.T) {
 		var status string
 		var attemptCount int32
 		err := pool.QueryRow(context.Background(),
-			`SELECT status, attempt_count FROM run_webhook_deliveries WHERE run_event_id=$1`,
+			`SELECT status, attempt_count FROM task_callback_deliveries WHERE run_event_id=$1`,
 			event.ID).Scan(&status, &attemptCount)
 		return err == nil && status == "success" && attemptCount == 1
 	}, 2*time.Second, 20*time.Millisecond)
 }
 
-func TestRunWebhookSubscriptionCanPauseAndResumeNonTerminalEvents(t *testing.T) {
+func TestTaskCallbackSubscriptionCanPauseAndResumeNonTerminalEvents(t *testing.T) {
 	pool := setupWebhookTestDB(t)
 	svc := NewService(pool)
 	userID := insertWebhookUser(t, pool, false)
 	creatorID := insertWebhookUser(t, pool, true)
-	agentID := insertWebhookAgent(t, pool, creatorID, "run-webhook-pause-"+uuid.NewString()[:8])
+	agentID := insertWebhookAgent(t, pool, creatorID, "task-callback-pause-"+uuid.NewString()[:8])
 	run := insertWebhookRun(t, pool, userID, agentID)
 
 	gotCh := make(chan string, 2)
@@ -276,14 +276,14 @@ func TestRunWebhookSubscriptionCanPauseAndResumeNonTerminalEvents(t *testing.T) 
 	defer server.Close()
 	svc.httpClient = server.Client()
 
-	sub, err := svc.CreateRunWebhookSubscription(context.Background(), run.ID, userID, &CreateRunWebhookRequest{
+	sub, err := svc.CreateTaskCallbackSubscription(context.Background(), run.ID, userID, &CreateTaskCallbackRequest{
 		URL:        server.URL,
 		EventTypes: []string{"run.message.delta"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"run.message.delta"}, sub.EventTypes)
 
-	paused, err := svc.UpdateRunWebhookSubscriptionStatus(context.Background(), run.ID, uuid.MustParse(sub.ID), userID, "paused")
+	paused, err := svc.UpdateTaskCallbackSubscriptionStatus(context.Background(), run.ID, uuid.MustParse(sub.ID), userID, "paused")
 	require.NoError(t, err)
 	assert.Equal(t, "paused", paused.Status)
 
@@ -297,11 +297,11 @@ func TestRunWebhookSubscriptionCanPauseAndResumeNonTerminalEvents(t *testing.T) 
 
 	select {
 	case event := <-gotCh:
-		t.Fatalf("paused run webhook should not receive event, got %s", event)
+		t.Fatalf("paused task callback should not receive event, got %s", event)
 	case <-time.After(150 * time.Millisecond):
 	}
 
-	resumed, err := svc.UpdateRunWebhookSubscriptionStatus(context.Background(), run.ID, uuid.MustParse(sub.ID), userID, "active")
+	resumed, err := svc.UpdateTaskCallbackSubscriptionStatus(context.Background(), run.ID, uuid.MustParse(sub.ID), userID, "active")
 	require.NoError(t, err)
 	assert.Equal(t, "active", resumed.Status)
 
@@ -317,17 +317,17 @@ func TestRunWebhookSubscriptionCanPauseAndResumeNonTerminalEvents(t *testing.T) 
 	case event := <-gotCh:
 		assert.Equal(t, "run.message.delta", event)
 	case <-time.After(2 * time.Second):
-		t.Fatal("resumed run webhook endpoint was not called")
+		t.Fatal("resumed task callback endpoint was not called")
 	}
 }
 
-func TestRunWebhookBatchManagementAcrossRuns(t *testing.T) {
+func TestTaskCallbackBatchManagementAcrossRuns(t *testing.T) {
 	pool := setupWebhookTestDB(t)
 	svc := NewService(pool)
 	userID := insertWebhookUser(t, pool, false)
 	otherUserID := insertWebhookUser(t, pool, false)
 	creatorID := insertWebhookUser(t, pool, true)
-	agentID := insertWebhookAgent(t, pool, creatorID, "run-webhook-batch-"+uuid.NewString()[:8])
+	agentID := insertWebhookAgent(t, pool, creatorID, "task-callback-batch-"+uuid.NewString()[:8])
 	runA := insertWebhookRun(t, pool, userID, agentID)
 	runB := insertWebhookRun(t, pool, userID, agentID)
 	otherRun := insertWebhookRun(t, pool, otherUserID, agentID)
@@ -337,27 +337,27 @@ func TestRunWebhookBatchManagementAcrossRuns(t *testing.T) {
 	}))
 	defer server.Close()
 
-	subA, err := svc.CreateRunWebhookSubscription(context.Background(), runA.ID, userID, &CreateRunWebhookRequest{
+	subA, err := svc.CreateTaskCallbackSubscription(context.Background(), runA.ID, userID, &CreateTaskCallbackRequest{
 		URL:        server.URL,
 		EventTypes: []string{"run.completed"},
 	})
 	require.NoError(t, err)
-	subB, err := svc.CreateRunWebhookSubscription(context.Background(), runB.ID, userID, &CreateRunWebhookRequest{
+	subB, err := svc.CreateTaskCallbackSubscription(context.Background(), runB.ID, userID, &CreateTaskCallbackRequest{
 		URL:        server.URL,
 		EventTypes: []string{"run.failed"},
 	})
 	require.NoError(t, err)
-	otherSub, err := svc.CreateRunWebhookSubscription(context.Background(), otherRun.ID, otherUserID, &CreateRunWebhookRequest{
+	otherSub, err := svc.CreateTaskCallbackSubscription(context.Background(), otherRun.ID, otherUserID, &CreateTaskCallbackRequest{
 		URL:        server.URL,
 		EventTypes: []string{"run.completed"},
 	})
 	require.NoError(t, err)
 
-	active, err := svc.ListRunWebhookSubscriptionsForOwner(context.Background(), userID, "active", 20)
+	active, err := svc.ListTaskCallbackSubscriptionsForOwner(context.Background(), userID, "active", 20)
 	require.NoError(t, err)
 	require.Len(t, active, 2)
 
-	paused, err := svc.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{
+	paused, err := svc.BatchManageTaskCallbackSubscriptions(context.Background(), userID, &BatchTaskCallbackSubscriptionsRequest{
 		Action:          "pause",
 		SubscriptionIDs: []string{subA.ID, subB.ID, otherSub.ID},
 	})
@@ -369,11 +369,11 @@ func TestRunWebhookBatchManagementAcrossRuns(t *testing.T) {
 		assert.Equal(t, "paused", item.Status)
 	}
 
-	pausedList, err := svc.ListRunWebhookSubscriptionsForOwner(context.Background(), userID, "paused", 20)
+	pausedList, err := svc.ListTaskCallbackSubscriptionsForOwner(context.Background(), userID, "paused", 20)
 	require.NoError(t, err)
 	require.Len(t, pausedList, 2)
 
-	resumed, err := svc.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{
+	resumed, err := svc.BatchManageTaskCallbackSubscriptions(context.Background(), userID, &BatchTaskCallbackSubscriptionsRequest{
 		Action:          "resume",
 		SubscriptionIDs: []string{subA.ID},
 	})
@@ -381,7 +381,7 @@ func TestRunWebhookBatchManagementAcrossRuns(t *testing.T) {
 	require.Equal(t, 1, resumed.UpdatedCount)
 	assert.Equal(t, "active", resumed.Items[0].Status)
 
-	deleted, err := svc.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{
+	deleted, err := svc.BatchManageTaskCallbackSubscriptions(context.Background(), userID, &BatchTaskCallbackSubscriptionsRequest{
 		Action:          "delete",
 		SubscriptionIDs: []string{subB.ID},
 	})
@@ -389,13 +389,13 @@ func TestRunWebhookBatchManagementAcrossRuns(t *testing.T) {
 	require.Equal(t, 1, deleted.UpdatedCount)
 	assert.Equal(t, "deleted", deleted.Items[0].Status)
 
-	all, err := svc.ListRunWebhookSubscriptionsForOwner(context.Background(), userID, "", 20)
+	all, err := svc.ListTaskCallbackSubscriptionsForOwner(context.Background(), userID, "", 20)
 	require.NoError(t, err)
 	require.Len(t, all, 1)
 	assert.Equal(t, subA.ID, all[0].ID)
 	assert.Equal(t, "active", all[0].Status)
 
-	other, err := svc.ListRunWebhookSubscriptionsForOwner(context.Background(), otherUserID, "", 20)
+	other, err := svc.ListTaskCallbackSubscriptionsForOwner(context.Background(), otherUserID, "", 20)
 	require.NoError(t, err)
 	require.Len(t, other, 1)
 	assert.Equal(t, otherSub.ID, other[0].ID)

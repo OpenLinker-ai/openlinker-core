@@ -547,31 +547,31 @@ func TestRuntimeAttachRequirementEvidenceFromQueries(t *testing.T) {
 	(&Service{requirements: q}).attachRunRequirementEvidence(ctx, runID, nil)
 }
 
-func TestRuntimeServiceDependencySettersAndRunWebhookTrigger(t *testing.T) {
+func TestRuntimeServiceDependencySettersAndTaskCallbackTrigger(t *testing.T) {
 	svc := &Service{}
 	webhook := &fakeRuntimeWebhookEnqueuer{}
-	runWebhook := &recordingRunWebhookEnqueuer{events: make(chan db.RunEvent, 1)}
+	taskCallback := &recordingTaskCallbackEnqueuer{events: make(chan db.RunEvent, 1)}
 	delivery := &fakeRuntimeDeliveryEnqueuer{}
 	wallet := &fakeRuntimeWalletCharger{}
 
 	svc.SetWebhookEnqueuer(webhook)
-	svc.SetRunWebhookEnqueuer(runWebhook)
+	svc.SetTaskCallbackEnqueuer(taskCallback)
 	svc.SetDeliveryEnqueuer(delivery)
 	svc.SetWalletCharger(wallet)
 	require.Equal(t, webhook, svc.webhookSvc)
-	require.Equal(t, runWebhook, svc.runWebhookSvc)
+	require.Equal(t, taskCallback, svc.taskCallbackSvc)
 	require.Equal(t, delivery, svc.deliverySvc)
 	require.Equal(t, wallet, svc.walletCharger)
 
-	svc.triggerRunWebhookEvent(nil)
+	svc.triggerTaskCallbackEvent(nil)
 	event := &db.RunEvent{ID: uuid.New(), RunID: uuid.New(), EventType: "run.completed"}
-	svc.triggerRunWebhookEvent(event)
+	svc.triggerTaskCallbackEvent(event)
 	select {
-	case got := <-runWebhook.events:
+	case got := <-taskCallback.events:
 		require.Equal(t, event.ID, got.ID)
 		require.Equal(t, event.RunID, got.RunID)
 	case <-time.After(time.Second):
-		t.Fatal("run webhook event was not enqueued")
+		t.Fatal("task callback event was not enqueued")
 	}
 }
 
@@ -827,10 +827,10 @@ func TestRuntimeAsyncTriggerErrorEdges(t *testing.T) {
 	}).triggerWebhookByRun(runID)
 	requireRuntimeSignal(t, webhookByRun.done)
 
-	runWebhook := &signalingRunWebhookEnqueuer{done: make(chan struct{}, 1), err: errors.New("run webhook down")}
+	taskCallback := &signalingTaskCallbackEnqueuer{done: make(chan struct{}, 1), err: errors.New("task callback down")}
 	event := db.RunEvent{ID: uuid.New(), RunID: runID, EventType: "run.completed"}
-	(&Service{runWebhookSvc: runWebhook}).triggerRunWebhookEvent(&event)
-	requireRuntimeSignal(t, runWebhook.done)
+	(&Service{taskCallbackSvc: taskCallback}).triggerTaskCallbackEvent(&event)
+	requireRuntimeSignal(t, taskCallback.done)
 
 	delivery := &signalingRuntimeDeliveryEnqueuer{done: make(chan struct{}, 1), err: errors.New("delivery down")}
 	(&Service{
@@ -1342,21 +1342,21 @@ func (s *signalingRuntimeWebhookEnqueuer) EnqueueDelivery(context.Context, *db.R
 	return s.err
 }
 
-type recordingRunWebhookEnqueuer struct {
+type recordingTaskCallbackEnqueuer struct {
 	events chan db.RunEvent
 }
 
-func (r *recordingRunWebhookEnqueuer) EnqueueRunEvent(_ context.Context, event db.RunEvent) error {
+func (r *recordingTaskCallbackEnqueuer) EnqueueRunEvent(_ context.Context, event db.RunEvent) error {
 	r.events <- event
 	return nil
 }
 
-type signalingRunWebhookEnqueuer struct {
+type signalingTaskCallbackEnqueuer struct {
 	done chan struct{}
 	err  error
 }
 
-func (s *signalingRunWebhookEnqueuer) EnqueueRunEvent(context.Context, db.RunEvent) error {
+func (s *signalingTaskCallbackEnqueuer) EnqueueRunEvent(context.Context, db.RunEvent) error {
 	s.done <- struct{}{}
 	return s.err
 }

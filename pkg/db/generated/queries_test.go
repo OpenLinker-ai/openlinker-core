@@ -1025,7 +1025,7 @@ func TestRegistryBridgeQueriesScanRowsAndScalars(t *testing.T) {
 	requireSQLName(t, dbtx.queryRowSQL, "CountPendingProxyRunsByNode")
 }
 
-func TestProxyRunAndRunWebhookQueriesScanRowsAndArgs(t *testing.T) {
+func TestProxyRunAndTaskCallbackQueriesScanRowsAndArgs(t *testing.T) {
 	ownerID := uuid.New()
 	requestingUserID := uuid.New()
 	nodeID := uuid.New()
@@ -1062,8 +1062,8 @@ func TestProxyRunAndRunWebhookQueriesScanRowsAndArgs(t *testing.T) {
 	linkValues := cloudListingLinkRow(linkID, listingID, nodeID, localAgentID, now)
 	proxyValues := proxyRunRow(proxyRunID, cloudRunID, linkID, listingID, nodeID, localAgentID, requestingUserID, now, &inputSummary, &outputSummary, &errCode, &errMsg, &nextRetry, &claimedAt, &finishedAt)
 	artifactValues := proxyRunArtifactRow(artifactID, proxyRunID, cloudRunID, now, &mimeType, &fileURI, &fileName, &fileSHA, &fileSize)
-	subscriptionValues := runWebhookSubscriptionRow(subscriptionID, runID, ownerID, &callerAgentID, now, &pushScheme, &pushCredentials, nil)
-	deliveryValues := runWebhookDeliveryRow(deliveryID, subscriptionID, runEventID, now, &responseStatus, &responseBody, &deliveryErr, &nextRetry, &deliveredAt)
+	subscriptionValues := taskCallbackSubscriptionRow(subscriptionID, runID, ownerID, &callerAgentID, now, &pushScheme, &pushCredentials, nil)
+	deliveryValues := taskCallbackDeliveryRow(deliveryID, subscriptionID, runEventID, now, &responseStatus, &responseBody, &deliveryErr, &nextRetry, &deliveredAt)
 	dbtx := &fakeDBTX{
 		row:     fakeRow{values: linkValues},
 		execTag: pgconn.NewCommandTag("UPDATE 8"),
@@ -1186,135 +1186,135 @@ func TestProxyRunAndRunWebhookQueriesScanRowsAndArgs(t *testing.T) {
 	requireSQLName(t, dbtx.queryRowSQL, "TimeoutStaleProxyRuns")
 
 	dbtx.row = fakeRow{values: subscriptionValues}
-	subscription, err := q.CreateRunWebhookSubscription(context.Background(), CreateRunWebhookSubscriptionParams{
-		RunID:               runID,
-		OwnerUserID:         ownerID,
-		CallerAgentID:       &callerAgentID,
-		TargetURL:           "https://hooks.example/run",
-		Secret:              "secret",
-		EventTypes:          []string{"completed", "artifact"},
-		PushAuthScheme:      &pushScheme,
-		PushAuthCredentials: &pushCredentials,
-		PushMetadata:        []byte(`{"source":"a2a"}`),
+	subscription, err := q.CreateTaskCallbackSubscription(context.Background(), CreateTaskCallbackSubscriptionParams{
+		RunID:           runID,
+		OwnerUserID:     ownerID,
+		CallerAgentID:   &callerAgentID,
+		TargetURL:       "https://hooks.example/run",
+		Secret:          "secret",
+		EventTypes:      []string{"completed", "artifact"},
+		AuthScheme:      &pushScheme,
+		AuthCredentials: &pushCredentials,
+		Metadata:        []byte(`{"source":"a2a"}`),
 	})
 	if err != nil {
-		t.Fatalf("CreateRunWebhookSubscription error = %v", err)
+		t.Fatalf("CreateTaskCallbackSubscription error = %v", err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "CreateRunWebhookSubscription")
-	if subscription.ID != subscriptionID || subscription.PushAuthScheme == nil || *subscription.PushAuthScheme != pushScheme {
-		t.Fatalf("CreateRunWebhookSubscription scan = %#v", subscription)
+	requireSQLName(t, dbtx.queryRowSQL, "CreateTaskCallbackSubscription")
+	if subscription.ID != subscriptionID || subscription.AuthScheme == nil || *subscription.AuthScheme != pushScheme {
+		t.Fatalf("CreateTaskCallbackSubscription scan = %#v", subscription)
 	}
 
 	subscriptionRows := &fakeRows{rows: [][]any{subscriptionValues}}
 	dbtx.queryRows = subscriptionRows
-	byRun, err := q.ListRunWebhookSubscriptionsByRun(context.Background(), ListRunWebhookSubscriptionsByRunParams{RunID: runID, OwnerUserID: ownerID})
+	byRun, err := q.ListTaskCallbackSubscriptionsByRun(context.Background(), ListTaskCallbackSubscriptionsByRunParams{RunID: runID, OwnerUserID: ownerID})
 	if err != nil {
-		t.Fatalf("ListRunWebhookSubscriptionsByRun error = %v", err)
+		t.Fatalf("ListTaskCallbackSubscriptionsByRun error = %v", err)
 	}
-	requireSQLName(t, dbtx.querySQL, "ListRunWebhookSubscriptionsByRun")
+	requireSQLName(t, dbtx.querySQL, "ListTaskCallbackSubscriptionsByRun")
 	if !subscriptionRows.closed || len(byRun) != 1 || byRun[0].ID != subscriptionID {
-		t.Fatalf("ListRunWebhookSubscriptionsByRun scan = %#v closed=%v", byRun, subscriptionRows.closed)
+		t.Fatalf("ListTaskCallbackSubscriptionsByRun scan = %#v closed=%v", byRun, subscriptionRows.closed)
 	}
 
 	ownerRows := &fakeRows{rows: [][]any{subscriptionValues}}
 	dbtx.queryRows = ownerRows
-	byOwner, err := q.ListRunWebhookSubscriptionsByOwner(context.Background(), ListRunWebhookSubscriptionsByOwnerParams{OwnerUserID: ownerID, Status: "active", Limit: 20})
+	byOwner, err := q.ListTaskCallbackSubscriptionsByOwner(context.Background(), ListTaskCallbackSubscriptionsByOwnerParams{OwnerUserID: ownerID, Status: "active", Limit: 20})
 	if err != nil {
-		t.Fatalf("ListRunWebhookSubscriptionsByOwner error = %v", err)
+		t.Fatalf("ListTaskCallbackSubscriptionsByOwner error = %v", err)
 	}
-	requireSQLName(t, dbtx.querySQL, "ListRunWebhookSubscriptionsByOwner")
+	requireSQLName(t, dbtx.querySQL, "ListTaskCallbackSubscriptionsByOwner")
 	if !ownerRows.closed || len(byOwner) != 1 || byOwner[0].RunID != runID {
-		t.Fatalf("ListRunWebhookSubscriptionsByOwner scan = %#v closed=%v", byOwner, ownerRows.closed)
+		t.Fatalf("ListTaskCallbackSubscriptionsByOwner scan = %#v closed=%v", byOwner, ownerRows.closed)
 	}
 
-	if rows, err := q.DeleteRunWebhookSubscriptionForOwner(context.Background(), DeleteRunWebhookSubscriptionForOwnerParams{ID: subscriptionID, RunID: runID, OwnerUserID: ownerID}); err != nil || rows != 8 {
-		t.Fatalf("DeleteRunWebhookSubscriptionForOwner = %d, %v", rows, err)
+	if rows, err := q.DeleteTaskCallbackSubscriptionForOwner(context.Background(), DeleteTaskCallbackSubscriptionForOwnerParams{ID: subscriptionID, RunID: runID, OwnerUserID: ownerID}); err != nil || rows != 8 {
+		t.Fatalf("DeleteTaskCallbackSubscriptionForOwner = %d, %v", rows, err)
 	}
-	requireSQLName(t, dbtx.execSQL, "DeleteRunWebhookSubscriptionForOwner")
+	requireSQLName(t, dbtx.execSQL, "DeleteTaskCallbackSubscriptionForOwner")
 
 	dbtx.row = fakeRow{values: subscriptionValues}
-	if got, err := q.UpdateRunWebhookSubscriptionStatusForOwner(context.Background(), UpdateRunWebhookSubscriptionStatusForOwnerParams{ID: subscriptionID, RunID: runID, OwnerUserID: ownerID, Status: "paused"}); err != nil || got.ID != subscriptionID {
-		t.Fatalf("UpdateRunWebhookSubscriptionStatusForOwner = %#v, %v", got, err)
+	if got, err := q.UpdateTaskCallbackSubscriptionStatusForOwner(context.Background(), UpdateTaskCallbackSubscriptionStatusForOwnerParams{ID: subscriptionID, RunID: runID, OwnerUserID: ownerID, Status: "paused"}); err != nil || got.ID != subscriptionID {
+		t.Fatalf("UpdateTaskCallbackSubscriptionStatusForOwner = %#v, %v", got, err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "UpdateRunWebhookSubscriptionStatusForOwner")
+	requireSQLName(t, dbtx.queryRowSQL, "UpdateTaskCallbackSubscriptionStatusForOwner")
 
 	batchRows := &fakeRows{rows: [][]any{subscriptionValues}}
 	dbtx.queryRows = batchRows
-	batchUpdated, err := q.BatchUpdateRunWebhookSubscriptionsForOwner(context.Background(), BatchUpdateRunWebhookSubscriptionsForOwnerParams{OwnerUserID: ownerID, IDs: []uuid.UUID{subscriptionID}, Status: "active"})
+	batchUpdated, err := q.BatchUpdateTaskCallbackSubscriptionsForOwner(context.Background(), BatchUpdateTaskCallbackSubscriptionsForOwnerParams{OwnerUserID: ownerID, IDs: []uuid.UUID{subscriptionID}, Status: "active"})
 	if err != nil {
-		t.Fatalf("BatchUpdateRunWebhookSubscriptionsForOwner error = %v", err)
+		t.Fatalf("BatchUpdateTaskCallbackSubscriptionsForOwner error = %v", err)
 	}
-	requireSQLName(t, dbtx.querySQL, "BatchUpdateRunWebhookSubscriptionsForOwner")
+	requireSQLName(t, dbtx.querySQL, "BatchUpdateTaskCallbackSubscriptionsForOwner")
 	if !batchRows.closed || len(batchUpdated) != 1 || batchUpdated[0].Status != "active" {
-		t.Fatalf("BatchUpdateRunWebhookSubscriptionsForOwner scan = %#v closed=%v", batchUpdated, batchRows.closed)
+		t.Fatalf("BatchUpdateTaskCallbackSubscriptionsForOwner scan = %#v closed=%v", batchUpdated, batchRows.closed)
 	}
 
 	activeRows := &fakeRows{rows: [][]any{subscriptionValues}}
 	dbtx.queryRows = activeRows
-	active, err := q.ListActiveRunWebhookSubscriptionsForEvent(context.Background(), ListActiveRunWebhookSubscriptionsForEventParams{RunID: runID, EventType: "completed"})
+	active, err := q.ListActiveTaskCallbackSubscriptionsForEvent(context.Background(), ListActiveTaskCallbackSubscriptionsForEventParams{RunID: runID, EventType: "completed"})
 	if err != nil {
-		t.Fatalf("ListActiveRunWebhookSubscriptionsForEvent error = %v", err)
+		t.Fatalf("ListActiveTaskCallbackSubscriptionsForEvent error = %v", err)
 	}
-	requireSQLName(t, dbtx.querySQL, "ListActiveRunWebhookSubscriptionsForEvent")
+	requireSQLName(t, dbtx.querySQL, "ListActiveTaskCallbackSubscriptionsForEvent")
 	if !activeRows.closed || len(active) != 1 || active[0].ID != subscriptionID {
-		t.Fatalf("ListActiveRunWebhookSubscriptionsForEvent scan = %#v closed=%v", active, activeRows.closed)
+		t.Fatalf("ListActiveTaskCallbackSubscriptionsForEvent scan = %#v closed=%v", active, activeRows.closed)
 	}
 
 	dbtx.row = fakeRow{values: deliveryValues}
-	delivery, err := q.CreateRunWebhookDelivery(context.Background(), CreateRunWebhookDeliveryParams{SubscriptionID: subscriptionID, RunEventID: runEventID, Payload: []byte(`{"event":"completed"}`)})
+	delivery, err := q.CreateTaskCallbackDelivery(context.Background(), CreateTaskCallbackDeliveryParams{SubscriptionID: subscriptionID, RunEventID: runEventID, Payload: []byte(`{"event":"completed"}`)})
 	if err != nil {
-		t.Fatalf("CreateRunWebhookDelivery error = %v", err)
+		t.Fatalf("CreateTaskCallbackDelivery error = %v", err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "CreateRunWebhookDelivery")
+	requireSQLName(t, dbtx.queryRowSQL, "CreateTaskCallbackDelivery")
 	if delivery.ID != deliveryID || delivery.NextRetryAt == nil {
-		t.Fatalf("CreateRunWebhookDelivery scan = %#v", delivery)
+		t.Fatalf("CreateTaskCallbackDelivery scan = %#v", delivery)
 	}
 
 	deliveryWithTarget := append(append([]any{}, deliveryValues...), "https://hooks.example/run", "secret", &pushScheme, &pushCredentials, "completed")
 	dbtx.row = fakeRow{values: deliveryWithTarget}
-	deliveryDetail, err := q.GetRunWebhookDeliveryByID(context.Background(), deliveryID)
+	deliveryDetail, err := q.GetTaskCallbackDeliveryByID(context.Background(), deliveryID)
 	if err != nil {
-		t.Fatalf("GetRunWebhookDeliveryByID error = %v", err)
+		t.Fatalf("GetTaskCallbackDeliveryByID error = %v", err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "GetRunWebhookDeliveryByID")
+	requireSQLName(t, dbtx.queryRowSQL, "GetTaskCallbackDeliveryByID")
 	if deliveryDetail.ID != deliveryID || deliveryDetail.TargetURL == "" || deliveryDetail.EventType != "completed" {
-		t.Fatalf("GetRunWebhookDeliveryByID scan = %#v", deliveryDetail)
+		t.Fatalf("GetTaskCallbackDeliveryByID scan = %#v", deliveryDetail)
 	}
 
-	if err := q.MarkRunWebhookDeliverySuccess(context.Background(), MarkRunWebhookDeliverySuccessParams{ID: deliveryID, ResponseStatus: &responseStatus, ResponseBody: &responseBody}); err != nil {
-		t.Fatalf("MarkRunWebhookDeliverySuccess error = %v", err)
+	if err := q.MarkTaskCallbackDeliverySuccess(context.Background(), MarkTaskCallbackDeliverySuccessParams{ID: deliveryID, ResponseStatus: &responseStatus, ResponseBody: &responseBody}); err != nil {
+		t.Fatalf("MarkTaskCallbackDeliverySuccess error = %v", err)
 	}
-	requireSQLName(t, dbtx.execSQL, "MarkRunWebhookDeliverySuccess")
+	requireSQLName(t, dbtx.execSQL, "MarkTaskCallbackDeliverySuccess")
 
-	if err := q.MarkRunWebhookDeliveryFailedRetry(context.Background(), MarkRunWebhookDeliveryFailedRetryParams{ID: deliveryID, ResponseStatus: &responseStatus, ResponseBody: &responseBody, ErrorMessage: &deliveryErr, NextRetryAt: nextRetry}); err != nil {
-		t.Fatalf("MarkRunWebhookDeliveryFailedRetry error = %v", err)
+	if err := q.MarkTaskCallbackDeliveryFailedRetry(context.Background(), MarkTaskCallbackDeliveryFailedRetryParams{ID: deliveryID, ResponseStatus: &responseStatus, ResponseBody: &responseBody, ErrorMessage: &deliveryErr, NextRetryAt: nextRetry}); err != nil {
+		t.Fatalf("MarkTaskCallbackDeliveryFailedRetry error = %v", err)
 	}
-	requireSQLName(t, dbtx.execSQL, "MarkRunWebhookDeliveryFailedRetry")
+	requireSQLName(t, dbtx.execSQL, "MarkTaskCallbackDeliveryFailedRetry")
 
-	if err := q.MarkRunWebhookDeliveryFailedFinal(context.Background(), MarkRunWebhookDeliveryFailedFinalParams{ID: deliveryID, ResponseStatus: &responseStatus, ResponseBody: &responseBody, ErrorMessage: &deliveryErr}); err != nil {
-		t.Fatalf("MarkRunWebhookDeliveryFailedFinal error = %v", err)
+	if err := q.MarkTaskCallbackDeliveryFailedFinal(context.Background(), MarkTaskCallbackDeliveryFailedFinalParams{ID: deliveryID, ResponseStatus: &responseStatus, ResponseBody: &responseBody, ErrorMessage: &deliveryErr}); err != nil {
+		t.Fatalf("MarkTaskCallbackDeliveryFailedFinal error = %v", err)
 	}
-	requireSQLName(t, dbtx.execSQL, "MarkRunWebhookDeliveryFailedFinal")
+	requireSQLName(t, dbtx.execSQL, "MarkTaskCallbackDeliveryFailedFinal")
 
-	if err := q.IncrementRunWebhookSubscriptionFailure(context.Background(), subscriptionID); err != nil {
-		t.Fatalf("IncrementRunWebhookSubscriptionFailure error = %v", err)
+	if err := q.IncrementTaskCallbackSubscriptionFailure(context.Background(), subscriptionID); err != nil {
+		t.Fatalf("IncrementTaskCallbackSubscriptionFailure error = %v", err)
 	}
-	requireSQLName(t, dbtx.execSQL, "IncrementRunWebhookSubscriptionFailure")
+	requireSQLName(t, dbtx.execSQL, "IncrementTaskCallbackSubscriptionFailure")
 
-	if err := q.ResetRunWebhookSubscriptionFailures(context.Background(), subscriptionID); err != nil {
-		t.Fatalf("ResetRunWebhookSubscriptionFailures error = %v", err)
+	if err := q.ResetTaskCallbackSubscriptionFailures(context.Background(), subscriptionID); err != nil {
+		t.Fatalf("ResetTaskCallbackSubscriptionFailures error = %v", err)
 	}
-	requireSQLName(t, dbtx.execSQL, "ResetRunWebhookSubscriptionFailures")
+	requireSQLName(t, dbtx.execSQL, "ResetTaskCallbackSubscriptionFailures")
 
 	pendingDeliveryRows := &fakeRows{rows: [][]any{deliveryValues}}
 	dbtx.queryRows = pendingDeliveryRows
-	pendingDeliveries, err := q.ListPendingRunWebhookDeliveries(context.Background())
+	pendingDeliveries, err := q.ListPendingTaskCallbackDeliveries(context.Background())
 	if err != nil {
-		t.Fatalf("ListPendingRunWebhookDeliveries error = %v", err)
+		t.Fatalf("ListPendingTaskCallbackDeliveries error = %v", err)
 	}
-	requireSQLName(t, dbtx.querySQL, "ListPendingRunWebhookDeliveries")
+	requireSQLName(t, dbtx.querySQL, "ListPendingTaskCallbackDeliveries")
 	if !pendingDeliveryRows.closed || len(pendingDeliveries) != 1 || pendingDeliveries[0].ID != deliveryID {
-		t.Fatalf("ListPendingRunWebhookDeliveries scan = %#v closed=%v", pendingDeliveries, pendingDeliveryRows.closed)
+		t.Fatalf("ListPendingTaskCallbackDeliveries scan = %#v closed=%v", pendingDeliveries, pendingDeliveryRows.closed)
 	}
 
 	dbtx.row = fakeRow{values: runEventRow(runEventID, runID, nil, 12, "completed", []byte(`{"ok":true}`), now)}
@@ -1700,24 +1700,24 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			_, err := q.ListRunMessagesByRun(ctx, id)
 			return err
 		}},
-		{name: "ListRunWebhookSubscriptionsByRun", run: func() error {
-			_, err := q.ListRunWebhookSubscriptionsByRun(ctx, ListRunWebhookSubscriptionsByRunParams{RunID: id, OwnerUserID: id})
+		{name: "ListTaskCallbackSubscriptionsByRun", run: func() error {
+			_, err := q.ListTaskCallbackSubscriptionsByRun(ctx, ListTaskCallbackSubscriptionsByRunParams{RunID: id, OwnerUserID: id})
 			return err
 		}},
-		{name: "ListRunWebhookSubscriptionsByOwner", run: func() error {
-			_, err := q.ListRunWebhookSubscriptionsByOwner(ctx, ListRunWebhookSubscriptionsByOwnerParams{OwnerUserID: id, Status: "active", Limit: 10})
+		{name: "ListTaskCallbackSubscriptionsByOwner", run: func() error {
+			_, err := q.ListTaskCallbackSubscriptionsByOwner(ctx, ListTaskCallbackSubscriptionsByOwnerParams{OwnerUserID: id, Status: "active", Limit: 10})
 			return err
 		}},
-		{name: "BatchUpdateRunWebhookSubscriptionsForOwner", run: func() error {
-			_, err := q.BatchUpdateRunWebhookSubscriptionsForOwner(ctx, BatchUpdateRunWebhookSubscriptionsForOwnerParams{OwnerUserID: id, IDs: []uuid.UUID{id}, Status: "active"})
+		{name: "BatchUpdateTaskCallbackSubscriptionsForOwner", run: func() error {
+			_, err := q.BatchUpdateTaskCallbackSubscriptionsForOwner(ctx, BatchUpdateTaskCallbackSubscriptionsForOwnerParams{OwnerUserID: id, IDs: []uuid.UUID{id}, Status: "active"})
 			return err
 		}},
-		{name: "ListActiveRunWebhookSubscriptionsForEvent", run: func() error {
-			_, err := q.ListActiveRunWebhookSubscriptionsForEvent(ctx, ListActiveRunWebhookSubscriptionsForEventParams{RunID: id, EventType: "completed"})
+		{name: "ListActiveTaskCallbackSubscriptionsForEvent", run: func() error {
+			_, err := q.ListActiveTaskCallbackSubscriptionsForEvent(ctx, ListActiveTaskCallbackSubscriptionsForEventParams{RunID: id, EventType: "completed"})
 			return err
 		}},
-		{name: "ListPendingRunWebhookDeliveries", run: func() error {
-			_, err := q.ListPendingRunWebhookDeliveries(ctx)
+		{name: "ListPendingTaskCallbackDeliveries", run: func() error {
+			_, err := q.ListPendingTaskCallbackDeliveries(ctx)
 			return err
 		}},
 		{name: "ListStaleRuntimePullRuns", run: func() error {
@@ -3707,11 +3707,11 @@ func proxyRunArtifactRow(id, proxyRunID, cloudRunID uuid.UUID, now time.Time, mi
 	}
 }
 
-func runWebhookSubscriptionRow(
+func taskCallbackSubscriptionRow(
 	id, runID, ownerUserID uuid.UUID,
 	callerAgentID *uuid.UUID,
 	now time.Time,
-	pushAuthScheme, pushAuthCredentials *string,
+	authScheme, authCredentials *string,
 	deletedAt *time.Time,
 ) []any {
 	return []any{
@@ -3722,8 +3722,8 @@ func runWebhookSubscriptionRow(
 		"https://hooks.example/run",
 		"secret",
 		[]string{"completed", "artifact"},
-		pushAuthScheme,
-		pushAuthCredentials,
+		authScheme,
+		authCredentials,
 		[]byte(`{"source":"a2a"}`),
 		"active",
 		int32(1),
@@ -3733,7 +3733,7 @@ func runWebhookSubscriptionRow(
 	}
 }
 
-func runWebhookDeliveryRow(
+func taskCallbackDeliveryRow(
 	id, subscriptionID, runEventID uuid.UUID,
 	now time.Time,
 	responseStatus *int32,

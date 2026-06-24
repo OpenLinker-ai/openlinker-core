@@ -165,32 +165,32 @@ func TestWebhookServiceAttemptDeliveryStateMachine(t *testing.T) {
 		t.Fatalf("deleted secret final arg = %#v", deletedSecretQ.finalArg)
 	}
 
-	runWebhookQ := &fakeWebhookQueries{
-		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
-			RunWebhookDelivery: db.RunWebhookDelivery{
+	taskCallbackQ := &fakeWebhookQueries{
+		runDeliveryRow: db.GetTaskCallbackDeliveryByIDRow{
+			TaskCallbackDelivery: db.TaskCallbackDelivery{
 				ID:             deliveryID,
 				SubscriptionID: subscriptionID,
 				Payload:        payload,
 				Status:         "pending",
 			},
-			TargetURL:           successServer.URL,
-			Secret:              secret,
-			EventType:           "run.completed",
-			PushAuthScheme:      stringPtr("Bearer"),
-			PushAuthCredentials: stringPtr("token"),
+			TargetURL:       successServer.URL,
+			Secret:          secret,
+			EventType:       "run.completed",
+			AuthScheme:      stringPtr("Bearer"),
+			AuthCredentials: stringPtr("token"),
 		},
 	}
-	svc = &Service{queries: runWebhookQ, httpClient: successServer.Client()}
-	if err := svc.AttemptRunWebhookDelivery(context.Background(), deliveryID); err != nil {
-		t.Fatalf("AttemptRunWebhookDelivery success error = %v", err)
+	svc = &Service{queries: taskCallbackQ, httpClient: successServer.Client()}
+	if err := svc.AttemptTaskCallbackDelivery(context.Background(), deliveryID); err != nil {
+		t.Fatalf("AttemptTaskCallbackDelivery success error = %v", err)
 	}
-	if runWebhookQ.runSuccessArg.ID != deliveryID || runWebhookQ.resetSubscriptionID != subscriptionID {
-		t.Fatalf("run webhook success/reset = %#v/%s", runWebhookQ.runSuccessArg, runWebhookQ.resetSubscriptionID)
+	if taskCallbackQ.runSuccessArg.ID != deliveryID || taskCallbackQ.resetSubscriptionID != subscriptionID {
+		t.Fatalf("task callback success/reset = %#v/%s", taskCallbackQ.runSuccessArg, taskCallbackQ.resetSubscriptionID)
 	}
 
 	runFinalQ := &fakeWebhookQueries{
-		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
-			RunWebhookDelivery: db.RunWebhookDelivery{
+		runDeliveryRow: db.GetTaskCallbackDeliveryByIDRow{
+			TaskCallbackDelivery: db.TaskCallbackDelivery{
 				ID:             deliveryID,
 				SubscriptionID: subscriptionID,
 				Payload:        payload,
@@ -203,11 +203,11 @@ func TestWebhookServiceAttemptDeliveryStateMachine(t *testing.T) {
 		},
 	}
 	svc = &Service{queries: runFinalQ, httpClient: failServer.Client()}
-	if err := svc.AttemptRunWebhookDelivery(context.Background(), deliveryID); err != nil {
-		t.Fatalf("AttemptRunWebhookDelivery final error = %v", err)
+	if err := svc.AttemptTaskCallbackDelivery(context.Background(), deliveryID); err != nil {
+		t.Fatalf("AttemptTaskCallbackDelivery final error = %v", err)
 	}
 	if runFinalQ.runFinalArg.ID != deliveryID || runFinalQ.incrementSubscriptionID != subscriptionID {
-		t.Fatalf("run webhook final/increment = %#v/%s", runFinalQ.runFinalArg, runFinalQ.incrementSubscriptionID)
+		t.Fatalf("task callback final/increment = %#v/%s", runFinalQ.runFinalArg, runFinalQ.incrementSubscriptionID)
 	}
 }
 
@@ -240,9 +240,9 @@ func TestWebhookServiceProcessPendingDeliversAgentAndRunQueues(t *testing.T) {
 			},
 			WebhookSecret: &secret,
 		},
-		pendingRunDeliveries: []db.RunWebhookDelivery{{ID: runDeliveryID}},
-		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
-			RunWebhookDelivery: db.RunWebhookDelivery{
+		pendingRunDeliveries: []db.TaskCallbackDelivery{{ID: runDeliveryID}},
+		runDeliveryRow: db.GetTaskCallbackDeliveryByIDRow{
+			TaskCallbackDelivery: db.TaskCallbackDelivery{
 				ID:             runDeliveryID,
 				SubscriptionID: subscriptionID,
 				Payload:        payload,
@@ -385,98 +385,98 @@ func TestWebhookServiceQueueAndDeliveryErrorEdges(t *testing.T) {
 	}
 
 	if err := (&Service{queries: &fakeWebhookQueries{runDeliveryErr: pgx.ErrNoRows}}).
-		AttemptRunWebhookDelivery(context.Background(), deliveryID); err != nil {
-		t.Fatalf("AttemptRunWebhookDelivery missing = %v", err)
+		AttemptTaskCallbackDelivery(context.Background(), deliveryID); err != nil {
+		t.Fatalf("AttemptTaskCallbackDelivery missing = %v", err)
 	}
 	if err := (&Service{queries: &fakeWebhookQueries{runDeliveryErr: sentinel}}).
-		AttemptRunWebhookDelivery(context.Background(), deliveryID); err == nil {
-		t.Fatalf("AttemptRunWebhookDelivery query error should propagate")
+		AttemptTaskCallbackDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptTaskCallbackDelivery query error should propagate")
 	}
-	if err := (&Service{queries: &fakeWebhookQueries{runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{RunWebhookDelivery: db.RunWebhookDelivery{ID: deliveryID, Status: "failed"}}}}).
-		AttemptRunWebhookDelivery(context.Background(), deliveryID); err != nil {
-		t.Fatalf("AttemptRunWebhookDelivery terminal = %v", err)
+	if err := (&Service{queries: &fakeWebhookQueries{runDeliveryRow: db.GetTaskCallbackDeliveryByIDRow{TaskCallbackDelivery: db.TaskCallbackDelivery{ID: deliveryID, Status: "failed"}}}}).
+		AttemptTaskCallbackDelivery(context.Background(), deliveryID); err != nil {
+		t.Fatalf("AttemptTaskCallbackDelivery terminal = %v", err)
 	}
 
 	runRetryQ := &fakeWebhookQueries{
-		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
-			RunWebhookDelivery: db.RunWebhookDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending"},
-			TargetURL:          url,
-			Secret:             secret,
-			EventType:          "run.completed",
+		runDeliveryRow: db.GetTaskCallbackDeliveryByIDRow{
+			TaskCallbackDelivery: db.TaskCallbackDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending"},
+			TargetURL:            url,
+			Secret:               secret,
+			EventType:            "run.completed",
 		},
 	}
 	if err := (&Service{queries: runRetryQ, httpClient: webhookHTTPClient(http.StatusTooManyRequests, "slow down", nil)}).
-		AttemptRunWebhookDelivery(context.Background(), deliveryID); err != nil {
-		t.Fatalf("AttemptRunWebhookDelivery retry = %v", err)
+		AttemptTaskCallbackDelivery(context.Background(), deliveryID); err != nil {
+		t.Fatalf("AttemptTaskCallbackDelivery retry = %v", err)
 	}
 	if runRetryQ.runRetryArg.ID != deliveryID || runRetryQ.runRetryArg.NextRetryAt.IsZero() {
 		t.Fatalf("run retry arg = %#v", runRetryQ.runRetryArg)
 	}
 
 	runSuccessErrQ := &fakeWebhookQueries{
-		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
-			RunWebhookDelivery: db.RunWebhookDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending"},
-			TargetURL:          url,
-			Secret:             secret,
-			EventType:          "run.completed",
+		runDeliveryRow: db.GetTaskCallbackDeliveryByIDRow{
+			TaskCallbackDelivery: db.TaskCallbackDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending"},
+			TargetURL:            url,
+			Secret:               secret,
+			EventType:            "run.completed",
 		},
 		runSuccessErr: sentinel,
 	}
 	if err := (&Service{queries: runSuccessErrQ, httpClient: webhookHTTPClient(http.StatusOK, "ok", nil)}).
-		AttemptRunWebhookDelivery(context.Background(), deliveryID); err == nil {
-		t.Fatalf("AttemptRunWebhookDelivery success mark error should propagate")
+		AttemptTaskCallbackDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptTaskCallbackDelivery success mark error should propagate")
 	}
 
 	resetErrQ := &fakeWebhookQueries{
-		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
-			RunWebhookDelivery: db.RunWebhookDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending"},
-			TargetURL:          url,
-			Secret:             secret,
-			EventType:          "run.completed",
+		runDeliveryRow: db.GetTaskCallbackDeliveryByIDRow{
+			TaskCallbackDelivery: db.TaskCallbackDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending"},
+			TargetURL:            url,
+			Secret:               secret,
+			EventType:            "run.completed",
 		},
 		resetErr: sentinel,
 	}
 	if err := (&Service{queries: resetErrQ, httpClient: webhookHTTPClient(http.StatusOK, "ok", nil)}).
-		AttemptRunWebhookDelivery(context.Background(), deliveryID); err == nil {
-		t.Fatalf("AttemptRunWebhookDelivery reset error should propagate")
+		AttemptTaskCallbackDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptTaskCallbackDelivery reset error should propagate")
 	}
 
 	runFinalErrQ := &fakeWebhookQueries{
-		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
-			RunWebhookDelivery: db.RunWebhookDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending", AttemptCount: 2},
-			TargetURL:          url,
-			Secret:             secret,
-			EventType:          "run.completed",
+		runDeliveryRow: db.GetTaskCallbackDeliveryByIDRow{
+			TaskCallbackDelivery: db.TaskCallbackDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending", AttemptCount: 2},
+			TargetURL:            url,
+			Secret:               secret,
+			EventType:            "run.completed",
 		},
 		runFinalErr: sentinel,
 	}
 	if err := (&Service{queries: runFinalErrQ, httpClient: webhookHTTPClient(http.StatusBadGateway, "bad", nil)}).
-		AttemptRunWebhookDelivery(context.Background(), deliveryID); err == nil {
-		t.Fatalf("AttemptRunWebhookDelivery final mark error should propagate")
+		AttemptTaskCallbackDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptTaskCallbackDelivery final mark error should propagate")
 	}
 
 	incrementErrQ := &fakeWebhookQueries{
-		runDeliveryRow: db.GetRunWebhookDeliveryByIDRow{
-			RunWebhookDelivery: db.RunWebhookDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending", AttemptCount: 2},
-			TargetURL:          url,
-			Secret:             secret,
-			EventType:          "run.completed",
+		runDeliveryRow: db.GetTaskCallbackDeliveryByIDRow{
+			TaskCallbackDelivery: db.TaskCallbackDelivery{ID: deliveryID, SubscriptionID: subscriptionID, Payload: []byte(`{}`), Status: "pending", AttemptCount: 2},
+			TargetURL:            url,
+			Secret:               secret,
+			EventType:            "run.completed",
 		},
 		incrementErr: sentinel,
 	}
 	if err := (&Service{queries: incrementErrQ, httpClient: webhookHTTPClient(http.StatusBadGateway, "bad", nil)}).
-		AttemptRunWebhookDelivery(context.Background(), deliveryID); err == nil {
-		t.Fatalf("AttemptRunWebhookDelivery increment error should propagate")
+		AttemptTaskCallbackDelivery(context.Background(), deliveryID); err == nil {
+		t.Fatalf("AttemptTaskCallbackDelivery increment error should propagate")
 	}
 }
 
-func TestWebhookRunSubscriptionManagement(t *testing.T) {
+func TestTaskCallbackSubscriptionManagement(t *testing.T) {
 	userID := uuid.New()
 	runID := uuid.New()
 	subID := uuid.New()
 	eventID := uuid.New()
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
-	sub := db.RunWebhookSubscription{
+	sub := db.TaskCallbackSubscription{
 		ID:          subID,
 		RunID:       runID,
 		OwnerUserID: userID,
@@ -491,13 +491,13 @@ func TestWebhookRunSubscriptionManagement(t *testing.T) {
 		run:            db.Run{ID: runID, UserID: userID},
 		createSub:      sub,
 		latestEventErr: pgx.ErrNoRows,
-		listSubs:       []db.RunWebhookSubscription{sub},
-		listOwnerSubs:  []db.RunWebhookSubscription{sub},
-		batchSubs:      []db.RunWebhookSubscription{sub},
+		listSubs:       []db.TaskCallbackSubscription{sub},
+		listOwnerSubs:  []db.TaskCallbackSubscription{sub},
+		batchSubs:      []db.TaskCallbackSubscription{sub},
 		updateSub:      sub,
 		deleteRows:     1,
-		activeSubs:     []db.RunWebhookSubscription{sub},
-		createRunDelivery: db.RunWebhookDelivery{
+		activeSubs:     []db.TaskCallbackSubscription{sub},
+		createRunDelivery: db.TaskCallbackDelivery{
 			ID:             uuid.New(),
 			SubscriptionID: subID,
 			RunEventID:     eventID,
@@ -508,15 +508,15 @@ func TestWebhookRunSubscriptionManagement(t *testing.T) {
 	}
 	svc := &Service{queries: q, allowLocalHTTP: true}
 
-	created, err := svc.CreateRunWebhookSubscription(context.Background(), runID, userID, &CreateRunWebhookRequest{
-		URL:                 "http://127.0.0.1/push",
-		EventTypes:          []string{"run.completed", "unknown"},
-		PushAuthScheme:      "Bearer",
-		PushAuthCredentials: "token",
-		PushMetadata:        map[string]interface{}{"client": "local"},
+	created, err := svc.CreateTaskCallbackSubscription(context.Background(), runID, userID, &CreateTaskCallbackRequest{
+		URL:             "http://127.0.0.1/push",
+		EventTypes:      []string{"run.completed", "unknown"},
+		AuthScheme:      "Bearer",
+		AuthCredentials: "token",
+		Metadata:        map[string]interface{}{"client": "local"},
 	})
 	if err != nil {
-		t.Fatalf("CreateRunWebhookSubscription error = %v", err)
+		t.Fatalf("CreateTaskCallbackSubscription error = %v", err)
 	}
 	if created.ID != subID.String() || created.Secret == "" {
 		t.Fatalf("created subscription = %#v", created)
@@ -528,47 +528,47 @@ func TestWebhookRunSubscriptionManagement(t *testing.T) {
 		t.Fatalf("create sub event types = %#v", q.createSubArg.EventTypes)
 	}
 	var metadata map[string]interface{}
-	if err := json.Unmarshal(q.createSubArg.PushMetadata, &metadata); err != nil || metadata["client"] != "local" {
-		t.Fatalf("push metadata = %#v %v", metadata, err)
+	if err := json.Unmarshal(q.createSubArg.Metadata, &metadata); err != nil || metadata["client"] != "local" {
+		t.Fatalf("task callback metadata = %#v %v", metadata, err)
 	}
 
-	listed, err := svc.ListRunWebhookSubscriptions(context.Background(), runID, userID)
+	listed, err := svc.ListTaskCallbackSubscriptions(context.Background(), runID, userID)
 	if err != nil {
-		t.Fatalf("ListRunWebhookSubscriptions error = %v", err)
+		t.Fatalf("ListTaskCallbackSubscriptions error = %v", err)
 	}
 	if len(listed) != 1 || q.listRunSubsArg.RunID != runID || q.listRunSubsArg.OwnerUserID != userID {
 		t.Fatalf("listed subscriptions/arg = %#v/%#v", listed, q.listRunSubsArg)
 	}
 
-	ownerList, err := svc.ListRunWebhookSubscriptionsForOwner(context.Background(), userID, "paused", maxListLimit+1)
+	ownerList, err := svc.ListTaskCallbackSubscriptionsForOwner(context.Background(), userID, "paused", maxListLimit+1)
 	if err != nil {
-		t.Fatalf("ListRunWebhookSubscriptionsForOwner error = %v", err)
+		t.Fatalf("ListTaskCallbackSubscriptionsForOwner error = %v", err)
 	}
 	if len(ownerList) != 1 || q.listOwnerArg.Status != "paused" || q.listOwnerArg.Limit != defaultListLimit {
 		t.Fatalf("owner list/arg = %#v/%#v", ownerList, q.listOwnerArg)
 	}
 
-	batch, err := svc.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{
+	batch, err := svc.BatchManageTaskCallbackSubscriptions(context.Background(), userID, &BatchTaskCallbackSubscriptionsRequest{
 		SubscriptionIDs: []string{subID.String()},
 		Action:          "pause",
 	})
 	if err != nil {
-		t.Fatalf("BatchManageRunWebhookSubscriptions error = %v", err)
+		t.Fatalf("BatchManageTaskCallbackSubscriptions error = %v", err)
 	}
 	if batch.UpdatedCount != 1 || q.batchArg.Status != "paused" {
 		t.Fatalf("batch/arg = %#v/%#v", batch, q.batchArg)
 	}
 
-	updated, err := svc.UpdateRunWebhookSubscriptionStatus(context.Background(), runID, subID, userID, "active")
+	updated, err := svc.UpdateTaskCallbackSubscriptionStatus(context.Background(), runID, subID, userID, "active")
 	if err != nil {
-		t.Fatalf("UpdateRunWebhookSubscriptionStatus error = %v", err)
+		t.Fatalf("UpdateTaskCallbackSubscriptionStatus error = %v", err)
 	}
 	if updated.ID != subID.String() || q.updateArg.Status != "active" {
 		t.Fatalf("updated/arg = %#v/%#v", updated, q.updateArg)
 	}
 
-	if err := svc.DeleteRunWebhookSubscription(context.Background(), runID, subID, userID); err != nil {
-		t.Fatalf("DeleteRunWebhookSubscription error = %v", err)
+	if err := svc.DeleteTaskCallbackSubscription(context.Background(), runID, subID, userID); err != nil {
+		t.Fatalf("DeleteTaskCallbackSubscription error = %v", err)
 	}
 	if q.deleteArg.ID != subID || q.deleteArg.RunID != runID || q.deleteArg.OwnerUserID != userID {
 		t.Fatalf("delete arg = %#v", q.deleteArg)
@@ -745,72 +745,72 @@ func TestWebhookServiceErrors(t *testing.T) {
 			want: http.StatusInternalServerError,
 		},
 		{
-			name: "create run webhook nil request",
+			name: "create task callback nil request",
 			call: func(s *Service) error {
-				_, err := s.CreateRunWebhookSubscription(context.Background(), runID, userID, nil)
+				_, err := s.CreateTaskCallbackSubscription(context.Background(), runID, userID, nil)
 				return err
 			},
 			q:    &fakeWebhookQueries{},
 			want: http.StatusBadRequest,
 		},
 		{
-			name: "create run webhook invalid url",
+			name: "create task callback invalid url",
 			call: func(s *Service) error {
-				_, err := s.CreateRunWebhookSubscription(context.Background(), runID, userID, &CreateRunWebhookRequest{URL: "http://127.0.0.1/hook"})
+				_, err := s.CreateTaskCallbackSubscription(context.Background(), runID, userID, &CreateTaskCallbackRequest{URL: "http://127.0.0.1/hook"})
 				return err
 			},
 			q:    &fakeWebhookQueries{},
 			want: http.StatusBadRequest,
 		},
 		{
-			name: "create run webhook invalid metadata",
+			name: "create task callback invalid metadata",
 			call: func(s *Service) error {
-				_, err := s.CreateRunWebhookSubscription(context.Background(), runID, userID, &CreateRunWebhookRequest{URL: url, PushMetadata: map[string]interface{}{"bad": func() {}}})
+				_, err := s.CreateTaskCallbackSubscription(context.Background(), runID, userID, &CreateTaskCallbackRequest{URL: url, Metadata: map[string]interface{}{"bad": func() {}}})
 				return err
 			},
 			q:    &fakeWebhookQueries{},
 			want: http.StatusBadRequest,
 		},
 		{
-			name: "create run webhook missing run",
+			name: "create task callback missing run",
 			call: func(s *Service) error {
-				_, err := s.CreateRunWebhookSubscription(context.Background(), runID, userID, &CreateRunWebhookRequest{URL: url})
+				_, err := s.CreateTaskCallbackSubscription(context.Background(), runID, userID, &CreateTaskCallbackRequest{URL: url})
 				return err
 			},
 			q:    &fakeWebhookQueries{runErr: pgx.ErrNoRows},
 			want: http.StatusNotFound,
 		},
 		{
-			name: "create run webhook wrong owner",
+			name: "create task callback wrong owner",
 			call: func(s *Service) error {
-				_, err := s.CreateRunWebhookSubscription(context.Background(), runID, userID, &CreateRunWebhookRequest{URL: url})
+				_, err := s.CreateTaskCallbackSubscription(context.Background(), runID, userID, &CreateTaskCallbackRequest{URL: url})
 				return err
 			},
 			q:    &fakeWebhookQueries{run: db.Run{ID: runID, UserID: otherUser}},
 			want: http.StatusNotFound,
 		},
 		{
-			name: "create run webhook query error",
+			name: "create task callback query error",
 			call: func(s *Service) error {
-				_, err := s.CreateRunWebhookSubscription(context.Background(), runID, userID, &CreateRunWebhookRequest{URL: url})
+				_, err := s.CreateTaskCallbackSubscription(context.Background(), runID, userID, &CreateTaskCallbackRequest{URL: url})
 				return err
 			},
 			q:    &fakeWebhookQueries{runErr: sentinel},
 			want: http.StatusInternalServerError,
 		},
 		{
-			name: "create run webhook insert error",
+			name: "create task callback insert error",
 			call: func(s *Service) error {
-				_, err := s.CreateRunWebhookSubscription(context.Background(), runID, userID, &CreateRunWebhookRequest{URL: url})
+				_, err := s.CreateTaskCallbackSubscription(context.Background(), runID, userID, &CreateTaskCallbackRequest{URL: url})
 				return err
 			},
 			q:    &fakeWebhookQueries{run: db.Run{ID: runID, UserID: userID}, createSubErr: sentinel},
 			want: http.StatusInternalServerError,
 		},
 		{
-			name: "list run webhooks query error",
+			name: "list task callbacks query error",
 			call: func(s *Service) error {
-				_, err := s.ListRunWebhookSubscriptions(context.Background(), runID, userID)
+				_, err := s.ListTaskCallbackSubscriptions(context.Background(), runID, userID)
 				return err
 			},
 			q:    &fakeWebhookQueries{run: db.Run{ID: runID, UserID: userID}, listSubsErr: sentinel},
@@ -819,7 +819,7 @@ func TestWebhookServiceErrors(t *testing.T) {
 		{
 			name: "managed list invalid status",
 			call: func(s *Service) error {
-				_, err := s.ListRunWebhookSubscriptionsForOwner(context.Background(), userID, "deleted", 20)
+				_, err := s.ListTaskCallbackSubscriptionsForOwner(context.Background(), userID, "deleted", 20)
 				return err
 			},
 			q:    &fakeWebhookQueries{},
@@ -828,7 +828,7 @@ func TestWebhookServiceErrors(t *testing.T) {
 		{
 			name: "managed list query error",
 			call: func(s *Service) error {
-				_, err := s.ListRunWebhookSubscriptionsForOwner(context.Background(), userID, "active", 20)
+				_, err := s.ListTaskCallbackSubscriptionsForOwner(context.Background(), userID, "active", 20)
 				return err
 			},
 			q:    &fakeWebhookQueries{listOwnerErr: sentinel},
@@ -837,7 +837,7 @@ func TestWebhookServiceErrors(t *testing.T) {
 		{
 			name: "batch nil request",
 			call: func(s *Service) error {
-				_, err := s.BatchManageRunWebhookSubscriptions(context.Background(), userID, nil)
+				_, err := s.BatchManageTaskCallbackSubscriptions(context.Background(), userID, nil)
 				return err
 			},
 			q:    &fakeWebhookQueries{},
@@ -846,7 +846,7 @@ func TestWebhookServiceErrors(t *testing.T) {
 		{
 			name: "batch invalid action",
 			call: func(s *Service) error {
-				_, err := s.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{SubscriptionIDs: []string{subID.String()}, Action: "archive"})
+				_, err := s.BatchManageTaskCallbackSubscriptions(context.Background(), userID, &BatchTaskCallbackSubscriptionsRequest{SubscriptionIDs: []string{subID.String()}, Action: "archive"})
 				return err
 			},
 			q:    &fakeWebhookQueries{},
@@ -855,7 +855,7 @@ func TestWebhookServiceErrors(t *testing.T) {
 		{
 			name: "batch empty ids",
 			call: func(s *Service) error {
-				_, err := s.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{Action: "pause"})
+				_, err := s.BatchManageTaskCallbackSubscriptions(context.Background(), userID, &BatchTaskCallbackSubscriptionsRequest{Action: "pause"})
 				return err
 			},
 			q:    &fakeWebhookQueries{},
@@ -864,7 +864,7 @@ func TestWebhookServiceErrors(t *testing.T) {
 		{
 			name: "batch invalid id",
 			call: func(s *Service) error {
-				_, err := s.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{SubscriptionIDs: []string{"bad"}, Action: "pause"})
+				_, err := s.BatchManageTaskCallbackSubscriptions(context.Background(), userID, &BatchTaskCallbackSubscriptionsRequest{SubscriptionIDs: []string{"bad"}, Action: "pause"})
 				return err
 			},
 			q:    &fakeWebhookQueries{},
@@ -873,7 +873,7 @@ func TestWebhookServiceErrors(t *testing.T) {
 		{
 			name: "batch too many ids",
 			call: func(s *Service) error {
-				_, err := s.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{SubscriptionIDs: tooManyIDs, Action: "pause"})
+				_, err := s.BatchManageTaskCallbackSubscriptions(context.Background(), userID, &BatchTaskCallbackSubscriptionsRequest{SubscriptionIDs: tooManyIDs, Action: "pause"})
 				return err
 			},
 			q:    &fakeWebhookQueries{},
@@ -882,7 +882,7 @@ func TestWebhookServiceErrors(t *testing.T) {
 		{
 			name: "batch update error",
 			call: func(s *Service) error {
-				_, err := s.BatchManageRunWebhookSubscriptions(context.Background(), userID, &BatchRunWebhookSubscriptionsRequest{SubscriptionIDs: []string{subID.String()}, Action: "resume"})
+				_, err := s.BatchManageTaskCallbackSubscriptions(context.Background(), userID, &BatchTaskCallbackSubscriptionsRequest{SubscriptionIDs: []string{subID.String()}, Action: "resume"})
 				return err
 			},
 			q:    &fakeWebhookQueries{batchErr: sentinel},
@@ -891,7 +891,7 @@ func TestWebhookServiceErrors(t *testing.T) {
 		{
 			name: "update invalid status",
 			call: func(s *Service) error {
-				_, err := s.UpdateRunWebhookSubscriptionStatus(context.Background(), runID, subID, userID, "failed")
+				_, err := s.UpdateTaskCallbackSubscriptionStatus(context.Background(), runID, subID, userID, "failed")
 				return err
 			},
 			q:    &fakeWebhookQueries{},
@@ -900,7 +900,7 @@ func TestWebhookServiceErrors(t *testing.T) {
 		{
 			name: "update missing subscription",
 			call: func(s *Service) error {
-				_, err := s.UpdateRunWebhookSubscriptionStatus(context.Background(), runID, subID, userID, "paused")
+				_, err := s.UpdateTaskCallbackSubscriptionStatus(context.Background(), runID, subID, userID, "paused")
 				return err
 			},
 			q:    &fakeWebhookQueries{run: db.Run{ID: runID, UserID: userID}, updateErr: pgx.ErrNoRows},
@@ -909,7 +909,7 @@ func TestWebhookServiceErrors(t *testing.T) {
 		{
 			name: "update query error",
 			call: func(s *Service) error {
-				_, err := s.UpdateRunWebhookSubscriptionStatus(context.Background(), runID, subID, userID, "paused")
+				_, err := s.UpdateTaskCallbackSubscriptionStatus(context.Background(), runID, subID, userID, "paused")
 				return err
 			},
 			q:    &fakeWebhookQueries{run: db.Run{ID: runID, UserID: userID}, updateErr: sentinel},
@@ -918,7 +918,7 @@ func TestWebhookServiceErrors(t *testing.T) {
 		{
 			name: "delete missing subscription",
 			call: func(s *Service) error {
-				return s.DeleteRunWebhookSubscription(context.Background(), runID, subID, userID)
+				return s.DeleteTaskCallbackSubscription(context.Background(), runID, subID, userID)
 			},
 			q:    &fakeWebhookQueries{run: db.Run{ID: runID, UserID: userID}},
 			want: http.StatusNotFound,
@@ -926,7 +926,7 @@ func TestWebhookServiceErrors(t *testing.T) {
 		{
 			name: "delete query error",
 			call: func(s *Service) error {
-				return s.DeleteRunWebhookSubscription(context.Background(), runID, subID, userID)
+				return s.DeleteTaskCallbackSubscription(context.Background(), runID, subID, userID)
 			},
 			q:    &fakeWebhookQueries{run: db.Run{ID: runID, UserID: userID}, deleteErr: sentinel},
 			want: http.StatusInternalServerError,
@@ -993,50 +993,50 @@ type fakeWebhookQueries struct {
 	run    db.Run
 	runErr error
 
-	createSubArg db.CreateRunWebhookSubscriptionParams
-	createSub    db.RunWebhookSubscription
+	createSubArg db.CreateTaskCallbackSubscriptionParams
+	createSub    db.TaskCallbackSubscription
 	createSubErr error
 
 	latestEventArg db.GetLatestRunEventForTypesParams
 	latestEvent    db.RunEvent
 	latestEventErr error
 
-	listRunSubsArg db.ListRunWebhookSubscriptionsByRunParams
-	listSubs       []db.RunWebhookSubscription
+	listRunSubsArg db.ListTaskCallbackSubscriptionsByRunParams
+	listSubs       []db.TaskCallbackSubscription
 	listSubsErr    error
 
-	listOwnerArg  db.ListRunWebhookSubscriptionsByOwnerParams
-	listOwnerSubs []db.RunWebhookSubscription
+	listOwnerArg  db.ListTaskCallbackSubscriptionsByOwnerParams
+	listOwnerSubs []db.TaskCallbackSubscription
 	listOwnerErr  error
 
-	batchArg  db.BatchUpdateRunWebhookSubscriptionsForOwnerParams
-	batchSubs []db.RunWebhookSubscription
+	batchArg  db.BatchUpdateTaskCallbackSubscriptionsForOwnerParams
+	batchSubs []db.TaskCallbackSubscription
 	batchErr  error
 
-	updateArg db.UpdateRunWebhookSubscriptionStatusForOwnerParams
-	updateSub db.RunWebhookSubscription
+	updateArg db.UpdateTaskCallbackSubscriptionStatusForOwnerParams
+	updateSub db.TaskCallbackSubscription
 	updateErr error
 
-	deleteArg  db.DeleteRunWebhookSubscriptionForOwnerParams
+	deleteArg  db.DeleteTaskCallbackSubscriptionForOwnerParams
 	deleteRows int64
 	deleteErr  error
 
-	activeArg  db.ListActiveRunWebhookSubscriptionsForEventParams
-	activeSubs []db.RunWebhookSubscription
+	activeArg  db.ListActiveTaskCallbackSubscriptionsForEventParams
+	activeSubs []db.TaskCallbackSubscription
 	activeErr  error
 
-	createRunDeliveryArg db.CreateRunWebhookDeliveryParams
-	createRunDelivery    db.RunWebhookDelivery
+	createRunDeliveryArg db.CreateTaskCallbackDeliveryParams
+	createRunDelivery    db.TaskCallbackDelivery
 	createRunDeliveryErr error
 
-	runDeliveryRow db.GetRunWebhookDeliveryByIDRow
+	runDeliveryRow db.GetTaskCallbackDeliveryByIDRow
 	runDeliveryErr error
 
-	runSuccessArg db.MarkRunWebhookDeliverySuccessParams
+	runSuccessArg db.MarkTaskCallbackDeliverySuccessParams
 	runSuccessErr error
-	runRetryArg   db.MarkRunWebhookDeliveryFailedRetryParams
+	runRetryArg   db.MarkTaskCallbackDeliveryFailedRetryParams
 	runRetryErr   error
-	runFinalArg   db.MarkRunWebhookDeliveryFailedFinalParams
+	runFinalArg   db.MarkTaskCallbackDeliveryFailedFinalParams
 	runFinalErr   error
 
 	incrementSubscriptionID uuid.UUID
@@ -1044,7 +1044,7 @@ type fakeWebhookQueries struct {
 	resetSubscriptionID     uuid.UUID
 	resetErr                error
 
-	pendingRunDeliveries []db.RunWebhookDelivery
+	pendingRunDeliveries []db.TaskCallbackDelivery
 	pendingRunErr        error
 }
 
@@ -1111,22 +1111,22 @@ func (q *fakeWebhookQueries) GetRunByID(context.Context, uuid.UUID) (db.Run, err
 	return q.run, q.runErr
 }
 
-func (q *fakeWebhookQueries) CreateRunWebhookSubscription(_ context.Context, arg db.CreateRunWebhookSubscriptionParams) (db.RunWebhookSubscription, error) {
+func (q *fakeWebhookQueries) CreateTaskCallbackSubscription(_ context.Context, arg db.CreateTaskCallbackSubscriptionParams) (db.TaskCallbackSubscription, error) {
 	q.createSubArg = arg
 	if q.createSub.ID == uuid.Nil {
-		q.createSub = db.RunWebhookSubscription{
-			ID:                  uuid.New(),
-			RunID:               arg.RunID,
-			OwnerUserID:         arg.OwnerUserID,
-			TargetURL:           arg.TargetURL,
-			Secret:              arg.Secret,
-			EventTypes:          arg.EventTypes,
-			PushAuthScheme:      arg.PushAuthScheme,
-			PushAuthCredentials: arg.PushAuthCredentials,
-			PushMetadata:        arg.PushMetadata,
-			Status:              "active",
-			CreatedAt:           time.Now(),
-			UpdatedAt:           time.Now(),
+		q.createSub = db.TaskCallbackSubscription{
+			ID:              uuid.New(),
+			RunID:           arg.RunID,
+			OwnerUserID:     arg.OwnerUserID,
+			TargetURL:       arg.TargetURL,
+			Secret:          arg.Secret,
+			EventTypes:      arg.EventTypes,
+			AuthScheme:      arg.AuthScheme,
+			AuthCredentials: arg.AuthCredentials,
+			Metadata:        arg.Metadata,
+			Status:          "active",
+			CreatedAt:       time.Now(),
+			UpdatedAt:       time.Now(),
 		}
 	}
 	return q.createSub, q.createSubErr
@@ -1137,40 +1137,40 @@ func (q *fakeWebhookQueries) GetLatestRunEventForTypes(_ context.Context, arg db
 	return q.latestEvent, q.latestEventErr
 }
 
-func (q *fakeWebhookQueries) ListRunWebhookSubscriptionsByRun(_ context.Context, arg db.ListRunWebhookSubscriptionsByRunParams) ([]db.RunWebhookSubscription, error) {
+func (q *fakeWebhookQueries) ListTaskCallbackSubscriptionsByRun(_ context.Context, arg db.ListTaskCallbackSubscriptionsByRunParams) ([]db.TaskCallbackSubscription, error) {
 	q.listRunSubsArg = arg
 	return q.listSubs, q.listSubsErr
 }
 
-func (q *fakeWebhookQueries) ListRunWebhookSubscriptionsByOwner(_ context.Context, arg db.ListRunWebhookSubscriptionsByOwnerParams) ([]db.RunWebhookSubscription, error) {
+func (q *fakeWebhookQueries) ListTaskCallbackSubscriptionsByOwner(_ context.Context, arg db.ListTaskCallbackSubscriptionsByOwnerParams) ([]db.TaskCallbackSubscription, error) {
 	q.listOwnerArg = arg
 	return q.listOwnerSubs, q.listOwnerErr
 }
 
-func (q *fakeWebhookQueries) BatchUpdateRunWebhookSubscriptionsForOwner(_ context.Context, arg db.BatchUpdateRunWebhookSubscriptionsForOwnerParams) ([]db.RunWebhookSubscription, error) {
+func (q *fakeWebhookQueries) BatchUpdateTaskCallbackSubscriptionsForOwner(_ context.Context, arg db.BatchUpdateTaskCallbackSubscriptionsForOwnerParams) ([]db.TaskCallbackSubscription, error) {
 	q.batchArg = arg
 	return q.batchSubs, q.batchErr
 }
 
-func (q *fakeWebhookQueries) UpdateRunWebhookSubscriptionStatusForOwner(_ context.Context, arg db.UpdateRunWebhookSubscriptionStatusForOwnerParams) (db.RunWebhookSubscription, error) {
+func (q *fakeWebhookQueries) UpdateTaskCallbackSubscriptionStatusForOwner(_ context.Context, arg db.UpdateTaskCallbackSubscriptionStatusForOwnerParams) (db.TaskCallbackSubscription, error) {
 	q.updateArg = arg
 	return q.updateSub, q.updateErr
 }
 
-func (q *fakeWebhookQueries) DeleteRunWebhookSubscriptionForOwner(_ context.Context, arg db.DeleteRunWebhookSubscriptionForOwnerParams) (int64, error) {
+func (q *fakeWebhookQueries) DeleteTaskCallbackSubscriptionForOwner(_ context.Context, arg db.DeleteTaskCallbackSubscriptionForOwnerParams) (int64, error) {
 	q.deleteArg = arg
 	return q.deleteRows, q.deleteErr
 }
 
-func (q *fakeWebhookQueries) ListActiveRunWebhookSubscriptionsForEvent(_ context.Context, arg db.ListActiveRunWebhookSubscriptionsForEventParams) ([]db.RunWebhookSubscription, error) {
+func (q *fakeWebhookQueries) ListActiveTaskCallbackSubscriptionsForEvent(_ context.Context, arg db.ListActiveTaskCallbackSubscriptionsForEventParams) ([]db.TaskCallbackSubscription, error) {
 	q.activeArg = arg
 	return q.activeSubs, q.activeErr
 }
 
-func (q *fakeWebhookQueries) CreateRunWebhookDelivery(_ context.Context, arg db.CreateRunWebhookDeliveryParams) (db.RunWebhookDelivery, error) {
+func (q *fakeWebhookQueries) CreateTaskCallbackDelivery(_ context.Context, arg db.CreateTaskCallbackDeliveryParams) (db.TaskCallbackDelivery, error) {
 	q.createRunDeliveryArg = arg
 	if q.createRunDelivery.ID == uuid.Nil {
-		q.createRunDelivery = db.RunWebhookDelivery{
+		q.createRunDelivery = db.TaskCallbackDelivery{
 			ID:             uuid.New(),
 			SubscriptionID: arg.SubscriptionID,
 			RunEventID:     arg.RunEventID,
@@ -1183,35 +1183,35 @@ func (q *fakeWebhookQueries) CreateRunWebhookDelivery(_ context.Context, arg db.
 	return q.createRunDelivery, q.createRunDeliveryErr
 }
 
-func (q *fakeWebhookQueries) GetRunWebhookDeliveryByID(context.Context, uuid.UUID) (db.GetRunWebhookDeliveryByIDRow, error) {
+func (q *fakeWebhookQueries) GetTaskCallbackDeliveryByID(context.Context, uuid.UUID) (db.GetTaskCallbackDeliveryByIDRow, error) {
 	return q.runDeliveryRow, q.runDeliveryErr
 }
 
-func (q *fakeWebhookQueries) MarkRunWebhookDeliverySuccess(_ context.Context, arg db.MarkRunWebhookDeliverySuccessParams) error {
+func (q *fakeWebhookQueries) MarkTaskCallbackDeliverySuccess(_ context.Context, arg db.MarkTaskCallbackDeliverySuccessParams) error {
 	q.runSuccessArg = arg
 	return q.runSuccessErr
 }
 
-func (q *fakeWebhookQueries) MarkRunWebhookDeliveryFailedRetry(_ context.Context, arg db.MarkRunWebhookDeliveryFailedRetryParams) error {
+func (q *fakeWebhookQueries) MarkTaskCallbackDeliveryFailedRetry(_ context.Context, arg db.MarkTaskCallbackDeliveryFailedRetryParams) error {
 	q.runRetryArg = arg
 	return q.runRetryErr
 }
 
-func (q *fakeWebhookQueries) MarkRunWebhookDeliveryFailedFinal(_ context.Context, arg db.MarkRunWebhookDeliveryFailedFinalParams) error {
+func (q *fakeWebhookQueries) MarkTaskCallbackDeliveryFailedFinal(_ context.Context, arg db.MarkTaskCallbackDeliveryFailedFinalParams) error {
 	q.runFinalArg = arg
 	return q.runFinalErr
 }
 
-func (q *fakeWebhookQueries) IncrementRunWebhookSubscriptionFailure(_ context.Context, id uuid.UUID) error {
+func (q *fakeWebhookQueries) IncrementTaskCallbackSubscriptionFailure(_ context.Context, id uuid.UUID) error {
 	q.incrementSubscriptionID = id
 	return q.incrementErr
 }
 
-func (q *fakeWebhookQueries) ResetRunWebhookSubscriptionFailures(_ context.Context, id uuid.UUID) error {
+func (q *fakeWebhookQueries) ResetTaskCallbackSubscriptionFailures(_ context.Context, id uuid.UUID) error {
 	q.resetSubscriptionID = id
 	return q.resetErr
 }
 
-func (q *fakeWebhookQueries) ListPendingRunWebhookDeliveries(context.Context) ([]db.RunWebhookDelivery, error) {
+func (q *fakeWebhookQueries) ListPendingTaskCallbackDeliveries(context.Context) ([]db.TaskCallbackDelivery, error) {
 	return q.pendingRunDeliveries, q.pendingRunErr
 }

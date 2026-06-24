@@ -843,51 +843,51 @@ func TestA2ARuntimeWorkbenchTokenAndPushHelpers(t *testing.T) {
 	if taskIDFromPushParams(&A2ATaskPushConfigParams{TaskID: " task ", ID: "fallback"}) != "task" || taskIDFromPushParams(&A2ATaskPushConfigParams{ID: " id "}) != "id" || taskIDFromPushParams(nil) != "" {
 		t.Fatalf("taskIDFromPushParams failed")
 	}
-	scheme, credentials := pushAuthFromConfig(A2APushNotificationConfig{Authentication: &A2APushAuthenticationInfo{Scheme: " HMAC ", Credentials: " secret "}, Token: "token"})
+	scheme, credentials := callbackAuthFromA2AConfig(A2APushNotificationConfig{Authentication: &A2APushAuthenticationInfo{Scheme: " HMAC ", Credentials: " secret "}, Token: "token"})
 	if scheme != "HMAC" || credentials != "secret" {
-		t.Fatalf("pushAuthFromConfig auth = %q %q", scheme, credentials)
+		t.Fatalf("callbackAuthFromA2AConfig auth = %q %q", scheme, credentials)
 	}
-	scheme, credentials = pushAuthFromConfig(A2APushNotificationConfig{Token: " token "})
+	scheme, credentials = callbackAuthFromA2AConfig(A2APushNotificationConfig{Token: " token "})
 	if scheme != "Bearer" || credentials != "token" {
-		t.Fatalf("pushAuthFromConfig token = %q %q", scheme, credentials)
+		t.Fatalf("callbackAuthFromA2AConfig token = %q %q", scheme, credentials)
 	}
-	if got := pushEventTypes([]string{"run.completed"}); !reflect.DeepEqual(got, []string{"run.completed"}) {
-		t.Fatalf("pushEventTypes custom = %#v", got)
+	if got := defaultTaskCallbackEventTypes([]string{"run.completed"}); !reflect.DeepEqual(got, []string{"run.completed"}) {
+		t.Fatalf("defaultTaskCallbackEventTypes custom = %#v", got)
 	}
-	if got := pushEventTypes(nil); len(got) < 5 || !containsString(got, "run.completed") {
-		t.Fatalf("pushEventTypes default = %#v", got)
+	if got := defaultTaskCallbackEventTypes(nil); len(got) < 5 || !containsString(got, "run.completed") {
+		t.Fatalf("defaultTaskCallbackEventTypes default = %#v", got)
 	}
 	authScheme := "Bearer"
 	authCredentials := "secret"
-	sub := db.RunWebhookSubscription{
+	sub := db.TaskCallbackSubscription{
 		ID:                  uuid.New(),
 		TargetURL:           "https://hooks.example/a2a",
 		EventTypes:          []string{"run.completed"},
-		PushAuthScheme:      &authScheme,
-		PushAuthCredentials: &authCredentials,
-		PushMetadata:        []byte(`{"client":"test"}`),
+		AuthScheme:          &authScheme,
+		AuthCredentials:     &authCredentials,
+		Metadata:            []byte(`{"client":"test"}`),
 		Status:              "active",
 		ConsecutiveFailures: 2,
 	}
-	pushCfg := pushConfigFromSubscription("task-1", sub, false)
+	pushCfg := a2aPushConfigFromTaskCallback("task-1", sub, false)
 	if pushCfg.TaskID != "task-1" || pushCfg.PushNotificationConfig.Authentication.Credentials != "" || pushCfg.PushNotificationConfig.Metadata["client"] != "test" {
-		t.Fatalf("pushConfigFromSubscription public = %#v", pushCfg)
+		t.Fatalf("a2aPushConfigFromTaskCallback public = %#v", pushCfg)
 	}
-	pushCfg = pushConfigFromSubscription("task-1", sub, true)
+	pushCfg = a2aPushConfigFromTaskCallback("task-1", sub, true)
 	if pushCfg.PushNotificationConfig.Authentication.Credentials != "secret" {
-		t.Fatalf("pushConfigFromSubscription credentials = %#v", pushCfg)
+		t.Fatalf("a2aPushConfigFromTaskCallback credentials = %#v", pushCfg)
 	}
-	metadata := pushMetadataFromSubscription(sub)
+	metadata := a2aMetadataFromTaskCallback(sub)
 	if metadata["openlinker_subscription_status"] != "active" || metadata["openlinker_consecutive_failures"] != int32(2) || metadata["client"] != "test" {
-		t.Fatalf("pushMetadataFromSubscription = %#v", metadata)
+		t.Fatalf("a2aMetadataFromTaskCallback = %#v", metadata)
 	}
 
-	sub.PushMetadata = []byte(`{`)
-	metadata = pushMetadataFromSubscription(sub)
+	sub.Metadata = []byte(`{`)
+	metadata = a2aMetadataFromTaskCallback(sub)
 	if metadata["openlinker_subscription_status"] != "active" || metadata["openlinker_consecutive_failures"] != int32(2) {
-		t.Fatalf("pushMetadataFromSubscription invalid json = %#v", metadata)
+		t.Fatalf("a2aMetadataFromTaskCallback invalid json = %#v", metadata)
 	}
-	scheme, credentials = pushAuthFromConfig(A2APushNotificationConfig{Authentication: &A2APushAuthenticationInfo{Scheme: " HMAC "}})
+	scheme, credentials = callbackAuthFromA2AConfig(A2APushNotificationConfig{Authentication: &A2APushAuthenticationInfo{Scheme: " HMAC "}})
 	if scheme != "" || credentials != "" {
 		t.Fatalf("incomplete push auth should be ignored, got %q %q", scheme, credentials)
 	}
@@ -903,7 +903,7 @@ func TestA2APushServiceValidationBranches(t *testing.T) {
 	err = svc.DeletePushNotificationConfig(ctx, userID, "agent", &A2ATaskPushConfigParams{ID: uuid.NewString()})
 	requireA2AHTTPStatus(t, err, http.StatusServiceUnavailable)
 
-	svc.SetRunPushManager(noopRunPushManager{})
+	svc.SetTaskCallbackManager(noopTaskCallbackManager{})
 	_, err = svc.SetPushNotificationConfig(ctx, userID, "agent", nil)
 	requireA2AHTTPStatus(t, err, http.StatusBadRequest)
 	err = svc.DeletePushNotificationConfig(ctx, userID, "agent", nil)
@@ -978,19 +978,19 @@ func TestA2AProtocolServiceValidationAndDBErrorMapping(t *testing.T) {
 	requireA2AHTTPStatus(t, err, http.StatusBadRequest)
 }
 
-func TestA2AListPushSubscriptionsErrorMapping(t *testing.T) {
+func TestA2AListTaskCallbackSubscriptionsErrorMapping(t *testing.T) {
 	ctx := context.Background()
 	runID := uuid.New()
 	userID := uuid.New()
 
 	svc := &Service{queries: db.New(&a2aErrorDBTX{queryErr: pgx.ErrNoRows})}
-	items, err := svc.listPushSubscriptions(ctx, runID, userID)
+	items, err := svc.listTaskCallbackSubscriptionsForA2A(ctx, runID, userID)
 	if err != nil || len(items) != 0 {
 		t.Fatalf("pgx.ErrNoRows should map to empty list, got %#v, %v", items, err)
 	}
 
 	svc = &Service{queries: db.New(&a2aErrorDBTX{queryErr: errors.New("database offline")})}
-	_, err = svc.listPushSubscriptions(ctx, runID, userID)
+	_, err = svc.listTaskCallbackSubscriptionsForA2A(ctx, runID, userID)
 	requireA2AHTTPStatus(t, err, http.StatusInternalServerError)
 }
 
@@ -1193,7 +1193,7 @@ func TestA2AControlHTTPHandlersDispatchService(t *testing.T) {
 		c := newA2ATestContext(&a2aHandlerRequest{
 			method: http.MethodPost,
 			target: "/agent-runtime/call-agent",
-			body:   `{"target_agent_id":"` + targetAgentID.String() + `","reason":"need data","input":{"q":"hi"}}`,
+			body:   `{"target_agent_id":"` + targetAgentID.String() + `","reason":"need data","input":{"q":"hi"},"task_callback":{"url":"https://caller.example.com/a2a/events","token":"caller-token","event_types":["run.completed","run.failed"]}}`,
 			headers: map[string]string{
 				echo.HeaderAuthorization: "Bearer rt_live_test",
 				"X-OpenLinker-Run-Id":    parentRunID.String(),
@@ -1205,6 +1205,9 @@ func TestA2AControlHTTPHandlersDispatchService(t *testing.T) {
 		assert.Equal(t, "rt_live_test", svc.callToken)
 		assert.Equal(t, parentRunID.String(), svc.callReq.CurrentRunID)
 		assert.Equal(t, targetAgentID.String(), svc.callReq.TargetAgentID)
+		require.NotNil(t, svc.callReq.TaskCallback)
+		assert.Equal(t, "https://caller.example.com/a2a/events", svc.callReq.TaskCallback.URL)
+		assert.Equal(t, []string{"run.completed", "run.failed"}, svc.callReq.TaskCallback.EventTypesAlias)
 	})
 
 	t.Run("list children and parents", func(t *testing.T) {
@@ -2064,14 +2067,14 @@ func TestA2AAgentCardHandlersUnavailableWithoutProvider(t *testing.T) {
 	requireA2AHTTPStatus(t, h.GetExtendedAgentCardHTTP(newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", userID: uuid.NewString(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": "agent-one"}})), http.StatusServiceUnavailable)
 }
 
-type noopRunPushManager struct{}
+type noopTaskCallbackManager struct{}
 
-func (noopRunPushManager) CreateRunWebhookSubscription(context.Context, uuid.UUID, uuid.UUID, *webhook.CreateRunWebhookRequest) (*webhook.RunWebhookSubscriptionResponse, error) {
-	return nil, errors.New("unexpected CreateRunWebhookSubscription call")
+func (noopTaskCallbackManager) CreateTaskCallbackSubscription(context.Context, uuid.UUID, uuid.UUID, *webhook.CreateTaskCallbackRequest) (*webhook.TaskCallbackSubscriptionResponse, error) {
+	return nil, errors.New("unexpected CreateTaskCallbackSubscription call")
 }
 
-func (noopRunPushManager) DeleteRunWebhookSubscription(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
-	return errors.New("unexpected DeleteRunWebhookSubscription call")
+func (noopTaskCallbackManager) DeleteTaskCallbackSubscription(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
+	return errors.New("unexpected DeleteTaskCallbackSubscription call")
 }
 
 type a2aHandlerRequest struct {

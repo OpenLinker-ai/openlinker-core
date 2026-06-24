@@ -66,8 +66,8 @@ type WebhookEnqueuer interface {
 	EnqueueDelivery(ctx context.Context, run *db.Run, agentSlug string, output map[string]interface{}) error
 }
 
-// RunWebhookEnqueuer 触发 run 级别 push webhook，payload 来自 run_events。
-type RunWebhookEnqueuer interface {
+// TaskCallbackEnqueuer 触发 task callback，payload 来自 run_events。
+type TaskCallbackEnqueuer interface {
 	EnqueueRunEvent(ctx context.Context, event db.RunEvent) error
 }
 
@@ -90,16 +90,16 @@ type DeliveryEnqueuer interface {
 //
 // HTTP 调用必须在事务外，否则会长时间锁住 wallets 行。
 type Service struct {
-	queries       *db.Queries
-	requirements  runRequirementQueries
-	pool          *pgxpool.Pool
-	cfg           *config.Config
-	httpClient    *http.Client
-	webhookSvc    WebhookEnqueuer
-	runWebhookSvc RunWebhookEnqueuer
-	deliverySvc   DeliveryEnqueuer
-	walletCharger WalletCharger
-	wsHub         *runtimeWSHub
+	queries         *db.Queries
+	requirements    runRequirementQueries
+	pool            *pgxpool.Pool
+	cfg             *config.Config
+	httpClient      *http.Client
+	webhookSvc      WebhookEnqueuer
+	taskCallbackSvc TaskCallbackEnqueuer
+	deliverySvc     DeliveryEnqueuer
+	walletCharger   WalletCharger
+	wsHub           *runtimeWSHub
 }
 
 type runInvocation struct {
@@ -149,9 +149,9 @@ func (s *Service) SetWebhookEnqueuer(w WebhookEnqueuer) {
 	s.webhookSvc = w
 }
 
-// SetRunWebhookEnqueuer 注入 run 级别 push webhook 触发器。
-func (s *Service) SetRunWebhookEnqueuer(w RunWebhookEnqueuer) {
-	s.runWebhookSvc = w
+// SetTaskCallbackEnqueuer 注入 task callback 触发器。
+func (s *Service) SetTaskCallbackEnqueuer(w TaskCallbackEnqueuer) {
+	s.taskCallbackSvc = w
 }
 
 // SetDeliveryEnqueuer 注入用户侧投递触发器（main.go 启动时调用）。
@@ -929,7 +929,7 @@ func (s *Service) ReportRunEvent(ctx context.Context, runID uuid.UUID, token str
 			Msg("runtime.ReportRunEvent: CreateRunEvent")
 		return nil, httpx.Internal("记录运行事件失败")
 	}
-	s.triggerRunWebhookEvent(&event)
+	s.triggerTaskCallbackEvent(&event)
 	resp := runEventToResponse(event)
 	if eventType == "run.message.delta" {
 		s.recordRunMessageBestEffort(ctx, runID, &resp.Sequence, "agent", messageContentFromMap(payload), payload)
@@ -2354,16 +2354,16 @@ func (s *Service) triggerWebhookByRun(runID uuid.UUID) {
 	}()
 }
 
-func (s *Service) triggerRunWebhookEvent(event *db.RunEvent) {
-	if s.runWebhookSvc == nil || event == nil {
+func (s *Service) triggerTaskCallbackEvent(event *db.RunEvent) {
+	if s.taskCallbackSvc == nil || event == nil {
 		return
 	}
 	go func(e db.RunEvent) {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := s.runWebhookSvc.EnqueueRunEvent(bgCtx, e); err != nil {
+		if err := s.taskCallbackSvc.EnqueueRunEvent(bgCtx, e); err != nil {
 			log.Error().Err(err).Str("event_id", e.ID.String()).Str("run_id", e.RunID.String()).
-				Msg("runtime.triggerRunWebhookEvent: EnqueueRunEvent")
+				Msg("runtime.triggerTaskCallbackEvent: EnqueueRunEvent")
 		}
 	}(*event)
 }
@@ -2721,7 +2721,7 @@ func (s *Service) recordRunEventBestEffort(ctx context.Context, runID uuid.UUID,
 			Msg("runtime.recordRunEventBestEffort")
 		return nil
 	}
-	s.triggerRunWebhookEvent(&event)
+	s.triggerTaskCallbackEvent(&event)
 	return &event
 }
 

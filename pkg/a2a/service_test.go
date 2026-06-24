@@ -23,7 +23,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/webhook"
 )
 
-const truncateA2ATables = "TRUNCATE run_webhook_deliveries, run_webhook_subscriptions, run_artifact_chunks, run_artifacts, run_messages, run_delegations, agent_runtime_tokens, agent_call_policies, run_events, runs, agents, users RESTART IDENTITY CASCADE"
+const truncateA2ATables = "TRUNCATE task_callback_deliveries, task_callback_subscriptions, run_artifact_chunks, run_artifacts, run_messages, run_delegations, agent_runtime_tokens, agent_call_policies, run_events, runs, agents, users RESTART IDENTITY CASCADE"
 
 func setupService(t *testing.T) (*pgxpool.Pool, *a2a.Service, *runtime.Service) {
 	t.Helper()
@@ -251,6 +251,8 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	pool, svc, runtimeSvc := setupService(t)
 	callerOwner := insertCreator(t, pool)
 	targetOwner := insertCreator(t, pool)
+	pushSvc := webhook.NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true})
+	svc.SetTaskCallbackManager(pushSvc)
 
 	var receivedHeader string
 	var receivedParent string
@@ -273,6 +275,10 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 		_, _ = w.Write([]byte(`{"output":{"text":"child ok"}}`))
 	}))
 	defer server.Close()
+	pushServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer pushServer.Close()
 	defaultTransport := http.DefaultTransport
 	http.DefaultTransport = server.Client().Transport
 	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
@@ -288,12 +294,25 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	child, err := svc.CallAgent(context.Background(), token.PlaintextToken, &a2a.CallAgentRequest{
 		ParentRunID: parentRunID.String(), TargetAgentID: targetID.String(),
 		Reason: "summarize", Input: map[string]any{"q": "hello"},
+		TaskCallback: &a2a.A2APushNotificationConfig{
+			URL: pushServer.URL + "/a2a/events",
+			EventTypesAlias: []string{
+				"run.completed",
+				"run.failed",
+				"run.canceled",
+			},
+			Metadata: map[string]any{"client": "caller-agent"},
+		},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "success", child.Status)
 	assert.Equal(t, int32(0), child.CostCents)
 	assert.Equal(t, "free_delegation", child.BillingMode)
 	assert.Equal(t, parentRunID.String(), child.ParentRunID)
+	require.NotNil(t, child.TaskCallback)
+	assert.Equal(t, pushServer.URL+"/a2a/events", child.TaskCallback.TargetURL)
+	assert.Equal(t, []string{"run.completed", "run.failed", "run.canceled"}, child.TaskCallback.EventTypes)
+	assert.NotEmpty(t, child.TaskCallback.Secret)
 	assert.Empty(t, receivedHeader)
 	assert.Equal(t, parentRunID.String(), receivedParent)
 	assert.Equal(t, child.RunID, receivedA2A.CurrentRunID)
@@ -307,6 +326,12 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	assert.Equal(t, parentRunID.String(), reloaded.ParentRunID)
 	assert.Equal(t, callerID.String(), reloaded.CallerAgentID)
 	assert.Equal(t, "free_delegation", reloaded.BillingMode)
+	var subscriptionCount int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM task_callback_subscriptions WHERE run_id=$1 AND owner_user_id=$2 AND target_url=$3`,
+		child.RunID, callerOwner, pushServer.URL+"/a2a/events",
+	).Scan(&subscriptionCount))
+	assert.Equal(t, 1, subscriptionCount)
 
 	children, err := svc.ListChildren(context.Background(), callerOwner, parentRunID)
 	require.NoError(t, err)
@@ -321,6 +346,57 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 		Scan(&parentEvents)
 	require.NoError(t, err)
 	assert.Equal(t, 2, parentEvents)
+}
+
+func TestCallAgent_InvalidTaskCallbackDoesNotCreateChildRun(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	callerOwner := insertCreator(t, pool)
+	targetOwner := insertCreator(t, pool)
+	svc.SetTaskCallbackManager(webhook.NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true}))
+
+	var targetHits int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"text":"child ok"}}`))
+	}))
+	defer server.Close()
+	defaultTransport := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
+
+	callerID := insertAgent(t, pool, callerOwner, "https://example.com/caller")
+	targetID := insertAgent(t, pool, targetOwner, server.URL)
+	parentRunID := insertParentRun(t, pool, callerOwner, callerID)
+
+	token, err := svc.CreateRuntimeToken(context.Background(), callerOwner, callerID, &a2a.CreateRuntimeTokenRequest{Name: "worker"})
+	require.NoError(t, err)
+
+	_, err = svc.CallAgent(context.Background(), token.PlaintextToken, &a2a.CallAgentRequest{
+		ParentRunID:   parentRunID.String(),
+		TargetAgentID: targetID.String(),
+		Reason:        "summarize",
+		Input:         map[string]any{"q": "hello"},
+		TaskCallback: &a2a.A2APushNotificationConfig{
+			EventTypesAlias: []string{"run.completed"},
+		},
+	})
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	assert.Equal(t, 0, targetHits)
+
+	var delegationCount int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM run_delegations WHERE parent_run_id=$1`,
+		parentRunID,
+	).Scan(&delegationCount))
+	assert.Equal(t, 0, delegationCount)
+
+	var runCount int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM runs WHERE id<>$1`,
+		parentRunID,
+	).Scan(&runCount))
+	assert.Equal(t, 0, runCount)
 }
 
 func TestCallAgentRejectsDelegationCycle(t *testing.T) {
@@ -677,7 +753,7 @@ func TestProtocolServiceValidationAndOwnershipEdges(t *testing.T) {
 	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
 
 	pushSvc := webhook.NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true})
-	svc.SetRunPushManager(pushSvc)
+	svc.SetTaskCallbackManager(pushSvc)
 	pushParams := a2a.A2ATaskPushConfigParams{
 		ID:                     "not-a-uuid",
 		PushNotificationConfig: a2a.A2APushNotificationConfig{URL: server.URL + "/push"},
@@ -965,7 +1041,7 @@ func TestProtocolMessageCreatesInlinePushNotificationConfig(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	owner := insertCreator(t, pool)
 	pushSvc := webhook.NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true})
-	svc.SetRunPushManager(pushSvc)
+	svc.SetTaskCallbackManager(pushSvc)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1003,11 +1079,11 @@ func TestProtocolMessageCreatesInlinePushNotificationConfig(t *testing.T) {
 	assert.Equal(t, "inline-a2a", list.Items[0].PushNotificationConfig.Metadata["client"])
 }
 
-func TestPushNotificationConfigMapsToRunWebhook(t *testing.T) {
+func TestPushNotificationConfigMapsToTaskCallback(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	owner := insertCreator(t, pool)
 	pushSvc := webhook.NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true})
-	svc.SetRunPushManager(pushSvc)
+	svc.SetTaskCallbackManager(pushSvc)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1072,7 +1148,7 @@ func TestPushNotificationConfigLookupAndValidationEdges(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	owner := insertCreator(t, pool)
 	pushSvc := webhook.NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true})
-	svc.SetRunPushManager(pushSvc)
+	svc.SetTaskCallbackManager(pushSvc)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

@@ -81,12 +81,15 @@ type RuntimeWorkbenchDiagnostic struct {
 
 // CallAgentRequest is sent by Agent A using its runtime token.
 type CallAgentRequest struct {
-	ParentRunID   string                 `json:"parent_run_id,omitempty" validate:"omitempty,uuid"`
-	CurrentRunID  string                 `json:"current_run_id,omitempty" validate:"omitempty,uuid"`
-	TargetAgentID string                 `json:"target_agent_id" validate:"required,uuid"`
-	Reason        string                 `json:"reason" validate:"max=500"`
-	Input         map[string]interface{} `json:"input" validate:"required"`
-	Metadata      map[string]interface{} `json:"metadata,omitempty"`
+	ParentRunID            string                     `json:"parent_run_id,omitempty" validate:"omitempty,uuid"`
+	CurrentRunID           string                     `json:"current_run_id,omitempty" validate:"omitempty,uuid"`
+	TargetAgentID          string                     `json:"target_agent_id" validate:"required,uuid"`
+	Reason                 string                     `json:"reason" validate:"max=500"`
+	Input                  map[string]interface{}     `json:"input" validate:"required"`
+	Metadata               map[string]interface{}     `json:"metadata,omitempty"`
+	TaskCallback           *A2APushNotificationConfig `json:"task_callback,omitempty"`
+	PushNotification       *A2APushNotificationConfig `json:"push_notification,omitempty"`
+	PushNotificationConfig *A2APushNotificationConfig `json:"pushNotificationConfig,omitempty"`
 }
 
 // SkillRef is the small capability badge shown in A2A call-chain views.

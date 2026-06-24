@@ -34,7 +34,7 @@ type Service struct {
 	queries               *db.Queries
 	pool                  *pgxpool.Pool
 	runtime               *runtime.Service
-	runPush               runPushManager
+	taskCallbackManager   taskCallbackManager
 	maxDelegationDepth    int
 	maxRunningDelegations int
 }
@@ -430,9 +430,13 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 	if err := s.enforceDelegationLimits(ctx, parentRunID, targetAgentID); err != nil {
 		return nil, err
 	}
+	taskCallbackConfig := taskCallbackConfigFromCallRequest(req)
+	if err := s.validateCallerTaskCallbackConfig(taskCallbackConfig); err != nil {
+		return nil, err
+	}
 
 	_ = s.queries.TouchAgentRuntimeToken(ctx, callerToken.ID)
-	return s.runtime.RunDelegated(ctx, parent.UserID, runtime.Delegation{
+	resp, err := s.runtime.RunDelegated(ctx, parent.UserID, runtime.Delegation{
 		ParentRunID:   parentRunID,
 		CallerAgentID: callerToken.AgentID,
 		Reason:        strings.TrimSpace(req.Reason),
@@ -441,6 +445,15 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 		Input:    req.Input,
 		Metadata: req.Metadata,
 	})
+	if err != nil {
+		return nil, err
+	}
+	callback, err := s.createCallerTaskCallback(ctx, parent.UserID, resp.RunID, taskCallbackConfig)
+	if err != nil {
+		return nil, err
+	}
+	resp.TaskCallback = callback
+	return resp, nil
 }
 
 func (s *Service) enforceDelegationLimits(ctx context.Context, parentRunID, targetAgentID uuid.UUID) error {

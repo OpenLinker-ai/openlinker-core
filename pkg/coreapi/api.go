@@ -148,11 +148,11 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	webhookHandler := webhook.NewHandler(webhookSvc, cfg)
 	webhookHandler.RegisterProtected(api, jwtMiddleware)
 	runtimeSvc.SetWebhookEnqueuer(webhookSvc)
-	runtimeSvc.SetRunWebhookEnqueuer(webhookSvc)
+	runtimeSvc.SetTaskCallbackEnqueuer(webhookSvc)
 	go webhook.StartWorker(rootCtx, webhookSvc)
 
 	a2aSvc := a2a.NewService(pool, runtimeSvc)
-	a2aSvc.SetRunPushManager(webhookSvc)
+	a2aSvc.SetTaskCallbackManager(webhookSvc)
 	a2aHandler := a2a.NewHandler(a2aSvc)
 	a2aHandler.SetAgentCardProvider(agentMarketSvc)
 	a2aHandler.Register(api, jwtMiddleware, hybridMw)

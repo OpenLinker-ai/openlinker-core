@@ -36,9 +36,25 @@ type RunResponse struct {
 	ParentRunID         string                          `json:"parent_run_id,omitempty"`
 	CallerAgentID       string                          `json:"caller_agent_id,omitempty"`
 	BillingMode         string                          `json:"billing_mode,omitempty"`
+	TaskCallback        *RunTaskCallbackResponse        `json:"task_callback,omitempty"`
 	RequirementEvidence *RunRequirementEvidenceResponse `json:"requirement_evidence,omitempty"`
 	EvidenceSummary     *RunEvidenceSummary             `json:"evidence_summary,omitempty"`
 	NextAction          *RunNextAction                  `json:"next_action,omitempty"`
+}
+
+// RunTaskCallbackResponse describes a caller-owned task callback created while
+// starting or delegating a run. Secret is only populated on creation.
+type RunTaskCallbackResponse struct {
+	ID                  string   `json:"id"`
+	RunID               string   `json:"run_id"`
+	TargetURL           string   `json:"target_url"`
+	EventTypes          []string `json:"event_types"`
+	AuthScheme          string   `json:"auth_scheme,omitempty"`
+	Status              string   `json:"status"`
+	ConsecutiveFailures int32    `json:"consecutive_failures"`
+	Secret              string   `json:"secret,omitempty"`
+	CreatedAt           string   `json:"created_at"`
+	UpdatedAt           string   `json:"updated_at"`
 }
 
 // RunEvidenceSummary gives UI and external clients a compact view of why a run

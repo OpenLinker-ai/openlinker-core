@@ -129,29 +129,29 @@ func TestWebhookPayloadHelpers(t *testing.T) {
 	}
 }
 
-func TestRunWebhookNormalizationAndPayloads(t *testing.T) {
-	gotEvents := normalizeRunWebhookEventTypes([]string{
+func TestTaskCallbackNormalizationAndPayloads(t *testing.T) {
+	gotEvents := normalizeTaskCallbackEventTypes([]string{
 		" run.completed ",
 		"run.completed",
 		"unknown",
 		"run.message.delta",
 	})
 	if !reflect.DeepEqual(gotEvents, []string{"run.completed", "run.message.delta"}) {
-		t.Fatalf("normalizeRunWebhookEventTypes = %#v", gotEvents)
+		t.Fatalf("normalizeTaskCallbackEventTypes = %#v", gotEvents)
 	}
-	defaultEvents := normalizeRunWebhookEventTypes([]string{"unknown", " "})
+	defaultEvents := normalizeTaskCallbackEventTypes([]string{"unknown", " "})
 	if !reflect.DeepEqual(defaultEvents, []string{"run.completed", "run.failed", "run.canceled"}) {
 		t.Fatalf("default events = %#v", defaultEvents)
 	}
 
-	scheme, creds := normalizePushAuth(" Bearer ", " token ")
+	scheme, creds := normalizeCallbackAuth(" Bearer ", " token ")
 	if scheme == nil || creds == nil || *scheme != "Bearer" || *creds != "token" {
-		t.Fatalf("normalizePushAuth = %#v %#v", scheme, creds)
+		t.Fatalf("normalizeCallbackAuth = %#v %#v", scheme, creds)
 	}
-	if scheme, creds := normalizePushAuth("Bearer", " "); scheme != nil || creds != nil {
+	if scheme, creds := normalizeCallbackAuth("Bearer", " "); scheme != nil || creds != nil {
 		t.Fatalf("empty credentials should omit auth: %#v %#v", scheme, creds)
 	}
-	if scheme, creds := normalizePushAuth(" ", "token"); scheme != nil || creds != nil {
+	if scheme, creds := normalizeCallbackAuth(" ", "token"); scheme != nil || creds != nil {
 		t.Fatalf("empty scheme should omit auth: %#v %#v", scheme, creds)
 	}
 
@@ -163,58 +163,58 @@ func TestRunWebhookNormalizationAndPayloads(t *testing.T) {
 		{action: "resume", want: "active"},
 		{action: "delete", want: "deleted"},
 	} {
-		if got, err := batchActionToRunWebhookStatus(tc.action); err != nil || got != tc.want {
-			t.Fatalf("batchActionToRunWebhookStatus(%q) = %q %v", tc.action, got, err)
+		if got, err := batchActionToTaskCallbackStatus(tc.action); err != nil || got != tc.want {
+			t.Fatalf("batchActionToTaskCallbackStatus(%q) = %q %v", tc.action, got, err)
 		}
 	}
-	if _, err := batchActionToRunWebhookStatus("stop"); err == nil {
+	if _, err := batchActionToTaskCallbackStatus("stop"); err == nil {
 		t.Fatalf("invalid batch action should fail")
 	}
 
 	idA := uuid.New()
 	idB := uuid.New()
-	ids, err := parseRunWebhookSubscriptionIDs([]string{idA.String(), " " + idA.String() + " ", idB.String()})
+	ids, err := parseTaskCallbackSubscriptionIDs([]string{idA.String(), " " + idA.String() + " ", idB.String()})
 	if err != nil || !reflect.DeepEqual(ids, []uuid.UUID{idA, idB}) {
 		t.Fatalf("parse ids = %#v %v", ids, err)
 	}
-	if _, err := parseRunWebhookSubscriptionIDs(nil); err == nil {
+	if _, err := parseTaskCallbackSubscriptionIDs(nil); err == nil {
 		t.Fatalf("empty ids should fail")
 	}
-	if _, err := parseRunWebhookSubscriptionIDs([]string{"bad"}); err == nil {
+	if _, err := parseTaskCallbackSubscriptionIDs([]string{"bad"}); err == nil {
 		t.Fatalf("bad uuid should fail")
 	}
 	tooMany := make([]string, 51)
 	for i := range tooMany {
 		tooMany[i] = uuid.NewString()
 	}
-	if _, err := parseRunWebhookSubscriptionIDs(tooMany); err == nil {
+	if _, err := parseTaskCallbackSubscriptionIDs(tooMany); err == nil {
 		t.Fatalf("too many ids should fail")
 	}
 
 	now := time.Date(2026, 6, 20, 9, 0, 0, 0, time.UTC)
 	parentID := uuid.New()
-	sub := db.RunWebhookSubscription{
+	sub := db.TaskCallbackSubscription{
 		ID:                  uuid.New(),
 		RunID:               uuid.New(),
 		TargetURL:           "https://client.example/a2a/push",
 		EventTypes:          []string{"run.completed"},
-		PushAuthScheme:      stringPtr("Bearer"),
+		AuthScheme:          stringPtr("Bearer"),
 		Status:              "active",
 		ConsecutiveFailures: 2,
 		CreatedAt:           now,
 		UpdatedAt:           now.Add(time.Second),
 	}
-	resp := runWebhookSubscriptionToResponse(sub)
-	if resp.ID != sub.ID.String() || resp.PushAuthScheme != "Bearer" || resp.ConsecutiveFailures != 2 {
+	resp := taskCallbackSubscriptionToResponse(sub)
+	if resp.ID != sub.ID.String() || resp.AuthScheme != "Bearer" || resp.ConsecutiveFailures != 2 {
 		t.Fatalf("subscription response = %+v", resp)
 	}
 	resp.EventTypes[0] = "mutated"
 	if sub.EventTypes[0] != "run.completed" {
 		t.Fatalf("response should copy event types")
 	}
-	sub.PushAuthScheme = nil
-	noAuthResp := runWebhookSubscriptionToResponse(sub)
-	if noAuthResp.PushAuthScheme != "" {
+	sub.AuthScheme = nil
+	noAuthResp := taskCallbackSubscriptionToResponse(sub)
+	if noAuthResp.AuthScheme != "" {
 		t.Fatalf("nil push auth scheme should serialize empty: %+v", noAuthResp)
 	}
 
@@ -227,18 +227,18 @@ func TestRunWebhookNormalizationAndPayloads(t *testing.T) {
 		Payload:     []byte(`{"path":"report.json"}`),
 		CreatedAt:   now,
 	}
-	pushPayload := runWebhookPayload(sub, event)
+	pushPayload := taskCallbackPayload(sub, event)
 	if pushPayload.EventID != event.ID.String() || pushPayload.ParentRunID != parentID.String() || pushPayload.Payload["path"] != "report.json" {
-		t.Fatalf("runWebhookPayload = %+v", pushPayload)
+		t.Fatalf("taskCallbackPayload = %+v", pushPayload)
 	}
 	event.Payload = []byte(`not-json`)
-	rawPayload := runWebhookPayload(sub, event)
+	rawPayload := taskCallbackPayload(sub, event)
 	if rawPayload.Payload["raw"] != "not-json" {
 		t.Fatalf("invalid payload should be preserved as raw: %+v", rawPayload.Payload)
 	}
 	event.ParentRunID = nil
 	event.Payload = nil
-	emptyPayload := runWebhookPayload(sub, event)
+	emptyPayload := taskCallbackPayload(sub, event)
 	if emptyPayload.ParentRunID != "" || len(emptyPayload.Payload) != 0 {
 		t.Fatalf("nil parent/payload should stay empty: %+v", emptyPayload)
 	}
@@ -347,7 +347,7 @@ func TestWebhookHandlerValidationAndRoutes(t *testing.T) {
 	h := NewHandler(&Service{})
 	userID := uuid.NewString()
 	id := uuid.NewString()
-	webhookID := uuid.NewString()
+	callbackID := uuid.NewString()
 
 	for _, tc := range []struct {
 		name   string
@@ -362,17 +362,17 @@ func TestWebhookHandlerValidationAndRoutes(t *testing.T) {
 		{name: "clear missing user", method: h.Clear, req: &webhookHandlerRequest{method: http.MethodDelete, target: "/", params: map[string]string{"id": id}}, want: http.StatusUnauthorized},
 		{name: "rotate invalid id", method: h.Rotate, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
 		{name: "list deliveries bad limit", method: h.ListDeliveries, req: &webhookHandlerRequest{method: http.MethodGet, target: "/?limit=bad", userID: userID, params: map[string]string{"id": id}}, want: http.StatusBadRequest},
-		{name: "create run webhook validation", method: h.CreateRunWebhook, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": id}, body: `{}`}, want: http.StatusUnprocessableEntity},
-		{name: "list run webhooks invalid id", method: h.ListRunWebhooks, req: &webhookHandlerRequest{method: http.MethodGet, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
-		{name: "managed list missing user", method: h.ListManagedRunWebhooks, req: &webhookHandlerRequest{method: http.MethodGet, target: "/"}, want: http.StatusUnauthorized},
-		{name: "managed list bad limit", method: h.ListManagedRunWebhooks, req: &webhookHandlerRequest{method: http.MethodGet, target: "/?limit=bad", userID: userID}, want: http.StatusBadRequest},
-		{name: "batch invalid json", method: h.BatchManageRunWebhooks, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: "{"}, want: http.StatusBadRequest},
-		{name: "batch validation", method: h.BatchManageRunWebhooks, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: `{}`}, want: http.StatusUnprocessableEntity},
-		{name: "delete bad run id", method: h.DeleteRunWebhook, req: &webhookHandlerRequest{method: http.MethodDelete, target: "/", userID: userID, params: map[string]string{"id": "bad", "webhookID": webhookID}}, want: http.StatusBadRequest},
-		{name: "delete bad webhook id", method: h.DeleteRunWebhook, req: &webhookHandlerRequest{method: http.MethodDelete, target: "/", userID: userID, params: map[string]string{"id": id, "webhookID": "bad"}}, want: http.StatusBadRequest},
-		{name: "pause bad run id", method: h.PauseRunWebhook, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": "bad", "webhookID": webhookID}}, want: http.StatusBadRequest},
-		{name: "pause bad webhook id", method: h.PauseRunWebhook, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": id, "webhookID": "bad"}}, want: http.StatusBadRequest},
-		{name: "resume bad webhook id", method: h.ResumeRunWebhook, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": id, "webhookID": "bad"}}, want: http.StatusBadRequest},
+		{name: "create task callback validation", method: h.CreateTaskCallback, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": id}, body: `{}`}, want: http.StatusUnprocessableEntity},
+		{name: "list task callbacks invalid id", method: h.ListTaskCallbacks, req: &webhookHandlerRequest{method: http.MethodGet, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
+		{name: "managed list missing user", method: h.ListManagedTaskCallbacks, req: &webhookHandlerRequest{method: http.MethodGet, target: "/"}, want: http.StatusUnauthorized},
+		{name: "managed list bad limit", method: h.ListManagedTaskCallbacks, req: &webhookHandlerRequest{method: http.MethodGet, target: "/?limit=bad", userID: userID}, want: http.StatusBadRequest},
+		{name: "batch invalid json", method: h.BatchManageTaskCallbacks, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: "{"}, want: http.StatusBadRequest},
+		{name: "batch validation", method: h.BatchManageTaskCallbacks, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: `{}`}, want: http.StatusUnprocessableEntity},
+		{name: "delete bad run id", method: h.DeleteTaskCallback, req: &webhookHandlerRequest{method: http.MethodDelete, target: "/", userID: userID, params: map[string]string{"id": "bad", "callbackID": callbackID}}, want: http.StatusBadRequest},
+		{name: "delete bad callback id", method: h.DeleteTaskCallback, req: &webhookHandlerRequest{method: http.MethodDelete, target: "/", userID: userID, params: map[string]string{"id": id, "callbackID": "bad"}}, want: http.StatusBadRequest},
+		{name: "pause bad run id", method: h.PauseTaskCallback, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": "bad", "callbackID": callbackID}}, want: http.StatusBadRequest},
+		{name: "pause bad callback id", method: h.PauseTaskCallback, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": id, "callbackID": "bad"}}, want: http.StatusBadRequest},
+		{name: "resume bad callback id", method: h.ResumeTaskCallback, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": id, "callbackID": "bad"}}, want: http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newWebhookTestContext(tc.req)
@@ -404,6 +404,19 @@ func TestWebhookHandlerValidationAndRoutes(t *testing.T) {
 		"DELETE /api/v1/creator/agents/:id/webhook",
 		"POST /api/v1/creator/agents/:id/webhook/rotate",
 		"GET /api/v1/creator/agents/:id/webhook/deliveries",
+		"POST /api/v1/runs/:id/task-callbacks",
+		"GET /api/v1/runs/:id/task-callbacks",
+		"POST /api/v1/runs/:id/task-callbacks/:callbackID/pause",
+		"POST /api/v1/runs/:id/task-callbacks/:callbackID/resume",
+		"DELETE /api/v1/runs/:id/task-callbacks/:callbackID",
+		"GET /api/v1/task-callbacks",
+		"POST /api/v1/task-callbacks/batch",
+	} {
+		if !routes[route] {
+			t.Fatalf("missing route %s", route)
+		}
+	}
+	for _, route := range []string{
 		"POST /api/v1/runs/:id/webhooks",
 		"GET /api/v1/runs/:id/webhooks",
 		"POST /api/v1/runs/:id/webhooks/:webhookID/pause",
@@ -412,8 +425,8 @@ func TestWebhookHandlerValidationAndRoutes(t *testing.T) {
 		"GET /api/v1/run-webhooks",
 		"POST /api/v1/run-webhooks/batch",
 	} {
-		if !routes[route] {
-			t.Fatalf("missing route %s", route)
+		if routes[route] {
+			t.Fatalf("legacy route should not be registered: %s", route)
 		}
 	}
 }

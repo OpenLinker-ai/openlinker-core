@@ -589,10 +589,10 @@ type WebhookDelivery struct {
 	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
 }
 
-// RunWebhookSubscription 对应 run_webhook_subscriptions 表。
+// TaskCallbackSubscription 对应 task_callback_subscriptions 表。
 //
 // status: 'active' | 'paused' | 'failed' | 'deleted'
-type RunWebhookSubscription struct {
+type TaskCallbackSubscription struct {
 	ID                  uuid.UUID  `db:"id" json:"id"`
 	RunID               uuid.UUID  `db:"run_id" json:"run_id"`
 	OwnerUserID         uuid.UUID  `db:"owner_user_id" json:"owner_user_id"`
@@ -600,9 +600,9 @@ type RunWebhookSubscription struct {
 	TargetURL           string     `db:"target_url" json:"target_url"`
 	Secret              string     `db:"secret" json:"-"`
 	EventTypes          []string   `db:"event_types" json:"event_types"`
-	PushAuthScheme      *string    `db:"push_auth_scheme" json:"push_auth_scheme,omitempty"`
-	PushAuthCredentials *string    `db:"push_auth_credentials" json:"-"`
-	PushMetadata        []byte     `db:"push_metadata" json:"push_metadata"`
+	AuthScheme          *string    `db:"auth_scheme" json:"auth_scheme,omitempty"`
+	AuthCredentials     *string    `db:"auth_credentials" json:"-"`
+	Metadata            []byte     `db:"metadata" json:"metadata"`
 	Status              string     `db:"status" json:"status"`
 	ConsecutiveFailures int32      `db:"consecutive_failures" json:"consecutive_failures"`
 	CreatedAt           time.Time  `db:"created_at" json:"created_at"`
@@ -610,8 +610,8 @@ type RunWebhookSubscription struct {
 	DeletedAt           *time.Time `db:"deleted_at" json:"deleted_at"`
 }
 
-// RunWebhookDelivery 对应 run_webhook_deliveries 表。
-type RunWebhookDelivery struct {
+// TaskCallbackDelivery 对应 task_callback_deliveries 表。
+type TaskCallbackDelivery struct {
 	ID             uuid.UUID  `db:"id" json:"id"`
 	SubscriptionID uuid.UUID  `db:"subscription_id" json:"subscription_id"`
 	RunEventID     uuid.UUID  `db:"run_event_id" json:"run_event_id"`

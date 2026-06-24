@@ -391,7 +391,7 @@ func (s *Service) ReportRuntimeTokenRunEvent(ctx context.Context, plaintextToken
 			Msg("runtime.ReportRuntimeTokenRunEvent: CreateRunEvent")
 		return nil, httpx.Internal("记录运行事件失败")
 	}
-	s.triggerRunWebhookEvent(&event)
+	s.triggerTaskCallbackEvent(&event)
 	resp := runEventToResponse(event)
 	if eventType == "run.message.delta" {
 		s.recordRunMessageBestEffort(ctx, runID, &resp.Sequence, "agent", messageContentFromMap(payload), payload)

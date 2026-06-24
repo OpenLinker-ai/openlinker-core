@@ -63,7 +63,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
-const truncateAll = "TRUNCATE run_requirement_evidence, run_artifact_chunks, run_artifacts, run_messages, run_events, run_webhook_deliveries, run_webhook_subscriptions, wallets, runs, charges, withdrawals, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"
+const truncateAll = "TRUNCATE run_requirement_evidence, run_artifact_chunks, run_artifacts, run_messages, run_events, task_callback_deliveries, task_callback_subscriptions, wallets, runs, charges, withdrawals, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"
 
 const testDBOpTimeout = 30 * time.Second
 

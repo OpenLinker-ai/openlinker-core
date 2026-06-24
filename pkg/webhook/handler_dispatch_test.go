@@ -19,14 +19,14 @@ func TestWebhookHandlerDispatchesServiceSuccess(t *testing.T) {
 	userID := uuid.New()
 	agentID := uuid.New()
 	runID := uuid.New()
-	webhookID := uuid.New()
+	callbackID := uuid.New()
 	createdAt := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
-	subscription := RunWebhookSubscriptionResponse{
-		ID:                  webhookID.String(),
+	subscription := TaskCallbackSubscriptionResponse{
+		ID:                  callbackID.String(),
 		RunID:               runID.String(),
 		TargetURL:           "https://client.example/push",
 		EventTypes:          []string{"run.completed"},
-		PushAuthScheme:      "Bearer",
+		AuthScheme:          "Bearer",
 		Status:              "active",
 		ConsecutiveFailures: 0,
 		Secret:              "secret",
@@ -113,47 +113,47 @@ func TestWebhookHandlerDispatchesServiceSuccess(t *testing.T) {
 		}
 	})
 
-	t.Run("create run webhook", func(t *testing.T) {
-		mock := &mockWebhookService{createRunWebhookResp: &subscription}
+	t.Run("create task callback", func(t *testing.T) {
+		mock := &mockWebhookService{createTaskCallbackResp: &subscription}
 		c, rec := newWebhookRecorderContext(
 			http.MethodPost,
-			"/runs/"+runID.String()+"/webhooks",
-			`{"target_url":"https://client.example/push","event_types":["run.completed"],"push_auth_scheme":"Bearer","push_auth_credentials":"token"}`,
+			"/runs/"+runID.String()+"/task-callbacks",
+			`{"target_url":"https://client.example/push","event_types":["run.completed"],"auth_scheme":"Bearer","auth_credentials":"token"}`,
 			userID.String(),
 			map[string]string{"id": runID.String()},
 		)
 
-		if err := NewHandler(mock).CreateRunWebhook(c); err != nil {
-			t.Fatalf("CreateRunWebhook error = %v", err)
+		if err := NewHandler(mock).CreateTaskCallback(c); err != nil {
+			t.Fatalf("CreateTaskCallback error = %v", err)
 		}
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 		}
-		if mock.createRunWebhookRunID != runID || mock.createRunWebhookUserID != userID || mock.createRunWebhookReq == nil || mock.createRunWebhookReq.URL == "" {
-			t.Fatalf("captured create run webhook = run %s user %s req %#v", mock.createRunWebhookRunID, mock.createRunWebhookUserID, mock.createRunWebhookReq)
+		if mock.createTaskCallbackRunID != runID || mock.createTaskCallbackUserID != userID || mock.createTaskCallbackReq == nil || mock.createTaskCallbackReq.URL == "" {
+			t.Fatalf("captured create task callback = run %s user %s req %#v", mock.createTaskCallbackRunID, mock.createTaskCallbackUserID, mock.createTaskCallbackReq)
 		}
-		var body RunWebhookSubscriptionResponse
+		var body TaskCallbackSubscriptionResponse
 		decodeWebhookJSON(t, rec, &body)
-		if body.ID != webhookID.String() || body.Secret == "" {
+		if body.ID != callbackID.String() || body.Secret == "" {
 			t.Fatalf("body = %#v", body)
 		}
 	})
 
-	t.Run("list run webhooks nil becomes empty", func(t *testing.T) {
+	t.Run("list task callbacks nil becomes empty", func(t *testing.T) {
 		mock := &mockWebhookService{}
-		c, rec := newWebhookRecorderContext(http.MethodGet, "/runs/"+runID.String()+"/webhooks", "", userID.String(), map[string]string{"id": runID.String()})
+		c, rec := newWebhookRecorderContext(http.MethodGet, "/runs/"+runID.String()+"/task-callbacks", "", userID.String(), map[string]string{"id": runID.String()})
 
-		if err := NewHandler(mock).ListRunWebhooks(c); err != nil {
-			t.Fatalf("ListRunWebhooks error = %v", err)
+		if err := NewHandler(mock).ListTaskCallbacks(c); err != nil {
+			t.Fatalf("ListTaskCallbacks error = %v", err)
 		}
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 		}
-		if mock.listRunWebhooksRunID != runID || mock.listRunWebhooksUserID != userID {
-			t.Fatalf("captured list run webhooks = run %s user %s", mock.listRunWebhooksRunID, mock.listRunWebhooksUserID)
+		if mock.listTaskCallbacksRunID != runID || mock.listTaskCallbacksUserID != userID {
+			t.Fatalf("captured list task callbacks = run %s user %s", mock.listTaskCallbacksRunID, mock.listTaskCallbacksUserID)
 		}
 		var body struct {
-			Items []RunWebhookSubscriptionResponse `json:"items"`
+			Items []TaskCallbackSubscriptionResponse `json:"items"`
 		}
 		decodeWebhookJSON(t, rec, &body)
 		if body.Items == nil || len(body.Items) != 0 {
@@ -162,11 +162,11 @@ func TestWebhookHandlerDispatchesServiceSuccess(t *testing.T) {
 	})
 
 	t.Run("managed list", func(t *testing.T) {
-		mock := &mockWebhookService{listOwnerResp: []RunWebhookSubscriptionResponse{subscription}}
-		c, rec := newWebhookRecorderContext(http.MethodGet, "/run-webhooks?status=active&limit=5", "", userID.String(), nil)
+		mock := &mockWebhookService{listOwnerResp: []TaskCallbackSubscriptionResponse{subscription}}
+		c, rec := newWebhookRecorderContext(http.MethodGet, "/task-callbacks?status=active&limit=5", "", userID.String(), nil)
 
-		if err := NewHandler(mock).ListManagedRunWebhooks(c); err != nil {
-			t.Fatalf("ListManagedRunWebhooks error = %v", err)
+		if err := NewHandler(mock).ListManagedTaskCallbacks(c); err != nil {
+			t.Fatalf("ListManagedTaskCallbacks error = %v", err)
 		}
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
@@ -174,29 +174,29 @@ func TestWebhookHandlerDispatchesServiceSuccess(t *testing.T) {
 		if mock.listOwnerUserID != userID || mock.listOwnerStatus != "active" || mock.listOwnerLimit != 5 {
 			t.Fatalf("captured owner list = user %s status %q limit %d", mock.listOwnerUserID, mock.listOwnerStatus, mock.listOwnerLimit)
 		}
-		var body RunWebhookSubscriptionListResponse
+		var body TaskCallbackSubscriptionListResponse
 		decodeWebhookJSON(t, rec, &body)
-		if len(body.Items) != 1 || body.Items[0].ID != webhookID.String() {
+		if len(body.Items) != 1 || body.Items[0].ID != callbackID.String() {
 			t.Fatalf("body = %#v", body)
 		}
 	})
 
 	t.Run("batch manage", func(t *testing.T) {
-		mock := &mockWebhookService{batchResp: &BatchRunWebhookSubscriptionsResponse{
+		mock := &mockWebhookService{batchResp: &BatchTaskCallbackSubscriptionsResponse{
 			Action:       "pause",
 			UpdatedCount: 1,
-			Items:        []RunWebhookSubscriptionResponse{subscription},
+			Items:        []TaskCallbackSubscriptionResponse{subscription},
 		}}
 		c, rec := newWebhookRecorderContext(
 			http.MethodPost,
-			"/run-webhooks/batch",
-			`{"subscription_ids":["`+webhookID.String()+`"],"action":"pause"}`,
+			"/task-callbacks/batch",
+			`{"subscription_ids":["`+callbackID.String()+`"],"action":"pause"}`,
 			userID.String(),
 			nil,
 		)
 
-		if err := NewHandler(mock).BatchManageRunWebhooks(c); err != nil {
-			t.Fatalf("BatchManageRunWebhooks error = %v", err)
+		if err := NewHandler(mock).BatchManageTaskCallbacks(c); err != nil {
+			t.Fatalf("BatchManageTaskCallbacks error = %v", err)
 		}
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
@@ -210,13 +210,13 @@ func TestWebhookHandlerDispatchesServiceSuccess(t *testing.T) {
 		mock := &mockWebhookService{updateStatusResp: &subscription}
 		pauseCtx, pauseRec := newWebhookRecorderContext(
 			http.MethodPost,
-			"/runs/"+runID.String()+"/webhooks/"+webhookID.String()+"/pause",
+			"/runs/"+runID.String()+"/task-callbacks/"+callbackID.String()+"/pause",
 			"",
 			userID.String(),
-			map[string]string{"id": runID.String(), "webhookID": webhookID.String()},
+			map[string]string{"id": runID.String(), "callbackID": callbackID.String()},
 		)
-		if err := NewHandler(mock).PauseRunWebhook(pauseCtx); err != nil {
-			t.Fatalf("PauseRunWebhook error = %v", err)
+		if err := NewHandler(mock).PauseTaskCallback(pauseCtx); err != nil {
+			t.Fatalf("PauseTaskCallback error = %v", err)
 		}
 		if pauseRec.Code != http.StatusOK || mock.updateStatus != "paused" {
 			t.Fatalf("pause code=%d status=%q body=%s", pauseRec.Code, mock.updateStatus, pauseRec.Body.String())
@@ -224,13 +224,13 @@ func TestWebhookHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		resumeCtx, resumeRec := newWebhookRecorderContext(
 			http.MethodPost,
-			"/runs/"+runID.String()+"/webhooks/"+webhookID.String()+"/resume",
+			"/runs/"+runID.String()+"/task-callbacks/"+callbackID.String()+"/resume",
 			"",
 			userID.String(),
-			map[string]string{"id": runID.String(), "webhookID": webhookID.String()},
+			map[string]string{"id": runID.String(), "callbackID": callbackID.String()},
 		)
-		if err := NewHandler(mock).ResumeRunWebhook(resumeCtx); err != nil {
-			t.Fatalf("ResumeRunWebhook error = %v", err)
+		if err := NewHandler(mock).ResumeTaskCallback(resumeCtx); err != nil {
+			t.Fatalf("ResumeTaskCallback error = %v", err)
 		}
 		if resumeRec.Code != http.StatusOK || mock.updateStatus != "active" {
 			t.Fatalf("resume code=%d status=%q body=%s", resumeRec.Code, mock.updateStatus, resumeRec.Body.String())
@@ -238,16 +238,16 @@ func TestWebhookHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		deleteCtx, deleteRec := newWebhookRecorderContext(
 			http.MethodDelete,
-			"/runs/"+runID.String()+"/webhooks/"+webhookID.String(),
+			"/runs/"+runID.String()+"/task-callbacks/"+callbackID.String(),
 			"",
 			userID.String(),
-			map[string]string{"id": runID.String(), "webhookID": webhookID.String()},
+			map[string]string{"id": runID.String(), "callbackID": callbackID.String()},
 		)
-		if err := NewHandler(mock).DeleteRunWebhook(deleteCtx); err != nil {
-			t.Fatalf("DeleteRunWebhook error = %v", err)
+		if err := NewHandler(mock).DeleteTaskCallback(deleteCtx); err != nil {
+			t.Fatalf("DeleteTaskCallback error = %v", err)
 		}
-		if deleteRec.Code != http.StatusOK || mock.deleteWebhookRunID != runID || mock.deleteWebhookID != webhookID || mock.deleteWebhookUserID != userID {
-			t.Fatalf("delete code=%d run=%s webhook=%s user=%s", deleteRec.Code, mock.deleteWebhookRunID, mock.deleteWebhookID, mock.deleteWebhookUserID)
+		if deleteRec.Code != http.StatusOK || mock.deleteCallbackRunID != runID || mock.deleteCallbackID != callbackID || mock.deleteCallbackUserID != userID {
+			t.Fatalf("delete code=%d run=%s webhook=%s user=%s", deleteRec.Code, mock.deleteCallbackRunID, mock.deleteCallbackID, mock.deleteCallbackUserID)
 		}
 		assertWebhookStatusBody(t, deleteRec, "deleted")
 	})
@@ -258,7 +258,7 @@ func TestWebhookHandlerPropagatesServiceErrors(t *testing.T) {
 	userID := uuid.New()
 	agentID := uuid.New()
 	runID := uuid.New()
-	webhookID := uuid.New()
+	callbackID := uuid.New()
 
 	tests := []struct {
 		name string
@@ -296,45 +296,45 @@ func TestWebhookHandlerPropagatesServiceErrors(t *testing.T) {
 			want: http.StatusNotFound,
 		},
 		{
-			name: "create run webhook",
-			call: (*Handler).CreateRunWebhook,
-			mock: &mockWebhookService{createRunWebhookErr: httpx.Conflict("duplicate")},
-			ctx:  mustWebhookContext(http.MethodPost, "/runs/"+runID.String()+"/webhooks", `{"target_url":"https://client.example/push"}`, userID.String(), map[string]string{"id": runID.String()}),
+			name: "create task callback",
+			call: (*Handler).CreateTaskCallback,
+			mock: &mockWebhookService{createTaskCallbackErr: httpx.Conflict("duplicate")},
+			ctx:  mustWebhookContext(http.MethodPost, "/runs/"+runID.String()+"/task-callbacks", `{"target_url":"https://client.example/push"}`, userID.String(), map[string]string{"id": runID.String()}),
 			want: http.StatusConflict,
 		},
 		{
-			name: "list run webhooks",
-			call: (*Handler).ListRunWebhooks,
-			mock: &mockWebhookService{listRunWebhooksErr: httpx.NotFound("missing")},
-			ctx:  mustWebhookContext(http.MethodGet, "/runs/"+runID.String()+"/webhooks", "", userID.String(), map[string]string{"id": runID.String()}),
+			name: "list task callbacks",
+			call: (*Handler).ListTaskCallbacks,
+			mock: &mockWebhookService{listTaskCallbacksErr: httpx.NotFound("missing")},
+			ctx:  mustWebhookContext(http.MethodGet, "/runs/"+runID.String()+"/task-callbacks", "", userID.String(), map[string]string{"id": runID.String()}),
 			want: http.StatusNotFound,
 		},
 		{
 			name: "managed list",
-			call: (*Handler).ListManagedRunWebhooks,
+			call: (*Handler).ListManagedTaskCallbacks,
 			mock: &mockWebhookService{listOwnerErr: httpx.Internal("list failed")},
-			ctx:  mustWebhookContext(http.MethodGet, "/run-webhooks", "", userID.String(), nil),
+			ctx:  mustWebhookContext(http.MethodGet, "/task-callbacks", "", userID.String(), nil),
 			want: http.StatusInternalServerError,
 		},
 		{
 			name: "batch",
-			call: (*Handler).BatchManageRunWebhooks,
+			call: (*Handler).BatchManageTaskCallbacks,
 			mock: &mockWebhookService{batchErr: httpx.BadRequest("bad batch")},
-			ctx:  mustWebhookContext(http.MethodPost, "/run-webhooks/batch", `{"subscription_ids":["`+webhookID.String()+`"],"action":"pause"}`, userID.String(), nil),
+			ctx:  mustWebhookContext(http.MethodPost, "/task-callbacks/batch", `{"subscription_ids":["`+callbackID.String()+`"],"action":"pause"}`, userID.String(), nil),
 			want: http.StatusBadRequest,
 		},
 		{
 			name: "delete",
-			call: (*Handler).DeleteRunWebhook,
-			mock: &mockWebhookService{deleteWebhookErr: httpx.NotFound("missing")},
-			ctx:  mustWebhookContext(http.MethodDelete, "/runs/"+runID.String()+"/webhooks/"+webhookID.String(), "", userID.String(), map[string]string{"id": runID.String(), "webhookID": webhookID.String()}),
+			call: (*Handler).DeleteTaskCallback,
+			mock: &mockWebhookService{deleteCallbackErr: httpx.NotFound("missing")},
+			ctx:  mustWebhookContext(http.MethodDelete, "/runs/"+runID.String()+"/task-callbacks/"+callbackID.String(), "", userID.String(), map[string]string{"id": runID.String(), "callbackID": callbackID.String()}),
 			want: http.StatusNotFound,
 		},
 		{
 			name: "pause",
-			call: (*Handler).PauseRunWebhook,
+			call: (*Handler).PauseTaskCallback,
 			mock: &mockWebhookService{updateStatusErr: httpx.NotFound("missing")},
-			ctx:  mustWebhookContext(http.MethodPost, "/runs/"+runID.String()+"/webhooks/"+webhookID.String()+"/pause", "", userID.String(), map[string]string{"id": runID.String(), "webhookID": webhookID.String()}),
+			ctx:  mustWebhookContext(http.MethodPost, "/runs/"+runID.String()+"/task-callbacks/"+callbackID.String()+"/pause", "", userID.String(), map[string]string{"id": runID.String(), "callbackID": callbackID.String()}),
 			want: http.StatusNotFound,
 		},
 	}
@@ -367,38 +367,38 @@ type mockWebhookService struct {
 	listDeliveriesResp    []DeliveryListItem
 	listDeliveriesErr     error
 
-	createRunWebhookRunID  uuid.UUID
-	createRunWebhookUserID uuid.UUID
-	createRunWebhookReq    *CreateRunWebhookRequest
-	createRunWebhookResp   *RunWebhookSubscriptionResponse
-	createRunWebhookErr    error
+	createTaskCallbackRunID  uuid.UUID
+	createTaskCallbackUserID uuid.UUID
+	createTaskCallbackReq    *CreateTaskCallbackRequest
+	createTaskCallbackResp   *TaskCallbackSubscriptionResponse
+	createTaskCallbackErr    error
 
-	listRunWebhooksRunID  uuid.UUID
-	listRunWebhooksUserID uuid.UUID
-	listRunWebhooksResp   []RunWebhookSubscriptionResponse
-	listRunWebhooksErr    error
+	listTaskCallbacksRunID  uuid.UUID
+	listTaskCallbacksUserID uuid.UUID
+	listTaskCallbacksResp   []TaskCallbackSubscriptionResponse
+	listTaskCallbacksErr    error
 
 	listOwnerUserID uuid.UUID
 	listOwnerStatus string
 	listOwnerLimit  int
-	listOwnerResp   []RunWebhookSubscriptionResponse
+	listOwnerResp   []TaskCallbackSubscriptionResponse
 	listOwnerErr    error
 
 	batchUserID uuid.UUID
-	batchReq    *BatchRunWebhookSubscriptionsRequest
-	batchResp   *BatchRunWebhookSubscriptionsResponse
+	batchReq    *BatchTaskCallbackSubscriptionsRequest
+	batchResp   *BatchTaskCallbackSubscriptionsResponse
 	batchErr    error
 
-	deleteWebhookRunID  uuid.UUID
-	deleteWebhookID     uuid.UUID
-	deleteWebhookUserID uuid.UUID
-	deleteWebhookErr    error
+	deleteCallbackRunID  uuid.UUID
+	deleteCallbackID     uuid.UUID
+	deleteCallbackUserID uuid.UUID
+	deleteCallbackErr    error
 
 	updateRunID      uuid.UUID
-	updateWebhookID  uuid.UUID
+	updateCallbackID uuid.UUID
 	updateUserID     uuid.UUID
 	updateStatus     string
-	updateStatusResp *RunWebhookSubscriptionResponse
+	updateStatusResp *TaskCallbackSubscriptionResponse
 	updateStatusErr  error
 }
 
@@ -428,42 +428,42 @@ func (m *mockWebhookService) ListDeliveries(_ context.Context, agentID, userID u
 	return m.listDeliveriesResp, m.listDeliveriesErr
 }
 
-func (m *mockWebhookService) CreateRunWebhookSubscription(_ context.Context, runID, userID uuid.UUID, req *CreateRunWebhookRequest) (*RunWebhookSubscriptionResponse, error) {
-	m.createRunWebhookRunID = runID
-	m.createRunWebhookUserID = userID
-	m.createRunWebhookReq = req
-	return m.createRunWebhookResp, m.createRunWebhookErr
+func (m *mockWebhookService) CreateTaskCallbackSubscription(_ context.Context, runID, userID uuid.UUID, req *CreateTaskCallbackRequest) (*TaskCallbackSubscriptionResponse, error) {
+	m.createTaskCallbackRunID = runID
+	m.createTaskCallbackUserID = userID
+	m.createTaskCallbackReq = req
+	return m.createTaskCallbackResp, m.createTaskCallbackErr
 }
 
-func (m *mockWebhookService) ListRunWebhookSubscriptions(_ context.Context, runID, userID uuid.UUID) ([]RunWebhookSubscriptionResponse, error) {
-	m.listRunWebhooksRunID = runID
-	m.listRunWebhooksUserID = userID
-	return m.listRunWebhooksResp, m.listRunWebhooksErr
+func (m *mockWebhookService) ListTaskCallbackSubscriptions(_ context.Context, runID, userID uuid.UUID) ([]TaskCallbackSubscriptionResponse, error) {
+	m.listTaskCallbacksRunID = runID
+	m.listTaskCallbacksUserID = userID
+	return m.listTaskCallbacksResp, m.listTaskCallbacksErr
 }
 
-func (m *mockWebhookService) ListRunWebhookSubscriptionsForOwner(_ context.Context, userID uuid.UUID, status string, limit int) ([]RunWebhookSubscriptionResponse, error) {
+func (m *mockWebhookService) ListTaskCallbackSubscriptionsForOwner(_ context.Context, userID uuid.UUID, status string, limit int) ([]TaskCallbackSubscriptionResponse, error) {
 	m.listOwnerUserID = userID
 	m.listOwnerStatus = status
 	m.listOwnerLimit = limit
 	return m.listOwnerResp, m.listOwnerErr
 }
 
-func (m *mockWebhookService) BatchManageRunWebhookSubscriptions(_ context.Context, userID uuid.UUID, req *BatchRunWebhookSubscriptionsRequest) (*BatchRunWebhookSubscriptionsResponse, error) {
+func (m *mockWebhookService) BatchManageTaskCallbackSubscriptions(_ context.Context, userID uuid.UUID, req *BatchTaskCallbackSubscriptionsRequest) (*BatchTaskCallbackSubscriptionsResponse, error) {
 	m.batchUserID = userID
 	m.batchReq = req
 	return m.batchResp, m.batchErr
 }
 
-func (m *mockWebhookService) DeleteRunWebhookSubscription(_ context.Context, runID, webhookID, userID uuid.UUID) error {
-	m.deleteWebhookRunID = runID
-	m.deleteWebhookID = webhookID
-	m.deleteWebhookUserID = userID
-	return m.deleteWebhookErr
+func (m *mockWebhookService) DeleteTaskCallbackSubscription(_ context.Context, runID, callbackID, userID uuid.UUID) error {
+	m.deleteCallbackRunID = runID
+	m.deleteCallbackID = callbackID
+	m.deleteCallbackUserID = userID
+	return m.deleteCallbackErr
 }
 
-func (m *mockWebhookService) UpdateRunWebhookSubscriptionStatus(_ context.Context, runID, webhookID, userID uuid.UUID, status string) (*RunWebhookSubscriptionResponse, error) {
+func (m *mockWebhookService) UpdateTaskCallbackSubscriptionStatus(_ context.Context, runID, callbackID, userID uuid.UUID, status string) (*TaskCallbackSubscriptionResponse, error) {
 	m.updateRunID = runID
-	m.updateWebhookID = webhookID
+	m.updateCallbackID = callbackID
 	m.updateUserID = userID
 	m.updateStatus = status
 	return m.updateStatusResp, m.updateStatusErr

@@ -25,12 +25,12 @@ type webhookService interface {
 	ClearWebhook(context.Context, uuid.UUID, uuid.UUID) error
 	RotateSecret(context.Context, uuid.UUID, uuid.UUID) (*SetWebhookResponse, error)
 	ListDeliveries(context.Context, uuid.UUID, uuid.UUID, int) ([]DeliveryListItem, error)
-	CreateRunWebhookSubscription(context.Context, uuid.UUID, uuid.UUID, *CreateRunWebhookRequest) (*RunWebhookSubscriptionResponse, error)
-	ListRunWebhookSubscriptions(context.Context, uuid.UUID, uuid.UUID) ([]RunWebhookSubscriptionResponse, error)
-	ListRunWebhookSubscriptionsForOwner(context.Context, uuid.UUID, string, int) ([]RunWebhookSubscriptionResponse, error)
-	BatchManageRunWebhookSubscriptions(context.Context, uuid.UUID, *BatchRunWebhookSubscriptionsRequest) (*BatchRunWebhookSubscriptionsResponse, error)
-	DeleteRunWebhookSubscription(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
-	UpdateRunWebhookSubscriptionStatus(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) (*RunWebhookSubscriptionResponse, error)
+	CreateTaskCallbackSubscription(context.Context, uuid.UUID, uuid.UUID, *CreateTaskCallbackRequest) (*TaskCallbackSubscriptionResponse, error)
+	ListTaskCallbackSubscriptions(context.Context, uuid.UUID, uuid.UUID) ([]TaskCallbackSubscriptionResponse, error)
+	ListTaskCallbackSubscriptionsForOwner(context.Context, uuid.UUID, string, int) ([]TaskCallbackSubscriptionResponse, error)
+	BatchManageTaskCallbackSubscriptions(context.Context, uuid.UUID, *BatchTaskCallbackSubscriptionsRequest) (*BatchTaskCallbackSubscriptionsResponse, error)
+	DeleteTaskCallbackSubscription(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
+	UpdateTaskCallbackSubscriptionStatus(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) (*TaskCallbackSubscriptionResponse, error)
 }
 
 // NewHandler 构造 Handler。cfg 可选（保持与其它模块一致）。
@@ -51,13 +51,13 @@ func NewHandler(svc webhookService, cfg ...*config.Config) *Handler {
 //	DELETE /creator/agents/:id/webhook            清除
 //	POST   /creator/agents/:id/webhook/rotate     重新生成 secret
 //	GET    /creator/agents/:id/webhook/deliveries 投递历史
-//	POST   /runs/:id/webhooks                      为单个 run 注册 push webhook
-//	GET    /runs/:id/webhooks                      查看 run push webhook
-//	POST   /runs/:id/webhooks/:webhookID/pause     暂停 run push webhook
-//	POST   /runs/:id/webhooks/:webhookID/resume    恢复 run push webhook
-//	DELETE /runs/:id/webhooks/:webhookID           删除 run push webhook
-//	GET    /run-webhooks                           汇总当前用户的 run push webhook
-//	POST   /run-webhooks/batch                     批量 pause / resume / delete
+//	POST   /runs/:id/task-callbacks                      为单个 run 注册任务回调
+//	GET    /runs/:id/task-callbacks                      查看 run 任务回调
+//	POST   /runs/:id/task-callbacks/:callbackID/pause     暂停 run 任务回调
+//	POST   /runs/:id/task-callbacks/:callbackID/resume    恢复 run 任务回调
+//	DELETE /runs/:id/task-callbacks/:callbackID           删除 run 任务回调
+//	GET    /task-callbacks                                汇总当前用户的任务回调
+//	POST   /task-callbacks/batch                          批量 pause / resume / delete
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
 	g := api.Group("/creator/agents/:id/webhook", jwtMiddleware)
 	g.POST("", h.Set)
@@ -65,16 +65,16 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	g.POST("/rotate", h.Rotate)
 	g.GET("/deliveries", h.ListDeliveries)
 
-	runHooks := api.Group("/runs/:id/webhooks", jwtMiddleware)
-	runHooks.POST("", h.CreateRunWebhook)
-	runHooks.GET("", h.ListRunWebhooks)
-	runHooks.POST("/:webhookID/pause", h.PauseRunWebhook)
-	runHooks.POST("/:webhookID/resume", h.ResumeRunWebhook)
-	runHooks.DELETE("/:webhookID", h.DeleteRunWebhook)
+	taskCallbacks := api.Group("/runs/:id/task-callbacks", jwtMiddleware)
+	taskCallbacks.POST("", h.CreateTaskCallback)
+	taskCallbacks.GET("", h.ListTaskCallbacks)
+	taskCallbacks.POST("/:callbackID/pause", h.PauseTaskCallback)
+	taskCallbacks.POST("/:callbackID/resume", h.ResumeTaskCallback)
+	taskCallbacks.DELETE("/:callbackID", h.DeleteTaskCallback)
 
-	runHookManager := api.Group("/run-webhooks", jwtMiddleware)
-	runHookManager.GET("", h.ListManagedRunWebhooks)
-	runHookManager.POST("/batch", h.BatchManageRunWebhooks)
+	callbackManager := api.Group("/task-callbacks", jwtMiddleware)
+	callbackManager.GET("", h.ListManagedTaskCallbacks)
+	callbackManager.POST("/batch", h.BatchManageTaskCallbacks)
 }
 
 // Set 设置 webhook（生成新 secret，仅本次返回）。
@@ -164,8 +164,8 @@ func (h *Handler) ListDeliveries(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"items": items})
 }
 
-// CreateRunWebhook 为单个 run 注册 push webhook。secret 仅本次返回。
-func (h *Handler) CreateRunWebhook(c echo.Context) error {
+// CreateTaskCallback 为单个 run 注册调用方任务回调。secret 仅本次返回。
+func (h *Handler) CreateTaskCallback(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -174,21 +174,21 @@ func (h *Handler) CreateRunWebhook(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	var req CreateRunWebhookRequest
+	var req CreateTaskCallbackRequest
 	if err := c.Bind(&req); err != nil {
 		return httpx.BadRequest("请求体格式错误")
 	}
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
 	}
-	resp, err := h.svc.CreateRunWebhookSubscription(c.Request().Context(), runID, uid, &req)
+	resp, err := h.svc.CreateTaskCallbackSubscription(c.Request().Context(), runID, uid, &req)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusCreated, resp)
 }
 
-func (h *Handler) ListRunWebhooks(c echo.Context) error {
+func (h *Handler) ListTaskCallbacks(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -197,17 +197,17 @@ func (h *Handler) ListRunWebhooks(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	items, err := h.svc.ListRunWebhookSubscriptions(c.Request().Context(), runID, uid)
+	items, err := h.svc.ListTaskCallbackSubscriptions(c.Request().Context(), runID, uid)
 	if err != nil {
 		return err
 	}
 	if items == nil {
-		items = []RunWebhookSubscriptionResponse{}
+		items = []TaskCallbackSubscriptionResponse{}
 	}
 	return c.JSON(http.StatusOK, map[string]any{"items": items})
 }
 
-func (h *Handler) ListManagedRunWebhooks(c echo.Context) error {
+func (h *Handler) ListManagedTaskCallbacks(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -220,36 +220,36 @@ func (h *Handler) ListManagedRunWebhooks(c echo.Context) error {
 		}
 		limit = n
 	}
-	items, err := h.svc.ListRunWebhookSubscriptionsForOwner(c.Request().Context(), uid, c.QueryParam("status"), limit)
+	items, err := h.svc.ListTaskCallbackSubscriptionsForOwner(c.Request().Context(), uid, c.QueryParam("status"), limit)
 	if err != nil {
 		return err
 	}
 	if items == nil {
-		items = []RunWebhookSubscriptionResponse{}
+		items = []TaskCallbackSubscriptionResponse{}
 	}
-	return c.JSON(http.StatusOK, RunWebhookSubscriptionListResponse{Items: items})
+	return c.JSON(http.StatusOK, TaskCallbackSubscriptionListResponse{Items: items})
 }
 
-func (h *Handler) BatchManageRunWebhooks(c echo.Context) error {
+func (h *Handler) BatchManageTaskCallbacks(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
 	}
-	var req BatchRunWebhookSubscriptionsRequest
+	var req BatchTaskCallbackSubscriptionsRequest
 	if err := c.Bind(&req); err != nil {
 		return httpx.BadRequest("请求体格式错误")
 	}
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
 	}
-	resp, err := h.svc.BatchManageRunWebhookSubscriptions(c.Request().Context(), uid, &req)
+	resp, err := h.svc.BatchManageTaskCallbackSubscriptions(c.Request().Context(), uid, &req)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, resp)
 }
 
-func (h *Handler) DeleteRunWebhook(c echo.Context) error {
+func (h *Handler) DeleteTaskCallback(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -258,25 +258,25 @@ func (h *Handler) DeleteRunWebhook(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	webhookID, err := uuid.Parse(c.Param("webhookID"))
+	callbackID, err := taskCallbackIDFromParam(c)
 	if err != nil {
-		return httpx.BadRequest("webhookID 不是合法 uuid")
+		return err
 	}
-	if err := h.svc.DeleteRunWebhookSubscription(c.Request().Context(), runID, webhookID, uid); err != nil {
+	if err := h.svc.DeleteTaskCallbackSubscription(c.Request().Context(), runID, callbackID, uid); err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-func (h *Handler) PauseRunWebhook(c echo.Context) error {
-	return h.setRunWebhookStatus(c, "paused")
+func (h *Handler) PauseTaskCallback(c echo.Context) error {
+	return h.setTaskCallbackStatus(c, "paused")
 }
 
-func (h *Handler) ResumeRunWebhook(c echo.Context) error {
-	return h.setRunWebhookStatus(c, "active")
+func (h *Handler) ResumeTaskCallback(c echo.Context) error {
+	return h.setTaskCallbackStatus(c, "active")
 }
 
-func (h *Handler) setRunWebhookStatus(c echo.Context, status string) error {
+func (h *Handler) setTaskCallbackStatus(c echo.Context, status string) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -285,11 +285,11 @@ func (h *Handler) setRunWebhookStatus(c echo.Context, status string) error {
 	if err != nil {
 		return err
 	}
-	webhookID, err := uuid.Parse(c.Param("webhookID"))
+	callbackID, err := taskCallbackIDFromParam(c)
 	if err != nil {
-		return httpx.BadRequest("webhookID 不是合法 uuid")
+		return err
 	}
-	resp, err := h.svc.UpdateRunWebhookSubscriptionStatus(c.Request().Context(), runID, webhookID, uid, status)
+	resp, err := h.svc.UpdateTaskCallbackSubscriptionStatus(c.Request().Context(), runID, callbackID, uid, status)
 	if err != nil {
 		return err
 	}
@@ -315,6 +315,15 @@ func pathID(c echo.Context) (uuid.UUID, error) {
 	id, err := uuid.Parse(raw)
 	if err != nil {
 		return uuid.Nil, httpx.BadRequest("id 不是合法 uuid")
+	}
+	return id, nil
+}
+
+func taskCallbackIDFromParam(c echo.Context) (uuid.UUID, error) {
+	raw := c.Param("callbackID")
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return uuid.Nil, httpx.BadRequest("callbackID 不是合法 uuid")
 	}
 	return id, nil
 }

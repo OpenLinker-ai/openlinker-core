@@ -39,12 +39,13 @@ type A2ASendConfiguration struct {
 }
 
 type A2APushNotificationConfig struct {
-	ID             string                     `json:"id,omitempty"`
-	URL            string                     `json:"url,omitempty"`
-	Token          string                     `json:"token,omitempty"`
-	Authentication *A2APushAuthenticationInfo `json:"authentication,omitempty"`
-	Metadata       map[string]interface{}     `json:"metadata,omitempty"`
-	EventTypes     []string                   `json:"eventTypes,omitempty"`
+	ID              string                     `json:"id,omitempty"`
+	URL             string                     `json:"url,omitempty"`
+	Token           string                     `json:"token,omitempty"`
+	Authentication  *A2APushAuthenticationInfo `json:"authentication,omitempty"`
+	Metadata        map[string]interface{}     `json:"metadata,omitempty"`
+	EventTypes      []string                   `json:"eventTypes,omitempty"`
+	EventTypesAlias []string                   `json:"event_types,omitempty"`
 }
 
 type A2APushAuthenticationInfo struct {

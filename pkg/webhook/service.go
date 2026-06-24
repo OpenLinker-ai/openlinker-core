@@ -101,22 +101,22 @@ type webhookQueries interface {
 	ListDeliveriesByAgent(context.Context, db.ListDeliveriesByAgentParams) ([]db.WebhookDelivery, error)
 	ListPendingDeliveries(context.Context) ([]db.WebhookDelivery, error)
 	GetRunByID(context.Context, uuid.UUID) (db.Run, error)
-	CreateRunWebhookSubscription(context.Context, db.CreateRunWebhookSubscriptionParams) (db.RunWebhookSubscription, error)
+	CreateTaskCallbackSubscription(context.Context, db.CreateTaskCallbackSubscriptionParams) (db.TaskCallbackSubscription, error)
 	GetLatestRunEventForTypes(context.Context, db.GetLatestRunEventForTypesParams) (db.RunEvent, error)
-	ListRunWebhookSubscriptionsByRun(context.Context, db.ListRunWebhookSubscriptionsByRunParams) ([]db.RunWebhookSubscription, error)
-	ListRunWebhookSubscriptionsByOwner(context.Context, db.ListRunWebhookSubscriptionsByOwnerParams) ([]db.RunWebhookSubscription, error)
-	BatchUpdateRunWebhookSubscriptionsForOwner(context.Context, db.BatchUpdateRunWebhookSubscriptionsForOwnerParams) ([]db.RunWebhookSubscription, error)
-	UpdateRunWebhookSubscriptionStatusForOwner(context.Context, db.UpdateRunWebhookSubscriptionStatusForOwnerParams) (db.RunWebhookSubscription, error)
-	DeleteRunWebhookSubscriptionForOwner(context.Context, db.DeleteRunWebhookSubscriptionForOwnerParams) (int64, error)
-	ListActiveRunWebhookSubscriptionsForEvent(context.Context, db.ListActiveRunWebhookSubscriptionsForEventParams) ([]db.RunWebhookSubscription, error)
-	CreateRunWebhookDelivery(context.Context, db.CreateRunWebhookDeliveryParams) (db.RunWebhookDelivery, error)
-	GetRunWebhookDeliveryByID(context.Context, uuid.UUID) (db.GetRunWebhookDeliveryByIDRow, error)
-	MarkRunWebhookDeliverySuccess(context.Context, db.MarkRunWebhookDeliverySuccessParams) error
-	MarkRunWebhookDeliveryFailedRetry(context.Context, db.MarkRunWebhookDeliveryFailedRetryParams) error
-	MarkRunWebhookDeliveryFailedFinal(context.Context, db.MarkRunWebhookDeliveryFailedFinalParams) error
-	IncrementRunWebhookSubscriptionFailure(context.Context, uuid.UUID) error
-	ResetRunWebhookSubscriptionFailures(context.Context, uuid.UUID) error
-	ListPendingRunWebhookDeliveries(context.Context) ([]db.RunWebhookDelivery, error)
+	ListTaskCallbackSubscriptionsByRun(context.Context, db.ListTaskCallbackSubscriptionsByRunParams) ([]db.TaskCallbackSubscription, error)
+	ListTaskCallbackSubscriptionsByOwner(context.Context, db.ListTaskCallbackSubscriptionsByOwnerParams) ([]db.TaskCallbackSubscription, error)
+	BatchUpdateTaskCallbackSubscriptionsForOwner(context.Context, db.BatchUpdateTaskCallbackSubscriptionsForOwnerParams) ([]db.TaskCallbackSubscription, error)
+	UpdateTaskCallbackSubscriptionStatusForOwner(context.Context, db.UpdateTaskCallbackSubscriptionStatusForOwnerParams) (db.TaskCallbackSubscription, error)
+	DeleteTaskCallbackSubscriptionForOwner(context.Context, db.DeleteTaskCallbackSubscriptionForOwnerParams) (int64, error)
+	ListActiveTaskCallbackSubscriptionsForEvent(context.Context, db.ListActiveTaskCallbackSubscriptionsForEventParams) ([]db.TaskCallbackSubscription, error)
+	CreateTaskCallbackDelivery(context.Context, db.CreateTaskCallbackDeliveryParams) (db.TaskCallbackDelivery, error)
+	GetTaskCallbackDeliveryByID(context.Context, uuid.UUID) (db.GetTaskCallbackDeliveryByIDRow, error)
+	MarkTaskCallbackDeliverySuccess(context.Context, db.MarkTaskCallbackDeliverySuccessParams) error
+	MarkTaskCallbackDeliveryFailedRetry(context.Context, db.MarkTaskCallbackDeliveryFailedRetryParams) error
+	MarkTaskCallbackDeliveryFailedFinal(context.Context, db.MarkTaskCallbackDeliveryFailedFinalParams) error
+	IncrementTaskCallbackSubscriptionFailure(context.Context, uuid.UUID) error
+	ResetTaskCallbackSubscriptionFailures(context.Context, uuid.UUID) error
+	ListPendingTaskCallbackDeliveries(context.Context) ([]db.TaskCallbackDelivery, error)
 }
 
 // NewService 构造 Service。
@@ -421,8 +421,8 @@ func (s *Service) ListDeliveries(ctx context.Context, agentID, userID uuid.UUID,
 	return out, nil
 }
 
-// CreateRunWebhookSubscription registers a signed push callback for one run.
-func (s *Service) CreateRunWebhookSubscription(ctx context.Context, runID, userID uuid.UUID, req *CreateRunWebhookRequest) (*RunWebhookSubscriptionResponse, error) {
+// CreateTaskCallbackSubscription registers a signed caller-owned callback for one run.
+func (s *Service) CreateTaskCallbackSubscription(ctx context.Context, runID, userID uuid.UUID, req *CreateTaskCallbackRequest) (*TaskCallbackSubscriptionResponse, error) {
 	if req == nil {
 		return nil, httpx.BadRequest("请求体不能为空")
 	}
@@ -430,15 +430,15 @@ func (s *Service) CreateRunWebhookSubscription(ctx context.Context, runID, userI
 	if err := endpointurl.Validate(targetURL, s.allowLocalHTTP); err != nil {
 		return nil, httpx.BadRequest("target_url 必须是 HTTPS；本地开发需开启 ALLOW_LOCAL_HTTP_ENDPOINTS 后才允许 loopback HTTP")
 	}
-	eventTypes := normalizeRunWebhookEventTypes(req.EventTypes)
-	pushAuthScheme, pushAuthCredentials := normalizePushAuth(req.PushAuthScheme, req.PushAuthCredentials)
-	pushMetadataMap := req.PushMetadata
-	if pushMetadataMap == nil {
-		pushMetadataMap = map[string]interface{}{}
+	eventTypes := normalizeTaskCallbackEventTypes(req.EventTypes)
+	authScheme, authCredentials := normalizeCallbackAuth(req.AuthScheme, req.AuthCredentials)
+	metadataMap := req.Metadata
+	if metadataMap == nil {
+		metadataMap = map[string]interface{}{}
 	}
-	pushMetadata, err := json.Marshal(pushMetadataMap)
+	metadata, err := json.Marshal(metadataMap)
 	if err != nil {
-		return nil, httpx.BadRequest("push_metadata 格式错误")
+		return nil, httpx.BadRequest("metadata 格式错误")
 	}
 
 	run, err := s.queries.GetRunByID(ctx, runID)
@@ -446,7 +446,7 @@ func (s *Service) CreateRunWebhookSubscription(ctx context.Context, runID, userI
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, httpx.NotFound("调用记录不存在")
 		}
-		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.CreateRunWebhookSubscription: GetRunByID")
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.CreateTaskCallbackSubscription: GetRunByID")
 		return nil, httpx.Internal("查询调用记录失败")
 	}
 	if run.UserID != userID {
@@ -455,21 +455,21 @@ func (s *Service) CreateRunWebhookSubscription(ctx context.Context, runID, userI
 
 	secret, err := generateSecret()
 	if err != nil {
-		return nil, httpx.Internal("生成 webhook secret 失败")
+		return nil, httpx.Internal("生成 task callback secret 失败")
 	}
-	sub, err := s.queries.CreateRunWebhookSubscription(ctx, db.CreateRunWebhookSubscriptionParams{
-		RunID:               runID,
-		OwnerUserID:         userID,
-		TargetURL:           targetURL,
-		Secret:              secret,
-		EventTypes:          eventTypes,
-		PushAuthScheme:      pushAuthScheme,
-		PushAuthCredentials: pushAuthCredentials,
-		PushMetadata:        pushMetadata,
+	sub, err := s.queries.CreateTaskCallbackSubscription(ctx, db.CreateTaskCallbackSubscriptionParams{
+		RunID:           runID,
+		OwnerUserID:     userID,
+		TargetURL:       targetURL,
+		Secret:          secret,
+		EventTypes:      eventTypes,
+		AuthScheme:      authScheme,
+		AuthCredentials: authCredentials,
+		Metadata:        metadata,
 	})
 	if err != nil {
-		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.CreateRunWebhookSubscription: insert")
-		return nil, httpx.Internal("创建 run webhook 失败")
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.CreateTaskCallbackSubscription: insert")
+		return nil, httpx.Internal("创建 task callback 失败")
 	}
 
 	// If matching events already exist, enqueue the latest one immediately so late subscribers can catch up.
@@ -477,37 +477,37 @@ func (s *Service) CreateRunWebhookSubscription(ctx context.Context, runID, userI
 		RunID:      runID,
 		EventTypes: eventTypes,
 	}); err == nil {
-		_ = s.enqueueRunWebhookDelivery(ctx, sub, event)
+		_ = s.enqueueTaskCallbackDelivery(ctx, sub, event)
 	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.CreateRunWebhookSubscription: GetLatestRunEventForTypes")
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.CreateTaskCallbackSubscription: GetLatestRunEventForTypes")
 	}
 
-	resp := runWebhookSubscriptionToResponse(sub)
+	resp := taskCallbackSubscriptionToResponse(sub)
 	resp.Secret = secret
 	return &resp, nil
 }
 
-// ListRunWebhookSubscriptions returns active/non-deleted run push callbacks.
-func (s *Service) ListRunWebhookSubscriptions(ctx context.Context, runID, userID uuid.UUID) ([]RunWebhookSubscriptionResponse, error) {
+// ListTaskCallbackSubscriptions returns active/non-deleted task callbacks.
+func (s *Service) ListTaskCallbackSubscriptions(ctx context.Context, runID, userID uuid.UUID) ([]TaskCallbackSubscriptionResponse, error) {
 	if err := s.ensureRunOwner(ctx, runID, userID); err != nil {
 		return nil, err
 	}
-	rows, err := s.queries.ListRunWebhookSubscriptionsByRun(ctx, db.ListRunWebhookSubscriptionsByRunParams{
+	rows, err := s.queries.ListTaskCallbackSubscriptionsByRun(ctx, db.ListTaskCallbackSubscriptionsByRunParams{
 		RunID:       runID,
 		OwnerUserID: userID,
 	})
 	if err != nil {
-		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.ListRunWebhookSubscriptions")
-		return nil, httpx.Internal("查询 run webhook 失败")
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.ListTaskCallbackSubscriptions")
+		return nil, httpx.Internal("查询 task callback 失败")
 	}
-	items := make([]RunWebhookSubscriptionResponse, 0, len(rows))
+	items := make([]TaskCallbackSubscriptionResponse, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, runWebhookSubscriptionToResponse(row))
+		items = append(items, taskCallbackSubscriptionToResponse(row))
 	}
 	return items, nil
 }
 
-func (s *Service) ListRunWebhookSubscriptionsForOwner(ctx context.Context, userID uuid.UUID, status string, limit int) ([]RunWebhookSubscriptionResponse, error) {
+func (s *Service) ListTaskCallbackSubscriptionsForOwner(ctx context.Context, userID uuid.UUID, status string, limit int) ([]TaskCallbackSubscriptionResponse, error) {
 	status = strings.TrimSpace(status)
 	if status != "" && status != "active" && status != "paused" && status != "failed" {
 		return nil, httpx.BadRequest("status 只能是 active、paused 或 failed")
@@ -515,63 +515,63 @@ func (s *Service) ListRunWebhookSubscriptionsForOwner(ctx context.Context, userI
 	if limit <= 0 || limit > maxListLimit {
 		limit = defaultListLimit
 	}
-	rows, err := s.queries.ListRunWebhookSubscriptionsByOwner(ctx, db.ListRunWebhookSubscriptionsByOwnerParams{
+	rows, err := s.queries.ListTaskCallbackSubscriptionsByOwner(ctx, db.ListTaskCallbackSubscriptionsByOwnerParams{
 		OwnerUserID: userID,
 		Status:      status,
 		Limit:       int32(limit),
 	})
 	if err != nil {
-		log.Error().Err(err).Str("user_id", userID.String()).Str("status", status).Msg("webhook.ListRunWebhookSubscriptionsForOwner")
-		return nil, httpx.Internal("查询 run webhook 失败")
+		log.Error().Err(err).Str("user_id", userID.String()).Str("status", status).Msg("webhook.ListTaskCallbackSubscriptionsForOwner")
+		return nil, httpx.Internal("查询 task callback 失败")
 	}
-	items := make([]RunWebhookSubscriptionResponse, 0, len(rows))
+	items := make([]TaskCallbackSubscriptionResponse, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, runWebhookSubscriptionToResponse(row))
+		items = append(items, taskCallbackSubscriptionToResponse(row))
 	}
 	return items, nil
 }
 
-func (s *Service) BatchManageRunWebhookSubscriptions(ctx context.Context, userID uuid.UUID, req *BatchRunWebhookSubscriptionsRequest) (*BatchRunWebhookSubscriptionsResponse, error) {
+func (s *Service) BatchManageTaskCallbackSubscriptions(ctx context.Context, userID uuid.UUID, req *BatchTaskCallbackSubscriptionsRequest) (*BatchTaskCallbackSubscriptionsResponse, error) {
 	if req == nil {
 		return nil, httpx.BadRequest("请求体不能为空")
 	}
-	status, err := batchActionToRunWebhookStatus(req.Action)
+	status, err := batchActionToTaskCallbackStatus(req.Action)
 	if err != nil {
 		return nil, err
 	}
-	ids, err := parseRunWebhookSubscriptionIDs(req.SubscriptionIDs)
+	ids, err := parseTaskCallbackSubscriptionIDs(req.SubscriptionIDs)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.queries.BatchUpdateRunWebhookSubscriptionsForOwner(ctx, db.BatchUpdateRunWebhookSubscriptionsForOwnerParams{
+	rows, err := s.queries.BatchUpdateTaskCallbackSubscriptionsForOwner(ctx, db.BatchUpdateTaskCallbackSubscriptionsForOwnerParams{
 		OwnerUserID: userID,
 		IDs:         ids,
 		Status:      status,
 	})
 	if err != nil {
-		log.Error().Err(err).Str("user_id", userID.String()).Str("action", req.Action).Msg("webhook.BatchManageRunWebhookSubscriptions")
-		return nil, httpx.Internal("批量更新 run webhook 失败")
+		log.Error().Err(err).Str("user_id", userID.String()).Str("action", req.Action).Msg("webhook.BatchManageTaskCallbackSubscriptions")
+		return nil, httpx.Internal("批量更新 task callback 失败")
 	}
-	items := make([]RunWebhookSubscriptionResponse, 0, len(rows))
+	items := make([]TaskCallbackSubscriptionResponse, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, runWebhookSubscriptionToResponse(row))
+		items = append(items, taskCallbackSubscriptionToResponse(row))
 	}
-	return &BatchRunWebhookSubscriptionsResponse{
+	return &BatchTaskCallbackSubscriptionsResponse{
 		Action:       strings.TrimSpace(req.Action),
 		UpdatedCount: len(items),
 		Items:        items,
 	}, nil
 }
 
-// UpdateRunWebhookSubscriptionStatus pauses or resumes a run push callback.
-func (s *Service) UpdateRunWebhookSubscriptionStatus(ctx context.Context, runID, subscriptionID, userID uuid.UUID, status string) (*RunWebhookSubscriptionResponse, error) {
+// UpdateTaskCallbackSubscriptionStatus pauses or resumes a task callback.
+func (s *Service) UpdateTaskCallbackSubscriptionStatus(ctx context.Context, runID, subscriptionID, userID uuid.UUID, status string) (*TaskCallbackSubscriptionResponse, error) {
 	if status != "active" && status != "paused" {
 		return nil, httpx.BadRequest("status 只能是 active 或 paused")
 	}
 	if err := s.ensureRunOwner(ctx, runID, userID); err != nil {
 		return nil, err
 	}
-	sub, err := s.queries.UpdateRunWebhookSubscriptionStatusForOwner(ctx, db.UpdateRunWebhookSubscriptionStatusForOwnerParams{
+	sub, err := s.queries.UpdateTaskCallbackSubscriptionStatusForOwner(ctx, db.UpdateTaskCallbackSubscriptionStatusForOwnerParams{
 		ID:          subscriptionID,
 		RunID:       runID,
 		OwnerUserID: userID,
@@ -579,47 +579,47 @@ func (s *Service) UpdateRunWebhookSubscriptionStatus(ctx context.Context, runID,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.NotFound("run webhook 不存在")
+			return nil, httpx.NotFound("task callback 不存在")
 		}
 		log.Error().Err(err).Str("run_id", runID.String()).Str("subscription_id", subscriptionID.String()).Str("status", status).
-			Msg("webhook.UpdateRunWebhookSubscriptionStatus")
-		return nil, httpx.Internal("更新 run webhook 状态失败")
+			Msg("webhook.UpdateTaskCallbackSubscriptionStatus")
+		return nil, httpx.Internal("更新 task callback 状态失败")
 	}
-	resp := runWebhookSubscriptionToResponse(sub)
+	resp := taskCallbackSubscriptionToResponse(sub)
 	return &resp, nil
 }
 
-// DeleteRunWebhookSubscription soft-deletes a run push callback.
-func (s *Service) DeleteRunWebhookSubscription(ctx context.Context, runID, subscriptionID, userID uuid.UUID) error {
+// DeleteTaskCallbackSubscription soft-deletes a task callback.
+func (s *Service) DeleteTaskCallbackSubscription(ctx context.Context, runID, subscriptionID, userID uuid.UUID) error {
 	if err := s.ensureRunOwner(ctx, runID, userID); err != nil {
 		return err
 	}
-	affected, err := s.queries.DeleteRunWebhookSubscriptionForOwner(ctx, db.DeleteRunWebhookSubscriptionForOwnerParams{
+	affected, err := s.queries.DeleteTaskCallbackSubscriptionForOwner(ctx, db.DeleteTaskCallbackSubscriptionForOwnerParams{
 		ID:          subscriptionID,
 		RunID:       runID,
 		OwnerUserID: userID,
 	})
 	if err != nil {
-		log.Error().Err(err).Str("run_id", runID.String()).Str("subscription_id", subscriptionID.String()).Msg("webhook.DeleteRunWebhookSubscription")
-		return httpx.Internal("删除 run webhook 失败")
+		log.Error().Err(err).Str("run_id", runID.String()).Str("subscription_id", subscriptionID.String()).Msg("webhook.DeleteTaskCallbackSubscription")
+		return httpx.Internal("删除 task callback 失败")
 	}
 	if affected == 0 {
-		return httpx.NotFound("run webhook 不存在")
+		return httpx.NotFound("task callback 不存在")
 	}
 	return nil
 }
 
 // EnqueueRunEvent creates deliveries for all subscriptions interested in this run_event.
 func (s *Service) EnqueueRunEvent(ctx context.Context, event db.RunEvent) error {
-	subs, err := s.queries.ListActiveRunWebhookSubscriptionsForEvent(ctx, db.ListActiveRunWebhookSubscriptionsForEventParams{
+	subs, err := s.queries.ListActiveTaskCallbackSubscriptionsForEvent(ctx, db.ListActiveTaskCallbackSubscriptionsForEventParams{
 		RunID:     event.RunID,
 		EventType: event.EventType,
 	})
 	if err != nil {
-		return fmt.Errorf("list run webhook subscriptions: %w", err)
+		return fmt.Errorf("list task callback subscriptions: %w", err)
 	}
 	for _, sub := range subs {
-		if err := s.enqueueRunWebhookDelivery(ctx, sub, event); err != nil {
+		if err := s.enqueueTaskCallbackDelivery(ctx, sub, event); err != nil {
 			log.Error().Err(err).Str("subscription_id", sub.ID.String()).Str("event_id", event.ID.String()).
 				Msg("webhook.EnqueueRunEvent: enqueue delivery")
 		}
@@ -627,13 +627,13 @@ func (s *Service) EnqueueRunEvent(ctx context.Context, event db.RunEvent) error 
 	return nil
 }
 
-func (s *Service) enqueueRunWebhookDelivery(ctx context.Context, sub db.RunWebhookSubscription, event db.RunEvent) error {
-	payload := runWebhookPayload(sub, event)
+func (s *Service) enqueueTaskCallbackDelivery(ctx context.Context, sub db.TaskCallbackSubscription, event db.RunEvent) error {
+	payload := taskCallbackPayload(sub, event)
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	delivery, err := s.queries.CreateRunWebhookDelivery(ctx, db.CreateRunWebhookDeliveryParams{
+	delivery, err := s.queries.CreateTaskCallbackDelivery(ctx, db.CreateTaskCallbackDeliveryParams{
 		SubscriptionID: sub.ID,
 		RunEventID:     event.ID,
 		Payload:        payloadBytes,
@@ -644,39 +644,39 @@ func (s *Service) enqueueRunWebhookDelivery(ctx context.Context, sub db.RunWebho
 	go func(deliveryID uuid.UUID) {
 		bgCtx, cancel := context.WithTimeout(context.Background(), httpTimeout+5*time.Second)
 		defer cancel()
-		if err := s.AttemptRunWebhookDelivery(bgCtx, deliveryID); err != nil {
+		if err := s.AttemptTaskCallbackDelivery(bgCtx, deliveryID); err != nil {
 			log.Error().Err(err).Str("delivery_id", deliveryID.String()).
-				Msg("webhook.enqueueRunWebhookDelivery: first attempt failed")
+				Msg("webhook.enqueueTaskCallbackDelivery: first attempt failed")
 		}
 	}(delivery.ID)
 	return nil
 }
 
-// AttemptRunWebhookDelivery performs one run webhook delivery attempt.
-func (s *Service) AttemptRunWebhookDelivery(ctx context.Context, deliveryID uuid.UUID) error {
-	row, err := s.queries.GetRunWebhookDeliveryByID(ctx, deliveryID)
+// AttemptTaskCallbackDelivery performs one task callback delivery attempt.
+func (s *Service) AttemptTaskCallbackDelivery(ctx context.Context, deliveryID uuid.UUID) error {
+	row, err := s.queries.GetTaskCallbackDeliveryByID(ctx, deliveryID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
-		return fmt.Errorf("get run webhook delivery: %w", err)
+		return fmt.Errorf("get task callback delivery: %w", err)
 	}
 	if row.Status != "pending" {
 		return nil
 	}
 
-	statusCode, respBody, attemptErr := s.doDeliverWithEvent(ctx, row.TargetURL, row.Secret, deliveryID, row.Payload, row.EventType, row.PushAuthScheme, row.PushAuthCredentials)
+	statusCode, respBody, attemptErr := s.doDeliverWithEvent(ctx, row.TargetURL, row.Secret, deliveryID, row.Payload, row.EventType, row.AuthScheme, row.AuthCredentials)
 	if attemptErr == nil && statusCode >= 200 && statusCode < 300 {
 		statusPtr := int32(statusCode)
 		bodyPtr := truncate(respBody, responseBodyMaxLen)
-		if err := s.queries.MarkRunWebhookDeliverySuccess(ctx, db.MarkRunWebhookDeliverySuccessParams{
+		if err := s.queries.MarkTaskCallbackDeliverySuccess(ctx, db.MarkTaskCallbackDeliverySuccessParams{
 			ID:             deliveryID,
 			ResponseStatus: &statusPtr,
 			ResponseBody:   &bodyPtr,
 		}); err != nil {
 			return err
 		}
-		return s.queries.ResetRunWebhookSubscriptionFailures(ctx, row.SubscriptionID)
+		return s.queries.ResetTaskCallbackSubscriptionFailures(ctx, row.SubscriptionID)
 	}
 
 	var (
@@ -699,7 +699,7 @@ func (s *Service) AttemptRunWebhookDelivery(ctx context.Context, deliveryID uuid
 	currAttempt := int(row.AttemptCount)
 	delay := nextRetryDelay(currAttempt)
 	if currAttempt+1 >= maxAttempts || delay == 0 {
-		if err := s.queries.MarkRunWebhookDeliveryFailedFinal(ctx, db.MarkRunWebhookDeliveryFailedFinalParams{
+		if err := s.queries.MarkTaskCallbackDeliveryFailedFinal(ctx, db.MarkTaskCallbackDeliveryFailedFinalParams{
 			ID:             deliveryID,
 			ResponseStatus: statusPtr,
 			ResponseBody:   bodyPtr,
@@ -707,10 +707,10 @@ func (s *Service) AttemptRunWebhookDelivery(ctx context.Context, deliveryID uuid
 		}); err != nil {
 			return err
 		}
-		return s.queries.IncrementRunWebhookSubscriptionFailure(ctx, row.SubscriptionID)
+		return s.queries.IncrementTaskCallbackSubscriptionFailure(ctx, row.SubscriptionID)
 	}
 	nextAt := time.Now().Add(delay)
-	return s.queries.MarkRunWebhookDeliveryFailedRetry(ctx, db.MarkRunWebhookDeliveryFailedRetryParams{
+	return s.queries.MarkTaskCallbackDeliveryFailedRetry(ctx, db.MarkTaskCallbackDeliveryFailedRetryParams{
 		ID:             deliveryID,
 		ResponseStatus: statusPtr,
 		ResponseBody:   bodyPtr,
@@ -737,9 +737,9 @@ func (s *Service) processPending(ctx context.Context) {
 				Msg("webhook.processPending: AttemptDelivery")
 		}
 	}
-	runRows, err := s.queries.ListPendingRunWebhookDeliveries(ctx)
+	runRows, err := s.queries.ListPendingTaskCallbackDeliveries(ctx)
 	if err != nil {
-		log.Error().Err(err).Msg("webhook.processPending: ListPendingRunWebhookDeliveries")
+		log.Error().Err(err).Msg("webhook.processPending: ListPendingTaskCallbackDeliveries")
 		return
 	}
 	for _, d := range runRows {
@@ -748,9 +748,9 @@ func (s *Service) processPending(ctx context.Context) {
 			return
 		default:
 		}
-		if err := s.AttemptRunWebhookDelivery(ctx, d.ID); err != nil {
+		if err := s.AttemptTaskCallbackDelivery(ctx, d.ID); err != nil {
 			log.Error().Err(err).Str("delivery_id", d.ID.String()).
-				Msg("webhook.processPending: AttemptRunWebhookDelivery")
+				Msg("webhook.processPending: AttemptTaskCallbackDelivery")
 		}
 	}
 }
@@ -765,7 +765,7 @@ func (s *Service) doDeliver(
 }
 
 func (s *Service) doDeliverWithEvent(
-	ctx context.Context, url, secret string, deliveryID uuid.UUID, payload []byte, eventType string, pushAuthScheme, pushAuthCredentials *string,
+	ctx context.Context, url, secret string, deliveryID uuid.UUID, payload []byte, eventType string, authScheme, authCredentials *string,
 ) (int, string, error) {
 	signature := signPayload(payload, secret)
 
@@ -780,9 +780,9 @@ func (s *Service) doDeliverWithEvent(
 	req.Header.Set("X-OpenLinker-Event", eventType)
 	req.Header.Set("X-OpenLinker-Delivery", deliveryID.String())
 	req.Header.Set("X-OpenLinker-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
-	if pushAuthScheme != nil && pushAuthCredentials != nil {
-		scheme := strings.TrimSpace(*pushAuthScheme)
-		credentials := strings.TrimSpace(*pushAuthCredentials)
+	if authScheme != nil && authCredentials != nil {
+		scheme := strings.TrimSpace(*authScheme)
+		credentials := strings.TrimSpace(*authCredentials)
 		if scheme != "" && credentials != "" {
 			req.Header.Set("Authorization", scheme+" "+credentials)
 		}
@@ -884,7 +884,7 @@ func buildPayload(run *db.Run, agentSlug string, output map[string]interface{}) 
 	return p
 }
 
-func normalizeRunWebhookEventTypes(raw []string) []string {
+func normalizeTaskCallbackEventTypes(raw []string) []string {
 	seen := map[string]struct{}{}
 	out := make([]string, 0, len(raw))
 	for _, item := range raw {
@@ -915,7 +915,7 @@ func normalizeRunWebhookEventTypes(raw []string) []string {
 	return out
 }
 
-func normalizePushAuth(scheme, credentials string) (*string, *string) {
+func normalizeCallbackAuth(scheme, credentials string) (*string, *string) {
 	scheme = strings.TrimSpace(scheme)
 	credentials = strings.TrimSpace(credentials)
 	if scheme == "" || credentials == "" {
@@ -924,7 +924,7 @@ func normalizePushAuth(scheme, credentials string) (*string, *string) {
 	return &scheme, &credentials
 }
 
-func batchActionToRunWebhookStatus(action string) (string, error) {
+func batchActionToTaskCallbackStatus(action string) (string, error) {
 	switch strings.TrimSpace(action) {
 	case "pause":
 		return "paused", nil
@@ -937,7 +937,7 @@ func batchActionToRunWebhookStatus(action string) (string, error) {
 	}
 }
 
-func parseRunWebhookSubscriptionIDs(raw []string) ([]uuid.UUID, error) {
+func parseTaskCallbackSubscriptionIDs(raw []string) ([]uuid.UUID, error) {
 	if len(raw) == 0 {
 		return nil, httpx.BadRequest("subscription_ids 不能为空")
 	}
@@ -960,14 +960,14 @@ func parseRunWebhookSubscriptionIDs(raw []string) ([]uuid.UUID, error) {
 	return out, nil
 }
 
-func runWebhookPayload(sub db.RunWebhookSubscription, event db.RunEvent) RunWebhookPayload {
+func taskCallbackPayload(sub db.TaskCallbackSubscription, event db.RunEvent) TaskCallbackPayload {
 	payload := map[string]interface{}{}
 	if len(event.Payload) > 0 {
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			payload = map[string]interface{}{"raw": string(event.Payload)}
 		}
 	}
-	out := RunWebhookPayload{
+	out := TaskCallbackPayload{
 		EventID:        event.ID.String(),
 		RunID:          event.RunID.String(),
 		EventType:      event.EventType,
@@ -982,8 +982,8 @@ func runWebhookPayload(sub db.RunWebhookSubscription, event db.RunEvent) RunWebh
 	return out
 }
 
-func runWebhookSubscriptionToResponse(sub db.RunWebhookSubscription) RunWebhookSubscriptionResponse {
-	resp := RunWebhookSubscriptionResponse{
+func taskCallbackSubscriptionToResponse(sub db.TaskCallbackSubscription) TaskCallbackSubscriptionResponse {
+	resp := TaskCallbackSubscriptionResponse{
 		ID:                  sub.ID.String(),
 		RunID:               sub.RunID.String(),
 		TargetURL:           sub.TargetURL,
@@ -993,8 +993,8 @@ func runWebhookSubscriptionToResponse(sub db.RunWebhookSubscription) RunWebhookS
 		CreatedAt:           sub.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:           sub.UpdatedAt.UTC().Format(time.RFC3339),
 	}
-	if sub.PushAuthScheme != nil {
-		resp.PushAuthScheme = *sub.PushAuthScheme
+	if sub.AuthScheme != nil {
+		resp.AuthScheme = *sub.AuthScheme
 	}
 	return resp
 }
