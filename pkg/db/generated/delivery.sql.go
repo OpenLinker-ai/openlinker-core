@@ -169,6 +169,26 @@ func (q *Queries) SetDeliveryTargetDefault(ctx context.Context, arg SetDeliveryT
 	return tag.RowsAffected(), nil
 }
 
+const updateDeliveryTargetConfig = `-- name: UpdateDeliveryTargetConfig :one
+UPDATE delivery_targets
+SET config = $3,
+    updated_at = NOW()
+WHERE id = $1 AND user_id = $2
+RETURNING id, user_id, name, type, config, secret, is_default, created_at, updated_at`
+
+type UpdateDeliveryTargetConfigParams struct {
+	ID     uuid.UUID `db:"id" json:"id"`
+	UserID uuid.UUID `db:"user_id" json:"user_id"`
+	Config []byte    `db:"config" json:"config"`
+}
+
+func (q *Queries) UpdateDeliveryTargetConfig(ctx context.Context, arg UpdateDeliveryTargetConfigParams) (DeliveryTarget, error) {
+	row := q.db.QueryRow(ctx, updateDeliveryTargetConfig, arg.ID, arg.UserID, arg.Config)
+	var t DeliveryTarget
+	err := scanDeliveryTarget(row, &t)
+	return t, err
+}
+
 const createRunDelivery = `-- name: CreateRunDelivery :one
 INSERT INTO run_deliveries (
     run_id, target_id, user_id, target_type, target_url, payload,

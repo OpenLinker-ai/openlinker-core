@@ -52,7 +52,7 @@ func TestBuildPayloadNormalizesRunData(t *testing.T) {
 		FinishedAt: &finished,
 	}
 
-	got := buildPayload(run, "shipper", "Shipping Agent")
+	got := buildPayload(run, "shipper", "Shipping Agent", eventRunCompleted)
 	if got.Event != eventRunCompleted || got.RunID != run.ID.String() || got.AgentID != run.AgentID.String() {
 		t.Fatalf("unexpected identifiers: %+v", got)
 	}
@@ -82,7 +82,7 @@ func TestBuildPayloadDefaultsInvalidJSONAndFailedCost(t *testing.T) {
 		StartedAt: started,
 	}
 
-	got := buildPayload(run, "agent", "Agent")
+	got := buildPayload(run, "agent", "Agent", eventRunFailed)
 	if len(got.Input) != 0 {
 		t.Fatalf("invalid input JSON should become empty object: %+v", got.Input)
 	}
@@ -127,13 +127,13 @@ func TestDeliveryTransforms(t *testing.T) {
 		ID:        targetID,
 		Name:      "Webhook",
 		Type:      targetTypeWebhook,
-		Config:    []byte(`{"url":"https://example.com/hook"}`),
+		Config:    []byte(`{"url":"https://example.com/hook","event_types":["run.completed","run.failed"]}`),
 		Secret:    "delivery-secret",
 		IsDefault: true,
 		CreatedAt: now,
 	}
 	targetResp := toTargetResponse(target, true)
-	if targetResp.ID != targetID.String() || targetResp.URL != "https://example.com/hook" || targetResp.Secret != "delivery-secret" {
+	if targetResp.ID != targetID.String() || targetResp.URL != "https://example.com/hook" || targetResp.Secret != "delivery-secret" || len(targetResp.EventTypes) != 2 {
 		t.Fatalf("unexpected target response: %+v", targetResp)
 	}
 
@@ -192,7 +192,7 @@ func TestDeliverWebhookSendsSignedJSON(t *testing.T) {
 	defer server.Close()
 
 	svc := &Service{httpClient: server.Client()}
-	status, body, err := svc.deliverWebhook(context.Background(), server.URL, secret, deliveryID, payload)
+	status, body, err := svc.deliverWebhook(context.Background(), server.URL, secret, deliveryID, payload, eventRunCompleted)
 	if err != nil {
 		t.Fatalf("deliverWebhook error: %v", err)
 	}
@@ -273,6 +273,8 @@ func TestDeliveryServiceTargetCRUDAndHistory(t *testing.T) {
 		createTarget: target,
 		deleteRows:   1,
 		defaultRows:  1,
+		target:       target,
+		updateTarget: target,
 		run:          db.Run{ID: runID, UserID: userID, Status: "success"},
 		deliveries: []db.RunDelivery{
 			{ID: uuid.New(), RunID: runID, TargetID: targetID, UserID: userID, TargetType: targetTypeWebhook, TargetURL: "https://example.com/hook", Status: "success", CreatedAt: now, UpdatedAt: now},
@@ -281,10 +283,11 @@ func TestDeliveryServiceTargetCRUDAndHistory(t *testing.T) {
 	svc := &Service{queries: queries}
 
 	created, err := svc.CreateTarget(context.Background(), userID, &CreateTargetRequest{
-		Name:      "Webhook",
-		Type:      targetTypeWebhook,
-		URL:       "https://example.com/hook",
-		IsDefault: true,
+		Name:       "Webhook",
+		Type:       targetTypeWebhook,
+		URL:        "https://example.com/hook",
+		EventTypes: []string{eventRunCompleted, eventRunCanceled},
+		IsDefault:  true,
 	})
 	if err != nil {
 		t.Fatalf("CreateTarget error = %v", err)
@@ -294,6 +297,10 @@ func TestDeliveryServiceTargetCRUDAndHistory(t *testing.T) {
 	}
 	if queries.createTargetArg.UserID != userID || queries.createTargetArg.Name != "Webhook" || queries.createTargetArg.Type != targetTypeWebhook || queries.createTargetArg.Secret == "" {
 		t.Fatalf("create target arg = %#v", queries.createTargetArg)
+	}
+	var createdCfg deliveryTargetConfig
+	if err := json.Unmarshal(queries.createTargetArg.Config, &createdCfg); err != nil || len(createdCfg.EventTypes) != 2 || createdCfg.EventTypes[1] != eventRunCanceled {
+		t.Fatalf("create target config = %#v %v", createdCfg, err)
 	}
 
 	listed, err := svc.ListTargets(context.Background(), userID)
@@ -316,6 +323,20 @@ func TestDeliveryServiceTargetCRUDAndHistory(t *testing.T) {
 	}
 	if queries.defaultArg.ID != targetID || queries.defaultArg.UserID != userID {
 		t.Fatalf("default arg = %#v", queries.defaultArg)
+	}
+
+	updated, err := svc.UpdateTarget(context.Background(), targetID, userID, &UpdateTargetRequest{
+		EventTypes: []string{eventRunFailed},
+	})
+	if err != nil {
+		t.Fatalf("UpdateTarget error = %v", err)
+	}
+	if len(updated.EventTypes) != 1 || updated.EventTypes[0] != eventRunFailed {
+		t.Fatalf("updated target = %#v", updated)
+	}
+	var updateCfg deliveryTargetConfig
+	if err := json.Unmarshal(queries.updateTargetArg.Config, &updateCfg); err != nil || updateCfg.URL != "https://example.com/hook" || len(updateCfg.EventTypes) != 1 || updateCfg.EventTypes[0] != eventRunFailed {
+		t.Fatalf("update target config = %#v %v", updateCfg, err)
 	}
 
 	history, err := svc.ListByRun(context.Background(), runID, userID)
@@ -383,7 +404,7 @@ func TestDeliveryServiceEnqueueAndAttemptDelivery(t *testing.T) {
 		},
 	}
 	svc := &Service{queries: queries}
-	enqueued, err := svc.enqueue(context.Background(), userID, &run, target)
+	enqueued, err := svc.enqueue(context.Background(), userID, &run, target, eventRunCompleted)
 	if err != nil {
 		t.Fatalf("enqueue error = %v", err)
 	}
@@ -618,6 +639,25 @@ func TestDeliveryServiceAutoEnqueueRetryAndProcessPending(t *testing.T) {
 		t.Fatalf("EnqueueIfDefault create arg = %#v", autoQueries.createDeliveryArg)
 	}
 
+	filteredRun := *run
+	filteredRun.Status = "failed"
+	filteredQueries := &fakeDeliveryQueries{
+		defaultTarget: db.DeliveryTarget{
+			ID:     targetID,
+			UserID: userID,
+			Type:   targetTypeWebhook,
+			Config: []byte(`{"url":"https://example.com/default","event_types":["run.completed"]}`),
+			Secret: "secret",
+		},
+		agent: agent,
+	}
+	if err := (&Service{queries: filteredQueries}).EnqueueIfDefault(context.Background(), &filteredRun); err != nil {
+		t.Fatalf("EnqueueIfDefault filtered event error = %v", err)
+	}
+	if filteredQueries.createDeliveryArg.RunID != uuid.Nil {
+		t.Fatalf("filtered event should not enqueue delivery = %#v", filteredQueries.createDeliveryArg)
+	}
+
 	retryQueries := &fakeDeliveryQueries{resetRows: 1}
 	if err := (&Service{queries: retryQueries}).RetryDelivery(context.Background(), deliveryID, userID); err != nil {
 		t.Fatalf("RetryDelivery success error = %v", err)
@@ -745,7 +785,7 @@ func TestDeliveryServiceErrors(t *testing.T) {
 		{
 			name: "enqueue missing agent",
 			call: func(s *Service) error {
-				_, err := s.enqueue(context.Background(), userID, &db.Run{ID: runID, AgentID: uuid.New()}, db.DeliveryTarget{ID: targetID, Config: []byte(`{"url":"https://example.com/hook"}`)})
+				_, err := s.enqueue(context.Background(), userID, &db.Run{ID: runID, AgentID: uuid.New()}, db.DeliveryTarget{ID: targetID, Config: []byte(`{"url":"https://example.com/hook"}`)}, eventRunCompleted)
 				return err
 			},
 			q:    &fakeDeliveryQueries{agentErr: sentinel},
@@ -754,7 +794,7 @@ func TestDeliveryServiceErrors(t *testing.T) {
 		{
 			name: "enqueue empty target url",
 			call: func(s *Service) error {
-				_, err := s.enqueue(context.Background(), userID, &db.Run{ID: runID, AgentID: uuid.New()}, db.DeliveryTarget{ID: targetID, Config: []byte(`{}`)})
+				_, err := s.enqueue(context.Background(), userID, &db.Run{ID: runID, AgentID: uuid.New()}, db.DeliveryTarget{ID: targetID, Config: []byte(`{}`)}, eventRunCompleted)
 				return err
 			},
 			q:    &fakeDeliveryQueries{agent: db.Agent{ID: uuid.New(), Slug: "helper", Name: "Helper"}},
@@ -785,6 +825,10 @@ type fakeDeliveryQueries struct {
 	defaultArg  db.SetDeliveryTargetDefaultParams
 	defaultRows int64
 	defaultErr  error
+
+	updateTargetArg db.UpdateDeliveryTargetConfigParams
+	updateTarget    db.DeliveryTarget
+	updateTargetErr error
 
 	run    db.Run
 	runErr error
@@ -861,6 +905,24 @@ func (q *fakeDeliveryQueries) DeleteDeliveryTarget(_ context.Context, arg db.Del
 func (q *fakeDeliveryQueries) SetDeliveryTargetDefault(_ context.Context, arg db.SetDeliveryTargetDefaultParams) (int64, error) {
 	q.defaultArg = arg
 	return q.defaultRows, q.defaultErr
+}
+
+func (q *fakeDeliveryQueries) UpdateDeliveryTargetConfig(_ context.Context, arg db.UpdateDeliveryTargetConfigParams) (db.DeliveryTarget, error) {
+	q.updateTargetArg = arg
+	if q.updateTarget.ID == uuid.Nil {
+		q.updateTarget = db.DeliveryTarget{
+			ID:        arg.ID,
+			UserID:    arg.UserID,
+			Name:      "Webhook",
+			Type:      targetTypeWebhook,
+			Config:    arg.Config,
+			Secret:    "secret",
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+	}
+	q.updateTarget.Config = arg.Config
+	return q.updateTarget, q.updateTargetErr
 }
 
 func (q *fakeDeliveryQueries) GetRunByID(context.Context, uuid.UUID) (db.Run, error) {

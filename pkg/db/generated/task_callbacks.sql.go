@@ -44,12 +44,12 @@ RETURNING id, run_id, owner_user_id, caller_agent_id, target_url, secret,
           status, consecutive_failures, created_at, updated_at, deleted_at`
 
 type CreateTaskCallbackSubscriptionParams struct {
-	RunID               uuid.UUID  `db:"run_id" json:"run_id"`
-	OwnerUserID         uuid.UUID  `db:"owner_user_id" json:"owner_user_id"`
-	CallerAgentID       *uuid.UUID `db:"caller_agent_id" json:"caller_agent_id"`
-	TargetURL           string     `db:"target_url" json:"target_url"`
-	Secret              string     `db:"secret" json:"secret"`
-	EventTypes          []string   `db:"event_types" json:"event_types"`
+	RunID           uuid.UUID  `db:"run_id" json:"run_id"`
+	OwnerUserID     uuid.UUID  `db:"owner_user_id" json:"owner_user_id"`
+	CallerAgentID   *uuid.UUID `db:"caller_agent_id" json:"caller_agent_id"`
+	TargetURL       string     `db:"target_url" json:"target_url"`
+	Secret          string     `db:"secret" json:"secret"`
+	EventTypes      []string   `db:"event_types" json:"event_types"`
 	AuthScheme      *string    `db:"auth_scheme" json:"auth_scheme"`
 	AuthCredentials *string    `db:"auth_credentials" json:"auth_credentials"`
 	Metadata        []byte     `db:"metadata" json:"metadata"`
@@ -310,11 +310,11 @@ WHERE d.id = $1`
 
 type GetTaskCallbackDeliveryByIDRow struct {
 	TaskCallbackDelivery
-	TargetURL           string  `db:"target_url" json:"target_url"`
-	Secret              string  `db:"secret" json:"-"`
+	TargetURL       string  `db:"target_url" json:"target_url"`
+	Secret          string  `db:"secret" json:"-"`
 	AuthScheme      *string `db:"auth_scheme" json:"auth_scheme,omitempty"`
 	AuthCredentials *string `db:"auth_credentials" json:"-"`
-	EventType           string  `db:"event_type" json:"event_type"`
+	EventType       string  `db:"event_type" json:"event_type"`
 }
 
 func (q *Queries) GetTaskCallbackDeliveryByID(ctx context.Context, id uuid.UUID) (GetTaskCallbackDeliveryByIDRow, error) {
@@ -341,6 +341,64 @@ func (q *Queries) GetTaskCallbackDeliveryByID(ctx context.Context, id uuid.UUID)
 		&r.EventType,
 	)
 	return r, err
+}
+
+const listTaskCallbackDeliveriesByRun = `-- name: ListTaskCallbackDeliveriesByRun :many
+SELECT d.id, d.subscription_id, d.run_event_id, d.payload, d.status,
+       d.response_status, d.response_body, d.error_message,
+       d.attempt_count, d.next_retry_at, d.delivered_at, d.created_at, d.updated_at,
+       s.target_url, e.event_type
+FROM task_callback_deliveries d
+JOIN task_callback_subscriptions s ON s.id = d.subscription_id
+JOIN run_events e ON e.id = d.run_event_id
+WHERE s.run_id = $1
+  AND s.owner_user_id = $2
+ORDER BY d.created_at DESC
+LIMIT $3`
+
+type ListTaskCallbackDeliveriesByRunParams struct {
+	RunID       uuid.UUID `db:"run_id" json:"run_id"`
+	OwnerUserID uuid.UUID `db:"owner_user_id" json:"owner_user_id"`
+	Limit       int32     `db:"limit" json:"limit"`
+}
+
+type ListTaskCallbackDeliveriesByRunRow struct {
+	TaskCallbackDelivery
+	TargetURL string `db:"target_url" json:"target_url"`
+	EventType string `db:"event_type" json:"event_type"`
+}
+
+func (q *Queries) ListTaskCallbackDeliveriesByRun(ctx context.Context, arg ListTaskCallbackDeliveriesByRunParams) ([]ListTaskCallbackDeliveriesByRunRow, error) {
+	rows, err := q.db.Query(ctx, listTaskCallbackDeliveriesByRun, arg.RunID, arg.OwnerUserID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTaskCallbackDeliveriesByRunRow
+	for rows.Next() {
+		var r ListTaskCallbackDeliveriesByRunRow
+		if err := rows.Scan(
+			&r.ID,
+			&r.SubscriptionID,
+			&r.RunEventID,
+			&r.Payload,
+			&r.Status,
+			&r.ResponseStatus,
+			&r.ResponseBody,
+			&r.ErrorMessage,
+			&r.AttemptCount,
+			&r.NextRetryAt,
+			&r.DeliveredAt,
+			&r.CreatedAt,
+			&r.UpdatedAt,
+			&r.TargetURL,
+			&r.EventType,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, r)
+	}
+	return items, rows.Err()
 }
 
 const markTaskCallbackDeliverySuccess = `-- name: MarkTaskCallbackDeliverySuccess :exec

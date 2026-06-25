@@ -32,6 +32,17 @@ func TestWebhookHandlerDispatchesServiceSuccess(t *testing.T) {
 		CreatedAt:           createdAt,
 		UpdatedAt:           createdAt,
 	}
+	delivery := TaskCallbackDeliveryResponse{
+		ID:             uuid.NewString(),
+		SubscriptionID: callbackID.String(),
+		RunEventID:     uuid.NewString(),
+		EventType:      "run.completed",
+		TargetURL:      "https://client.example/push",
+		Status:         "success",
+		AttemptCount:   1,
+		CreatedAt:      createdAt,
+		UpdatedAt:      createdAt,
+	}
 
 	t.Run("create task callback", func(t *testing.T) {
 		mock := &mockWebhookService{createTaskCallbackResp: &subscription}
@@ -77,6 +88,32 @@ func TestWebhookHandlerDispatchesServiceSuccess(t *testing.T) {
 		}
 		decodeWebhookJSON(t, rec, &body)
 		if body.Items == nil || len(body.Items) != 0 {
+			t.Fatalf("body = %#v", body)
+		}
+	})
+
+	t.Run("list task callback deliveries", func(t *testing.T) {
+		mock := &mockWebhookService{listTaskCallbackDeliveriesResp: []TaskCallbackDeliveryResponse{delivery}}
+		c, rec := newWebhookRecorderContext(
+			http.MethodGet,
+			"/runs/"+runID.String()+"/task-callbacks/deliveries?limit=5",
+			"",
+			userID.String(),
+			map[string]string{"id": runID.String()},
+		)
+
+		if err := NewHandler(mock).ListTaskCallbackDeliveries(c); err != nil {
+			t.Fatalf("ListTaskCallbackDeliveries error = %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		if mock.listTaskCallbackDeliveriesRunID != runID || mock.listTaskCallbackDeliveriesUserID != userID || mock.listTaskCallbackDeliveriesLimit != 5 {
+			t.Fatalf("captured list deliveries = run %s user %s limit %d", mock.listTaskCallbackDeliveriesRunID, mock.listTaskCallbackDeliveriesUserID, mock.listTaskCallbackDeliveriesLimit)
+		}
+		var body TaskCallbackDeliveryListResponse
+		decodeWebhookJSON(t, rec, &body)
+		if len(body.Items) != 1 || body.Items[0].EventType != "run.completed" {
 			t.Fatalf("body = %#v", body)
 		}
 	})
@@ -248,6 +285,12 @@ type mockWebhookService struct {
 	listTaskCallbacksResp   []TaskCallbackSubscriptionResponse
 	listTaskCallbacksErr    error
 
+	listTaskCallbackDeliveriesRunID  uuid.UUID
+	listTaskCallbackDeliveriesUserID uuid.UUID
+	listTaskCallbackDeliveriesLimit  int
+	listTaskCallbackDeliveriesResp   []TaskCallbackDeliveryResponse
+	listTaskCallbackDeliveriesErr    error
+
 	listOwnerUserID uuid.UUID
 	listOwnerStatus string
 	listOwnerLimit  int
@@ -283,6 +326,13 @@ func (m *mockWebhookService) ListTaskCallbackSubscriptions(_ context.Context, ru
 	m.listTaskCallbacksRunID = runID
 	m.listTaskCallbacksUserID = userID
 	return m.listTaskCallbacksResp, m.listTaskCallbacksErr
+}
+
+func (m *mockWebhookService) ListTaskCallbackDeliveries(_ context.Context, runID, userID uuid.UUID, limit int) ([]TaskCallbackDeliveryResponse, error) {
+	m.listTaskCallbackDeliveriesRunID = runID
+	m.listTaskCallbackDeliveriesUserID = userID
+	m.listTaskCallbackDeliveriesLimit = limit
+	return m.listTaskCallbackDeliveriesResp, m.listTaskCallbackDeliveriesErr
 }
 
 func (m *mockWebhookService) ListTaskCallbackSubscriptionsForOwner(_ context.Context, userID uuid.UUID, status string, limit int) ([]TaskCallbackSubscriptionResponse, error) {

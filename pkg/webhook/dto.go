@@ -1,6 +1,6 @@
 package webhook
 
-// SetWebhookRequest is kept for the legacy Agent webhook service path.
+// SetWebhookRequest is kept for removed Agent webhook route tests.
 //
 // URL 必须 https，由 schema CHECK 兜底（agents_webhook_https），同时这里前置校验。
 type SetWebhookRequest struct {
@@ -15,7 +15,7 @@ type SetWebhookResponse struct {
 	Secret string `json:"webhook_secret"`
 }
 
-// DeliveryListItem describes legacy Agent webhook delivery rows.
+// DeliveryListItem describes removed Agent webhook delivery rows.
 //
 // payload / response_body 不返回（避免巨大响应；如需 debug 可再加详情接口）。
 type DeliveryListItem struct {
@@ -61,6 +61,27 @@ type BatchTaskCallbackSubscriptionsRequest struct {
 
 type TaskCallbackSubscriptionListResponse struct {
 	Items []TaskCallbackSubscriptionResponse `json:"items"`
+}
+
+// TaskCallbackDeliveryResponse describes one signed callback delivery attempt.
+type TaskCallbackDeliveryResponse struct {
+	ID             string  `json:"id"`
+	SubscriptionID string  `json:"subscription_id"`
+	RunEventID     string  `json:"run_event_id"`
+	EventType      string  `json:"event_type"`
+	TargetURL      string  `json:"target_url"`
+	Status         string  `json:"status"`
+	ResponseStatus *int32  `json:"response_status,omitempty"`
+	ErrorMessage   *string `json:"error_message,omitempty"`
+	AttemptCount   int32   `json:"attempt_count"`
+	NextRetryAt    *string `json:"next_retry_at,omitempty"`
+	DeliveredAt    *string `json:"delivered_at,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
+}
+
+type TaskCallbackDeliveryListResponse struct {
+	Items []TaskCallbackDeliveryResponse `json:"items"`
 }
 
 type BatchTaskCallbackSubscriptionsResponse struct {

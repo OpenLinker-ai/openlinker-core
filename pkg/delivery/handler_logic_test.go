@@ -28,6 +28,8 @@ func TestDeliveryHandlerValidationAndRoutes(t *testing.T) {
 		{name: "create target invalid json", method: h.CreateTarget, req: &deliveryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: "{"}, want: http.StatusBadRequest},
 		{name: "create target validation", method: h.CreateTarget, req: &deliveryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: `{}`}, want: http.StatusUnprocessableEntity},
 		{name: "list targets missing user", method: h.ListTargets, req: &deliveryHandlerRequest{method: http.MethodGet, target: "/"}, want: http.StatusUnauthorized},
+		{name: "update invalid id", method: h.UpdateTarget, req: &deliveryHandlerRequest{method: http.MethodPatch, target: "/", userID: userID, params: map[string]string{"id": "bad"}, body: `{"event_types":["run.completed"]}`}, want: http.StatusBadRequest},
+		{name: "update validation", method: h.UpdateTarget, req: &deliveryHandlerRequest{method: http.MethodPatch, target: "/", userID: userID, params: map[string]string{"id": id}, body: `{}`}, want: http.StatusUnprocessableEntity},
 		{name: "delete invalid id", method: h.DeleteTarget, req: &deliveryHandlerRequest{method: http.MethodDelete, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
 		{name: "default invalid id", method: h.SetDefault, req: &deliveryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
 		{name: "deliver invalid run id", method: h.DeliverRun, req: &deliveryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
@@ -67,6 +69,7 @@ func TestDeliveryHandlerValidationAndRoutes(t *testing.T) {
 	for _, route := range []string{
 		"POST /api/v1/delivery-targets",
 		"GET /api/v1/delivery-targets",
+		"PATCH /api/v1/delivery-targets/:id",
 		"DELETE /api/v1/delivery-targets/:id",
 		"POST /api/v1/delivery-targets/:id/default",
 		"POST /api/v1/runs/:id/deliver",

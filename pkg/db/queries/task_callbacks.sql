@@ -100,6 +100,19 @@ JOIN task_callback_subscriptions s ON s.id = d.subscription_id
 JOIN run_events e ON e.id = d.run_event_id
 WHERE d.id = $1;
 
+-- name: ListTaskCallbackDeliveriesByRun :many
+SELECT d.id, d.subscription_id, d.run_event_id, d.payload, d.status,
+       d.response_status, d.response_body, d.error_message,
+       d.attempt_count, d.next_retry_at, d.delivered_at, d.created_at, d.updated_at,
+       s.target_url, e.event_type
+FROM task_callback_deliveries d
+JOIN task_callback_subscriptions s ON s.id = d.subscription_id
+JOIN run_events e ON e.id = d.run_event_id
+WHERE s.run_id = $1
+  AND s.owner_user_id = $2
+ORDER BY d.created_at DESC
+LIMIT $3;
+
 -- name: MarkTaskCallbackDeliverySuccess :exec
 UPDATE task_callback_deliveries
 SET status = 'success',

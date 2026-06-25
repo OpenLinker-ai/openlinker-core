@@ -23,6 +23,7 @@ type Handler struct {
 type webhookService interface {
 	CreateTaskCallbackSubscription(context.Context, uuid.UUID, uuid.UUID, *CreateTaskCallbackRequest) (*TaskCallbackSubscriptionResponse, error)
 	ListTaskCallbackSubscriptions(context.Context, uuid.UUID, uuid.UUID) ([]TaskCallbackSubscriptionResponse, error)
+	ListTaskCallbackDeliveries(context.Context, uuid.UUID, uuid.UUID, int) ([]TaskCallbackDeliveryResponse, error)
 	ListTaskCallbackSubscriptionsForOwner(context.Context, uuid.UUID, string, int) ([]TaskCallbackSubscriptionResponse, error)
 	BatchManageTaskCallbackSubscriptions(context.Context, uuid.UUID, *BatchTaskCallbackSubscriptionsRequest) (*BatchTaskCallbackSubscriptionsResponse, error)
 	DeleteTaskCallbackSubscription(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
@@ -45,6 +46,7 @@ func NewHandler(svc webhookService, cfg ...*config.Config) *Handler {
 //
 //	POST   /runs/:id/task-callbacks                      为单个 run 注册任务回调
 //	GET    /runs/:id/task-callbacks                      查看 run 任务回调
+//	GET    /runs/:id/task-callbacks/deliveries           查看 run 任务回调投递记录
 //	POST   /runs/:id/task-callbacks/:callbackID/pause     暂停 run 任务回调
 //	POST   /runs/:id/task-callbacks/:callbackID/resume    恢复 run 任务回调
 //	DELETE /runs/:id/task-callbacks/:callbackID           删除 run 任务回调
@@ -54,6 +56,7 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	taskCallbacks := api.Group("/runs/:id/task-callbacks", jwtMiddleware)
 	taskCallbacks.POST("", h.CreateTaskCallback)
 	taskCallbacks.GET("", h.ListTaskCallbacks)
+	taskCallbacks.GET("/deliveries", h.ListTaskCallbackDeliveries)
 	taskCallbacks.POST("/:callbackID/pause", h.PauseTaskCallback)
 	taskCallbacks.POST("/:callbackID/resume", h.ResumeTaskCallback)
 	taskCallbacks.DELETE("/:callbackID", h.DeleteTaskCallback)
@@ -104,6 +107,33 @@ func (h *Handler) ListTaskCallbacks(c echo.Context) error {
 		items = []TaskCallbackSubscriptionResponse{}
 	}
 	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *Handler) ListTaskCallbackDeliveries(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	runID, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	limit := 0
+	if v := c.QueryParam("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return httpx.BadRequest("limit 必须是整数")
+		}
+		limit = n
+	}
+	items, err := h.svc.ListTaskCallbackDeliveries(c.Request().Context(), runID, uid, limit)
+	if err != nil {
+		return err
+	}
+	if items == nil {
+		items = []TaskCallbackDeliveryResponse{}
+	}
+	return c.JSON(http.StatusOK, TaskCallbackDeliveryListResponse{Items: items})
 }
 
 func (h *Handler) ListManagedTaskCallbacks(c echo.Context) error {

@@ -357,6 +357,7 @@ func TestWebhookHandlerValidationAndRoutes(t *testing.T) {
 	}{
 		{name: "create task callback validation", method: h.CreateTaskCallback, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": id}, body: `{}`}, want: http.StatusUnprocessableEntity},
 		{name: "list task callbacks invalid id", method: h.ListTaskCallbacks, req: &webhookHandlerRequest{method: http.MethodGet, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
+		{name: "list task callback deliveries invalid limit", method: h.ListTaskCallbackDeliveries, req: &webhookHandlerRequest{method: http.MethodGet, target: "/?limit=bad", userID: userID, params: map[string]string{"id": id}}, want: http.StatusBadRequest},
 		{name: "managed list missing user", method: h.ListManagedTaskCallbacks, req: &webhookHandlerRequest{method: http.MethodGet, target: "/"}, want: http.StatusUnauthorized},
 		{name: "managed list bad limit", method: h.ListManagedTaskCallbacks, req: &webhookHandlerRequest{method: http.MethodGet, target: "/?limit=bad", userID: userID}, want: http.StatusBadRequest},
 		{name: "batch invalid json", method: h.BatchManageTaskCallbacks, req: &webhookHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: "{"}, want: http.StatusBadRequest},
@@ -395,6 +396,7 @@ func TestWebhookHandlerValidationAndRoutes(t *testing.T) {
 	for _, route := range []string{
 		"POST /api/v1/runs/:id/task-callbacks",
 		"GET /api/v1/runs/:id/task-callbacks",
+		"GET /api/v1/runs/:id/task-callbacks/deliveries",
 		"POST /api/v1/runs/:id/task-callbacks/:callbackID/pause",
 		"POST /api/v1/runs/:id/task-callbacks/:callbackID/resume",
 		"DELETE /api/v1/runs/:id/task-callbacks/:callbackID",

@@ -478,11 +478,25 @@ func TestTaskCallbackSubscriptionManagement(t *testing.T) {
 		createSub:      sub,
 		latestEventErr: pgx.ErrNoRows,
 		listSubs:       []db.TaskCallbackSubscription{sub},
-		listOwnerSubs:  []db.TaskCallbackSubscription{sub},
-		batchSubs:      []db.TaskCallbackSubscription{sub},
-		updateSub:      sub,
-		deleteRows:     1,
-		activeSubs:     []db.TaskCallbackSubscription{sub},
+		listRunDeliveries: []db.ListTaskCallbackDeliveriesByRunRow{{
+			TaskCallbackDelivery: db.TaskCallbackDelivery{
+				ID:             uuid.New(),
+				SubscriptionID: subID,
+				RunEventID:     eventID,
+				Status:         "success",
+				AttemptCount:   1,
+				DeliveredAt:    &now,
+				CreatedAt:      now,
+				UpdatedAt:      now,
+			},
+			TargetURL: "https://client.example/push",
+			EventType: "run.completed",
+		}},
+		listOwnerSubs: []db.TaskCallbackSubscription{sub},
+		batchSubs:     []db.TaskCallbackSubscription{sub},
+		updateSub:     sub,
+		deleteRows:    1,
+		activeSubs:    []db.TaskCallbackSubscription{sub},
 		createRunDelivery: db.TaskCallbackDelivery{
 			ID:             uuid.New(),
 			SubscriptionID: subID,
@@ -524,6 +538,17 @@ func TestTaskCallbackSubscriptionManagement(t *testing.T) {
 	}
 	if len(listed) != 1 || q.listRunSubsArg.RunID != runID || q.listRunSubsArg.OwnerUserID != userID {
 		t.Fatalf("listed subscriptions/arg = %#v/%#v", listed, q.listRunSubsArg)
+	}
+
+	deliveryHistory, err := svc.ListTaskCallbackDeliveries(context.Background(), runID, userID, maxListLimit+1)
+	if err != nil {
+		t.Fatalf("ListTaskCallbackDeliveries error = %v", err)
+	}
+	if len(deliveryHistory) != 1 || deliveryHistory[0].EventType != "run.completed" || deliveryHistory[0].DeliveredAt == nil {
+		t.Fatalf("delivery history = %#v", deliveryHistory)
+	}
+	if q.listRunDeliveriesArg.RunID != runID || q.listRunDeliveriesArg.OwnerUserID != userID || q.listRunDeliveriesArg.Limit != defaultListLimit {
+		t.Fatalf("delivery history arg = %#v", q.listRunDeliveriesArg)
 	}
 
 	ownerList, err := svc.ListTaskCallbackSubscriptionsForOwner(context.Background(), userID, "paused", maxListLimit+1)
@@ -991,6 +1016,10 @@ type fakeWebhookQueries struct {
 	listSubs       []db.TaskCallbackSubscription
 	listSubsErr    error
 
+	listRunDeliveriesArg db.ListTaskCallbackDeliveriesByRunParams
+	listRunDeliveries    []db.ListTaskCallbackDeliveriesByRunRow
+	listRunDeliveriesErr error
+
 	listOwnerArg  db.ListTaskCallbackSubscriptionsByOwnerParams
 	listOwnerSubs []db.TaskCallbackSubscription
 	listOwnerErr  error
@@ -1126,6 +1155,11 @@ func (q *fakeWebhookQueries) GetLatestRunEventForTypes(_ context.Context, arg db
 func (q *fakeWebhookQueries) ListTaskCallbackSubscriptionsByRun(_ context.Context, arg db.ListTaskCallbackSubscriptionsByRunParams) ([]db.TaskCallbackSubscription, error) {
 	q.listRunSubsArg = arg
 	return q.listSubs, q.listSubsErr
+}
+
+func (q *fakeWebhookQueries) ListTaskCallbackDeliveriesByRun(_ context.Context, arg db.ListTaskCallbackDeliveriesByRunParams) ([]db.ListTaskCallbackDeliveriesByRunRow, error) {
+	q.listRunDeliveriesArg = arg
+	return q.listRunDeliveries, q.listRunDeliveriesErr
 }
 
 func (q *fakeWebhookQueries) ListTaskCallbackSubscriptionsByOwner(_ context.Context, arg db.ListTaskCallbackSubscriptionsByOwnerParams) ([]db.TaskCallbackSubscription, error) {

@@ -84,6 +84,39 @@ func TestDeliveryHandlerDispatchesServiceSuccess(t *testing.T) {
 		}
 	})
 
+	t.Run("update target", func(t *testing.T) {
+		mock := &mockDeliveryService{updateTargetResp: &TargetResponse{
+			ID:         targetID.String(),
+			Name:       "Webhook",
+			Type:       targetTypeWebhook,
+			URL:        "https://example.com/hook",
+			EventTypes: []string{eventRunFailed},
+			CreatedAt:  createdAt,
+		}}
+		c, rec := newDeliveryRecorderContext(
+			http.MethodPatch,
+			"/delivery-targets/"+targetID.String(),
+			`{"event_types":["run.failed"]}`,
+			userID.String(),
+			map[string]string{"id": targetID.String()},
+		)
+
+		if err := NewHandler(mock).UpdateTarget(c); err != nil {
+			t.Fatalf("UpdateTarget error = %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		if mock.updateTargetID != targetID || mock.updateTargetUserID != userID || len(mock.updateTargetReq.EventTypes) != 1 || mock.updateTargetReq.EventTypes[0] != eventRunFailed {
+			t.Fatalf("captured update target = target %s user %s req %#v", mock.updateTargetID, mock.updateTargetUserID, mock.updateTargetReq)
+		}
+		var body TargetResponse
+		decodeDeliveryJSON(t, rec, &body)
+		if len(body.EventTypes) != 1 || body.EventTypes[0] != eventRunFailed {
+			t.Fatalf("body = %#v", body)
+		}
+	})
+
 	t.Run("delete target", func(t *testing.T) {
 		mock := &mockDeliveryService{}
 		c, rec := newDeliveryRecorderContext(http.MethodDelete, "/delivery-targets/"+targetID.String(), "", userID.String(), map[string]string{"id": targetID.String()})
@@ -331,6 +364,12 @@ type mockDeliveryService struct {
 	listTargetsResp   []TargetResponse
 	listTargetsErr    error
 
+	updateTargetID     uuid.UUID
+	updateTargetUserID uuid.UUID
+	updateTargetReq    *UpdateTargetRequest
+	updateTargetResp   *TargetResponse
+	updateTargetErr    error
+
 	deleteTargetID     uuid.UUID
 	deleteTargetUserID uuid.UUID
 	deleteTargetErr    error
@@ -369,6 +408,13 @@ func (m *mockDeliveryService) CreateTarget(_ context.Context, userID uuid.UUID, 
 func (m *mockDeliveryService) ListTargets(_ context.Context, userID uuid.UUID) ([]TargetResponse, error) {
 	m.listTargetsUserID = userID
 	return m.listTargetsResp, m.listTargetsErr
+}
+
+func (m *mockDeliveryService) UpdateTarget(_ context.Context, targetID, userID uuid.UUID, req *UpdateTargetRequest) (*TargetResponse, error) {
+	m.updateTargetID = targetID
+	m.updateTargetUserID = userID
+	m.updateTargetReq = req
+	return m.updateTargetResp, m.updateTargetErr
 }
 
 func (m *mockDeliveryService) DeleteTarget(_ context.Context, targetID, userID uuid.UUID) error {

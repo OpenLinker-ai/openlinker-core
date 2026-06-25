@@ -39,6 +39,8 @@ const (
 
 	userAgent         = "OpenLinker-Delivery/1.0"
 	eventRunCompleted = "run.completed"
+	eventRunFailed    = "run.failed"
+	eventRunCanceled  = "run.canceled"
 
 	targetTypeWebhook = "webhook"
 	targetTypeSlack   = "slack"
@@ -46,6 +48,13 @@ const (
 	defaultDeliveryHistoryLimit = 50
 	maxDeliveryHistoryLimit     = 100
 )
+
+var defaultDeliveryEventTypes = []string{eventRunCompleted, eventRunFailed, eventRunCanceled}
+
+type deliveryTargetConfig struct {
+	URL        string   `json:"url"`
+	EventTypes []string `json:"event_types,omitempty"`
+}
 
 // nextRetryDelay 1min / 5min / 30min 退避。
 func nextRetryDelay(attempt int) time.Duration {
@@ -78,6 +87,7 @@ type deliveryQueries interface {
 	CreateDeliveryTarget(context.Context, db.CreateDeliveryTargetParams) (db.DeliveryTarget, error)
 	DeleteDeliveryTarget(context.Context, db.DeleteDeliveryTargetParams) (int64, error)
 	SetDeliveryTargetDefault(context.Context, db.SetDeliveryTargetDefaultParams) (int64, error)
+	UpdateDeliveryTargetConfig(context.Context, db.UpdateDeliveryTargetConfigParams) (db.DeliveryTarget, error)
 	GetRunByID(context.Context, uuid.UUID) (db.Run, error)
 	GetDeliveryTargetByID(context.Context, uuid.UUID) (db.DeliveryTarget, error)
 	GetDefaultDeliveryTarget(context.Context, uuid.UUID) (db.DeliveryTarget, error)
@@ -111,7 +121,8 @@ func NewService(pool *pgxpool.Pool, cfg ...*config.Config) *Service {
 //
 // 当 IsDefault=true 时先清掉原 default 避免唯一索引冲突。
 func (s *Service) CreateTarget(ctx context.Context, userID uuid.UUID, req *CreateTargetRequest) (*TargetResponse, error) {
-	if err := endpointurl.Validate(req.URL, s.allowLocalHTTP); err != nil {
+	targetURL := strings.TrimSpace(req.URL)
+	if err := endpointurl.Validate(targetURL, s.allowLocalHTTP); err != nil {
 		return nil, httpx.BadRequest("url 必须是 HTTPS；本地开发需开启 ALLOW_LOCAL_HTTP_ENDPOINTS 后才允许 loopback HTTP")
 	}
 
@@ -131,7 +142,10 @@ func (s *Service) CreateTarget(ctx context.Context, userID uuid.UUID, req *Creat
 		return nil, httpx.Internal("生成 secret 失败")
 	}
 
-	cfg, err := json.Marshal(map[string]string{"url": req.URL})
+	cfg, err := json.Marshal(deliveryTargetConfig{
+		URL:        targetURL,
+		EventTypes: normalizeDeliveryEventTypes(req.EventTypes),
+	})
 	if err != nil {
 		return nil, httpx.Internal("序列化 config 失败")
 	}
@@ -210,6 +224,42 @@ func (s *Service) SetDefault(ctx context.Context, targetID, userID uuid.UUID) er
 	return nil
 }
 
+func (s *Service) UpdateTarget(ctx context.Context, targetID, userID uuid.UUID, req *UpdateTargetRequest) (*TargetResponse, error) {
+	if req == nil {
+		return nil, httpx.BadRequest("请求体不能为空")
+	}
+	if len(req.EventTypes) == 0 {
+		return nil, httpx.BadRequest("event_types 至少选择一个")
+	}
+	target, err := s.queries.GetDeliveryTargetByID(ctx, targetID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("投递目标不存在")
+		}
+		return nil, httpx.Internal("查询投递目标失败")
+	}
+	if target.UserID != userID {
+		return nil, httpx.NotFound("投递目标不存在")
+	}
+	cfg := parseTargetConfig(target.Config)
+	cfg.EventTypes = normalizeDeliveryEventTypes(req.EventTypes)
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, httpx.Internal("序列化 config 失败")
+	}
+	updated, err := s.queries.UpdateDeliveryTargetConfig(ctx, db.UpdateDeliveryTargetConfigParams{
+		ID:     targetID,
+		UserID: userID,
+		Config: body,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("target_id", targetID.String()).Msg("delivery.UpdateTarget")
+		return nil, httpx.Internal("更新投递目标失败")
+	}
+	resp := toTargetResponse(updated, false)
+	return &resp, nil
+}
+
 // DeliverRun 手动触发投递（用户 /run/:id 点投递按钮）。
 //
 // run 必须属于当前用户、且终态（success / failed / timeout）。
@@ -255,7 +305,7 @@ func (s *Service) DeliverRun(ctx context.Context, userID, runID uuid.UUID, targe
 		target = t
 	}
 
-	delivery, err := s.enqueue(ctx, userID, &run, target)
+	delivery, err := s.enqueue(ctx, userID, &run, target, deliveryEventForRunStatus(run.Status))
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +325,11 @@ func (s *Service) EnqueueIfDefault(ctx context.Context, run *db.Run) error {
 		}
 		return fmt.Errorf("get default delivery target: %w", err)
 	}
-	delivery, err := s.enqueue(ctx, run.UserID, run, target)
+	eventType := deliveryEventForRunStatus(run.Status)
+	if !targetAllowsDeliveryEvent(target, eventType) {
+		return nil
+	}
+	delivery, err := s.enqueue(ctx, run.UserID, run, target, eventType)
 	if err != nil {
 		return err
 	}
@@ -382,23 +436,19 @@ func (s *Service) RetryDelivery(ctx context.Context, deliveryID, userID uuid.UUI
 }
 
 // enqueue 内部：构造 payload + 写 run_deliveries（INSERT pending）。
-func (s *Service) enqueue(ctx context.Context, userID uuid.UUID, run *db.Run, target db.DeliveryTarget) (db.RunDelivery, error) {
+func (s *Service) enqueue(ctx context.Context, userID uuid.UUID, run *db.Run, target db.DeliveryTarget, eventType string) (db.RunDelivery, error) {
 	agent, err := s.queries.GetAgentByID(ctx, run.AgentID)
 	if err != nil {
 		log.Error().Err(err).Str("agent_id", run.AgentID.String()).Msg("delivery.enqueue: GetAgentByID")
 		return db.RunDelivery{}, httpx.Internal("查询 Agent 失败")
 	}
-	payload := buildPayload(run, agent.Slug, agent.Name)
+	payload := buildPayload(run, agent.Slug, agent.Name, eventType)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return db.RunDelivery{}, httpx.Internal("序列化投递 payload 失败")
 	}
 
-	var targetURL string
-	var cfg map[string]string
-	if err := json.Unmarshal(target.Config, &cfg); err == nil {
-		targetURL = cfg["url"]
-	}
+	targetURL := parseTargetConfig(target.Config).URL
 	if targetURL == "" {
 		return db.RunDelivery{}, httpx.BadRequest("投递目标 url 为空")
 	}
@@ -508,16 +558,17 @@ func (s *Service) AttemptDelivery(ctx context.Context, deliveryID uuid.UUID) err
 func (s *Service) doDeliver(
 	ctx context.Context, targetType, url, secret string, deliveryID uuid.UUID, payload []byte,
 ) (int, string, error) {
+	eventType := deliveryEventFromPayload(payload)
 	switch targetType {
 	case targetTypeSlack:
 		return s.deliverSlack(ctx, url, deliveryID, payload)
 	default:
-		return s.deliverWebhook(ctx, url, secret, deliveryID, payload)
+		return s.deliverWebhook(ctx, url, secret, deliveryID, payload, eventType)
 	}
 }
 
 func (s *Service) deliverWebhook(
-	ctx context.Context, url, secret string, deliveryID uuid.UUID, payload []byte,
+	ctx context.Context, url, secret string, deliveryID uuid.UUID, payload []byte, eventType string,
 ) (int, string, error) {
 	signature := signPayload(payload, secret)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
@@ -528,7 +579,7 @@ func (s *Service) deliverWebhook(
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("X-OpenLinker-Signature", "sha256="+signature)
-	req.Header.Set("X-OpenLinker-Event", eventRunCompleted)
+	req.Header.Set("X-OpenLinker-Event", eventType)
 	req.Header.Set("X-OpenLinker-Delivery", deliveryID.String())
 	req.Header.Set("X-OpenLinker-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
 	return doRequest(s.httpClient, req)
@@ -586,7 +637,10 @@ func (s *Service) processPending(ctx context.Context) {
 	}
 }
 
-func buildPayload(run *db.Run, agentSlug, agentName string) DeliveryPayload {
+func buildPayload(run *db.Run, agentSlug, agentName, eventType string) DeliveryPayload {
+	if eventType == "" {
+		eventType = deliveryEventForRunStatus(run.Status)
+	}
 	finishedAt := time.Now().UTC()
 	if run.FinishedAt != nil {
 		finishedAt = run.FinishedAt.UTC()
@@ -613,7 +667,7 @@ func buildPayload(run *db.Run, agentSlug, agentName string) DeliveryPayload {
 	}
 
 	return DeliveryPayload{
-		Event:      eventRunCompleted,
+		Event:      eventType,
 		RunID:      run.ID.String(),
 		AgentID:    run.AgentID.String(),
 		AgentSlug:  agentSlug,
@@ -626,6 +680,85 @@ func buildPayload(run *db.Run, agentSlug, agentName string) DeliveryPayload {
 		StartedAt:  run.StartedAt.UTC().Format(time.RFC3339),
 		FinishedAt: finishedAt.Format(time.RFC3339),
 	}
+}
+
+func parseTargetConfig(raw []byte) deliveryTargetConfig {
+	cfg := deliveryTargetConfig{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &cfg)
+	}
+	if cfg.URL == "" {
+		var legacy map[string]string
+		if err := json.Unmarshal(raw, &legacy); err == nil {
+			cfg.URL = legacy["url"]
+		}
+	}
+	cfg.URL = strings.TrimSpace(cfg.URL)
+	cfg.EventTypes = normalizeDeliveryEventTypes(cfg.EventTypes)
+	return cfg
+}
+
+func normalizeDeliveryEventTypes(events []string) []string {
+	if len(events) == 0 {
+		return append([]string(nil), defaultDeliveryEventTypes...)
+	}
+	seen := make(map[string]bool, len(events))
+	out := make([]string, 0, len(events))
+	for _, event := range events {
+		event = strings.TrimSpace(event)
+		if !isDeliveryEventType(event) || seen[event] {
+			continue
+		}
+		seen[event] = true
+		out = append(out, event)
+	}
+	if len(out) == 0 {
+		return append([]string(nil), defaultDeliveryEventTypes...)
+	}
+	return out
+}
+
+func isDeliveryEventType(event string) bool {
+	switch event {
+	case eventRunCompleted, eventRunFailed, eventRunCanceled:
+		return true
+	default:
+		return false
+	}
+}
+
+func deliveryEventForRunStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "success", "completed", "succeeded":
+		return eventRunCompleted
+	case "canceled", "cancelled":
+		return eventRunCanceled
+	default:
+		return eventRunFailed
+	}
+}
+
+func targetAllowsDeliveryEvent(target db.DeliveryTarget, eventType string) bool {
+	cfg := parseTargetConfig(target.Config)
+	for _, allowed := range cfg.EventTypes {
+		if allowed == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+func deliveryEventFromPayload(payload []byte) string {
+	var body struct {
+		Event string `json:"event"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return eventRunCompleted
+	}
+	if isDeliveryEventType(body.Event) {
+		return body.Event
+	}
+	return eventRunCompleted
 }
 
 func buildSlackText(p DeliveryPayload) string {

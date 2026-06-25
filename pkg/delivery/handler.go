@@ -22,6 +22,7 @@ type Handler struct {
 type deliveryService interface {
 	CreateTarget(context.Context, uuid.UUID, *CreateTargetRequest) (*TargetResponse, error)
 	ListTargets(context.Context, uuid.UUID) ([]TargetResponse, error)
+	UpdateTarget(context.Context, uuid.UUID, uuid.UUID, *UpdateTargetRequest) (*TargetResponse, error)
 	DeleteTarget(context.Context, uuid.UUID, uuid.UUID) error
 	SetDefault(context.Context, uuid.UUID, uuid.UUID) error
 	DeliverRun(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID) (*DeliveryItem, error)
@@ -41,6 +42,7 @@ func NewHandler(svc deliveryService) *Handler {
 //
 //	POST   /delivery-targets                       创建
 //	GET    /delivery-targets                       列表
+//	PATCH  /delivery-targets/:id                   更新通知类型
 //	DELETE /delivery-targets/:id                   删除
 //	POST   /delivery-targets/:id/default           设为默认
 //	POST   /runs/:id/deliver                       触发投递
@@ -51,6 +53,7 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	g := api.Group("", jwtMiddleware)
 	g.POST("/delivery-targets", h.CreateTarget)
 	g.GET("/delivery-targets", h.ListTargets)
+	g.PATCH("/delivery-targets/:id", h.UpdateTarget)
 	g.DELETE("/delivery-targets/:id", h.DeleteTarget)
 	g.POST("/delivery-targets/:id/default", h.SetDefault)
 	g.POST("/runs/:id/deliver", h.DeliverRun)
@@ -88,6 +91,29 @@ func (h *Handler) ListTargets(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *Handler) UpdateTarget(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	var req UpdateTargetRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.UpdateTarget(c.Request().Context(), id, uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 func (h *Handler) DeleteTarget(c echo.Context) error {

@@ -12,22 +12,28 @@ import (
 // 仅支持 webhook / slack 两种 type。URL 默认必须 HTTPS；
 // 本地开发可由服务端配置允许 loopback HTTP。
 type CreateTargetRequest struct {
-	Name      string `json:"name" validate:"required,min=1,max=80"`
-	Type      string `json:"type" validate:"required,oneof=webhook slack"`
-	URL       string `json:"url" validate:"required,url,max=500"`
-	IsDefault bool   `json:"is_default"`
+	Name       string   `json:"name" validate:"required,min=1,max=80"`
+	Type       string   `json:"type" validate:"required,oneof=webhook slack"`
+	URL        string   `json:"url" validate:"required,url,max=500"`
+	EventTypes []string `json:"event_types,omitempty" validate:"omitempty,dive,oneof=run.completed run.failed run.canceled"`
+	IsDefault  bool     `json:"is_default"`
+}
+
+type UpdateTargetRequest struct {
+	EventTypes []string `json:"event_types" validate:"required,min=1,dive,oneof=run.completed run.failed run.canceled"`
 }
 
 // TargetResponse 投递目标返回体。Secret 仅 Create / Rotate 时返回一次。
 type TargetResponse struct {
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Type      string          `json:"type"`
-	URL       string          `json:"url"`
-	Secret    string          `json:"secret,omitempty"`
-	IsDefault bool            `json:"is_default"`
-	Config    json.RawMessage `json:"config,omitempty"`
-	CreatedAt string          `json:"created_at"`
+	ID         string          `json:"id"`
+	Name       string          `json:"name"`
+	Type       string          `json:"type"`
+	URL        string          `json:"url"`
+	EventTypes []string        `json:"event_types"`
+	Secret     string          `json:"secret,omitempty"`
+	IsDefault  bool            `json:"is_default"`
+	Config     json.RawMessage `json:"config,omitempty"`
+	CreatedAt  string          `json:"created_at"`
 }
 
 // DeliverRequest POST /api/v1/runs/:id/deliver。
@@ -82,18 +88,16 @@ type DeliveryPayload struct {
 }
 
 func toTargetResponse(t db.DeliveryTarget, includeSecret bool) TargetResponse {
+	cfg := parseTargetConfig(t.Config)
 	resp := TargetResponse{
-		ID:        t.ID.String(),
-		Name:      t.Name,
-		Type:      t.Type,
-		IsDefault: t.IsDefault,
-		Config:    json.RawMessage(t.Config),
-		CreatedAt: t.CreatedAt.UTC().Format(time.RFC3339),
-	}
-	// 解析 config 取 url 字段方便前端展示
-	var cfg map[string]string
-	if err := json.Unmarshal(t.Config, &cfg); err == nil {
-		resp.URL = cfg["url"]
+		ID:         t.ID.String(),
+		Name:       t.Name,
+		Type:       t.Type,
+		URL:        cfg.URL,
+		EventTypes: append([]string(nil), cfg.EventTypes...),
+		IsDefault:  t.IsDefault,
+		Config:     json.RawMessage(t.Config),
+		CreatedAt:  t.CreatedAt.UTC().Format(time.RFC3339),
 	}
 	if includeSecret {
 		resp.Secret = t.Secret

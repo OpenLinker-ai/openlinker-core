@@ -533,7 +533,7 @@ type AgentSkillScore struct {
 
 // DeliveryTarget 对应 delivery_targets 表（用户拥有的投递目标）。
 //
-// type: 'webhook' | 'slack'。Config 是 JSONB（webhook: {url}; slack: {url}）。
+// type: 'webhook' | 'slack'。Config 是 JSONB（{url, event_types}）。
 // Secret 给 webhook 投递做 HMAC 签名；slack 也存一份以备未来扩展。
 type DeliveryTarget struct {
 	ID        uuid.UUID `db:"id" json:"id"`

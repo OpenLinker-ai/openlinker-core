@@ -565,6 +565,16 @@ func TestDeliveryQueriesScanRowsAndAffectedRows(t *testing.T) {
 		t.Fatalf("SetDeliveryTargetDefault args = %#v", dbtx.execArgs)
 	}
 
+	dbtx.row = fakeRow{values: targetValues}
+	updatedTarget, err := q.UpdateDeliveryTargetConfig(context.Background(), UpdateDeliveryTargetConfigParams{ID: targetID, UserID: userID, Config: []byte(`{"url":"https://example.com/hook","event_types":["run.failed"]}`)})
+	if err != nil {
+		t.Fatalf("UpdateDeliveryTargetConfig error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpdateDeliveryTargetConfig")
+	if updatedTarget.ID != targetID || !reflect.DeepEqual(dbtx.queryRowArgs, []any{targetID, userID, []byte(`{"url":"https://example.com/hook","event_types":["run.failed"]}`)}) {
+		t.Fatalf("UpdateDeliveryTargetConfig scan/args = %#v/%#v", updatedTarget, dbtx.queryRowArgs)
+	}
+
 	dbtx.row = fakeRow{values: runDeliveryValues}
 	createdDelivery, err := q.CreateRunDelivery(context.Background(), CreateRunDeliveryParams{
 		RunID:      runID,
@@ -1281,6 +1291,18 @@ func TestProxyRunAndTaskCallbackQueriesScanRowsAndArgs(t *testing.T) {
 		t.Fatalf("GetTaskCallbackDeliveryByID scan = %#v", deliveryDetail)
 	}
 
+	deliveryListValues := append(append([]any{}, deliveryValues...), "https://hooks.example/run", "completed")
+	deliveryListRows := &fakeRows{rows: [][]any{deliveryListValues}}
+	dbtx.queryRows = deliveryListRows
+	deliveryList, err := q.ListTaskCallbackDeliveriesByRun(context.Background(), ListTaskCallbackDeliveriesByRunParams{RunID: runID, OwnerUserID: ownerID, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListTaskCallbackDeliveriesByRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListTaskCallbackDeliveriesByRun")
+	if !deliveryListRows.closed || len(deliveryList) != 1 || deliveryList[0].TargetURL == "" || deliveryList[0].EventType != "completed" {
+		t.Fatalf("ListTaskCallbackDeliveriesByRun scan = %#v closed=%v", deliveryList, deliveryListRows.closed)
+	}
+
 	if err := q.MarkTaskCallbackDeliverySuccess(context.Background(), MarkTaskCallbackDeliverySuccessParams{ID: deliveryID, ResponseStatus: &responseStatus, ResponseBody: &responseBody}); err != nil {
 		t.Fatalf("MarkTaskCallbackDeliverySuccess error = %v", err)
 	}
@@ -1714,6 +1736,10 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 		}},
 		{name: "ListActiveTaskCallbackSubscriptionsForEvent", run: func() error {
 			_, err := q.ListActiveTaskCallbackSubscriptionsForEvent(ctx, ListActiveTaskCallbackSubscriptionsForEventParams{RunID: id, EventType: "completed"})
+			return err
+		}},
+		{name: "ListTaskCallbackDeliveriesByRun", run: func() error {
+			_, err := q.ListTaskCallbackDeliveriesByRun(ctx, ListTaskCallbackDeliveriesByRunParams{RunID: id, OwnerUserID: id, Limit: 10})
 			return err
 		}},
 		{name: "ListPendingTaskCallbackDeliveries", run: func() error {

@@ -4,6 +4,7 @@
 -- 表结构见 migrations/009_delivery_targets.up.sql：
 --   - delivery_targets：用户拥有的投递目标
 --   - run_deliveries：每次投递记录 + 重试状态
+--   - delivery_targets.config：{url, event_types}；旧 {url} 自动按终态事件处理
 --
 -- 设计要点：
 --   - 所有写操作必须带 user_id 防越权（同 webhook_deliveries 用 creator_id）
@@ -46,6 +47,13 @@ WHERE user_id = $1 AND is_default = TRUE;
 UPDATE delivery_targets
 SET is_default = TRUE, updated_at = NOW()
 WHERE id = $1 AND user_id = $2;
+
+-- name: UpdateDeliveryTargetConfig :one
+UPDATE delivery_targets
+SET config = $3,
+    updated_at = NOW()
+WHERE id = $1 AND user_id = $2
+RETURNING id, user_id, name, type, config, secret, is_default, created_at, updated_at;
 
 -- name: CreateRunDelivery :one
 INSERT INTO run_deliveries (

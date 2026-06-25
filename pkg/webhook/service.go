@@ -110,6 +110,7 @@ type webhookQueries interface {
 	ListActiveTaskCallbackSubscriptionsForEvent(context.Context, db.ListActiveTaskCallbackSubscriptionsForEventParams) ([]db.TaskCallbackSubscription, error)
 	CreateTaskCallbackDelivery(context.Context, db.CreateTaskCallbackDeliveryParams) (db.TaskCallbackDelivery, error)
 	GetTaskCallbackDeliveryByID(context.Context, uuid.UUID) (db.GetTaskCallbackDeliveryByIDRow, error)
+	ListTaskCallbackDeliveriesByRun(context.Context, db.ListTaskCallbackDeliveriesByRunParams) ([]db.ListTaskCallbackDeliveriesByRunRow, error)
 	MarkTaskCallbackDeliverySuccess(context.Context, db.MarkTaskCallbackDeliverySuccessParams) error
 	MarkTaskCallbackDeliveryFailedRetry(context.Context, db.MarkTaskCallbackDeliveryFailedRetryParams) error
 	MarkTaskCallbackDeliveryFailedFinal(context.Context, db.MarkTaskCallbackDeliveryFailedFinalParams) error
@@ -502,6 +503,29 @@ func (s *Service) ListTaskCallbackSubscriptions(ctx context.Context, runID, user
 	items := make([]TaskCallbackSubscriptionResponse, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, taskCallbackSubscriptionToResponse(row))
+	}
+	return items, nil
+}
+
+func (s *Service) ListTaskCallbackDeliveries(ctx context.Context, runID, userID uuid.UUID, limit int) ([]TaskCallbackDeliveryResponse, error) {
+	if err := s.ensureRunOwner(ctx, runID, userID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > maxListLimit {
+		limit = defaultListLimit
+	}
+	rows, err := s.queries.ListTaskCallbackDeliveriesByRun(ctx, db.ListTaskCallbackDeliveriesByRunParams{
+		RunID:       runID,
+		OwnerUserID: userID,
+		Limit:       int32(limit),
+	})
+	if err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.ListTaskCallbackDeliveries")
+		return nil, httpx.Internal("查询 task callback 投递记录失败")
+	}
+	items := make([]TaskCallbackDeliveryResponse, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, taskCallbackDeliveryToResponse(row))
 	}
 	return items, nil
 }
@@ -980,6 +1004,31 @@ func taskCallbackSubscriptionToResponse(sub db.TaskCallbackSubscription) TaskCal
 		resp.AuthScheme = *sub.AuthScheme
 	}
 	return resp
+}
+
+func taskCallbackDeliveryToResponse(row db.ListTaskCallbackDeliveriesByRunRow) TaskCallbackDeliveryResponse {
+	item := TaskCallbackDeliveryResponse{
+		ID:             row.ID.String(),
+		SubscriptionID: row.SubscriptionID.String(),
+		RunEventID:     row.RunEventID.String(),
+		EventType:      row.EventType,
+		TargetURL:      row.TargetURL,
+		Status:         row.Status,
+		ResponseStatus: row.ResponseStatus,
+		ErrorMessage:   row.ErrorMessage,
+		AttemptCount:   row.AttemptCount,
+		CreatedAt:      row.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:      row.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	if row.NextRetryAt != nil {
+		t := row.NextRetryAt.UTC().Format(time.RFC3339)
+		item.NextRetryAt = &t
+	}
+	if row.DeliveredAt != nil {
+		t := row.DeliveredAt.UTC().Format(time.RFC3339)
+		item.DeliveredAt = &t
+	}
+	return item
 }
 
 // toDeliveryListItem db.WebhookDelivery → API DTO。
