@@ -33,6 +33,15 @@ type UserListResponse struct {
 	Offset int32      `json:"offset"`
 }
 
+type CreateUserRequest struct {
+	Email           string `json:"email"`
+	DisplayName     string `json:"display_name"`
+	Password        string `json:"password"`
+	IsAdmin         bool   `json:"is_admin"`
+	IsCreator       bool   `json:"is_creator"`
+	CreatorVerified bool   `json:"creator_verified"`
+}
+
 type UpdateUserFlagsRequest struct {
 	IsAdmin         *bool `json:"is_admin"`
 	IsCreator       *bool `json:"is_creator"`

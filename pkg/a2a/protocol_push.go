@@ -34,6 +34,9 @@ func taskCallbackConfigFromCallRequest(req *CallAgentRequest) *A2APushNotificati
 	if req.PushNotification != nil {
 		return req.PushNotification
 	}
+	if req.PushNotificationAlias != nil {
+		return req.PushNotificationAlias
+	}
 	return req.PushNotificationConfig
 }
 
@@ -56,6 +59,7 @@ func (s *Service) createCallerTaskCallback(
 	scheme, credentials := callbackAuthFromA2AConfig(*cfg)
 	resp, err := s.taskCallbackManager.CreateTaskCallbackSubscription(ctx, parsedRunID, userID, &webhook.CreateTaskCallbackRequest{
 		URL:             cfg.URL,
+		Secret:          cfg.Secret,
 		EventTypes:      defaultTaskCallbackEventTypes(taskCallbackEventTypesFromA2A(*cfg)),
 		AuthScheme:      scheme,
 		AuthCredentials: credentials,
@@ -110,6 +114,7 @@ func (s *Service) SetPushNotificationConfig(ctx context.Context, userID uuid.UUI
 	scheme, credentials := callbackAuthFromA2AConfig(cfg)
 	resp, err := s.taskCallbackManager.CreateTaskCallbackSubscription(ctx, runID, userID, &webhook.CreateTaskCallbackRequest{
 		URL:             cfg.URL,
+		Secret:          cfg.Secret,
 		EventTypes:      defaultTaskCallbackEventTypes(taskCallbackEventTypesFromA2A(cfg)),
 		AuthScheme:      scheme,
 		AuthCredentials: credentials,

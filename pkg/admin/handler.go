@@ -22,6 +22,7 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, adminMiddleware echo.
 	g := api.Group("/admin", jwtMiddleware, adminMiddleware)
 	g.GET("/summary", h.Summary)
 	g.GET("/users", h.ListUsers)
+	g.POST("/users", h.CreateUser)
 	g.PATCH("/users/:id/flags", h.UpdateUserFlags)
 	g.GET("/agents", h.ListAgents)
 	g.PATCH("/agents/:id/moderation", h.UpdateAgentModeration)
@@ -47,6 +48,18 @@ func (h *Handler) ListUsers(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) CreateUser(c echo.Context) error {
+	var req CreateUserRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	resp, err := h.svc.CreateUser(c.Request().Context(), &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusCreated, resp)
 }
 
 func (h *Handler) UpdateUserFlags(c echo.Context) error {

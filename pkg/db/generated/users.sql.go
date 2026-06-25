@@ -63,6 +63,60 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 	return u, err
 }
 
+const createAdminUser = `-- name: CreateAdminUser :one
+INSERT INTO users (
+    email,
+    password_hash,
+    display_name,
+    is_admin,
+    is_creator,
+    creator_verified
+) VALUES (
+    $1, $2, $3, $4, $5, $6
+)
+RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
+          avatar_url, is_creator, creator_verified, is_admin,
+          created_at, updated_at, deleted_at`
+
+// CreateAdminUserParams 入参（管理台创建用户）。
+type CreateAdminUserParams struct {
+	Email           string  `db:"email" json:"email"`
+	PasswordHash    *string `db:"password_hash" json:"password_hash"`
+	DisplayName     string  `db:"display_name" json:"display_name"`
+	IsAdmin         bool    `db:"is_admin" json:"is_admin"`
+	IsCreator       bool    `db:"is_creator" json:"is_creator"`
+	CreatorVerified bool    `db:"creator_verified" json:"creator_verified"`
+}
+
+// CreateAdminUser 管理台创建邮箱密码用户。
+func (q *Queries) CreateAdminUser(ctx context.Context, arg CreateAdminUserParams) (User, error) {
+	row := q.db.QueryRow(ctx, createAdminUser,
+		arg.Email,
+		arg.PasswordHash,
+		arg.DisplayName,
+		arg.IsAdmin,
+		arg.IsCreator,
+		arg.CreatorVerified,
+	)
+	var u User
+	err := row.Scan(
+		&u.ID,
+		&u.Email,
+		&u.PasswordHash,
+		&u.OauthProvider,
+		&u.OauthID,
+		&u.DisplayName,
+		&u.AvatarURL,
+		&u.IsCreator,
+		&u.CreatorVerified,
+		&u.IsAdmin,
+		&u.CreatedAt,
+		&u.UpdatedAt,
+		&u.DeletedAt,
+	)
+	return u, err
+}
+
 const getUserByEmail = `-- name: GetUserByEmail :one
 SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,
        avatar_url, is_creator, creator_verified, is_admin,

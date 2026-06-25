@@ -42,6 +42,7 @@ type A2APushNotificationConfig struct {
 	ID              string                     `json:"id,omitempty"`
 	URL             string                     `json:"url,omitempty"`
 	Token           string                     `json:"token,omitempty"`
+	Secret          string                     `json:"secret,omitempty"`
 	Authentication  *A2APushAuthenticationInfo `json:"authentication,omitempty"`
 	Metadata        map[string]interface{}     `json:"metadata,omitempty"`
 	EventTypes      []string                   `json:"eventTypes,omitempty"`

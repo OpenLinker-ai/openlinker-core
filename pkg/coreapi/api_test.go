@@ -183,6 +183,7 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		"POST /api/v1/creator/agents",
 		"GET /api/v1/admin/summary",
 		"GET /api/v1/admin/users",
+		"POST /api/v1/admin/users",
 		"PATCH /api/v1/admin/users/:id/flags",
 		"GET /api/v1/admin/agents",
 		"PATCH /api/v1/admin/agents/:id/moderation",

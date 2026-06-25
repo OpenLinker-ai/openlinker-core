@@ -89,6 +89,7 @@ type CallAgentRequest struct {
 	Metadata               map[string]interface{}     `json:"metadata,omitempty"`
 	TaskCallback           *A2APushNotificationConfig `json:"task_callback,omitempty"`
 	PushNotification       *A2APushNotificationConfig `json:"push_notification,omitempty"`
+	PushNotificationAlias  *A2APushNotificationConfig `json:"pushNotification,omitempty"`
 	PushNotificationConfig *A2APushNotificationConfig `json:"pushNotificationConfig,omitempty"`
 }
 

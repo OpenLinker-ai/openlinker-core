@@ -8,9 +8,28 @@ import "time"
 // Input 必填，为创作者 endpoint 接收的入参（透传）。
 // Metadata 可选，平台原样转发给 endpoint，常用于 trace_id / 客户端版本等。
 type RunRequest struct {
-	AgentID  string                 `json:"agent_id" validate:"required,uuid"`
-	Input    map[string]interface{} `json:"input" validate:"required"`
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
+	AgentID                string                 `json:"agent_id" validate:"required,uuid"`
+	Input                  map[string]interface{} `json:"input" validate:"required"`
+	Metadata               map[string]interface{} `json:"metadata,omitempty"`
+	TaskCallback           *TaskCallbackConfig    `json:"task_callback,omitempty"`
+	PushNotification       *TaskCallbackConfig    `json:"push_notification,omitempty"`
+	PushNotificationAlias  *TaskCallbackConfig    `json:"pushNotification,omitempty"`
+	PushNotificationConfig *TaskCallbackConfig    `json:"pushNotificationConfig,omitempty"`
+}
+
+type TaskCallbackAuthentication struct {
+	Scheme      string `json:"scheme,omitempty"`
+	Credentials string `json:"credentials,omitempty"`
+}
+
+type TaskCallbackConfig struct {
+	URL             string                      `json:"url,omitempty"`
+	Token           string                      `json:"token,omitempty"`
+	Secret          string                      `json:"secret,omitempty"`
+	Authentication  *TaskCallbackAuthentication `json:"authentication,omitempty"`
+	Metadata        map[string]interface{}      `json:"metadata,omitempty"`
+	EventTypes      []string                    `json:"eventTypes,omitempty"`
+	EventTypesAlias []string                    `json:"event_types,omitempty"`
 }
 
 // RunResponse POST /api/v1/run 同步响应体，或 POST /api/v1/runs 异步启动响应体。

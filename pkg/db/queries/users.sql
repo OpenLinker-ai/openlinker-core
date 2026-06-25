@@ -14,6 +14,22 @@ RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
           avatar_url, is_creator, creator_verified, is_admin,
           created_at, updated_at, deleted_at;
 
+-- name: CreateAdminUser :one
+-- 管理台创建邮箱密码用户，可同时设置管理/创作者标志。
+INSERT INTO users (
+    email,
+    password_hash,
+    display_name,
+    is_admin,
+    is_creator,
+    creator_verified
+) VALUES (
+    $1, $2, $3, $4, $5, $6
+)
+RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
+          avatar_url, is_creator, creator_verified, is_admin,
+          created_at, updated_at, deleted_at;
+
 -- name: GetUserByEmail :one
 -- 按 email 查活跃用户
 SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,

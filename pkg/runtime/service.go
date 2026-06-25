@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -36,6 +37,7 @@ const errMsgMaxLen = 500
 const defaultRunEventsLimit int32 = 100
 const maxRunEventsLimit int32 = 500
 const maxAgentResponseEvents = 50
+const taskCallbackSecretByteLen = 32
 const maxRunMessageContentLen = 10000
 const runtimePullClaimTTL = 5 * time.Minute
 const runtimePullEmptyClaimRetryAfter = 30 * time.Second
@@ -109,6 +111,7 @@ type runInvocation struct {
 	cost                 int32
 	revenue              int32
 	req                  *RunRequest
+	taskCallback         *RunTaskCallbackResponse
 	settle               bool
 	delegation           *Delegation
 	runtimePullAvailable bool
@@ -118,6 +121,15 @@ type createRunOptions struct {
 	delegation                   *Delegation
 	settle                       bool
 	allowOfflineRuntimePullQueue bool
+}
+
+type preparedTaskCallbackSubscription struct {
+	targetURL       string
+	secret          string
+	eventTypes      []string
+	authScheme      *string
+	authCredentials *string
+	metadata        []byte
 }
 
 // Delegation describes an Agent-mediated child run executed within an active parent run.
@@ -345,6 +357,10 @@ func (s *Service) createRunningRun(
 	default:
 		return nil, nil, httpx.BadRequest("source 取值非法")
 	}
+	taskCallback, err := s.prepareTaskCallbackSubscription(taskCallbackConfigFromRunRequest(req))
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// 1. 校验 agent
 	agentID, err := uuid.Parse(req.AgentID)
@@ -414,6 +430,7 @@ func (s *Service) createRunningRun(
 
 	// 4. 事务 A：扣余额（如配置了 charger） + 创建 run
 	var runID uuid.UUID
+	var taskCallbackResp *RunTaskCallbackResponse
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
@@ -440,6 +457,22 @@ func (s *Service) createRunningRun(
 			return createErr
 		}
 		runID = run.ID
+		if taskCallback != nil {
+			sub, createErr := q.CreateTaskCallbackSubscription(ctx, db.CreateTaskCallbackSubscriptionParams{
+				RunID:           runID,
+				OwnerUserID:     userID,
+				TargetURL:       taskCallback.targetURL,
+				Secret:          taskCallback.secret,
+				EventTypes:      taskCallback.eventTypes,
+				AuthScheme:      taskCallback.authScheme,
+				AuthCredentials: taskCallback.authCredentials,
+				Metadata:        taskCallback.metadata,
+			})
+			if createErr != nil {
+				return createErr
+			}
+			taskCallbackResp = runTaskCallbackResponseFromSubscription(sub, taskCallback.secret)
+		}
 		var parentRunID *uuid.UUID
 		if opts.delegation != nil {
 			parentRunID = &opts.delegation.ParentRunID
@@ -511,15 +544,17 @@ func (s *Service) createRunningRun(
 		cost:                 cost,
 		revenue:              revenue,
 		req:                  req,
+		taskCallback:         taskCallbackResp,
 		settle:               opts.settle,
 		delegation:           opts.delegation,
 		runtimePullAvailable: runtimePullAvailable,
 	}
 	resp := &RunResponse{
-		RunID:     runID.String(),
-		Status:    "running",
-		CostCents: cost,
-		Source:    source,
+		RunID:        runID.String(),
+		Status:       "running",
+		CostCents:    cost,
+		Source:       source,
+		TaskCallback: taskCallbackResp,
 	}
 	if opts.delegation != nil {
 		resp.ParentRunID = opts.delegation.ParentRunID.String()
@@ -552,6 +587,158 @@ func platformFeeCents(cost int32, rate float64) int32 {
 		return cost
 	}
 	return fee
+}
+
+func taskCallbackConfigFromRunRequest(req *RunRequest) *TaskCallbackConfig {
+	if req == nil {
+		return nil
+	}
+	if req.TaskCallback != nil {
+		return req.TaskCallback
+	}
+	if req.PushNotification != nil {
+		return req.PushNotification
+	}
+	if req.PushNotificationAlias != nil {
+		return req.PushNotificationAlias
+	}
+	return req.PushNotificationConfig
+}
+
+func (s *Service) prepareTaskCallbackSubscription(cfg *TaskCallbackConfig) (*preparedTaskCallbackSubscription, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	targetURL := strings.TrimSpace(cfg.URL)
+	if targetURL == "" {
+		return nil, httpx.BadRequest("task_callback.url 不能为空")
+	}
+	allowLocalHTTP := s.cfg != nil && s.cfg.AllowLocalHTTPEndpoints
+	if err := endpointurl.Validate(targetURL, allowLocalHTTP); err != nil {
+		return nil, httpx.BadRequest("task_callback.url 必须是 HTTPS；本地开发需开启 ALLOW_LOCAL_HTTP_ENDPOINTS 后才允许 loopback HTTP")
+	}
+	eventTypes, err := normalizeRunTaskCallbackEventTypes(taskCallbackEventTypesFromRunConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
+	metadataMap := cfg.Metadata
+	if metadataMap == nil {
+		metadataMap = map[string]interface{}{}
+	}
+	metadata, err := json.Marshal(metadataMap)
+	if err != nil {
+		return nil, httpx.BadRequest("task_callback.metadata 格式错误")
+	}
+	secret := strings.TrimSpace(cfg.Secret)
+	if secret == "" {
+		generated, err := generateRunTaskCallbackSecret()
+		if err != nil {
+			log.Error().Err(err).Msg("runtime.prepareTaskCallbackSubscription: generate secret")
+			return nil, httpx.Internal("生成 task callback secret 失败")
+		}
+		secret = generated
+	}
+	authScheme, authCredentials := callbackAuthFromRunConfig(cfg)
+	return &preparedTaskCallbackSubscription{
+		targetURL:       targetURL,
+		secret:          secret,
+		eventTypes:      eventTypes,
+		authScheme:      stringPtrOrNil(authScheme),
+		authCredentials: stringPtrOrNil(authCredentials),
+		metadata:        metadata,
+	}, nil
+}
+
+func taskCallbackEventTypesFromRunConfig(cfg *TaskCallbackConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	if len(cfg.EventTypes) > 0 {
+		return cfg.EventTypes
+	}
+	return cfg.EventTypesAlias
+}
+
+func normalizeRunTaskCallbackEventTypes(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return []string{"run.completed", "run.failed", "run.canceled"}, nil
+	}
+	allowed := map[string]struct{}{
+		"run.created":                  {},
+		"run.started":                  {},
+		"run.dispatch.pending":         {},
+		"run.dispatch.claimed":         {},
+		"run.requirements.snapshotted": {},
+		"run.message.delta":            {},
+		"run.artifact.delta":           {},
+		"run.status.changed":           {},
+		"run.child.created":            {},
+		"run.child.completed":          {},
+		"run.completed":                {},
+		"run.failed":                   {},
+		"run.canceled":                 {},
+	}
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, eventType := range raw {
+		eventType = strings.TrimSpace(eventType)
+		if eventType == "" {
+			continue
+		}
+		if _, ok := allowed[eventType]; !ok {
+			return nil, httpx.BadRequest("task_callback.event_types 包含不支持的事件类型")
+		}
+		if _, ok := seen[eventType]; ok {
+			continue
+		}
+		seen[eventType] = struct{}{}
+		out = append(out, eventType)
+	}
+	if len(out) == 0 {
+		return nil, httpx.BadRequest("task_callback.event_types 至少包含一个事件类型")
+	}
+	return out, nil
+}
+
+func callbackAuthFromRunConfig(cfg *TaskCallbackConfig) (string, string) {
+	if cfg == nil {
+		return "", ""
+	}
+	if cfg.Authentication != nil {
+		scheme := strings.TrimSpace(cfg.Authentication.Scheme)
+		credentials := strings.TrimSpace(cfg.Authentication.Credentials)
+		if scheme != "" && credentials != "" {
+			return scheme, credentials
+		}
+	}
+	if strings.TrimSpace(cfg.Token) != "" {
+		return "Bearer", strings.TrimSpace(cfg.Token)
+	}
+	return "", ""
+}
+
+func generateRunTaskCallbackSecret() (string, error) {
+	buf := make([]byte, taskCallbackSecretByteLen)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func runTaskCallbackResponseFromSubscription(sub db.TaskCallbackSubscription, secret string) *RunTaskCallbackResponse {
+	resp := &RunTaskCallbackResponse{
+		ID:                  sub.ID.String(),
+		RunID:               sub.RunID.String(),
+		TargetURL:           sub.TargetURL,
+		EventTypes:          sub.EventTypes,
+		AuthScheme:          stringPtrValue(sub.AuthScheme),
+		Status:              sub.Status,
+		ConsecutiveFailures: sub.ConsecutiveFailures,
+		Secret:              secret,
+		CreatedAt:           sub.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:           sub.UpdatedAt.Format(time.RFC3339),
+	}
+	return resp
 }
 
 func (s *Service) executeRunAsync(invocation *runInvocation) {
@@ -614,6 +801,9 @@ func (s *Service) executeRun(ctx context.Context, invocation *runInvocation) *Ru
 			"status":          resp.Status,
 		})
 		decorateNextAction(resp)
+	}
+	if invocation.taskCallback != nil {
+		resp.TaskCallback = invocation.taskCallback
 	}
 	s.attachRunRequirementEvidence(ctx, invocation.runID, resp)
 	return resp

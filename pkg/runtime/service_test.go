@@ -538,6 +538,15 @@ func makeRunReq(agentID uuid.UUID, input map[string]interface{}) *runtime.RunReq
 	}
 }
 
+type recordingRuntimeTaskCallbackEnqueuer struct {
+	events chan db.RunEvent
+}
+
+func (r *recordingRuntimeTaskCallbackEnqueuer) EnqueueRunEvent(_ context.Context, event db.RunEvent) error {
+	r.events <- event
+	return nil
+}
+
 // mustParseUUID 测试快捷：把 RunResponse.RunID（string）解析回 uuid.UUID。
 func mustParseUUID(t *testing.T, s string) uuid.UUID {
 	t.Helper()
@@ -607,6 +616,64 @@ func TestRun_HappyPath(t *testing.T) {
 	assert.Equal(t, "ok", artifacts[0].Content["text"])
 
 	assertNoLostMoney(t, pool)
+}
+
+func TestRun_CreatesCallerOwnedTaskCallbackSubscription(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	taskCallbackEvents := &recordingRuntimeTaskCallbackEnqueuer{events: make(chan db.RunEvent, 2)}
+	svc.SetTaskCallbackEnqueuer(taskCallbackEvents)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"callback ok"}}`))
+	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
+	req := makeRunReq(agentID, map[string]any{"q": "callback"})
+	req.PushNotificationConfig = &runtime.TaskCallbackConfig{
+		URL:        "https://caller.example.com/a2a/events",
+		Token:      "caller-token",
+		Secret:     "caller-secret",
+		EventTypes: []string{"run.completed", "run.failed"},
+		Metadata:   map[string]interface{}{"client": "integration"},
+	}
+
+	resp, err := svc.Run(ctx, userID, req, "api")
+	require.NoError(t, err)
+	require.Equal(t, "success", resp.Status)
+	require.NotNil(t, resp.TaskCallback)
+	assert.Equal(t, resp.RunID, resp.TaskCallback.RunID)
+	assert.Equal(t, "https://caller.example.com/a2a/events", resp.TaskCallback.TargetURL)
+	assert.Equal(t, []string{"run.completed", "run.failed"}, resp.TaskCallback.EventTypes)
+	assert.Equal(t, "Bearer", resp.TaskCallback.AuthScheme)
+	assert.Equal(t, "caller-secret", resp.TaskCallback.Secret)
+
+	runID := mustParseUUID(t, resp.RunID)
+	subs, err := db.New(pool).ListTaskCallbackSubscriptionsByRun(ctx, db.ListTaskCallbackSubscriptionsByRunParams{
+		RunID:       runID,
+		OwnerUserID: userID,
+	})
+	require.NoError(t, err)
+	require.Len(t, subs, 1)
+	assert.Equal(t, userID, subs[0].OwnerUserID)
+	assert.Nil(t, subs[0].CallerAgentID)
+	assert.Equal(t, "active", subs[0].Status)
+	require.NotNil(t, subs[0].AuthScheme)
+	require.NotNil(t, subs[0].AuthCredentials)
+	assert.Equal(t, "Bearer", *subs[0].AuthScheme)
+	assert.Equal(t, "caller-token", *subs[0].AuthCredentials)
+	assert.Equal(t, "caller-secret", subs[0].Secret)
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal(subs[0].Metadata, &metadata))
+	assert.Equal(t, "integration", metadata["client"])
+
+	select {
+	case event := <-taskCallbackEvents.events:
+		assert.Equal(t, runID, event.RunID)
+		assert.Equal(t, "run.completed", event.EventType)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected run.completed task callback trigger")
+	}
 }
 
 func TestRun_WithTaskRequirementEvidence(t *testing.T) {

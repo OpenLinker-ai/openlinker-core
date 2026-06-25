@@ -3,12 +3,14 @@ package admin
 import (
 	"context"
 	"errors"
+	"net/mail"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/crypto/bcrypt"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
@@ -17,6 +19,7 @@ import (
 const (
 	defaultLimit = int32(25)
 	maxLimit     = int32(100)
+	bcryptCost   = 12
 )
 
 type Service struct {
@@ -68,6 +71,60 @@ func (s *Service) ListUsers(ctx context.Context, query, role string, limit, offs
 		out = append(out, toUserItem(&user))
 	}
 	return &UserListResponse{Items: out, Total: total, Limit: limit, Offset: offset}, nil
+}
+
+func (s *Service) CreateUser(ctx context.Context, req *CreateUserRequest) (*UserItem, error) {
+	if req == nil {
+		return nil, httpx.BadRequest("请求体不能为空")
+	}
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	displayName := strings.TrimSpace(req.DisplayName)
+	password := req.Password
+
+	if !validEmail(email) {
+		return nil, httpx.Unprocessable("邮箱格式不正确")
+	}
+	if len(displayName) < 2 || len(displayName) > 50 {
+		return nil, httpx.Unprocessable("显示名称长度需为 2-50 个字符")
+	}
+	if len(password) < 8 || len(password) > 72 {
+		return nil, httpx.Unprocessable("密码长度需为 8-72 个字符")
+	}
+
+	isAdmin := req.IsAdmin
+	isCreator := req.IsCreator
+	creatorVerified := req.CreatorVerified
+	if creatorVerified {
+		isCreator = true
+	}
+	if !isCreator {
+		creatorVerified = false
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	if err != nil {
+		log.Error().Err(err).Msg("admin.CreateUser: bcrypt")
+		return nil, httpx.Internal("密码处理失败")
+	}
+	hashStr := string(hashed)
+
+	created, err := s.queries.CreateAdminUser(ctx, db.CreateAdminUserParams{
+		Email:           email,
+		PasswordHash:    &hashStr,
+		DisplayName:     displayName,
+		IsAdmin:         isAdmin,
+		IsCreator:       isCreator,
+		CreatorVerified: creatorVerified,
+	})
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, httpx.Conflict("邮箱已注册")
+		}
+		log.Error().Err(err).Msg("admin.CreateUser")
+		return nil, httpx.Internal("创建用户失败")
+	}
+	item := toUserItem(&created)
+	return &item, nil
 }
 
 func (s *Service) UpdateUserFlags(ctx context.Context, actorID, targetID uuid.UUID, req *UpdateUserFlagsRequest) (*UserItem, error) {
@@ -251,6 +308,25 @@ func normalizeAgentFilter(value string, allowedValues map[string]bool) string {
 
 func allowed(value string, allowedValues map[string]bool) bool {
 	return allowedValues[value]
+}
+
+func validEmail(email string) bool {
+	if email == "" || len(email) > 120 || strings.ContainsAny(email, " \t\r\n") {
+		return false
+	}
+	address, err := mail.ParseAddress(email)
+	if err != nil {
+		return false
+	}
+	return address.Address == email
+}
+
+func isUniqueViolation(err error) bool {
+	type sqlState interface {
+		SQLState() string
+	}
+	var state sqlState
+	return errors.As(err, &state) && state.SQLState() == "23505"
 }
 
 func firstNonEmpty(value, fallback string) string {

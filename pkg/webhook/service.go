@@ -453,9 +453,13 @@ func (s *Service) CreateTaskCallbackSubscription(ctx context.Context, runID, use
 		return nil, httpx.NotFound("调用记录不存在")
 	}
 
-	secret, err := generateSecret()
-	if err != nil {
-		return nil, httpx.Internal("生成 task callback secret 失败")
+	secret := strings.TrimSpace(req.Secret)
+	if secret == "" {
+		generated, err := generateSecret()
+		if err != nil {
+			return nil, httpx.Internal("生成 task callback secret 失败")
+		}
+		secret = generated
 	}
 	sub, err := s.queries.CreateTaskCallbackSubscription(ctx, db.CreateTaskCallbackSubscriptionParams{
 		RunID:           runID,

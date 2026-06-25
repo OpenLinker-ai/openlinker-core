@@ -295,7 +295,8 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 		ParentRunID: parentRunID.String(), TargetAgentID: targetID.String(),
 		Reason: "summarize", Input: map[string]any{"q": "hello"},
 		TaskCallback: &a2a.A2APushNotificationConfig{
-			URL: pushServer.URL + "/a2a/events",
+			URL:    pushServer.URL + "/a2a/events",
+			Secret: "caller-a2a-secret",
 			EventTypesAlias: []string{
 				"run.completed",
 				"run.failed",
@@ -312,7 +313,7 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	require.NotNil(t, child.TaskCallback)
 	assert.Equal(t, pushServer.URL+"/a2a/events", child.TaskCallback.TargetURL)
 	assert.Equal(t, []string{"run.completed", "run.failed", "run.canceled"}, child.TaskCallback.EventTypes)
-	assert.NotEmpty(t, child.TaskCallback.Secret)
+	assert.Equal(t, "caller-a2a-secret", child.TaskCallback.Secret)
 	assert.Empty(t, receivedHeader)
 	assert.Equal(t, parentRunID.String(), receivedParent)
 	assert.Equal(t, child.RunID, receivedA2A.CurrentRunID)

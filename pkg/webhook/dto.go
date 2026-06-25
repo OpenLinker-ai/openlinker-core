@@ -34,6 +34,7 @@ type DeliveryListItem struct {
 // CreateTaskCallbackRequest POST /api/v1/runs/:id/task-callbacks.
 type CreateTaskCallbackRequest struct {
 	URL             string                 `json:"target_url" validate:"required,url,max=500"`
+	Secret          string                 `json:"secret,omitempty" validate:"omitempty,max=1000"`
 	EventTypes      []string               `json:"event_types,omitempty" validate:"omitempty,dive,oneof=run.created run.started run.dispatch.pending run.dispatch.claimed run.requirements.snapshotted run.message.delta run.artifact.delta run.status.changed run.child.created run.child.completed run.completed run.failed run.canceled"`
 	AuthScheme      string                 `json:"auth_scheme,omitempty" validate:"omitempty,max=80"`
 	AuthCredentials string                 `json:"auth_credentials,omitempty" validate:"omitempty,max=1000"`

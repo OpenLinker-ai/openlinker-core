@@ -45,6 +45,27 @@ func TestUserQueriesScanRowsAndUseExpectedArgs(t *testing.T) {
 		t.Fatalf("CreateUser args = %#v", dbtx.queryRowArgs)
 	}
 
+	dbtx.row = fakeRow{values: userRow(userID, now, &passwordHash, nil, nil, nil, nil)}
+	adminCreated, err := q.CreateAdminUser(context.Background(), CreateAdminUserParams{
+		Email:           "admin-created@example.com",
+		PasswordHash:    &passwordHash,
+		DisplayName:     "Admin Created",
+		IsAdmin:         true,
+		IsCreator:       true,
+		CreatorVerified: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateAdminUser error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateAdminUser")
+	if adminCreated.ID != userID {
+		t.Fatalf("CreateAdminUser scan = %#v", adminCreated)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{"admin-created@example.com", &passwordHash, "Admin Created", true, true, true}) {
+		t.Fatalf("CreateAdminUser args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: userRow(userID, now, &passwordHash, &provider, &oauthID, &avatar, nil)}
 	got, err := q.GetUserByID(context.Background(), userID)
 	if err != nil {
 		t.Fatalf("GetUserByID error = %v", err)
