@@ -62,6 +62,16 @@ func TestAgentSlugTagsStatusAndSQLStateHelpers(t *testing.T) {
 	if got := normalizeAuthHeader(" \t "); got != nil {
 		t.Fatalf("normalizeAuthHeader(empty) = %#v, want nil", got)
 	}
+	existingHeader := "Bearer old"
+	if got := nextEndpointAuthHeader(&existingHeader, " \t ", false); got == nil || *got != "Bearer old" {
+		t.Fatalf("nextEndpointAuthHeader should preserve existing on blank incoming, got %#v", got)
+	}
+	if got := nextEndpointAuthHeader(&existingHeader, "  Bearer new  ", false); got == nil || *got != "Bearer new" {
+		t.Fatalf("nextEndpointAuthHeader should replace with trimmed incoming, got %#v", got)
+	}
+	if got := nextEndpointAuthHeader(&existingHeader, "Bearer ignored", true); got != nil {
+		t.Fatalf("nextEndpointAuthHeader(clear) = %#v, want nil", got)
+	}
 
 	for _, tc := range []struct {
 		name string

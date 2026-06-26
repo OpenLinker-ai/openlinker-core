@@ -187,7 +187,7 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 	if err != nil {
 		return nil, err
 	}
-	authHeader := normalizeAuthHeader(req.EndpointAuthHeader)
+	authHeader := nextEndpointAuthHeader(existing.EndpointAuthHeader, req.EndpointAuthHeader, req.ClearEndpointAuth)
 	visibility := strings.TrimSpace(req.Visibility)
 	if visibility == "" {
 		visibility = existing.Visibility
@@ -769,6 +769,16 @@ func normalizeAuthHeader(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+func nextEndpointAuthHeader(existing *string, incoming string, clear bool) *string {
+	if clear {
+		return nil
+	}
+	if strings.TrimSpace(incoming) == "" {
+		return existing
+	}
+	return normalizeAuthHeader(incoming)
 }
 
 // normalizeTagsForInsert 去前后空格、过滤空 tag、转小写。

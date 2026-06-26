@@ -209,6 +209,16 @@ func readAgentStatus(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) (statu
 	return
 }
 
+func readAgentEndpointAuthHeader(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) *string {
+	t.Helper()
+	var header *string
+	err := pool.QueryRow(context.Background(),
+		`SELECT endpoint_auth_header FROM agents WHERE id=$1`, agentID).
+		Scan(&header)
+	require.NoError(t, err)
+	return header
+}
+
 // forceAgentStatus 直接 SQL 改写 agent 三维状态（为了测各种状态过渡）。
 // 接受旧 status 文案；映射如下：
 //
@@ -380,6 +390,35 @@ func TestUpdateAgent_HappyPath(t *testing.T) {
 	assert.Equal(t, "Updated Name", resp.Name)
 	assert.Equal(t, int32(999), resp.PricePerCallCents)
 	assert.ElementsMatch(t, []string{"updated"}, resp.Tags)
+
+	header := readAgentEndpointAuthHeader(t, pool, agentID)
+	require.NotNil(t, header)
+	assert.Equal(t, "Bearer new-secret", *header)
+
+	resp, err = svc.UpdateAgent(ctx, agentID, uid, &agent.UpdateAgentRequest{
+		Name:              "Updated Name Again",
+		Description:       "Credentials should be preserved when omitted.",
+		EndpointURL:       "https://example.com/v3",
+		PricePerCallCents: 111,
+		Tags:              []string{"preserve"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Updated Name Again", resp.Name)
+	header = readAgentEndpointAuthHeader(t, pool, agentID)
+	require.NotNil(t, header)
+	assert.Equal(t, "Bearer new-secret", *header)
+
+	resp, err = svc.UpdateAgent(ctx, agentID, uid, &agent.UpdateAgentRequest{
+		Name:              "Updated Without Auth",
+		Description:       "Credentials should be cleared only when explicitly requested.",
+		EndpointURL:       "https://example.com/v4",
+		PricePerCallCents: 112,
+		Tags:              []string{"cleared"},
+		ClearEndpointAuth: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Updated Without Auth", resp.Name)
+	assert.Nil(t, readAgentEndpointAuthHeader(t, pool, agentID))
 }
 
 func TestSetVisibility_HappyPath(t *testing.T) {
