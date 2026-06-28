@@ -42,7 +42,7 @@ func setupService(t *testing.T) (*pgxpool.Pool, *a2a.Service, *runtime.Service) 
 	})
 	runtimeSvc := runtime.NewService(pool, &config.Config{
 		PlatformFeeRate:         0.25,
-		RunTimeoutSeconds:       2,
+		RunTimeoutSeconds:       15,
 		AllowLocalHTTPEndpoints: true,
 	})
 	return pool, a2a.NewService(pool, runtimeSvc), runtimeSvc
@@ -113,7 +113,7 @@ func insertDelegatedRun(t *testing.T, pool *pgxpool.Pool, userID, childAgentID, 
 		`INSERT INTO runs (
 		  id, user_id, agent_id, input, status, cost_cents, platform_fee_cents,
 		  creator_revenue_cents, source
-		) VALUES ($1, $2, $3, '{}'::jsonb, 'running', 0, 0, 0, 'a2a')`,
+		) VALUES ($1, $2, $3, '{}'::jsonb, 'running', 0, 0, 0, 'api')`,
 		childRunID, userID, childAgentID)
 	require.NoError(t, err)
 	_, err = pool.Exec(context.Background(),

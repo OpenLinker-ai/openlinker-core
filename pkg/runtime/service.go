@@ -1141,6 +1141,9 @@ func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string
 		return nil, httpx.NotFound("Agent 不存在")
 	}
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, httpx.Internal("查询 Agent 失败")
 	}
 	if !isQueuedRuntimeMode(agent.ConnectionMode) {
@@ -1193,6 +1196,9 @@ func (s *Service) claimRuntimePullRunOnce(ctx context.Context, token db.AgentRun
 		return nil, nil
 	}
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		log.Error().Err(err).Str("agent_id", token.AgentID.String()).Msg("runtime.ClaimRuntimePullRun")
 		return nil, httpx.Internal("领取任务失败")
 	}
@@ -1464,6 +1470,9 @@ func (s *Service) verifyRuntimeTokenAny(ctx context.Context, plaintext string, a
 	}
 	tokens, err := s.queries.ListActiveAgentRuntimeTokensByPrefix(ctx, plaintext[:runtimeTokenPrefixLen])
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return db.AgentRuntimeToken{}, ctxErr
+		}
 		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
 	}
 	for _, token := range tokens {
