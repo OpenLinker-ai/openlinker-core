@@ -33,6 +33,7 @@ type A2AMessageSendParams struct {
 type A2ASendConfiguration struct {
 	AcceptedOutputModes        []string                       `json:"acceptedOutputModes,omitempty"`
 	Blocking                   *bool                          `json:"blocking,omitempty"`
+	ReturnImmediately          *bool                          `json:"returnImmediately,omitempty"`
 	PushNotificationConfig     *A2APushNotificationConfig     `json:"pushNotificationConfig,omitempty"`
 	TaskPushNotificationConfig *A2ATaskPushNotificationConfig `json:"taskPushNotificationConfig,omitempty"`
 	HistoryLength              *int                           `json:"historyLength,omitempty"`

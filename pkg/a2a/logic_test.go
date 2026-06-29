@@ -1456,7 +1456,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 	}{
 		{
 			name:   "message send",
-			body:   `{"jsonrpc":"2.0","id":"send","method":"SendMessage","params":{"message":{"messageId":"msg-send","contextId":"ctx-jsonrpc","role":"user","parts":[{"text":"hello"}]}}}`,
+			body:   `{"jsonrpc":"2.0","id":"send","method":"SendMessage","params":{"message":{"messageId":"msg-send","contextId":"ctx-jsonrpc","role":"user","parts":[{"text":"hello"}]},"configuration":{"returnImmediately":false,"acceptedOutputModes":["text/plain"]}}}`,
 			scopes: []string{"agents:run"},
 			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
 				if !svc.called("message/send") || svc.slug != slug || svc.userID != userID {
@@ -1464,6 +1464,9 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 				}
 				if svc.sendParams.Metadata["a2a_protocol_version"] != a2aProtocolVersionCurrent {
 					t.Fatalf("message/send metadata = %#v", svc.sendParams.Metadata)
+				}
+				if svc.sendParams.Configuration == nil || svc.sendParams.Configuration.ReturnImmediately == nil || *svc.sendParams.Configuration.ReturnImmediately {
+					t.Fatalf("message/send configuration = %#v", svc.sendParams.Configuration)
 				}
 			},
 		},
