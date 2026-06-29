@@ -161,7 +161,8 @@ See [SECURITY.md](./SECURITY.md) for vulnerability reporting.
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md).
+See [CONTRIBUTING.md](./CONTRIBUTING.md) and
+[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md).
 
 ## License
 

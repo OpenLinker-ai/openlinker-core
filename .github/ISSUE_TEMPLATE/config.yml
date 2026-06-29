@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security reports
+    url: https://github.com/OpenLinker-ai/openlinker-core/security
+    about: Do not open public vulnerability issues. Use GitHub private vulnerability reporting when enabled, or follow SECURITY.md.
