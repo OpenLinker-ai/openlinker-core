@@ -872,6 +872,80 @@ func TestProtocolStreamEventsExposeStatusAndArtifactUpdates(t *testing.T) {
 	assert.True(t, sawArtifact, "expected artifact-update from run.artifact.delta")
 }
 
+func TestProtocolMessageReturnImmediatelyStartsAsyncTask(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+
+	called := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-called:
+		default:
+			close(called)
+		}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"summary":"async done"}}`))
+	}))
+	defer server.Close()
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	defaultTransport := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
+
+	agentID := insertAgent(t, pool, owner, server.URL)
+	slug := "a2a-" + agentID.String()[:8]
+	returnImmediately := true
+	done := make(chan struct {
+		task *a2a.A2ATask
+		err  error
+	}, 1)
+	go func() {
+		task, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+			Message: a2a.A2AMessage{
+				MessageID: "msg-return-immediately",
+				ContextID: "ctx-return-immediately",
+				Role:      "ROLE_USER",
+				Parts:     []map[string]any{{"text": "return now"}},
+			},
+			Configuration: &a2a.A2ASendConfiguration{ReturnImmediately: &returnImmediately},
+		})
+		done <- struct {
+			task *a2a.A2ATask
+			err  error
+		}{task: task, err: err}
+	}()
+
+	var result struct {
+		task *a2a.A2ATask
+		err  error
+	}
+	select {
+	case result = <-done:
+	case <-time.After(500 * time.Millisecond):
+		close(release)
+		t.Fatal("SendProtocolMessage blocked despite returnImmediately=true")
+	}
+	require.NoError(t, result.err)
+	require.NotNil(t, result.task)
+	assert.Equal(t, "working", result.task.Status.State)
+	assert.Equal(t, "ctx-return-immediately", result.task.ContextID)
+
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("async endpoint was not called")
+	}
+	close(release)
+}
+
 func TestProtocolListTasksSupportsPagingFiltersAndArtifacts(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	owner := insertCreator(t, pool)

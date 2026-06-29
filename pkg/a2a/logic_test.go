@@ -1619,6 +1619,58 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 	}
 }
 
+func TestA2AJSONRPCCurrentProtocolShapes(t *testing.T) {
+	userID := uuid.MustParse("8582c7a4-0f02-4895-8570-7c7cce357e5f")
+	taskID := uuid.MustParse("c93dbab2-404f-4460-bcb7-0f17ece85567").String()
+	const slug = "agent-one"
+
+	call := func(t *testing.T, h *Handler, body string) map[string]interface{} {
+		t.Helper()
+		c := newA2ATestContext(&a2aHandlerRequest{
+			method:     http.MethodPost,
+			target:     "/?version=1.0",
+			body:       body,
+			userID:     userID.String(),
+			authMethod: "apikey",
+			scopes:     []string{"agents:run", "runs:read"},
+			params:     map[string]string{"slug": slug},
+		})
+		require.NoError(t, h.JSONRPC(c))
+		rec := c.(*a2ATestContext).rec
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp map[string]interface{}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.NotContains(t, resp, "error")
+		result, ok := resp["result"].(map[string]interface{})
+		require.True(t, ok, "result body = %s", rec.Body.String())
+		return result
+	}
+
+	svc := newFakeA2AService(taskID)
+	h := NewHandler(svc)
+	sendResult := call(t, h, `{"jsonrpc":"2.0","id":"send","method":"SendMessage","params":{"message":{"messageId":"msg-send","role":"ROLE_USER","parts":[{"text":"hello"}]}}}`)
+	task := sendResult["task"].(map[string]interface{})
+	assert.Equal(t, taskID, task["id"])
+	assert.NotContains(t, task, "kind")
+	assert.Equal(t, "TASK_STATE_COMPLETED", task["status"].(map[string]interface{})["state"])
+	assert.NotContains(t, sendResult, "id")
+
+	svc = newFakeA2AService(taskID)
+	h = NewHandler(svc)
+	pushSet := call(t, h, `{"jsonrpc":"2.0","id":"push-set","method":"CreateTaskPushNotificationConfig","params":{"taskId":"`+taskID+`","url":"https://hooks.example/a2a","token":"secret"}}`)
+	assert.Equal(t, taskID, svc.pushParams.TaskID)
+	assert.Equal(t, "https://hooks.example/a2a", svc.pushParams.URL)
+	assert.Equal(t, "https://hooks.example/a2a", pushSet["url"])
+	assert.NotContains(t, pushSet, "pushNotificationConfig")
+
+	svc = newFakeA2AService(taskID)
+	h = NewHandler(svc)
+	pushList := call(t, h, `{"jsonrpc":"2.0","id":"push-list","method":"ListTaskPushNotificationConfigs","params":{"taskId":"`+taskID+`"}}`)
+	configs := pushList["configs"].([]interface{})
+	assert.Equal(t, taskID, configs[0].(map[string]interface{})["taskId"])
+	assert.NotContains(t, pushList, "items")
+}
+
 func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 	userID := uuid.MustParse("8582c7a4-0f02-4895-8570-7c7cce357e5f")
 	taskID := uuid.MustParse("c93dbab2-404f-4460-bcb7-0f17ece85567").String()
@@ -1688,6 +1740,9 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 				}
 				if got := c.Response().Header().Get(a2aVersionHeader); got != a2aProtocolVersionCurrent {
 					t.Fatalf("message send version header = %q", got)
+				}
+				if got := c.Response().Header().Get(echo.HeaderContentType); !strings.Contains(got, a2aJSONContentType) {
+					t.Fatalf("message send content-type = %q", got)
 				}
 			},
 		},
@@ -1770,7 +1825,7 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 			},
 			want: http.StatusCreated,
 			assert: func(t *testing.T, _ echo.Context, svc *fakeA2AService, _ *fakeA2ACardProvider) {
-				if !svc.called("push/set") || svc.pushParams.ID != taskID || svc.pushParams.PushNotificationConfig.URL != "https://hooks.example/a2a" {
+				if !svc.called("push/set") || taskIDFromPushParams(&svc.pushParams) != taskID || pushConfigFromPushParams(&svc.pushParams).URL != "https://hooks.example/a2a" {
 					t.Fatalf("push set dispatch = calls=%v params=%#v", svc.calls, svc.pushParams)
 				}
 			},
@@ -2515,9 +2570,9 @@ func fakeA2ATask(taskID, state string) *A2ATask {
 }
 
 func fakeA2APushConfig(params *A2ATaskPushConfigParams) *A2ATaskPushNotificationConfig {
-	cfg := params.PushNotificationConfig
+	cfg := pushConfigFromPushParams(params)
 	if cfg.ID == "" {
-		cfg.ID = params.PushNotificationConfigID
+		cfg.ID = configIDFromPushParams(params)
 	}
 	if cfg.URL == "" {
 		cfg.URL = "https://hooks.example/a2a"
@@ -2526,7 +2581,16 @@ func fakeA2APushConfig(params *A2ATaskPushConfigParams) *A2ATaskPushNotification
 	if taskID == "" {
 		taskID = params.ID
 	}
-	return &A2ATaskPushNotificationConfig{TaskID: taskID, PushNotificationConfig: cfg}
+	return &A2ATaskPushNotificationConfig{
+		ID:                     cfg.ID,
+		TaskID:                 taskID,
+		URL:                    cfg.URL,
+		Token:                  cfg.Token,
+		Authentication:         cfg.Authentication,
+		Metadata:               cfg.Metadata,
+		EventTypes:             cfg.EventTypes,
+		PushNotificationConfig: cfg,
+	}
 }
 
 type fakeA2ACardProvider struct {
