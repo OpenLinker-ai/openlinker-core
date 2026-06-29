@@ -1456,7 +1456,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 	}{
 		{
 			name:   "message send",
-			body:   `{"jsonrpc":"2.0","id":"send","method":"message/send","params":{"message":{"messageId":"msg-send","contextId":"ctx-jsonrpc","role":"user","parts":[{"kind":"text","text":"hello"}]}}}`,
+			body:   `{"jsonrpc":"2.0","id":"send","method":"SendMessage","params":{"message":{"messageId":"msg-send","contextId":"ctx-jsonrpc","role":"user","parts":[{"text":"hello"}]}}}`,
 			scopes: []string{"agents:run"},
 			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
 				if !svc.called("message/send") || svc.slug != slug || svc.userID != userID {
@@ -1469,7 +1469,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 		},
 		{
 			name:      "message stream",
-			body:      `{"jsonrpc":"2.0","id":"stream","method":"message/stream","params":{"message":{"messageId":"msg-stream","role":"user","parts":[{"kind":"text","text":"stream"}]}}}`,
+			body:      `{"jsonrpc":"2.0","id":"stream","method":"SendStreamingMessage","params":{"message":{"messageId":"msg-stream","role":"user","parts":[{"text":"stream"}]}}}`,
 			scopes:    []string{"agents:run"},
 			streaming: true,
 			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
@@ -1480,7 +1480,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 		},
 		{
 			name:   "tasks get",
-			body:   `{"jsonrpc":"2.0","id":"get","method":"tasks/get","params":{"id":"` + taskID + `","historyLength":2}}`,
+			body:   `{"jsonrpc":"2.0","id":"get","method":"GetTask","params":{"id":"` + taskID + `","historyLength":2}}`,
 			scopes: []string{"runs:read"},
 			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
 				if !svc.called("tasks/get") || svc.taskID != taskID || svc.historyLength == nil || *svc.historyLength != 2 {
@@ -1490,7 +1490,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 		},
 		{
 			name:   "tasks list",
-			body:   `{"jsonrpc":"2.0","id":"list","method":"tasks/list","params":{"status":"completed","pageSize":7,"contextId":"ctx-jsonrpc","includeArtifacts":true}}`,
+			body:   `{"jsonrpc":"2.0","id":"list","method":"ListTasks","params":{"status":"completed","pageSize":7,"contextId":"ctx-jsonrpc","includeArtifacts":true}}`,
 			scopes: []string{"runs:read"},
 			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
 				if !svc.called("tasks/list") || svc.listParams.Status != "completed" || svc.listParams.PageSize == nil || *svc.listParams.PageSize != 7 {
@@ -1500,7 +1500,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 		},
 		{
 			name:   "tasks cancel",
-			body:   `{"jsonrpc":"2.0","id":"cancel","method":"tasks/cancel","params":{"id":"` + taskID + `"}}`,
+			body:   `{"jsonrpc":"2.0","id":"cancel","method":"CancelTask","params":{"id":"` + taskID + `"}}`,
 			scopes: []string{"agents:run"},
 			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
 				if !svc.called("tasks/cancel") || svc.taskID != taskID {
@@ -1510,7 +1510,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 		},
 		{
 			name:      "tasks resubscribe",
-			body:      `{"jsonrpc":"2.0","id":"resub","method":"tasks/resubscribe","params":{"id":"` + taskID + `"}}`,
+			body:      `{"jsonrpc":"2.0","id":"resub","method":"SubscribeToTask","params":{"id":"` + taskID + `"}}`,
 			scopes:    []string{"runs:read"},
 			streaming: true,
 			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
@@ -1521,7 +1521,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 		},
 		{
 			name:   "push set",
-			body:   `{"jsonrpc":"2.0","id":"push-set","method":"tasks/pushNotificationConfig/set","params":{"id":"` + taskID + `","pushNotificationConfig":{"url":"https://hooks.example/a2a","token":"secret"}}}`,
+			body:   `{"jsonrpc":"2.0","id":"push-set","method":"CreateTaskPushNotificationConfig","params":{"id":"` + taskID + `","pushNotificationConfig":{"url":"https://hooks.example/a2a","token":"secret"}}}`,
 			scopes: []string{"runs:read"},
 			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
 				if !svc.called("push/set") || svc.pushParams.ID != taskID || svc.pushParams.PushNotificationConfig.URL != "https://hooks.example/a2a" {
@@ -1531,7 +1531,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 		},
 		{
 			name:   "push get",
-			body:   `{"jsonrpc":"2.0","id":"push-get","method":"tasks/pushNotificationConfig/get","params":{"id":"` + taskID + `","pushNotificationConfigId":"cfg-1"}}`,
+			body:   `{"jsonrpc":"2.0","id":"push-get","method":"GetTaskPushNotificationConfig","params":{"id":"` + taskID + `","pushNotificationConfigId":"cfg-1"}}`,
 			scopes: []string{"runs:read"},
 			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
 				if !svc.called("push/get") || svc.pushParams.PushNotificationConfigID != "cfg-1" {
@@ -1541,7 +1541,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 		},
 		{
 			name:   "push list",
-			body:   `{"jsonrpc":"2.0","id":"push-list","method":"tasks/pushNotificationConfig/list","params":{"id":"` + taskID + `"}}`,
+			body:   `{"jsonrpc":"2.0","id":"push-list","method":"ListTaskPushNotificationConfigs","params":{"id":"` + taskID + `"}}`,
 			scopes: []string{"runs:read"},
 			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
 				if !svc.called("push/list") || svc.pushParams.ID != taskID {
@@ -1551,7 +1551,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 		},
 		{
 			name:   "push delete",
-			body:   `{"jsonrpc":"2.0","id":"push-delete","method":"tasks/pushNotificationConfig/delete","params":{"id":"` + taskID + `","pushNotificationConfigId":"cfg-1"}}`,
+			body:   `{"jsonrpc":"2.0","id":"push-delete","method":"DeleteTaskPushNotificationConfig","params":{"id":"` + taskID + `","pushNotificationConfigId":"cfg-1"}}`,
 			scopes: []string{"runs:read"},
 			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
 				if !svc.called("push/delete") || svc.pushParams.PushNotificationConfigID != "cfg-1" {
@@ -1561,7 +1561,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 		},
 		{
 			name:   "extended card",
-			body:   `{"jsonrpc":"2.0","id":"card","method":"agent/getExtendedCard","params":{}}`,
+			body:   `{"jsonrpc":"2.0","id":"card","method":"GetExtendedAgentCard","params":{}}`,
 			scopes: []string{"runs:read"},
 			assert: func(t *testing.T, _ *fakeA2AService, cards *fakeA2ACardProvider) {
 				if cards.extendedSlug != slug {

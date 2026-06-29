@@ -137,7 +137,11 @@ func TestNormalizeA2AJSONRPCMethodAcceptsStandardAliases(t *testing.T) {
 	assert.Equal(t, "tasks/list", normalizeA2AJSONRPCMethod("ListTasks"))
 	assert.Equal(t, "tasks/cancel", normalizeA2AJSONRPCMethod("CancelTask"))
 	assert.Equal(t, "tasks/resubscribe", normalizeA2AJSONRPCMethod("SubscribeToTask"))
+	assert.Equal(t, "tasks/pushNotificationConfig/set", normalizeA2AJSONRPCMethod("CreateTaskPushNotificationConfig"))
+	assert.Equal(t, "tasks/pushNotificationConfig/get", normalizeA2AJSONRPCMethod("GetTaskPushNotificationConfig"))
 	assert.Equal(t, "tasks/pushNotificationConfig/list", normalizeA2AJSONRPCMethod("ListTaskPushNotificationConfigs"))
+	assert.Equal(t, "tasks/pushNotificationConfig/delete", normalizeA2AJSONRPCMethod("DeleteTaskPushNotificationConfig"))
+	assert.Equal(t, "agent/getExtendedCard", normalizeA2AJSONRPCMethod("GetExtendedAgentCard"))
 }
 
 func TestAfterSequenceFromA2ASSEUsesQueryBeforeLastEventID(t *testing.T) {
