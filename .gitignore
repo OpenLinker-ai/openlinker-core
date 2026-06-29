@@ -1,0 +1,17 @@
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Build outputs
+bin/
+tmp/
+api
+coverage.out
+*.cover.out
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
