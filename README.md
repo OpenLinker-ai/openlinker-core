@@ -164,7 +164,7 @@ See [SECURITY.md](./SECURITY.md) for vulnerability reporting.
 See [CONTRIBUTING.md](./CONTRIBUTING.md) and
 [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md).
 Use [SUPPORT.md](./SUPPORT.md) for help and [CHANGELOG.md](./CHANGELOG.md) for
-release notes.
+release notes. See [RELEASE.md](./RELEASE.md) for release checks.
 
 ## License
 
