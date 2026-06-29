@@ -32,7 +32,7 @@ Those belong in `openlinker-cloud` or hosted product services.
 
 ## Quick Start
 
-Start Postgres and Redis from the parent workspace:
+Start local Postgres and Redis:
 
 ```bash
 docker compose up -d postgres redis

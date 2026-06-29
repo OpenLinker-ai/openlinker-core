@@ -6,15 +6,10 @@ runtime. Keep Core usable without `openlinker-cloud`.
 ## Setup
 
 ```bash
+docker compose up -d postgres redis
 cp .env.example .env
 make migrate-up
 make test
-```
-
-The parent workspace can start local Postgres and Redis:
-
-```bash
-docker compose up -d postgres redis
 ```
 
 ## Boundary Rules
@@ -33,4 +28,3 @@ make test
 gofmt -w .
 go vet ./...
 ```
-
