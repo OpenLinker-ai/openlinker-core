@@ -408,18 +408,18 @@ func (s *Service) createRunningRun(
 		return nil, nil, err
 	}
 
-	// 2. 计算费用：抽成 = floor(cost × effective_rate)，creator_revenue = cost - fee
-	cost := agent.PricePerCallCents
-	feeRate, err := s.effectivePlatformFeeRate(ctx, agent.ID)
-	if err != nil {
-		return nil, nil, err
-	}
-	fee := platformFeeCents(cost, feeRate)
-	revenue := cost - fee
-	if !opts.settle {
-		cost = 0
-		fee = 0
-		revenue = 0
+	// 2. 计算费用：免费模式不触碰计费配置；结算模式才查费率并扣账。
+	cost := int32(0)
+	fee := int32(0)
+	revenue := int32(0)
+	if opts.settle {
+		cost = agent.PricePerCallCents
+		feeRate, rateErr := s.effectivePlatformFeeRate(ctx, agent.ID)
+		if rateErr != nil {
+			return nil, nil, rateErr
+		}
+		fee = platformFeeCents(cost, feeRate)
+		revenue = cost - fee
 	}
 
 	// 3. 序列化 input 为 JSONB

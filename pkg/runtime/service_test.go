@@ -1237,6 +1237,25 @@ func TestRun_FreePhaseRecordsNoSettlement(t *testing.T) {
 	}
 }
 
+func TestRun_FreeModeDoesNotRequirePlatformFeeOverrideColumn(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 100000)
+	creatorID := insertCreator(t, pool)
+	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
+	agentID := insertAgent(t, pool, creatorID, endpoint, 100, "approved")
+
+	_, err := pool.Exec(ctx, `ALTER TABLE agents DROP COLUMN IF EXISTS platform_fee_rate_override CASCADE`)
+	require.NoError(t, err)
+
+	resp, err := svc.Run(ctx, userID, makeRunReq(agentID, nil), "")
+	require.NoError(t, err)
+	require.Equal(t, "success", resp.Status)
+	assert.Equal(t, int32(0), resp.CostCents)
+}
+
 // ────────────────────────────────────────────────────────────
 // Run - 并发安全
 // ────────────────────────────────────────────────────────────

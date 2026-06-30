@@ -160,7 +160,8 @@ func newEcho(cfg *config.Config, stores ...emw.RateLimiterStore) *echo.Echo {
 	e.Use(emw.CORSWithConfig(emw.CORSConfig{
 		AllowOrigins:     allowedCORSOrigins(cfg),
 		AllowCredentials: true,
-		AllowHeaders:     []string{echo.HeaderContentType, echo.HeaderAuthorization},
+		AllowHeaders:     []string{echo.HeaderContentType, echo.HeaderAuthorization, "A2A-Version"},
+		ExposeHeaders:    []string{"A2A-Version"},
 	}))
 	if cfg.IsProduction() {
 		e.Use(emw.RateLimiterWithConfig(rateLimiterConfig(stores...)))

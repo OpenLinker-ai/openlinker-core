@@ -51,6 +51,27 @@ func TestAllowedCORSOrigins(t *testing.T) {
 	}
 }
 
+func TestNewEchoAllowsA2AVersionCORSHeader(t *testing.T) {
+	e := newEcho(&config.Config{Env: "development"})
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/a2a/agents/demo", nil)
+	req.Header.Set(echo.HeaderOrigin, "http://localhost:3000")
+	req.Header.Set(echo.HeaderAccessControlRequestMethod, http.MethodPost)
+	req.Header.Set(echo.HeaderAccessControlRequestHeaders, "authorization,content-type,a2a-version")
+	rec := httptest.NewRecorder()
+
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	allowHeaders := strings.ToLower(rec.Header().Get(echo.HeaderAccessControlAllowHeaders))
+	for _, want := range []string{"authorization", "content-type", "a2a-version"} {
+		if !strings.Contains(allowHeaders, want) {
+			t.Fatalf("Access-Control-Allow-Headers = %q, missing %q", allowHeaders, want)
+		}
+	}
+}
+
 func TestRateLimiterConfigSkipsHealthAndDeniesWithStandardError(t *testing.T) {
 	cfg := rateLimiterConfig()
 	e := echo.New()
