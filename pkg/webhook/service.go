@@ -979,18 +979,144 @@ func taskCallbackPayload(sub db.TaskCallbackSubscription, event db.RunEvent) Tas
 		}
 	}
 	out := TaskCallbackPayload{
-		EventID:        event.ID.String(),
-		RunID:          event.RunID.String(),
-		EventType:      event.EventType,
-		Sequence:       event.Sequence,
-		Payload:        payload,
-		SubscriptionID: sub.ID.String(),
-		CreatedAt:      event.CreatedAt.UTC().Format(time.RFC3339),
+		EventID:           event.ID.String(),
+		RunID:             event.RunID.String(),
+		EventType:         event.EventType,
+		Sequence:          event.Sequence,
+		Payload:           payload,
+		SubscriptionID:    sub.ID.String(),
+		CreatedAt:         event.CreatedAt.UTC().Format(time.RFC3339),
+		a2aStreamResponse: taskCallbackMetadataBool(sub.Metadata, "openlinker_a2a_stream_response"),
 	}
 	if event.ParentRunID != nil {
 		out.ParentRunID = event.ParentRunID.String()
 	}
 	return out
+}
+
+type taskCallbackPayloadAlias TaskCallbackPayload
+
+func (p TaskCallbackPayload) MarshalJSON() ([]byte, error) {
+	if !p.a2aStreamResponse {
+		return json.Marshal(taskCallbackPayloadAlias(p))
+	}
+	return json.Marshal(map[string]interface{}{
+		"statusUpdate": map[string]interface{}{
+			"taskId":    p.RunID,
+			"contextId": taskCallbackContextID(p),
+			"status": map[string]interface{}{
+				"state":     taskCallbackA2AState(p.EventType, p.Payload),
+				"timestamp": p.CreatedAt,
+				"message": map[string]interface{}{
+					"messageId": "push-" + p.EventID,
+					"role":      "ROLE_AGENT",
+					"parts": []map[string]interface{}{
+						{"text": taskCallbackA2AMessage(p.EventType, p.Payload)},
+					},
+				},
+			},
+			"metadata": map[string]interface{}{
+				"openlinker_event_id":      p.EventID,
+				"openlinker_event_type":    p.EventType,
+				"openlinker_sequence":      p.Sequence,
+				"openlinker_subscription":  p.SubscriptionID,
+				"openlinker_original_body": p.Payload,
+			},
+		},
+	})
+}
+
+func taskCallbackMetadataBool(raw []byte, key string) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var metadata map[string]interface{}
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return false
+	}
+	switch value := metadata[key].(type) {
+	case bool:
+		return value
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "true", "yes", "y", "on":
+			return true
+		}
+	}
+	return false
+}
+
+func taskCallbackContextID(p TaskCallbackPayload) string {
+	for _, key := range []string{"a2a_context_id", "contextId", "context_id"} {
+		if value, ok := p.Payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return p.RunID
+}
+
+func taskCallbackA2AState(eventType string, payload map[string]interface{}) string {
+	switch eventType {
+	case "run.completed":
+		return "TASK_STATE_COMPLETED"
+	case "run.failed":
+		return "TASK_STATE_FAILED"
+	case "run.canceled":
+		return "TASK_STATE_CANCELED"
+	case "run.created":
+		return "TASK_STATE_SUBMITTED"
+	default:
+		if state, ok := payload["state"].(string); ok {
+			return taskCallbackNormalizeA2AState(state)
+		}
+		if status, ok := payload["status"].(string); ok {
+			return taskCallbackNormalizeA2AState(status)
+		}
+		return "TASK_STATE_WORKING"
+	}
+}
+
+func taskCallbackNormalizeA2AState(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "submitted", "task_state_submitted":
+		return "TASK_STATE_SUBMITTED"
+	case "working", "running", "task_state_working":
+		return "TASK_STATE_WORKING"
+	case "completed", "success", "task_state_completed":
+		return "TASK_STATE_COMPLETED"
+	case "failed", "timeout", "task_state_failed":
+		return "TASK_STATE_FAILED"
+	case "canceled", "cancelled", "task_state_canceled", "task_state_cancelled":
+		return "TASK_STATE_CANCELED"
+	case "input-required", "input_required", "task_state_input_required":
+		return "TASK_STATE_INPUT_REQUIRED"
+	case "auth-required", "auth_required", "task_state_auth_required":
+		return "TASK_STATE_AUTH_REQUIRED"
+	case "rejected", "task_state_rejected":
+		return "TASK_STATE_REJECTED"
+	default:
+		return "TASK_STATE_WORKING"
+	}
+}
+
+func taskCallbackA2AMessage(eventType string, payload map[string]interface{}) string {
+	for _, key := range []string{"text", "message", "summary"} {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	switch eventType {
+	case "run.completed":
+		return "OpenLinker task completed"
+	case "run.failed":
+		return "OpenLinker task failed"
+	case "run.canceled":
+		return "OpenLinker task canceled"
+	case "run.created":
+		return "OpenLinker task created"
+	default:
+		return "OpenLinker task updated"
+	}
 }
 
 func taskCallbackSubscriptionToResponse(sub db.TaskCallbackSubscription) TaskCallbackSubscriptionResponse {

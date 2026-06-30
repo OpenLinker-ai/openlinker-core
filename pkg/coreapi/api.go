@@ -155,6 +155,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	a2aHandler := a2a.NewHandler(a2aSvc)
 	a2aHandler.SetAgentCardProvider(agentMarketSvc)
 	a2aHandler.Register(api, jwtMiddleware, hybridMw)
+	configureA2AGRPCAgentCard(cfg, &Services{AgentMarket: agentMarketSvc})
 
 	workflowSvc := workflow.NewService(pool, runtimeSvc)
 	workflowHandler := workflow.NewHandler(workflowSvc)

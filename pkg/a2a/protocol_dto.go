@@ -59,6 +59,7 @@ type A2ATaskPushNotificationConfig struct {
 	Tenant                 string                     `json:"tenant,omitempty"`
 	ID                     string                     `json:"id,omitempty"`
 	TaskID                 string                     `json:"taskId,omitempty"`
+	TaskIDAlias            string                     `json:"task_id,omitempty"`
 	URL                    string                     `json:"url,omitempty"`
 	Token                  string                     `json:"token,omitempty"`
 	Secret                 string                     `json:"secret,omitempty"`
@@ -70,19 +71,21 @@ type A2ATaskPushNotificationConfig struct {
 }
 
 type A2ATaskPushConfigParams struct {
-	ID                       string                     `json:"id,omitempty"`
-	TaskID                   string                     `json:"taskId,omitempty"`
-	PushNotificationConfigID string                     `json:"pushNotificationConfigId,omitempty"`
-	PushNotificationConfig   A2APushNotificationConfig  `json:"pushNotificationConfig,omitempty"`
-	URL                      string                     `json:"url,omitempty"`
-	Token                    string                     `json:"token,omitempty"`
-	Secret                   string                     `json:"secret,omitempty"`
-	Authentication           *A2APushAuthenticationInfo `json:"authentication,omitempty"`
-	Metadata                 map[string]interface{}     `json:"metadata,omitempty"`
-	EventTypes               []string                   `json:"eventTypes,omitempty"`
-	EventTypesAlias          []string                   `json:"event_types,omitempty"`
-	PageSize                 *int                       `json:"pageSize,omitempty"`
-	PageToken                string                     `json:"pageToken,omitempty"`
+	ID                            string                     `json:"id,omitempty"`
+	TaskID                        string                     `json:"taskId,omitempty"`
+	TaskIDAlias                   string                     `json:"task_id,omitempty"`
+	PushNotificationConfigID      string                     `json:"pushNotificationConfigId,omitempty"`
+	PushNotificationConfigIDAlias string                     `json:"push_notification_config_id,omitempty"`
+	PushNotificationConfig        A2APushNotificationConfig  `json:"pushNotificationConfig,omitempty"`
+	URL                           string                     `json:"url,omitempty"`
+	Token                         string                     `json:"token,omitempty"`
+	Secret                        string                     `json:"secret,omitempty"`
+	Authentication                *A2APushAuthenticationInfo `json:"authentication,omitempty"`
+	Metadata                      map[string]interface{}     `json:"metadata,omitempty"`
+	EventTypes                    []string                   `json:"eventTypes,omitempty"`
+	EventTypesAlias               []string                   `json:"event_types,omitempty"`
+	PageSize                      *int                       `json:"pageSize,omitempty"`
+	PageToken                     string                     `json:"pageToken,omitempty"`
 }
 
 type A2ATaskPushConfigList struct {
@@ -126,13 +129,14 @@ type A2AMessage struct {
 }
 
 type A2ATask struct {
-	Kind      string                 `json:"kind"`
-	ID        string                 `json:"id"`
-	ContextID string                 `json:"contextId,omitempty"`
-	Status    A2ATaskStatus          `json:"status"`
-	Artifacts []A2AArtifact          `json:"artifacts,omitempty"`
-	History   []A2AMessage           `json:"history,omitempty"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Kind            string                 `json:"kind"`
+	ID              string                 `json:"id"`
+	ContextID       string                 `json:"contextId,omitempty"`
+	Status          A2ATaskStatus          `json:"status"`
+	Artifacts       []A2AArtifact          `json:"artifacts,omitempty"`
+	History         []A2AMessage           `json:"history,omitempty"`
+	Metadata        map[string]interface{} `json:"metadata,omitempty"`
+	ResponseMessage *A2AMessage            `json:"-"`
 }
 
 type A2ATaskStatus struct {

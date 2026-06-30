@@ -581,6 +581,27 @@ func TestGetAgentCardBySlug_HappyPath(t *testing.T) {
 	assert.Equal(t, "unknown", card.OpenLinker.AvailabilityStatus)
 }
 
+func TestGetAgentCardBySlug_WithGRPCInterface(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := agent.NewMarketService(pool)
+	svc.SetA2AGRPCInterface("https://grpc.example.com/a2a/")
+	creatorID, _ := setupTestData(t, pool)
+
+	createApprovedAgent(t, pool, creatorID, "grpc-card-agent",
+		WithName("gRPC Card Agent"),
+		WithDescription("Machine-readable gRPC card test"),
+	)
+
+	card, err := svc.GetAgentCardBySlug(context.Background(), "grpc-card-agent")
+	require.NoError(t, err)
+	require.Len(t, card.SupportedInterfaces, 4)
+	grpcInterface := card.SupportedInterfaces[3]
+	assert.Equal(t, "https://grpc.example.com/a2a", grpcInterface.URL)
+	assert.Equal(t, "GRPC", grpcInterface.ProtocolBinding)
+	assert.Equal(t, "grpc-card-agent", grpcInterface.Tenant)
+	assert.Equal(t, "1.0", grpcInterface.ProtocolVersion)
+}
+
 func TestGetBySlug_NotFound(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := agent.NewMarketService(pool)

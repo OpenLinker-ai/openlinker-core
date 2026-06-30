@@ -47,6 +47,12 @@ type Config struct {
 	OAuthCallbackBaseURL string `envconfig:"OAUTH_CALLBACK_BASE_URL"`
 	APIKeyVerifyURL      string `envconfig:"API_KEY_VERIFY_URL"`
 
+	// A2A gRPC binding. Disabled by default so existing HTTP deployments do not
+	// need to expose an additional HTTP/2 port.
+	A2AGRPCEnabled   bool   `envconfig:"A2A_GRPC_ENABLED" default:"false"`
+	A2AGRPCPort      int    `envconfig:"A2A_GRPC_PORT" default:"9090"`
+	A2AGRPCPublicURL string `envconfig:"A2A_GRPC_PUBLIC_URL"`
+
 	// LLM（任务驱动 A 形态。空 → 走规则 fallback）
 	AnthropicAPIKey string `envconfig:"ANTHROPIC_API_KEY"`
 

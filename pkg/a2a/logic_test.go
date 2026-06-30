@@ -98,7 +98,7 @@ func TestA2AVersionJSONRPCAndQueryHelpers(t *testing.T) {
 		t.Fatalf("unexpected unsupported version JSON-RPC error: %#v", badVersion)
 	}
 	data, ok := badVersion.Error.Data.([]map[string]interface{})
-	if !ok || len(data) != 1 || data[0]["reason"] != a2aErrorVersionNotSupported {
+	if !ok || len(data) != 1 || data[0]["reason"] != a2aErrorReason(a2aErrorVersionNotSupported) {
 		t.Fatalf("unexpected unsupported version data: %#v", badVersion.Error.Data)
 	}
 
@@ -633,6 +633,43 @@ func TestA2ARunTaskArtifactAndEventMapping(t *testing.T) {
 	output := outputArtifact(map[string]interface{}{"message": "hello", "ok": true})
 	if output.ArtifactID != "output" || output.Parts[0]["kind"] != "text" || output.Parts[1]["kind"] != "data" {
 		t.Fatalf("outputArtifact = %#v", output)
+	}
+	projected := taskFromRun(&runtimepkg.RunResponse{
+		RunID:  uuid.NewString(),
+		Status: "success",
+		Output: map[string]interface{}{
+			"a2a": map[string]interface{}{
+				"task_state":     "TASK_STATE_INPUT_REQUIRED",
+				"status_message": "Need more input",
+				"response_message": map[string]interface{}{
+					"role":  "agent",
+					"parts": []interface{}{map[string]interface{}{"kind": "text", "text": "Direct message response"}},
+				},
+				"artifacts": []interface{}{map[string]interface{}{
+					"artifactId": "artifact-text",
+					"parts":      []interface{}{map[string]interface{}{"kind": "text", "text": "Generated text content"}},
+				}},
+				"history": []interface{}{map[string]interface{}{
+					"role":  "user",
+					"parts": []interface{}{map[string]interface{}{"kind": "text", "text": "history"}},
+				}},
+			},
+		},
+	}, "ctx-projected", nil, nil)
+	if projected.Status.State != a2aTaskStateInputReq || projected.Status.Message == nil || projected.Status.Message.Parts[0]["text"] != "Need more input" {
+		t.Fatalf("projected task status = %#v", projected.Status)
+	}
+	if projected.ResponseMessage == nil || projected.ResponseMessage.Parts[0]["text"] != "Direct message response" {
+		t.Fatalf("projected response message = %#v", projected.ResponseMessage)
+	}
+	if len(projected.Artifacts) != 1 || projected.Artifacts[0].ArtifactID != "artifact-text" || len(projected.History) != 1 {
+		t.Fatalf("projected artifacts/history = %#v %#v", projected.Artifacts, projected.History)
+	}
+	if got := sendMessageResultForVersion(projected, a2aProtocolVersionCurrent).(A2ASendMessageResponse); got.Message == nil || got.Task != nil {
+		t.Fatalf("send message projection result = %#v", got)
+	}
+	if !isTerminalA2ATaskState("TASK_STATE_REJECTED") || isTerminalA2ATaskState("TASK_STATE_INPUT_REQUIRED") {
+		t.Fatalf("terminal state helper mismatch")
 	}
 
 	size := int64(123)
@@ -1387,7 +1424,7 @@ func TestA2AJSONRPCHandlerValidationBeforeServiceDispatch(t *testing.T) {
 	if err := h.JSONRPC(c); err != nil {
 		t.Fatalf("JSONRPC unsupported version returned error: %v", err)
 	}
-	if !strings.Contains(c.(*a2ATestContext).rec.Body.String(), a2aErrorVersionNotSupported) {
+	if !strings.Contains(c.(*a2ATestContext).rec.Body.String(), a2aErrorReason(a2aErrorVersionNotSupported)) {
 		t.Fatalf("unsupported version JSONRPC body = %s", c.(*a2ATestContext).rec.Body.String())
 	}
 

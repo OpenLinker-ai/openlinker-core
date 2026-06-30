@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
@@ -57,13 +58,14 @@ func (s *Service) createCallerTaskCallback(
 		return nil, httpx.Internal("子运行 ID 格式错误")
 	}
 	scheme, credentials := callbackAuthFromA2AConfig(*cfg)
+	metadata := a2aPushCallbackMetadata(cfg.Metadata)
 	resp, err := s.taskCallbackManager.CreateTaskCallbackSubscription(ctx, parsedRunID, userID, &webhook.CreateTaskCallbackRequest{
 		URL:             cfg.URL,
 		Secret:          cfg.Secret,
 		EventTypes:      defaultTaskCallbackEventTypes(taskCallbackEventTypesFromA2A(*cfg)),
 		AuthScheme:      scheme,
 		AuthCredentials: credentials,
-		Metadata:        cfg.Metadata,
+		Metadata:        metadata,
 	})
 	if err != nil {
 		return nil, err
@@ -112,20 +114,24 @@ func (s *Service) SetPushNotificationConfig(ctx context.Context, userID uuid.UUI
 		return nil, httpx.BadRequest("pushNotificationConfig.url 不能为空")
 	}
 	scheme, credentials := callbackAuthFromA2AConfig(cfg)
+	metadata := a2aPushCallbackMetadata(cfg.Metadata)
+	if configID := strings.TrimSpace(cfg.ID); configID != "" {
+		metadata["openlinker_a2a_push_config_id"] = configID
+	}
 	resp, err := s.taskCallbackManager.CreateTaskCallbackSubscription(ctx, runID, userID, &webhook.CreateTaskCallbackRequest{
 		URL:             cfg.URL,
 		Secret:          cfg.Secret,
 		EventTypes:      defaultTaskCallbackEventTypes(taskCallbackEventTypesFromA2A(cfg)),
 		AuthScheme:      scheme,
 		AuthCredentials: credentials,
-		Metadata:        cfg.Metadata,
+		Metadata:        metadata,
 	})
 	if err != nil {
 		return nil, err
 	}
 	out := A2ATaskPushNotificationConfig{
 		TaskID:     taskID,
-		ID:         resp.ID,
+		ID:         a2aExternalPushConfigID(cfg.ID, resp.ID),
 		URL:        resp.TargetURL,
 		EventTypes: resp.EventTypes,
 		Metadata:   cfg.Metadata,
@@ -159,7 +165,7 @@ func (s *Service) GetPushNotificationConfig(ctx context.Context, userID uuid.UUI
 		return nil, httpx.BadRequest("pushNotificationConfigId 不能为空")
 	}
 	for _, item := range items {
-		if item.ID.String() == configID {
+		if a2aPushConfigMatchesID(item, configID) {
 			out := a2aPushConfigFromTaskCallback(taskID, item, false)
 			return &out, nil
 		}
@@ -205,9 +211,61 @@ func (s *Service) DeletePushNotificationConfig(ctx context.Context, userID uuid.
 	}
 	subID, err := uuid.Parse(configID)
 	if err != nil {
-		return httpx.BadRequest("pushNotificationConfigId 不是合法 uuid")
+		items, listErr := s.listTaskCallbackSubscriptionsForA2A(ctx, runID, userID)
+		if listErr != nil {
+			return listErr
+		}
+		for _, item := range items {
+			if a2aPushConfigMatchesID(item, configID) {
+				subID = item.ID
+				err = nil
+				break
+			}
+		}
+		if err != nil {
+			return nil
+		}
 	}
-	return s.taskCallbackManager.DeleteTaskCallbackSubscription(ctx, runID, subID, userID)
+	if err := s.taskCallbackManager.DeleteTaskCallbackSubscription(ctx, runID, subID, userID); err != nil {
+		var he *httpx.HTTPError
+		if errors.As(err, &he) && he.Status == http.StatusNotFound {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func a2aPushCallbackMetadata(raw map[string]interface{}) map[string]interface{} {
+	metadata := map[string]interface{}{}
+	for key, value := range raw {
+		metadata[key] = value
+	}
+	metadata["openlinker_a2a_stream_response"] = true
+	metadata["openlinker_callback_binding"] = "a2a_push_notification"
+	return metadata
+}
+
+func a2aExternalPushConfigID(externalID, fallback string) string {
+	if value := strings.TrimSpace(externalID); value != "" {
+		return value
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func a2aPushConfigMatchesID(sub db.TaskCallbackSubscription, configID string) bool {
+	configID = strings.TrimSpace(configID)
+	if configID == "" {
+		return false
+	}
+	if sub.ID.String() == configID {
+		return true
+	}
+	metadata := a2aMetadataFromTaskCallback(sub)
+	if value, ok := metadata["openlinker_a2a_push_config_id"].(string); ok && strings.TrimSpace(value) == configID {
+		return true
+	}
+	return false
 }
 
 func (s *Service) listTaskCallbackSubscriptionsForA2A(ctx context.Context, runID, userID uuid.UUID) ([]db.TaskCallbackSubscription, error) {
@@ -231,6 +289,9 @@ func taskIDFromPushParams(params *A2ATaskPushConfigParams) string {
 	if strings.TrimSpace(params.TaskID) != "" {
 		return strings.TrimSpace(params.TaskID)
 	}
+	if strings.TrimSpace(params.TaskIDAlias) != "" {
+		return strings.TrimSpace(params.TaskIDAlias)
+	}
 	return strings.TrimSpace(params.ID)
 }
 
@@ -241,10 +302,13 @@ func configIDFromPushParams(params *A2ATaskPushConfigParams) string {
 	if strings.TrimSpace(params.PushNotificationConfigID) != "" {
 		return strings.TrimSpace(params.PushNotificationConfigID)
 	}
+	if strings.TrimSpace(params.PushNotificationConfigIDAlias) != "" {
+		return strings.TrimSpace(params.PushNotificationConfigIDAlias)
+	}
 	if strings.TrimSpace(params.PushNotificationConfig.ID) != "" {
 		return strings.TrimSpace(params.PushNotificationConfig.ID)
 	}
-	if strings.TrimSpace(params.TaskID) != "" {
+	if strings.TrimSpace(params.TaskID) != "" || strings.TrimSpace(params.TaskIDAlias) != "" {
 		return strings.TrimSpace(params.ID)
 	}
 	return ""
@@ -255,7 +319,7 @@ func pushConfigFromPushParams(params *A2ATaskPushConfigParams) A2APushNotificati
 		return A2APushNotificationConfig{}
 	}
 	cfg := params.PushNotificationConfig
-	if cfg.ID == "" && strings.TrimSpace(params.TaskID) != "" {
+	if cfg.ID == "" && (strings.TrimSpace(params.TaskID) != "" || strings.TrimSpace(params.TaskIDAlias) != "") {
 		cfg.ID = strings.TrimSpace(params.ID)
 	}
 	if cfg.URL == "" {
@@ -289,6 +353,9 @@ func pushConfigFromTaskPushConfig(taskCfg *A2ATaskPushNotificationConfig) *A2APu
 	cfg := taskCfg.PushNotificationConfig
 	if cfg.ID == "" {
 		cfg.ID = taskCfg.ID
+	}
+	if taskCfg.TaskID == "" {
+		taskCfg.TaskID = taskCfg.TaskIDAlias
 	}
 	if cfg.URL == "" {
 		cfg.URL = taskCfg.URL
@@ -353,11 +420,14 @@ func defaultTaskCallbackEventTypes(raw []string) []string {
 }
 
 func a2aPushConfigFromTaskCallback(taskID string, sub db.TaskCallbackSubscription, includeCredentials bool) A2ATaskPushNotificationConfig {
+	metadata := a2aMetadataFromTaskCallback(sub)
+	externalID, _ := metadata["openlinker_a2a_push_config_id"].(string)
+	id := a2aExternalPushConfigID(externalID, sub.ID.String())
 	cfg := A2APushNotificationConfig{
-		ID:         sub.ID.String(),
+		ID:         id,
 		URL:        sub.TargetURL,
 		EventTypes: append([]string{}, sub.EventTypes...),
-		Metadata:   a2aMetadataFromTaskCallback(sub),
+		Metadata:   metadata,
 	}
 	if sub.AuthScheme != nil {
 		auth := &A2APushAuthenticationInfo{Scheme: *sub.AuthScheme}

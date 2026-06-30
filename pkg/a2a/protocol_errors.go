@@ -39,11 +39,18 @@ func a2aTaskNotCancelable(message string) *httpx.HTTPError {
 	return a2aProtocolError(a2aErrorTaskNotCancelable, http.StatusBadRequest, message, nil)
 }
 
+func a2aUnsupportedOperation(message string) *httpx.HTTPError {
+	if message == "" {
+		message = "当前任务状态不支持该 A2A 操作"
+	}
+	return a2aProtocolError(a2aErrorUnsupportedOperation, http.StatusBadRequest, message, nil)
+}
+
 func a2aContentTypeNotSupported(message string, metadata map[string]string) *httpx.HTTPError {
 	if message == "" {
 		message = "A2A content type 不受支持"
 	}
-	return a2aProtocolError(a2aErrorContentTypeNotSupported, http.StatusBadRequest, message, metadata)
+	return a2aProtocolError(a2aErrorContentTypeNotSupported, http.StatusUnsupportedMediaType, message, metadata)
 }
 
 func a2aExtensionSupportRequired(missing []string) *httpx.HTTPError {
@@ -66,10 +73,35 @@ func a2aErrorDetails(errorType string, metadata map[string]string) []map[string]
 	}
 	return []map[string]interface{}{{
 		"@type":    "type.googleapis.com/google.rpc.ErrorInfo",
-		"reason":   errorType,
+		"reason":   a2aErrorReason(errorType),
 		"domain":   "a2a-protocol.org",
 		"metadata": metadata,
 	}}
+}
+
+func a2aErrorReason(errorType string) string {
+	switch errorType {
+	case a2aErrorTaskNotFound:
+		return "TASK_NOT_FOUND"
+	case a2aErrorTaskNotCancelable:
+		return "TASK_NOT_CANCELABLE"
+	case a2aErrorPushNotificationNotSupported:
+		return "PUSH_NOTIFICATION_NOT_SUPPORTED"
+	case a2aErrorUnsupportedOperation:
+		return "UNSUPPORTED_OPERATION"
+	case a2aErrorContentTypeNotSupported:
+		return "CONTENT_TYPE_NOT_SUPPORTED"
+	case a2aErrorInvalidAgentResponse:
+		return "INVALID_AGENT_RESPONSE"
+	case a2aErrorExtendedAgentCardNotConfigured:
+		return "EXTENDED_AGENT_CARD_NOT_CONFIGURED"
+	case a2aErrorExtensionSupportRequired:
+		return "EXTENSION_SUPPORT_REQUIRED"
+	case a2aErrorVersionNotSupported:
+		return "VERSION_NOT_SUPPORTED"
+	default:
+		return strings.TrimSuffix(errorType, "Error")
+	}
 }
 
 func a2aJSONRPCCode(errorType string) int {

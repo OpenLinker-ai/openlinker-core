@@ -101,7 +101,11 @@ func main() {
 		opts.APIKeyVerifier = verifier
 		log.Info().Str("endpoint", cfg.APIKeyVerifyURL).Msg("remote api key verifier configured")
 	}
-	coreapi.Register(rootCtx, e, pool, cfg, opts)
+	services := coreapi.Register(rootCtx, e, pool, cfg, opts)
+	shutdownA2AGRPC, err := coreapi.StartA2AGRPCServer(rootCtx, cfg, services, opts)
+	if err != nil {
+		log.Fatal().Err(err).Msg("start a2a grpc server failed")
+	}
 
 	srv := newHTTPServer(cfg.Port)
 	go func() {
@@ -115,11 +119,17 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	log.Info().Msg("shutting down")
+	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	if err := e.Shutdown(shutdownCtx); err != nil {
 		log.Error().Err(err).Msg("shutdown failed")
+	}
+	if shutdownA2AGRPC != nil {
+		if err := shutdownA2AGRPC(shutdownCtx); err != nil {
+			log.Error().Err(err).Msg("a2a grpc shutdown failed")
+		}
 	}
 	log.Info().Msg("bye")
 }

@@ -67,7 +67,7 @@ func TestNormalizeA2AResultForCurrentVersionRemovesLegacyDiscriminators(t *testi
 	assert.Equal(t, "https://files.example/report.csv", filePart["url"])
 	assert.Equal(t, "report.csv", filePart["filename"])
 	assert.Equal(t, "text/csv", filePart["mediaType"])
-	assert.Equal(t, "internal", body["metadata"].(map[string]interface{})["openlinker"].(map[string]interface{})["kind"])
+	assert.NotContains(t, body, "metadata")
 }
 
 func TestNormalizeA2AResultForVersionCompatibilityEdges(t *testing.T) {

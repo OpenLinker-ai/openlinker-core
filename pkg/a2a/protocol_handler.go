@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,11 +24,14 @@ const (
 	jsonRPCInternalError  = -32603
 	a2aSSEPollInterval    = time.Second
 	a2aSSEHeartbeat       = 15 * time.Second
-	a2aJSONContentType    = "application/a2a+json"
+	a2aJSONContentType    = echo.MIMEApplicationJSON
 )
 
 // JSONRPC handles the A2A JSON-RPC binding for one public Agent slug.
 func (h *Handler) JSONRPC(c echo.Context) error {
+	if !isA2AJSONContentType(c.Request().Header.Get(echo.HeaderContentType)) {
+		return c.JSON(http.StatusOK, jsonRPCError(nil, a2aJSONRPCCode(a2aErrorContentTypeNotSupported), "A2A JSON-RPC Content-Type 必须是 application/json", a2aErrorDetails(a2aErrorContentTypeNotSupported, nil)))
+	}
 	var req JSONRPCRequest
 	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, jsonRPCError(nil, jsonRPCParseError, "JSON-RPC 请求体格式错误", nil))
@@ -127,6 +131,9 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		task, err := h.svc.GetProtocolTask(c.Request().Context(), userID, c.Param("slug"), params.ID, params.HistoryLength)
 		if err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
+		}
+		if isTerminalA2ATaskState(task.Status.State) {
+			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, a2aUnsupportedOperation("终态任务不能建立 SubscribeToTask stream")))
 		}
 		return h.streamProtocolTask(c, userID, c.Param("slug"), params.ID, req.ID, true, task, serviceParams.Version)
 	case "tasks/pushNotificationConfig/set":
@@ -228,7 +235,11 @@ func (h *Handler) extendedAgentCard(c echo.Context) (interface{}, error) {
 	if h.cardProvider == nil {
 		return nil, a2aProtocolError(a2aErrorExtendedAgentCardNotConfigured, http.StatusBadRequest, "A2A Extended Agent Card 服务未配置", nil)
 	}
-	return h.cardProvider.GetExtendedAgentCardBySlug(c.Request().Context(), c.Param("slug"))
+	card, err := h.cardProvider.GetExtendedAgentCardBySlug(c.Request().Context(), c.Param("slug"))
+	if err != nil {
+		return nil, err
+	}
+	return officialA2AAgentCardView(card), nil
 }
 
 // SendMessageHTTP handles the A2A HTTP+JSON alias POST /message:send.
@@ -243,6 +254,9 @@ func (h *Handler) SendMessageHTTP(c echo.Context) error {
 	}
 	userID, err := userIDFromCtx(c)
 	if err != nil {
+		return err
+	}
+	if err := requireA2AJSONContentType(c); err != nil {
 		return err
 	}
 	var params A2AMessageSendParams
@@ -314,6 +328,9 @@ func (h *Handler) StreamMessageHTTP(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := requireA2AJSONContentType(c); err != nil {
+		return err
+	}
 	var params A2AMessageSendParams
 	if err := c.Bind(&params); err != nil {
 		return httpx.BadRequest("请求体格式错误")
@@ -376,6 +393,9 @@ func (h *Handler) SubscribeTaskHTTP(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	if isTerminalA2ATaskState(task.Status.State) {
+		return a2aUnsupportedOperation("终态任务不能建立 SubscribeToTask stream")
+	}
 	return h.streamProtocolTask(c, userID, c.Param("slug"), taskID, nil, false, task, serviceParams.Version)
 }
 
@@ -428,6 +448,9 @@ func (h *Handler) SetTaskPushNotificationHTTP(c echo.Context) error {
 	}
 	userID, err := userIDFromCtx(c)
 	if err != nil {
+		return err
+	}
+	if err := requireA2AJSONContentType(c); err != nil {
 		return err
 	}
 	var params A2ATaskPushConfigParams
@@ -552,6 +575,12 @@ func attachProtocolServiceMetadata(params *A2AMessageSendParams, serviceParams a
 }
 
 func sendMessageResultForVersion(task *A2ATask, version string) interface{} {
+	if task != nil && task.ResponseMessage != nil {
+		if version == a2aProtocolVersionCurrent {
+			return A2ASendMessageResponse{Message: task.ResponseMessage}
+		}
+		return task.ResponseMessage
+	}
 	if version == a2aProtocolVersionCurrent {
 		return A2ASendMessageResponse{Task: task}
 	}
@@ -561,6 +590,103 @@ func sendMessageResultForVersion(task *A2ATask, version string) interface{} {
 func a2aJSON(c echo.Context, code int, value interface{}) error {
 	c.Response().Header().Set(echo.HeaderContentType, a2aJSONContentType)
 	return c.JSON(code, value)
+}
+
+func a2aHTTPErrorMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		if err := next(c); err != nil {
+			if c.Response().Committed {
+				return err
+			}
+			return sendA2AHTTPError(c, err)
+		}
+		return nil
+	}
+}
+
+func sendA2AHTTPError(c echo.Context, err error) error {
+	var he *httpx.HTTPError
+	if !errors.As(err, &he) {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": map[string]interface{}{
+			"code":    http.StatusInternalServerError,
+			"status":  "INTERNAL",
+			"message": "internal error",
+		}})
+	}
+	statusName := a2aHTTPStatusName(he)
+	details := he.Details
+	if details == nil {
+		details = a2aErrorDetails(string(he.Code), map[string]string{"http_status": strconv.Itoa(he.Status)})
+	}
+	c.Response().Header().Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	return c.JSON(he.Status, map[string]interface{}{"error": map[string]interface{}{
+		"code":    he.Status,
+		"status":  statusName,
+		"message": he.Message,
+		"details": details,
+	}})
+}
+
+func a2aHTTPStatusName(err *httpx.HTTPError) string {
+	if err == nil {
+		return "INTERNAL"
+	}
+	if errorType := a2aErrorTypeFromHTTPError(err); errorType != "" {
+		switch grpcCodeFromA2AErrorType(errorType) {
+		case 3:
+			return "INVALID_ARGUMENT"
+		case 5:
+			return "NOT_FOUND"
+		case 9:
+			return "FAILED_PRECONDITION"
+		case 12:
+			return "UNIMPLEMENTED"
+		case 13:
+			return "INTERNAL"
+		}
+	}
+	switch err.Status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusUnsupportedMediaType:
+		return "INVALID_ARGUMENT"
+	case http.StatusUnauthorized:
+		return "UNAUTHENTICATED"
+	case http.StatusForbidden:
+		return "PERMISSION_DENIED"
+	case http.StatusNotFound:
+		return "NOT_FOUND"
+	case http.StatusConflict:
+		return "FAILED_PRECONDITION"
+	case http.StatusTooManyRequests:
+		return "RESOURCE_EXHAUSTED"
+	case http.StatusServiceUnavailable:
+		return "UNAVAILABLE"
+	default:
+		return "INTERNAL"
+	}
+}
+
+func requireA2AJSONContentType(c echo.Context) error {
+	if isA2AJSONContentType(c.Request().Header.Get(echo.HeaderContentType)) {
+		return nil
+	}
+	return a2aContentTypeNotSupported("A2A HTTP+JSON Content-Type 必须是 application/json", nil)
+}
+
+func isA2AJSONContentType(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return true
+	}
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		mediaType = strings.TrimSpace(strings.Split(raw, ";")[0])
+	}
+	switch strings.ToLower(mediaType) {
+	case echo.MIMEApplicationJSON, "application/a2a+json":
+		return true
+	default:
+		return false
+	}
 }
 
 func decodeJSONRPCParams(raw json.RawMessage, target interface{}) error {
@@ -708,11 +834,21 @@ func (h *Handler) streamProtocolTask(c echo.Context, userID uuid.UUID, slug, tas
 	res.Header().Set(echo.HeaderConnection, "keep-alive")
 	res.WriteHeader(http.StatusOK)
 
+	maxStateOrder := -1
 	if initialTask != nil {
+		if initialTask.ResponseMessage != nil {
+			_ = writeA2ASSEPayload(res.Writer, 0, requestID, initialTask.ResponseMessage, jsonRPC, protocolVersion)
+			flusher.Flush()
+			return nil
+		}
+		maxStateOrder = a2aTaskStateOrder(initialTask.Status.State)
 		if err := writeA2ASSEPayload(res.Writer, 0, requestID, initialTask, jsonRPC, protocolVersion); err != nil {
 			return nil
 		}
 		flusher.Flush()
+		if isTerminalA2ATaskState(initialTask.Status.State) {
+			return nil
+		}
 	}
 
 	ctx := c.Request().Context()
@@ -729,9 +865,16 @@ func (h *Handler) streamProtocolTask(c echo.Context, userID uuid.UUID, slug, tas
 			return nil
 		}
 		for _, item := range items {
+			itemStateOrder := a2aStreamItemStateOrder(item)
+			if itemStateOrder >= 0 && maxStateOrder >= 0 && itemStateOrder < maxStateOrder {
+				continue
+			}
 			seq := sequenceFromStreamItem(item)
 			if err := writeA2ASSEPayload(res.Writer, seq, requestID, item, jsonRPC, protocolVersion); err != nil {
 				return nil
+			}
+			if itemStateOrder > maxStateOrder {
+				maxStateOrder = itemStateOrder
 			}
 			if seq > 0 {
 				afterSequence = seq

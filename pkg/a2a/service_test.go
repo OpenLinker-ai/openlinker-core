@@ -735,6 +735,96 @@ func TestProtocolMessageAcceptsCurrentPartShapes(t *testing.T) {
 	assert.Equal(t, "text/csv", file["mimeType"])
 }
 
+func TestProtocolMessageReusesProtocolTaskIDForContinuation(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+
+	var calls []map[string]any
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Input map[string]any `json:"input"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		calls = append(calls, request.Input)
+		w.Header().Set("Content-Type", "application/json")
+		if _, ok := request.Input["a2a_task_id"]; !ok {
+			_, _ = w.Write([]byte(`{"output":{"summary":"need input","a2a":{"task_state":"input_required","status_message":"Need a follow-up"}}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"output":{"summary":"follow-up complete","a2a":{"task_state":"completed","artifacts":[{"artifactId":"followup","parts":[{"kind":"text","text":"done"}]}]}}}`))
+	}))
+	defer server.Close()
+	defaultTransport := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
+
+	agentID := insertAgent(t, pool, owner, server.URL)
+	slug := "a2a-" + agentID.String()[:8]
+
+	first, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			MessageID: "input-required-1",
+			ContextID: "ctx-multi",
+			Role:      "user",
+			Parts:     []map[string]any{{"kind": "text", "text": "start"}},
+		},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, first.ID)
+	assert.Equal(t, "ctx-multi", first.ContextID)
+	assert.Equal(t, "input_required", first.Status.State)
+	require.NotNil(t, first.Status.Message)
+	assert.Equal(t, "Need a follow-up", first.Status.Message.Parts[0]["text"])
+
+	followup, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			MessageID: "complete-1",
+			TaskID:    first.ID,
+			Role:      "user",
+			Parts:     []map[string]any{{"kind": "text", "text": "finish"}},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, followup.ID)
+	assert.Equal(t, "ctx-multi", followup.ContextID)
+	assert.Equal(t, "completed", followup.Status.State)
+	require.Len(t, calls, 2)
+	assert.Equal(t, first.ID, calls[1]["a2a_task_id"])
+	assert.Equal(t, "ctx-multi", calls[1]["a2a_context_id"])
+
+	reloaded, err := svc.GetProtocolTask(context.Background(), owner, slug, first.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, reloaded.ID)
+	assert.Equal(t, "completed", reloaded.Status.State)
+	require.NotEmpty(t, reloaded.Artifacts)
+	assert.Equal(t, "followup", reloaded.Artifacts[0].ArtifactID)
+
+	_, err = svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			MessageID: "too-late",
+			TaskID:    first.ID,
+			Role:      "user",
+			Parts:     []map[string]any{{"kind": "text", "text": "after terminal"}},
+		},
+	})
+	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+
+	second, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			MessageID: "input-required-2",
+			ContextID: "ctx-cancel-projected",
+			Role:      "user",
+			Parts:     []map[string]any{{"kind": "text", "text": "start cancelable"}},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "input_required", second.Status.State)
+	canceled, err := svc.CancelProtocolTask(context.Background(), owner, slug, second.ID)
+	require.NoError(t, err)
+	assert.Equal(t, second.ID, canceled.ID)
+	assert.Equal(t, "canceled", canceled.Status.State)
+}
+
 func TestProtocolServiceValidationAndOwnershipEdges(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	owner := insertCreator(t, pool)

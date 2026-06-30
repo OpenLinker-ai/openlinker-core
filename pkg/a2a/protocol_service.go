@@ -28,6 +28,9 @@ const (
 	a2aTaskStateCompleted = "completed"
 	a2aTaskStateCanceled  = "canceled"
 	a2aTaskStateFailed    = "failed"
+	a2aTaskStateRejected  = "rejected"
+	a2aTaskStateInputReq  = "input_required"
+	a2aTaskStateAuthReq   = "auth_required"
 )
 
 const (
@@ -38,6 +41,11 @@ const (
 type a2aTaskCursor struct {
 	StartedAt string `json:"started_at"`
 	ID        string `json:"id"`
+}
+
+type protocolContinuation struct {
+	TaskID    string
+	ContextID string
 }
 
 // SendProtocolMessage accepts an external A2A message/send request and runs the target Agent.
@@ -59,6 +67,10 @@ func (s *Service) SendProtocolMessage(ctx context.Context, userID uuid.UUID, slu
 	}
 	normalizeProtocolMessageContext(params)
 	if err := validateA2AMessageSendParams(params); err != nil {
+		return nil, err
+	}
+	continuation, err := s.prepareProtocolContinuation(ctx, userID, agent.Slug, params)
+	if err != nil {
 		return nil, err
 	}
 
@@ -84,7 +96,7 @@ func (s *Service) SendProtocolMessage(ctx context.Context, userID uuid.UUID, slu
 	if err := s.createInlinePushConfig(ctx, userID, slug, resp.RunID, params); err != nil {
 		return nil, err
 	}
-	return taskFromRun(resp, params.Message.ContextID, nil, nil), nil
+	return applyProtocolContinuation(taskFromRun(resp, params.Message.ContextID, nil, nil), continuation), nil
 }
 
 // StartProtocolMessage starts an A2A message/stream request and returns the initial Task.
@@ -108,6 +120,10 @@ func (s *Service) StartProtocolMessage(ctx context.Context, userID uuid.UUID, sl
 	if err := validateA2AMessageSendParams(params); err != nil {
 		return nil, err
 	}
+	continuation, err := s.prepareProtocolContinuation(ctx, userID, agent.Slug, params)
+	if err != nil {
+		return nil, err
+	}
 	input, err := inputFromA2AMessage(params.Message)
 	if err != nil {
 		return nil, err
@@ -124,7 +140,7 @@ func (s *Service) StartProtocolMessage(ctx context.Context, userID uuid.UUID, sl
 	if err := s.createInlinePushConfig(ctx, userID, slug, resp.RunID, params); err != nil {
 		return nil, err
 	}
-	return taskFromRun(resp, params.Message.ContextID, nil, nil), nil
+	return applyProtocolContinuation(taskFromRun(resp, params.Message.ContextID, nil, nil), continuation), nil
 }
 
 func (s *Service) createInlinePushConfig(ctx context.Context, userID uuid.UUID, slug, taskID string, params *A2AMessageSendParams) error {
@@ -163,11 +179,58 @@ func normalizeProtocolMessageContext(params *A2AMessageSendParams) {
 		return
 	}
 	params.Message.ContextID = strings.TrimSpace(params.Message.ContextID)
-	if params.Message.ContextID == "" {
+	params.Message.TaskID = strings.TrimSpace(params.Message.TaskID)
+	if params.Message.ContextID == "" && params.Message.TaskID == "" {
 		params.Message.ContextID = "ctx-" + uuid.NewString()
 	}
-	params.Message.TaskID = strings.TrimSpace(params.Message.TaskID)
 	params.Message.MessageID = strings.TrimSpace(params.Message.MessageID)
+}
+
+func (s *Service) prepareProtocolContinuation(ctx context.Context, userID uuid.UUID, slug string, params *A2AMessageSendParams) (*protocolContinuation, error) {
+	if params == nil {
+		return nil, nil
+	}
+	taskID := strings.TrimSpace(params.Message.TaskID)
+	if taskID == "" {
+		return nil, nil
+	}
+	task, err := s.GetProtocolTask(ctx, userID, slug, taskID, nil)
+	if err != nil {
+		return nil, err
+	}
+	if isTerminalA2ATaskState(task.Status.State) {
+		return nil, a2aUnsupportedOperation("终态任务不接受新的 A2A message")
+	}
+	contextID := strings.TrimSpace(params.Message.ContextID)
+	if contextID != "" && task.ContextID != "" && contextID != task.ContextID {
+		return nil, a2aUnsupportedOperation("message.contextId 与 taskId 所属 context 不一致")
+	}
+	if contextID == "" {
+		params.Message.ContextID = task.ContextID
+	}
+	return &protocolContinuation{TaskID: taskID, ContextID: task.ContextID}, nil
+}
+
+func applyProtocolContinuation(task *A2ATask, continuation *protocolContinuation) *A2ATask {
+	if task == nil || continuation == nil {
+		return task
+	}
+	if continuation.TaskID != "" {
+		task.ID = continuation.TaskID
+	}
+	if continuation.ContextID != "" {
+		task.ContextID = continuation.ContextID
+	}
+	if task.Metadata == nil {
+		task.Metadata = map[string]interface{}{}
+	}
+	openlinker, _ := task.Metadata["openlinker"].(map[string]interface{})
+	if openlinker == nil {
+		openlinker = map[string]interface{}{}
+		task.Metadata["openlinker"] = openlinker
+	}
+	openlinker["protocol_task_id"] = task.ID
+	return task
 }
 
 func protocolRunA2AContext(params *A2AMessageSendParams) *runtime.RunA2AContextRequest {
@@ -180,6 +243,7 @@ func protocolRunA2AContext(params *A2AMessageSendParams) *runtime.RunA2AContextR
 	}
 	return &runtime.RunA2AContextRequest{
 		ProtocolContextID: params.Message.ContextID,
+		ProtocolTaskID:    params.Message.TaskID,
 		ParentTaskID:      params.Message.TaskID,
 		RootContextID:     params.Message.ContextID,
 		TraceID:           traceID,
@@ -265,7 +329,7 @@ func validateA2AAcceptedOutputModes(cfg *A2ASendConfiguration) error {
 
 func validateA2AMessagePartMediaTypes(message A2AMessage) error {
 	for _, part := range message.Parts {
-		mediaType := normalizeA2AMediaType(firstPartString(part, "mediaType", "mimeType"))
+		mediaType := normalizeA2AMediaType(a2aPartMediaType(part))
 		if mediaType == "" {
 			continue
 		}
@@ -278,6 +342,16 @@ func validateA2AMessagePartMediaTypes(message A2AMessage) error {
 		})
 	}
 	return nil
+}
+
+func a2aPartMediaType(part map[string]interface{}) string {
+	if mediaType := firstPartString(part, "mediaType", "mimeType"); mediaType != "" {
+		return mediaType
+	}
+	if file, ok := part["file"].(map[string]interface{}); ok {
+		return firstPartString(file, "mediaType", "mimeType")
+	}
+	return ""
 }
 
 func normalizeA2AMediaType(raw string) string {
@@ -303,9 +377,10 @@ func (s *Service) GetProtocolTask(ctx context.Context, userID uuid.UUID, slug, t
 	if slug == "" {
 		return nil, httpx.BadRequest("缺少 Agent slug")
 	}
-	runID, err := uuid.Parse(strings.TrimSpace(taskID))
-	if err != nil {
-		return nil, httpx.BadRequest("task id 不是合法 uuid")
+	if s.pool == nil {
+		if _, err := uuid.Parse(strings.TrimSpace(taskID)); err != nil {
+			return nil, httpx.BadRequest("task id 不是合法 uuid")
+		}
 	}
 
 	agent, err := s.queries.GetAgentBySlug(ctx, slug)
@@ -315,6 +390,10 @@ func (s *Service) GetProtocolTask(ctx context.Context, userID uuid.UUID, slug, t
 	if err != nil {
 		log.Error().Err(err).Str("slug", slug).Msg("a2a.GetProtocolTask: GetAgentBySlug")
 		return nil, httpx.Internal("查询 Agent 失败")
+	}
+	runID, err := s.resolveProtocolTaskRunID(ctx, userID, agent.ID, taskID)
+	if err != nil {
+		return nil, err
 	}
 	runRow, err := s.queries.GetRunByID(ctx, runID)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (runRow.UserID != userID || runRow.AgentID != agent.ID)) {
@@ -343,7 +422,15 @@ func (s *Service) GetProtocolTask(ctx context.Context, userID uuid.UUID, slug, t
 			messages = messages[len(messages)-*historyLength:]
 		}
 	}
-	return taskFromRun(resp, s.protocolContextIDForRun(ctx, runID, runRow.Input), artifacts, messages), nil
+	task := taskFromRun(resp, s.protocolContextIDForRun(ctx, runID, runRow.Input), artifacts, messages)
+	task.Status.Timestamp = a2aRunStatusTimestamp(runRow)
+	if historyLength != nil {
+		trimA2ATaskHistory(task, *historyLength)
+	}
+	if protocolTaskID := s.protocolTaskIDForRun(ctx, runID); protocolTaskID != "" {
+		task.ID = protocolTaskID
+	}
+	return task, nil
 }
 
 func (s *Service) ListProtocolTasks(ctx context.Context, userID uuid.UUID, slug string, params *A2ATaskListParams) (*A2ATaskListResponse, error) {
@@ -448,6 +535,9 @@ func (s *Service) ListProtocolTasks(ctx context.Context, userID uuid.UUID, slug 
 			}
 		}
 		task := taskFromDBRun(row, includeArtifacts, artifacts, messages)
+		if params.HistoryLength != nil {
+			trimA2ATaskHistory(task, *params.HistoryLength)
+		}
 		if contextID := s.protocolContextIDForRun(ctx, row.ID, row.Input); contextID != "" {
 			task.ContextID = contextID
 		}
@@ -463,6 +553,24 @@ func (s *Service) ListProtocolTasks(ctx context.Context, userID uuid.UUID, slug 
 
 // CancelProtocolTask maps A2A tasks/cancel onto a real OpenLinker run cancellation.
 func (s *Service) CancelProtocolTask(ctx context.Context, userID uuid.UUID, slug, taskID string) (*A2ATask, error) {
+	current, err := s.GetProtocolTask(ctx, userID, slug, taskID, nil)
+	if err != nil {
+		return nil, err
+	}
+	if current.Status.State == a2aTaskStateInputReq || current.Status.State == a2aTaskStateAuthReq {
+		current.Status.State = a2aTaskStateCanceled
+		current.Status.Message = &A2AMessage{Kind: "message", Role: "agent", Parts: []map[string]interface{}{{"kind": "text", "text": "OpenLinker A2A task canceled"}}}
+		if current.Metadata == nil {
+			current.Metadata = map[string]interface{}{}
+		}
+		openlinker, _ := current.Metadata["openlinker"].(map[string]interface{})
+		if openlinker == nil {
+			openlinker = map[string]interface{}{}
+			current.Metadata["openlinker"] = openlinker
+		}
+		openlinker["a2a_projected_state"] = a2aTaskStateCanceled
+		return current, nil
+	}
 	runID, contextID, err := s.ensureProtocolRunContext(ctx, userID, slug, taskID)
 	if err != nil {
 		return nil, err
@@ -509,10 +617,6 @@ func (s *Service) ensureProtocolRun(ctx context.Context, userID uuid.UUID, slug,
 }
 
 func (s *Service) ensureProtocolRunContext(ctx context.Context, userID uuid.UUID, slug, taskID string) (uuid.UUID, string, error) {
-	runID, err := uuid.Parse(strings.TrimSpace(taskID))
-	if err != nil {
-		return uuid.Nil, "", httpx.BadRequest("task id 不是合法 uuid")
-	}
 	agent, err := s.queries.GetAgentBySlug(ctx, strings.TrimSpace(slug))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, "", httpx.NotFound("Agent 不存在")
@@ -520,6 +624,10 @@ func (s *Service) ensureProtocolRunContext(ctx context.Context, userID uuid.UUID
 	if err != nil {
 		log.Error().Err(err).Str("slug", slug).Msg("a2a.ensureProtocolRun: GetAgentBySlug")
 		return uuid.Nil, "", httpx.Internal("查询 Agent 失败")
+	}
+	runID, err := s.resolveProtocolTaskRunID(ctx, userID, agent.ID, taskID)
+	if err != nil {
+		return uuid.Nil, "", err
 	}
 	runRow, err := s.queries.GetRunByID(ctx, runID)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (runRow.UserID != userID || runRow.AgentID != agent.ID)) {
@@ -532,6 +640,35 @@ func (s *Service) ensureProtocolRunContext(ctx context.Context, userID uuid.UUID
 	return runID, s.protocolContextIDForRun(ctx, runID, runRow.Input), nil
 }
 
+func (s *Service) resolveProtocolTaskRunID(ctx context.Context, userID, agentID uuid.UUID, taskID string) (uuid.UUID, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return uuid.Nil, httpx.BadRequest("缺少 task id")
+	}
+	if s.pool != nil {
+		var runID uuid.UUID
+		err := s.pool.QueryRow(ctx, `
+SELECT run_id
+FROM a2a_context_mappings
+WHERE user_id = $1 AND agent_id = $2 AND protocol_task_id = $3
+ORDER BY created_at DESC, run_id DESC
+LIMIT 1
+`, userID, agentID, taskID).Scan(&runID)
+		if err == nil {
+			return runID, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			log.Error().Err(err).Str("task_id", taskID).Msg("a2a.resolveProtocolTaskRunID")
+			return uuid.Nil, httpx.Internal("查询 A2A task 映射失败")
+		}
+	}
+	runID, err := uuid.Parse(taskID)
+	if err != nil {
+		return uuid.Nil, a2aTaskNotFound("任务不存在")
+	}
+	return runID, nil
+}
+
 func (s *Service) protocolContextIDForRun(ctx context.Context, runID uuid.UUID, input []byte) string {
 	mapping, err := s.queries.GetA2AContextMappingByRun(ctx, runID)
 	if err == nil && strings.TrimSpace(mapping.ProtocolContextID) != "" {
@@ -541,6 +678,17 @@ func (s *Service) protocolContextIDForRun(ctx context.Context, runID uuid.UUID, 
 		log.Warn().Err(err).Str("run_id", runID.String()).Msg("a2a.protocolContextIDForRun")
 	}
 	return a2aContextIDFromRunInput(input)
+}
+
+func (s *Service) protocolTaskIDForRun(ctx context.Context, runID uuid.UUID) string {
+	mapping, err := s.queries.GetA2AContextMappingByRun(ctx, runID)
+	if err == nil && strings.TrimSpace(mapping.ProtocolTaskID) != "" {
+		return strings.TrimSpace(mapping.ProtocolTaskID)
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		log.Warn().Err(err).Str("run_id", runID.String()).Msg("a2a.protocolTaskIDForRun")
+	}
+	return ""
 }
 
 func normalizeA2AListTasksPageSize(raw *int) (int32, error) {
@@ -655,6 +803,14 @@ func taskFromDBRun(run db.Run, includeArtifacts bool, artifacts []runtime.RunArt
 	}
 	task.Status.Timestamp = statusAt.UTC().Format(time.RFC3339)
 	return task
+}
+
+func a2aRunStatusTimestamp(run db.Run) string {
+	statusAt := run.StartedAt
+	if run.FinishedAt != nil {
+		statusAt = *run.FinishedAt
+	}
+	return statusAt.UTC().Format(time.RFC3339)
 }
 
 func a2aContextIDFromRunInput(input []byte) string {
@@ -883,6 +1039,12 @@ func taskFromRun(resp *runtime.RunResponse, contextID string, artifacts []runtim
 			},
 		},
 	}
+	projection := a2aOutputProjection(resp.Output)
+	hasProjection := projection.HasValue
+	if projection.State != "" {
+		task.Status.State = projection.State
+		task.Metadata["openlinker"].(map[string]interface{})["a2a_projected_state"] = projection.State
+	}
 	if resp.ParentRunID != "" {
 		task.Metadata["openlinker"].(map[string]interface{})["parent_run_id"] = resp.ParentRunID
 	}
@@ -893,10 +1055,20 @@ func taskFromRun(resp *runtime.RunResponse, contextID string, artifacts []runtim
 		task.Metadata["openlinker"].(map[string]interface{})["a2a_context"] = resp.A2AContext
 	}
 
-	if msg := statusMessageFromRun(resp); msg != nil {
+	if projection.StatusMessage != nil {
+		task.Status.Message = projection.StatusMessage
+	} else if msg := statusMessageFromRun(resp); msg != nil {
 		task.Status.Message = msg
 	}
-	if resp.Status == "success" && resp.Output != nil {
+	if projection.ResponseMessage != nil {
+		task.ResponseMessage = projection.ResponseMessage
+	}
+	if len(projection.History) > 0 {
+		task.History = append(task.History, projection.History...)
+	}
+	if len(projection.Artifacts) > 0 {
+		task.Artifacts = append(task.Artifacts, projection.Artifacts...)
+	} else if resp.Status == "success" && resp.Output != nil && !hasProjection {
 		task.Artifacts = append(task.Artifacts, outputArtifact(resp.Output))
 	}
 	for _, artifact := range artifacts {
@@ -906,6 +1078,13 @@ func taskFromRun(resp *runtime.RunResponse, contextID string, artifacts []runtim
 		task.History = append(task.History, messageFromRunMessage(message))
 	}
 	return task
+}
+
+func trimA2ATaskHistory(task *A2ATask, limit int) {
+	if task == nil || limit <= 0 || len(task.History) <= limit {
+		return
+	}
+	task.History = task.History[len(task.History)-limit:]
 }
 
 func stateFromRunStatus(status string) string {
@@ -922,6 +1101,43 @@ func stateFromRunStatus(status string) string {
 		return a2aTaskStateSubmitted
 	default:
 		return a2aTaskStateSubmitted
+	}
+}
+
+func isTerminalA2ATaskState(state string) bool {
+	switch normalizeProjectedA2ATaskState(state) {
+	case a2aTaskStateCompleted, a2aTaskStateCanceled, a2aTaskStateFailed, a2aTaskStateRejected:
+		return true
+	default:
+		return false
+	}
+}
+
+func a2aTaskStateOrder(state string) int {
+	switch normalizeProjectedA2ATaskState(state) {
+	case a2aTaskStateSubmitted:
+		return 0
+	case a2aTaskStateWorking, a2aTaskStateInputReq, a2aTaskStateAuthReq:
+		return 1
+	case a2aTaskStateCompleted, a2aTaskStateCanceled, a2aTaskStateFailed, a2aTaskStateRejected:
+		return 2
+	default:
+		return -1
+	}
+}
+
+func a2aStreamItemStateOrder(item interface{}) int {
+	switch typed := item.(type) {
+	case *A2ATask:
+		return a2aTaskStateOrder(typed.Status.State)
+	case A2ATask:
+		return a2aTaskStateOrder(typed.Status.State)
+	case *A2ATaskStatusUpdateEvent:
+		return a2aTaskStateOrder(typed.Status.State)
+	case A2ATaskStatusUpdateEvent:
+		return a2aTaskStateOrder(typed.Status.State)
+	default:
+		return -1
 	}
 }
 
@@ -1004,7 +1220,11 @@ func messageFromRunEvent(event runtime.RunEventResponse) *A2AMessage {
 	if text == "" {
 		return nil
 	}
-	return &A2AMessage{Kind: "message", Role: "agent", Parts: []map[string]interface{}{{"kind": "text", "text": text}}}
+	messageID := strings.TrimSpace(event.EventID)
+	if messageID == "" {
+		messageID = "event-" + strconv.Itoa(int(event.Sequence))
+	}
+	return &A2AMessage{Kind: "message", MessageID: messageID, Role: "agent", Parts: []map[string]interface{}{{"kind": "text", "text": text}}}
 }
 
 func artifactUpdateFromRunEvent(taskID, contextID string, event runtime.RunEventResponse) *A2ATaskArtifactUpdateEvent {
@@ -1067,6 +1287,7 @@ func isTerminalRunEvent(eventType string) bool {
 }
 
 func statusMessageFromRun(resp *runtime.RunResponse) *A2AMessage {
+	messageID := "status-" + strings.TrimSpace(resp.RunID) + "-" + strings.TrimSpace(resp.Status)
 	switch resp.Status {
 	case "success":
 		parts := []map[string]interface{}{}
@@ -1076,7 +1297,7 @@ func statusMessageFromRun(resp *runtime.RunResponse) *A2AMessage {
 		if resp.Output != nil {
 			parts = append(parts, map[string]interface{}{"kind": "data", "data": resp.Output})
 		}
-		return &A2AMessage{Kind: "message", Role: "agent", Parts: parts}
+		return &A2AMessage{Kind: "message", MessageID: messageID, Role: "agent", Parts: parts}
 	case "failed", "timeout":
 		text := strings.TrimSpace(resp.ErrorMsg)
 		if text == "" {
@@ -1085,15 +1306,15 @@ func statusMessageFromRun(resp *runtime.RunResponse) *A2AMessage {
 		if text == "" {
 			text = "OpenLinker run failed"
 		}
-		return &A2AMessage{Kind: "message", Role: "agent", Parts: []map[string]interface{}{{"kind": "text", "text": text}}}
+		return &A2AMessage{Kind: "message", MessageID: messageID, Role: "agent", Parts: []map[string]interface{}{{"kind": "text", "text": text}}}
 	case "canceled":
 		text := strings.TrimSpace(resp.ErrorMsg)
 		if text == "" {
 			text = "OpenLinker task canceled"
 		}
-		return &A2AMessage{Kind: "message", Role: "agent", Parts: []map[string]interface{}{{"kind": "text", "text": text}}}
+		return &A2AMessage{Kind: "message", MessageID: messageID, Role: "agent", Parts: []map[string]interface{}{{"kind": "text", "text": text}}}
 	case "running":
-		return &A2AMessage{Kind: "message", Role: "agent", Parts: []map[string]interface{}{{"kind": "text", "text": "OpenLinker run is still running"}}}
+		return &A2AMessage{Kind: "message", MessageID: messageID, Role: "agent", Parts: []map[string]interface{}{{"kind": "text", "text": "OpenLinker run is still running"}}}
 	default:
 		return nil
 	}
@@ -1121,6 +1342,190 @@ func outputArtifact(output map[string]interface{}) A2AArtifact {
 		Name:       "OpenLinker run output",
 		Parts:      parts,
 		Metadata:   map[string]interface{}{"source": "run.output"},
+	}
+}
+
+type projectedA2AOutput struct {
+	HasValue        bool
+	State           string
+	StatusMessage   *A2AMessage
+	ResponseMessage *A2AMessage
+	Artifacts       []A2AArtifact
+	History         []A2AMessage
+}
+
+func a2aOutputProjection(output map[string]interface{}) projectedA2AOutput {
+	source := projectedA2AMap(output)
+	if len(source) == 0 {
+		return projectedA2AOutput{}
+	}
+	out := projectedA2AOutput{
+		HasValue:        true,
+		State:           normalizeProjectedA2ATaskState(projectedString(source, "task_state", "taskState", "state")),
+		StatusMessage:   projectedMessage(firstProjectedValue(source, "status_message", "statusMessage")),
+		ResponseMessage: projectedMessage(firstProjectedValue(source, "response_message", "responseMessage", "direct_message", "directMessage")),
+		Artifacts:       projectedArtifacts(firstProjectedValue(source, "artifacts", "artifact")),
+		History:         projectedMessages(firstProjectedValue(source, "history", "messages")),
+	}
+	if out.State == "" {
+		if status, ok := firstProjectedValue(source, "status").(map[string]interface{}); ok {
+			out.State = normalizeProjectedA2ATaskState(projectedString(status, "state"))
+			if out.StatusMessage == nil {
+				out.StatusMessage = projectedMessage(firstProjectedValue(status, "message"))
+			}
+		}
+	}
+	return out
+}
+
+func projectedA2AMap(output map[string]interface{}) map[string]interface{} {
+	if output == nil {
+		return nil
+	}
+	for _, key := range []string{"a2a", "a2a_task", "a2aTask"} {
+		if value, ok := output[key].(map[string]interface{}); ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func normalizeProjectedA2ATaskState(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "submitted", "task_state_submitted":
+		return a2aTaskStateSubmitted
+	case "working", "task_state_working":
+		return a2aTaskStateWorking
+	case "completed", "task_state_completed":
+		return a2aTaskStateCompleted
+	case "canceled", "cancelled", "task_state_canceled", "task_state_cancelled":
+		return a2aTaskStateCanceled
+	case "failed", "task_state_failed":
+		return a2aTaskStateFailed
+	case "rejected", "task_state_rejected":
+		return a2aTaskStateRejected
+	case "input-required", "input_required", "task_state_input_required":
+		return a2aTaskStateInputReq
+	case "auth-required", "auth_required", "task_state_auth_required":
+		return a2aTaskStateAuthReq
+	default:
+		return strings.TrimSpace(raw)
+	}
+}
+
+func projectedString(source map[string]interface{}, keys ...string) string {
+	value, _ := firstProjectedValue(source, keys...).(string)
+	return strings.TrimSpace(value)
+}
+
+func firstProjectedValue(source map[string]interface{}, keys ...string) interface{} {
+	if source == nil {
+		return nil
+	}
+	for _, key := range keys {
+		if value, ok := source[key]; ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func projectedMessage(raw interface{}) *A2AMessage {
+	switch value := raw.(type) {
+	case nil:
+		return nil
+	case string:
+		text := strings.TrimSpace(value)
+		if text == "" {
+			return nil
+		}
+		return &A2AMessage{Kind: "message", Role: "agent", Parts: []map[string]interface{}{{"kind": "text", "text": text}}}
+	case map[string]interface{}:
+		var msg A2AMessage
+		if !decodeProjectedValue(value, &msg) {
+			return nil
+		}
+		normalizeProjectedMessage(&msg)
+		return &msg
+	default:
+		return &A2AMessage{Kind: "message", Role: "agent", Parts: []map[string]interface{}{{"kind": "data", "data": value}}}
+	}
+}
+
+func projectedMessages(raw interface{}) []A2AMessage {
+	switch value := raw.(type) {
+	case []interface{}:
+		out := make([]A2AMessage, 0, len(value))
+		for _, item := range value {
+			if msg := projectedMessage(item); msg != nil {
+				out = append(out, *msg)
+			}
+		}
+		return out
+	case []map[string]interface{}:
+		out := make([]A2AMessage, 0, len(value))
+		for _, item := range value {
+			if msg := projectedMessage(item); msg != nil {
+				out = append(out, *msg)
+			}
+		}
+		return out
+	default:
+		if msg := projectedMessage(value); msg != nil {
+			return []A2AMessage{*msg}
+		}
+		return nil
+	}
+}
+
+func projectedArtifacts(raw interface{}) []A2AArtifact {
+	values := []interface{}{}
+	switch value := raw.(type) {
+	case nil:
+		return nil
+	case []interface{}:
+		values = value
+	case []map[string]interface{}:
+		for _, item := range value {
+			values = append(values, item)
+		}
+	default:
+		values = append(values, value)
+	}
+	out := make([]A2AArtifact, 0, len(values))
+	for _, item := range values {
+		var artifact A2AArtifact
+		if !decodeProjectedValue(item, &artifact) {
+			continue
+		}
+		if artifact.ArtifactID == "" {
+			artifact.ArtifactID = "output"
+		}
+		out = append(out, artifact)
+	}
+	return out
+}
+
+func decodeProjectedValue(raw interface{}, target interface{}) bool {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return false
+	}
+	return json.Unmarshal(data, target) == nil
+}
+
+func normalizeProjectedMessage(msg *A2AMessage) {
+	if msg == nil {
+		return
+	}
+	if msg.Kind == "" {
+		msg.Kind = "message"
+	}
+	if msg.Role == "" {
+		msg.Role = "agent"
+	}
+	if msg.MessageID == "" {
+		msg.MessageID = "projected-" + uuid.NewString()
 	}
 }
 

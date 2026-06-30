@@ -71,7 +71,7 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.
 	api.GET("/a2a/parents", h.ListParentRuns, queryMiddleware)
 	publicProtocol := api.Group("/a2a/agents/:slug")
 	publicProtocol.GET("/.well-known/agent-card.json", h.GetPublicAgentCardHTTP)
-	protocol := api.Group("/a2a/agents/:slug", queryMiddleware)
+	protocol := api.Group("/a2a/agents/:slug", queryMiddleware, a2aHTTPErrorMiddleware)
 	protocol.POST("", h.JSONRPC)
 	protocol.GET("/extendedAgentCard", h.GetExtendedAgentCardHTTP)
 	protocol.POST("/message:action", h.MessageHTTP)

@@ -1,0 +1,13 @@
+version: v2
+modules:
+  - path: proto
+  - path: third_party
+lint:
+  use:
+    - DEFAULT
+  except:
+    - PACKAGE_DIRECTORY_MATCH
+    - PACKAGE_VERSION_SUFFIX
+breaking:
+  use:
+    - FILE

@@ -1,0 +1,122 @@
+{
+  "messages": [
+    {
+      "name": "text_data_and_file_parts",
+      "message": {
+        "messageId": "third-party-msg-1",
+        "contextId": "ctx-third-party",
+        "role": "ROLE_USER",
+        "parts": [
+          { "text": "Run the report" },
+          { "data": { "required_skills": ["data/sql-query"], "count": 2 } },
+          { "raw": "plain bytes", "filename": "input.txt", "mediaType": "text/plain" }
+        ]
+      },
+      "expected_input": {
+        "message": "Run the report",
+        "a2a_message_id": "third-party-msg-1",
+        "a2a_context_id": "ctx-third-party",
+        "file_count": 1,
+        "data_count": 1
+      }
+    },
+    {
+      "name": "task_only_followup",
+      "message": {
+        "messageId": "third-party-msg-2",
+        "taskId": "task-opaque-1",
+        "role": "user",
+        "parts": [
+          { "text": "Continue" }
+        ]
+      },
+      "expected_input": {
+        "message": "Continue",
+        "a2a_message_id": "third-party-msg-2",
+        "a2a_task_id": "task-opaque-1"
+      }
+    }
+  ],
+  "normalizations": [
+    {
+      "name": "current_task_state_and_role",
+      "value": {
+        "task": {
+          "id": "task-1",
+          "contextId": "ctx-1",
+          "status": {
+            "state": "input_required",
+            "message": {
+              "messageId": "status-1",
+              "role": "agent",
+              "parts": [
+                { "kind": "text", "text": "Need input" }
+              ]
+            }
+          }
+        }
+      },
+      "expected_state": "TASK_STATE_INPUT_REQUIRED",
+      "expected_role": "ROLE_AGENT",
+      "expected_kind_dropped": true
+    },
+    {
+      "name": "direct_message_response",
+      "value": {
+        "message": {
+          "messageId": "msg-response",
+          "role": "agent",
+          "parts": [
+            { "kind": "text", "text": "Direct message response" }
+          ]
+        }
+      },
+      "expected_role": "ROLE_AGENT",
+      "expected_kind_dropped": true
+    }
+  ],
+  "push_configs": [
+    {
+      "name": "rest_plural_config_id",
+      "params": {
+        "taskId": "task-1",
+        "id": "push-1",
+        "pushNotificationConfig": {
+          "url": "https://example.com/push",
+          "authentication": {
+            "scheme": "Bearer",
+            "credentials": "secret"
+          }
+        }
+      },
+      "expected_task_id": "task-1",
+      "expected_config_id": "push-1"
+    },
+    {
+      "name": "jsonrpc_nested_config_id",
+      "params": {
+        "id": "task-2",
+        "pushNotificationConfig": {
+          "id": "push-2",
+          "url": "https://example.com/push"
+        }
+      },
+      "expected_task_id": "task-2",
+      "expected_config_id": "push-2"
+    }
+  ],
+  "errors": [
+    {
+      "name": "task_not_found",
+      "reason": "TASK_NOT_FOUND",
+      "jsonrpc_code": -32001,
+      "http_status": 404
+    },
+    {
+      "name": "unsupported_operation",
+      "reason": "UNSUPPORTED_OPERATION",
+      "jsonrpc_code": -32004,
+      "http_status": 400
+    }
+  ]
+}

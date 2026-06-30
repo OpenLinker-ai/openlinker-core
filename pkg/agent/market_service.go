@@ -26,12 +26,17 @@ import (
 // 设计与模块 2 (Agent 注册写入) 隔离：本 service 只调用 SELECT，
 // 不持有事务，也不依赖任何写入逻辑。
 type MarketService struct {
-	queries *db.Queries
+	queries          *db.Queries
+	a2aGRPCPublicURL string
 }
 
 // NewMarketService 构造 MarketService，pool 仅用于读。
 func NewMarketService(pool *pgxpool.Pool) *MarketService {
 	return &MarketService{queries: db.New(pool)}
+}
+
+func (s *MarketService) SetA2AGRPCInterface(publicURL string) {
+	s.a2aGRPCPublicURL = strings.TrimRight(strings.TrimSpace(publicURL), "/")
 }
 
 // 默认与上限分页参数。
@@ -290,28 +295,39 @@ func (s *MarketService) getAgentCardBySlug(ctx context.Context, slug string, ext
 	}
 
 	a2aEndpoint := "/api/v1/a2a/agents/" + detail.Slug
+	additionalInterfaces := []AgentCardTransport{
+		{URL: a2aEndpoint, Transport: "JSONRPC"},
+		{URL: a2aEndpoint, Transport: "HTTP+JSON"},
+	}
+	supportedInterfaces := []AgentCardInterface{
+		{URL: a2aEndpoint, ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0"},
+		{URL: a2aEndpoint, ProtocolBinding: "HTTP+JSON", ProtocolVersion: "1.0"},
+		{URL: a2aEndpoint, ProtocolBinding: "JSONRPC", ProtocolVersion: "0.3"},
+	}
+	if s.a2aGRPCPublicURL != "" {
+		additionalInterfaces = append(additionalInterfaces, AgentCardTransport{URL: s.a2aGRPCPublicURL, Transport: "GRPC"})
+		supportedInterfaces = append(supportedInterfaces, AgentCardInterface{
+			URL:             s.a2aGRPCPublicURL,
+			ProtocolBinding: "GRPC",
+			Tenant:          detail.Slug,
+			ProtocolVersion: "1.0",
+		})
+	}
 	extendedCardEndpoint := "/api/v1/agents/" + detail.Slug + "/agent-card.extended.json"
 	cardVariant := "public"
 	if extended {
 		cardVariant = "extended"
 	}
 	card := &AgentCardResponse{
-		Name:               detail.Name,
-		Description:        detail.Description,
-		URL:                a2aEndpoint,
-		Version:            "v1",
-		ProtocolVersion:    "1.0",
-		ProtocolVersions:   []string{"0.3", "1.0"},
-		PreferredTransport: "JSONRPC",
-		AdditionalInterfaces: []AgentCardTransport{
-			{URL: a2aEndpoint, Transport: "JSONRPC"},
-			{URL: a2aEndpoint, Transport: "HTTP+JSON"},
-		},
-		SupportedInterfaces: []AgentCardInterface{
-			{URL: a2aEndpoint, ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0"},
-			{URL: a2aEndpoint, ProtocolBinding: "HTTP+JSON", ProtocolVersion: "1.0"},
-			{URL: a2aEndpoint, ProtocolBinding: "JSONRPC", ProtocolVersion: "0.3"},
-		},
+		Name:                              detail.Name,
+		Description:                       detail.Description,
+		URL:                               a2aEndpoint,
+		Version:                           "v1",
+		ProtocolVersion:                   "1.0",
+		ProtocolVersions:                  []string{"0.3", "1.0"},
+		PreferredTransport:                "JSONRPC",
+		AdditionalInterfaces:              additionalInterfaces,
+		SupportedInterfaces:               supportedInterfaces,
 		SupportsAuthenticatedExtendedCard: true,
 		Provider: AgentCardProvider{
 			Organization: detail.Creator.DisplayName,

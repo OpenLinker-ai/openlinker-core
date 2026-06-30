@@ -101,6 +101,8 @@ type TaskCallbackPayload struct {
 	Payload        map[string]interface{} `json:"payload"`
 	SubscriptionID string                 `json:"subscription_id"`
 	CreatedAt      string                 `json:"created_at"`
+
+	a2aStreamResponse bool
 }
 
 // WebhookPayload is the legacy Agent webhook body.

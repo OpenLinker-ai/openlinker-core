@@ -165,6 +165,15 @@ func normalizeA2AValueForCurrent(value interface{}) interface{} {
 		return typed
 	case map[string]interface{}:
 		normalizeA2APushConfigMapForCurrent(typed)
+		delete(typed, "openlinker")
+		if metadata, ok := typed["metadata"].(map[string]interface{}); ok {
+			cleaned := normalizeA2AMetadataForCurrent(metadata)
+			if len(cleaned) == 0 {
+				delete(typed, "metadata")
+			} else {
+				typed["metadata"] = cleaned
+			}
+		}
 		if parts, ok := typed["parts"].([]interface{}); ok {
 			normalized := make([]interface{}, 0, len(parts))
 			for _, rawPart := range parts {
@@ -329,9 +338,76 @@ func normalizeA2AFilePartForCurrent(source map[string]interface{}) map[string]in
 	return out
 }
 
+func normalizeA2AMetadataForCurrent(metadata map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+	for key, value := range metadata {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" || trimmed == "openlinker" || trimmed == "payload" || strings.HasPrefix(trimmed, "openlinker_") {
+			continue
+		}
+		out[snakeToLowerCamel(trimmed)] = normalizeA2AMetadataValueForCurrent(value)
+	}
+	return out
+}
+
+func normalizeA2AMetadataValueForCurrent(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return normalizeA2AMetadataForCurrent(typed)
+	case []interface{}:
+		out := make([]interface{}, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, normalizeA2AMetadataValueForCurrent(item))
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func snakeToLowerCamel(key string) string {
+	if !strings.Contains(key, "_") {
+		return key
+	}
+	parts := strings.Split(key, "_")
+	var builder strings.Builder
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		part = strings.ToLower(part)
+		if i == 0 || builder.Len() == 0 {
+			builder.WriteString(part)
+			continue
+		}
+		builder.WriteString(strings.ToUpper(part[:1]))
+		if len(part) > 1 {
+			builder.WriteString(part[1:])
+		}
+	}
+	return builder.String()
+}
+
 func shouldDropA2AKind(value map[string]interface{}) bool {
 	if _, ok := value["kind"]; !ok {
 		return false
+	}
+	if kind, _ := value["kind"].(string); strings.EqualFold(strings.TrimSpace(kind), "message") {
+		if _, ok := value["messageId"]; ok {
+			return true
+		}
+		if _, ok := value["role"]; ok {
+			return true
+		}
+		if _, ok := value["parts"]; ok {
+			return true
+		}
+		if _, ok := value["contextId"]; ok {
+			return true
+		}
+		if _, ok := value["taskId"]; ok {
+			return true
+		}
 	}
 	if _, ok := value["parts"]; ok {
 		return true
@@ -374,4 +450,50 @@ func firstPartString(source map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func officialA2AAgentCardView(raw interface{}) interface{} {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return raw
+	}
+	var card map[string]interface{}
+	if err := json.Unmarshal(data, &card); err != nil {
+		return raw
+	}
+	out := map[string]interface{}{}
+	for _, key := range []string{
+		"name",
+		"description",
+		"version",
+		"provider",
+		"documentationUrl",
+		"documentation_url",
+		"iconUrl",
+		"icon_url",
+		"defaultInputModes",
+		"default_input_modes",
+		"defaultOutputModes",
+		"default_output_modes",
+		"supportedInterfaces",
+		"supported_interfaces",
+		"skills",
+		"signatures",
+	} {
+		if value, ok := card[key]; ok {
+			out[key] = value
+		}
+	}
+	if caps, ok := card["capabilities"].(map[string]interface{}); ok {
+		cleanCaps := map[string]interface{}{}
+		for _, key := range []string{"streaming", "pushNotifications", "push_notifications", "extensions", "extendedAgentCard", "extended_agent_card"} {
+			if value, exists := caps[key]; exists {
+				cleanCaps[key] = value
+			}
+		}
+		if len(cleanCaps) > 0 {
+			out["capabilities"] = cleanCaps
+		}
+	}
+	return out
 }

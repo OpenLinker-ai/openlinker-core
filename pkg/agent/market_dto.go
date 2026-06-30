@@ -167,6 +167,7 @@ type AgentCardExtension struct {
 type AgentCardInterface struct {
 	URL             string `json:"url"`
 	ProtocolBinding string `json:"protocolBinding"`
+	Tenant          string `json:"tenant,omitempty"`
 	ProtocolVersion string `json:"protocolVersion"`
 }
 
