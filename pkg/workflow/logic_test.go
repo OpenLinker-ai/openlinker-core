@@ -354,6 +354,22 @@ func TestWorkflowResponseAndDataHelpers(t *testing.T) {
 	}
 }
 
+func TestWorkflowNodeErrorPreferenceKeepsBusinessFailure(t *testing.T) {
+	businessErr := errors.New("agent branch failed")
+	if got := preferWorkflowNodeError(nil, businessErr); got != businessErr {
+		t.Fatalf("nil current should accept candidate, got %v", got)
+	}
+	if got := preferWorkflowNodeError(context.Canceled, businessErr); got != businessErr {
+		t.Fatalf("business error should replace context cancellation, got %v", got)
+	}
+	if got := preferWorkflowNodeError(businessErr, context.Canceled); got != businessErr {
+		t.Fatalf("context cancellation should not replace business error, got %v", got)
+	}
+	if got := preferWorkflowNodeError(context.DeadlineExceeded, context.Canceled); !errors.Is(got, context.DeadlineExceeded) {
+		t.Fatalf("first context error should be kept, got %v", got)
+	}
+}
+
 func TestWorkflowComparisonAndRerunHelpers(t *testing.T) {
 	graph := &workflowGraph{
 		Children: map[string][]string{

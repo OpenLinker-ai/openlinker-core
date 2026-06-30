@@ -502,47 +502,15 @@ func (s *Service) enforceDelegationLimits(ctx context.Context, parentRunID, targ
 }
 
 func (s *Service) delegationLineage(ctx context.Context, runID uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := s.pool.Query(ctx, `
-WITH RECURSIVE lineage AS (
-    SELECT r.id, r.agent_id, 0 AS depth
-    FROM runs r
-    WHERE r.id = $1
-  UNION ALL
-    SELECT p.id, p.agent_id, lineage.depth + 1
-    FROM lineage
-    JOIN run_delegations d ON d.child_run_id = lineage.id
-    JOIN runs p ON p.id = d.parent_run_id
-    WHERE lineage.depth < $2
-)
-SELECT agent_id
-FROM lineage
-ORDER BY depth ASC
-`, runID, s.maxDelegationDepth+1)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var lineage []uuid.UUID
-	for rows.Next() {
-		var agentID uuid.UUID
-		if err := rows.Scan(&agentID); err != nil {
-			return nil, err
-		}
-		lineage = append(lineage, agentID)
-	}
-	return lineage, rows.Err()
+	return s.queries.ListDelegationLineage(ctx, db.ListDelegationLineageParams{
+		RunID:    runID,
+		MaxDepth: int32(s.maxDelegationDepth + 1),
+	})
 }
 
 func (s *Service) runningDelegationCount(ctx context.Context) (int, error) {
-	var count int
-	err := s.pool.QueryRow(ctx, `
-SELECT COUNT(*)::int
-FROM run_delegations d
-JOIN runs r ON r.id = d.child_run_id
-WHERE r.status = 'running'
-`).Scan(&count)
-	return count, err
+	count, err := s.queries.CountRunningDelegations(ctx)
+	return int(count), err
 }
 
 func currentRunIDFromRequest(req *CallAgentRequest) (uuid.UUID, error) {

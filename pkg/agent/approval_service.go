@@ -22,6 +22,9 @@ import (
 const (
 	approvalDefaultMinutes = 60
 	approvalSlugRandomLen  = 12 // 24 hex chars
+
+	actionRequestCertification = "request_certification"
+	actionSetVisibilityPublic  = "set_visibility_public"
 )
 
 // ApprovalService 高风险动作审批 CRUD（docs/29 §3.4）。
@@ -187,13 +190,13 @@ func (s *ApprovalService) applyConfirmedAction(ctx context.Context, creatorID, a
 		return httpx.Internal("读取已确认审批失败")
 	}
 	switch approval.Action {
-	case "request-certification", "request_certification":
+	case "request-certification", actionRequestCertification:
 		if _, err := s.queries.RequestCertification(ctx, db.RequestCertificationParams{
 			ID: approval.AgentID, CreatorID: creatorID,
 		}); err != nil {
 			return httpx.Internal("提交认证请求失败")
 		}
-	case "set-visibility-public", "set_visibility=public":
+	case "set-visibility-public", actionSetVisibilityPublic, "set_visibility=public":
 		if err := s.queries.SetAgentVisibilityForOwner(ctx, db.SetAgentVisibilityForOwnerParams{
 			ID: approval.AgentID, CreatorID: creatorID, Visibility: "public",
 		}); err != nil {

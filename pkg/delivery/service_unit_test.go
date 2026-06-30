@@ -280,7 +280,8 @@ func TestDeliveryServiceTargetCRUDAndHistory(t *testing.T) {
 			{ID: uuid.New(), RunID: runID, TargetID: targetID, UserID: userID, TargetType: targetTypeWebhook, TargetURL: "https://example.com/hook", Status: "success", CreatedAt: now, UpdatedAt: now},
 		},
 	}
-	svc := &Service{queries: queries}
+	txRunner := &fakeDeliveryTxRunner{q: queries}
+	svc := &Service{queries: queries, txRunner: txRunner}
 
 	created, err := svc.CreateTarget(context.Background(), userID, &CreateTargetRequest{
 		Name:       "Webhook",
@@ -294,6 +295,9 @@ func TestDeliveryServiceTargetCRUDAndHistory(t *testing.T) {
 	}
 	if created.ID != targetID.String() || created.Secret != "secret" || !queries.clearDefaultCalled {
 		t.Fatalf("created target/clear default = %#v/%v", created, queries.clearDefaultCalled)
+	}
+	if txRunner.calls != 1 {
+		t.Fatalf("default CreateTarget should use transaction, calls=%d", txRunner.calls)
 	}
 	if queries.createTargetArg.UserID != userID || queries.createTargetArg.Name != "Webhook" || queries.createTargetArg.Type != targetTypeWebhook || queries.createTargetArg.Secret == "" {
 		t.Fatalf("create target arg = %#v", queries.createTargetArg)
@@ -320,6 +324,9 @@ func TestDeliveryServiceTargetCRUDAndHistory(t *testing.T) {
 
 	if err := svc.SetDefault(context.Background(), targetID, userID); err != nil {
 		t.Fatalf("SetDefault error = %v", err)
+	}
+	if txRunner.calls != 2 {
+		t.Fatalf("SetDefault should use transaction, calls=%d", txRunner.calls)
 	}
 	if queries.defaultArg.ID != targetID || queries.defaultArg.UserID != userID {
 		t.Fatalf("default arg = %#v", queries.defaultArg)
@@ -868,6 +875,20 @@ type fakeDeliveryQueries struct {
 
 	pending    []db.RunDelivery
 	pendingErr error
+}
+
+type fakeDeliveryTxRunner struct {
+	q     deliveryQueries
+	calls int
+	err   error
+}
+
+func (r *fakeDeliveryTxRunner) runInTx(ctx context.Context, fn func(deliveryQueries) error) error {
+	r.calls++
+	if r.err != nil {
+		return r.err
+	}
+	return fn(r.q)
 }
 
 func (q *fakeDeliveryQueries) ListDeliveryTargetsByUser(context.Context, uuid.UUID) ([]db.DeliveryTarget, error) {

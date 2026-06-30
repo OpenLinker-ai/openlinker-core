@@ -242,7 +242,15 @@ SELECT
 -- name: ListPublicAgents :many
 -- 市场列表：visibility=public AND lifecycle_status=active。
 -- $1 tags TEXT[]（空数组表示不筛选）；$2 keyword TEXT（空串表示不搜索）；$3 limit；$4 offset；$5 callable_only。
-SELECT a.*, u.display_name AS creator_name
+SELECT a.*, u.display_name AS creator_name,
+       COALESCE(av.availability_status, 'unknown') AS availability_status,
+       av.last_successful_run_at AS availability_last_successful_run_at,
+       av.last_failed_run_at AS availability_last_failed_run_at,
+       av.last_checked_at AS availability_last_checked_at,
+       COALESCE(av.consecutive_failures, 0)::int AS availability_consecutive_failures,
+       rt.last_runtime_token_used_at,
+       COALESCE(skill_stats.verified_count, 0)::int AS verified_skill_count,
+       skill_stats.latest_batch_id AS latest_benchmark_id
 FROM agents a
 JOIN users u ON u.id = a.creator_id
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
@@ -253,6 +261,20 @@ LEFT JOIN LATERAL (
       AND revoked_at IS NULL
       AND 'agent:pull' = ANY(scopes)
 ) rt ON TRUE
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*) FILTER (WHERE s.status = 'verified')::int AS verified_count,
+        (
+            SELECT latest.last_batch_id
+            FROM agent_skill_scores latest
+            WHERE latest.agent_id = a.id
+              AND latest.last_batch_id IS NOT NULL
+            ORDER BY latest.updated_at DESC
+            LIMIT 1
+        ) AS latest_batch_id
+    FROM agent_skill_scores s
+    WHERE s.agent_id = a.id
+) skill_stats ON TRUE
 WHERE a.visibility = 'public'
   AND a.lifecycle_status = 'active'
   AND NOT EXISTS (

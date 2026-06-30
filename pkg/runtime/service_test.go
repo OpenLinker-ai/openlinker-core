@@ -1942,6 +1942,28 @@ func TestRunWithWalletChargerSettlesSuccessFailureAndInsufficientBalance(t *test
 		assert.Equal(t, int64(15), credit.Amount)
 	})
 
+	t.Run("success status survives creator credit failure", func(t *testing.T) {
+		svc := newTestService(t, pool)
+		wallet := &recordingRuntimeWalletCharger{
+			ops:       make(chan recordedWalletOp, 4),
+			chargeOK:  true,
+			creditErr: errors.New("credit unavailable"),
+		}
+		svc.SetWalletCharger(wallet)
+		userID := insertUserWithBalance(t, pool, 1000)
+		creatorID := insertCreator(t, pool)
+		endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"still ok"}}`))
+		agentID := insertAgent(t, pool, creatorID, endpoint, 20, "approved")
+
+		resp, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "paid"}), "")
+		require.NoError(t, err)
+		require.Equal(t, "success", resp.Status)
+
+		var status string
+		require.NoError(t, pool.QueryRow(ctx, `SELECT status FROM runs WHERE id=$1`, mustParseUUID(t, resp.RunID)).Scan(&status))
+		require.Equal(t, "success", status)
+	})
+
 	t.Run("failure refunds charged user", func(t *testing.T) {
 		svc := newTestService(t, pool)
 		wallet := &recordingRuntimeWalletCharger{ops: make(chan recordedWalletOp, 4), chargeOK: true}

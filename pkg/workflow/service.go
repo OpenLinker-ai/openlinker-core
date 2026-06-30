@@ -180,13 +180,17 @@ func (s *Service) ListWorkflows(ctx context.Context, userID uuid.UUID, limit int
 		return nil, httpx.Internal("查询 workflow 数量失败")
 	}
 	items := make([]WorkflowResponse, 0, len(rows))
+	workflowIDs := make([]uuid.UUID, 0, len(rows))
 	for _, w := range rows {
-		nodes, err := s.queries.ListWorkflowNodes(ctx, w.ID)
-		if err != nil {
-			log.Error().Err(err).Str("workflow_id", w.ID.String()).Msg("workflow.ListWorkflows: nodes")
-			return nil, httpx.Internal("查询 workflow 节点失败")
-		}
-		items = append(items, workflowToResponse(w, nodes))
+		workflowIDs = append(workflowIDs, w.ID)
+	}
+	nodesByWorkflowID, err := s.listWorkflowNodesByWorkflowIDs(ctx, workflowIDs)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID.String()).Msg("workflow.ListWorkflows: nodes")
+		return nil, httpx.Internal("查询 workflow 节点失败")
+	}
+	for _, w := range rows {
+		items = append(items, workflowToResponse(w, nodesByWorkflowID[w.ID]))
 	}
 	return &WorkflowListResponse{Items: items, Total: total}, nil
 }
@@ -521,13 +525,17 @@ func (s *Service) ListWorkflowRuns(ctx context.Context, userID, workflowID uuid.
 		return nil, httpx.Internal("查询 workflow_run 数量失败")
 	}
 	items := make([]WorkflowRunResponse, 0, len(rows))
+	runIDs := make([]uuid.UUID, 0, len(rows))
 	for _, run := range rows {
-		steps, err := s.queries.ListWorkflowRunSteps(ctx, run.ID)
-		if err != nil {
-			log.Error().Err(err).Str("workflow_run_id", run.ID.String()).Msg("workflow.ListWorkflowRuns: steps")
-			return nil, httpx.Internal("查询 workflow_run_steps 失败")
-		}
-		items = append(items, workflowRunToResponse(run, steps))
+		runIDs = append(runIDs, run.ID)
+	}
+	stepsByRunID, err := s.listWorkflowRunStepsByRunIDs(ctx, runIDs)
+	if err != nil {
+		log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.ListWorkflowRuns: steps")
+		return nil, httpx.Internal("查询 workflow_run_steps 失败")
+	}
+	for _, run := range rows {
+		items = append(items, workflowRunToResponse(run, stepsByRunID[run.ID]))
 	}
 	return &WorkflowRunListResponse{Items: items, Total: total}, nil
 }
@@ -581,6 +589,7 @@ func (s *Service) executeWorkflowRun(
 		if stopped, resp, err := s.workflowRunStopped(ctx, run.UserID, run.ID); stopped || err != nil {
 			return resp, err
 		}
+		levelCtx, cancelLevel := context.WithCancel(ctx)
 		results := make(chan workflowNodeRunResult, len(level))
 		var wg sync.WaitGroup
 		for _, node := range level {
@@ -590,19 +599,29 @@ func (s *Service) executeWorkflowRun(
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				results <- s.runWorkflowNode(ctx, run.UserID, w, run, node, stepInput, sequence)
+				result := s.runWorkflowNode(levelCtx, run.UserID, w, run, node, stepInput, sequence)
+				if result.Err != nil {
+					cancelLevel()
+				}
+				results <- result
 			}()
 		}
 		wg.Wait()
+		cancelLevel()
 		close(results)
+		var levelErr error
 		for result := range results {
 			if result.Err != nil {
-				if stopped, resp, err := s.workflowRunStopped(ctx, run.UserID, run.ID); stopped || err != nil {
-					return resp, err
-				}
-				return nil, s.failWorkflowRun(ctx, run.ID, result.Err.Error())
+				levelErr = preferWorkflowNodeError(levelErr, result.Err)
+				continue
 			}
 			outputsByNode[result.NodeKey] = result.Output
+		}
+		if levelErr != nil {
+			if stopped, resp, err := s.workflowRunStopped(ctx, run.UserID, run.ID); stopped || err != nil {
+				return resp, err
+			}
+			return nil, s.failWorkflowRun(ctx, run.ID, levelErr.Error())
 		}
 		if stopped, resp, err := s.workflowRunStopped(ctx, run.UserID, run.ID); stopped || err != nil {
 			return resp, err
@@ -714,6 +733,23 @@ func (s *Service) runWorkflowNode(
 		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: fmt.Errorf("更新 step 失败: %w", err)}
 	}
 	return workflowNodeRunResult{NodeKey: node.NodeKey, Output: output}
+}
+
+func preferWorkflowNodeError(current, candidate error) error {
+	if candidate == nil {
+		return current
+	}
+	if current == nil {
+		return candidate
+	}
+	if isWorkflowContextError(current) && !isWorkflowContextError(candidate) {
+		return candidate
+	}
+	return current
+}
+
+func isWorkflowContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (s *Service) waitForRuntimeRunCompletion(ctx context.Context, userID, runID uuid.UUID) (*runtime.RunResponse, error) {
@@ -880,6 +916,36 @@ func (s *Service) getWorkflowDefinition(ctx context.Context, workflowID uuid.UUI
 		return db.Workflow{}, nil, httpx.Internal("查询 workflow 节点失败")
 	}
 	return w, nodes, nil
+}
+
+func (s *Service) listWorkflowNodesByWorkflowIDs(ctx context.Context, workflowIDs []uuid.UUID) (map[uuid.UUID][]db.WorkflowNode, error) {
+	grouped := map[uuid.UUID][]db.WorkflowNode{}
+	if len(workflowIDs) == 0 {
+		return grouped, nil
+	}
+	nodes, err := s.queries.ListWorkflowNodesByWorkflowIDs(ctx, workflowIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range nodes {
+		grouped[node.WorkflowID] = append(grouped[node.WorkflowID], node)
+	}
+	return grouped, nil
+}
+
+func (s *Service) listWorkflowRunStepsByRunIDs(ctx context.Context, runIDs []uuid.UUID) (map[uuid.UUID][]db.WorkflowRunStep, error) {
+	grouped := map[uuid.UUID][]db.WorkflowRunStep{}
+	if len(runIDs) == 0 {
+		return grouped, nil
+	}
+	steps, err := s.queries.ListWorkflowRunStepsByRunIDs(ctx, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, step := range steps {
+		grouped[step.WorkflowRunID] = append(grouped[step.WorkflowRunID], step)
+	}
+	return grouped, nil
 }
 
 func (s *Service) failWorkflowRun(ctx context.Context, workflowRunID uuid.UUID, message string) error {

@@ -16,8 +16,11 @@ import (
 
 var errRemoteAPIKeyInvalid = errors.New("remote api key invalid")
 
+const internalSecretHeader = "X-Internal-Secret"
+
 type RemoteAPIKeyVerifier struct {
 	endpoint string
+	secret   string
 	client   *http.Client
 }
 
@@ -30,13 +33,18 @@ type remoteAPIKeyVerifyResponse struct {
 	Scopes []string `json:"scopes"`
 }
 
-func NewRemoteAPIKeyVerifier(endpoint string) *RemoteAPIKeyVerifier {
+func NewRemoteAPIKeyVerifier(endpoint string, internalSecret ...string) *RemoteAPIKeyVerifier {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
 		return nil
 	}
+	secret := ""
+	if len(internalSecret) > 0 {
+		secret = strings.TrimSpace(internalSecret[0])
+	}
 	return &RemoteAPIKeyVerifier{
 		endpoint: endpoint,
+		secret:   secret,
 		client:   &http.Client{Timeout: 5 * time.Second},
 	}
 }
@@ -56,6 +64,9 @@ func (v *RemoteAPIKeyVerifier) Verify(ctx context.Context, plaintextKey string) 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	if v.secret != "" {
+		req.Header.Set(internalSecretHeader, v.secret)
+	}
 
 	res, err := v.client.Do(req)
 	if err != nil {

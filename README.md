@@ -66,18 +66,21 @@ Required:
 
 - `DATABASE_URL`
 - `JWT_SECRET`
+- `FRONTEND_URL` (required in production)
 
 Common optional values:
 
 - `REDIS_URL`
-- `FRONTEND_URL`
 - `API_URL`
 - `OAUTH_CALLBACK_BASE_URL`
+- `OAUTH_SESSION_SECRET`
 - `GOOGLE_OAUTH_CLIENT_ID`
 - `GOOGLE_OAUTH_CLIENT_SECRET`
 - `GITHUB_OAUTH_CLIENT_ID`
 - `GITHUB_OAUTH_CLIENT_SECRET`
 - `API_KEY_VERIFY_URL`
+- `API_KEY_VERIFY_SECRET` (required in production when `API_KEY_VERIFY_URL` is set)
+- `RUNTIME_ENDPOINT_RUN_*` (stale direct HTTP / MCP run recovery worker)
 - `ALLOW_LOCAL_HTTP_ENDPOINTS`
 
 Generate a local JWT secret with:

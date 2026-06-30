@@ -301,55 +301,6 @@ func TestRegistryPayloadPolicyAndArtifactHelpers(t *testing.T) {
 	}
 }
 
-func TestRegistryScannerHelpers(t *testing.T) {
-	now := time.Date(2026, 6, 21, 1, 2, 3, 0, time.UTC)
-	later := now.Add(time.Minute)
-	peerID := uuid.New()
-	ownerID := uuid.New()
-
-	peer, err := scanRegistryPeer(fakeRegistryScanner{values: []any{
-		peerID,
-		ownerID,
-		"Peer",
-		"https://peer.example/api/v1",
-		"token",
-		"sha256:abc",
-		"active",
-		&later,
-		now,
-		later,
-	}})
-	if err != nil || peer.ID != peerID || peer.OwnerUserID != ownerID || peer.LastUsedAt == nil || !peer.LastUsedAt.Equal(later) {
-		t.Fatalf("scanRegistryPeer = %#v, %v", peer, err)
-	}
-	if _, err := scanRegistryPeer(fakeRegistryScanner{err: errors.New("scan failed")}); err == nil {
-		t.Fatalf("scanRegistryPeer error should propagate")
-	}
-
-	inviteID := uuid.New()
-	invite, err := scanRegistryFederationInvite(fakeRegistryScanner{values: []any{
-		inviteID,
-		ownerID,
-		"Invite",
-		"https://peer.example/api/v1",
-		"token",
-		"rf_live_abcd",
-		"hash",
-		"sha256:def",
-		"active",
-		later,
-		&later,
-		now,
-		later,
-	}})
-	if err != nil || invite.ID != inviteID || invite.TokenPrefix != "rf_live_abcd" || invite.ConsumedAt == nil || !invite.ConsumedAt.Equal(later) {
-		t.Fatalf("scanRegistryFederationInvite = %#v, %v", invite, err)
-	}
-	if _, err := scanRegistryFederationInvite(fakeRegistryScanner{err: errors.New("scan failed")}); err == nil {
-		t.Fatalf("scanRegistryFederationInvite error should propagate")
-	}
-}
-
 func TestRegistryDTOAndJSONHelpers(t *testing.T) {
 	now := time.Date(2026, 6, 20, 1, 2, 3, 0, time.UTC)
 	later := now.Add(time.Minute)
@@ -1285,21 +1236,6 @@ func newRegistryTestContext(spec *registryHandlerRequest) echo.Context {
 		c.SetParamValues(values...)
 	}
 	return c
-}
-
-type fakeRegistryScanner struct {
-	values []any
-	err    error
-}
-
-func (s fakeRegistryScanner) Scan(dest ...any) error {
-	if s.err != nil {
-		return s.err
-	}
-	for i := range dest {
-		reflect.ValueOf(dest[i]).Elem().Set(reflect.ValueOf(s.values[i]))
-	}
-	return nil
 }
 
 type registryRoundTripper func(*http.Request) (*http.Response, error)

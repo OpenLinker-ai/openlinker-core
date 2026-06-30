@@ -26,8 +26,9 @@ type Config struct {
 	DBHealthCheckPeriodSeconds int    `envconfig:"DB_HEALTH_CHECK_PERIOD_SECONDS" default:"60"`
 
 	// 鉴权
-	JWTSecret      string `envconfig:"JWT_SECRET" required:"true"`
-	JWTExpireHours int    `envconfig:"JWT_EXPIRE_HOURS" default:"24"`
+	JWTSecret          string `envconfig:"JWT_SECRET" required:"true"`
+	JWTExpireHours     int    `envconfig:"JWT_EXPIRE_HOURS" default:"24"`
+	OAuthSessionSecret string `envconfig:"OAUTH_SESSION_SECRET"`
 
 	// Stripe
 	StripeSecretKey     string `envconfig:"STRIPE_SECRET_KEY"`
@@ -42,10 +43,11 @@ type Config struct {
 	GithubClientSecret string `envconfig:"GITHUB_OAUTH_CLIENT_SECRET"`
 
 	// 前端 URL
-	FrontendURL          string `envconfig:"FRONTEND_URL" default:"http://localhost:3000"`
+	FrontendURL          string `envconfig:"FRONTEND_URL"`
 	APIURL               string `envconfig:"API_URL" default:"http://localhost:8080"`
 	OAuthCallbackBaseURL string `envconfig:"OAUTH_CALLBACK_BASE_URL"`
 	APIKeyVerifyURL      string `envconfig:"API_KEY_VERIFY_URL"`
+	APIKeyVerifySecret   string `envconfig:"API_KEY_VERIFY_SECRET"`
 
 	// A2A gRPC binding. Disabled by default so existing HTTP deployments do not
 	// need to expose an additional HTTP/2 port.
@@ -89,6 +91,13 @@ type Config struct {
 	RuntimePullDispatchTimeoutSeconds    int  `envconfig:"RUNTIME_PULL_DISPATCH_TIMEOUT_SECONDS" default:"120"`
 	RuntimePullResultTimeoutSeconds      int  `envconfig:"RUNTIME_PULL_RESULT_TIMEOUT_SECONDS" default:"900"`
 	RuntimePullRunWorkerTimeoutBatchSize int  `envconfig:"RUNTIME_PULL_RUN_WORKER_TIMEOUT_BATCH_SIZE" default:"50"`
+
+	// Endpoint run timeout worker for direct_http / mcp_server runs. A zero
+	// timeout means max(RUN_TIMEOUT_SECONDS+30s, 180s).
+	RuntimeEndpointRunWorkerEnabled         bool `envconfig:"RUNTIME_ENDPOINT_RUN_WORKER_ENABLED" default:"true"`
+	RuntimeEndpointRunWorkerIntervalSeconds int  `envconfig:"RUNTIME_ENDPOINT_RUN_WORKER_INTERVAL_SECONDS" default:"30"`
+	RuntimeEndpointRunTimeoutSeconds        int  `envconfig:"RUNTIME_ENDPOINT_RUN_TIMEOUT_SECONDS" default:"0"`
+	RuntimeEndpointRunWorkerBatchSize       int  `envconfig:"RUNTIME_ENDPOINT_RUN_WORKER_BATCH_SIZE" default:"50"`
 }
 
 // Load 从环境变量加载配置。

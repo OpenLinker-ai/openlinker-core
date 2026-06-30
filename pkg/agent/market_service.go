@@ -96,8 +96,8 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 
 	items := make([]MarketListItem, 0, len(rows))
 	for _, r := range rows {
-		availability := s.agentAvailability(ctx, r.ID, r.ConnectionMode)
-		verifiedCount, latestBenchmarkID := s.agentVerifiedSkillStats(ctx, r.ID)
+		availability := marketListRowAvailability(r)
+		latestBenchmarkID := stringPtrFromUUID(r.LatestBenchmarkID)
 		items = append(items, MarketListItem{
 			ID:                r.ID.String(),
 			Slug:              r.Slug,
@@ -116,7 +116,7 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 				r.Visibility,
 				r.CertificationStatus,
 				availability,
-				verifiedCount,
+				r.VerifiedSkillCount,
 				latestBenchmarkID,
 			),
 		})
@@ -520,8 +520,40 @@ func (s *MarketService) runtimeAwareAvailability(ctx context.Context, agentID uu
 	return availability
 }
 
+func marketListRowAvailability(r db.ListPublicAgentsRow) Availability {
+	availability := availabilityResponse(
+		r.AvailabilityStatus,
+		r.AvailabilityLastSuccessfulRunAt,
+		r.AvailabilityLastFailedRunAt,
+		r.AvailabilityLastCheckedAt,
+		r.AvailabilityConsecutiveFailures,
+	)
+	return runtimeAwareAvailabilityFromLastRuntimeToken(r.ConnectionMode, availability, r.LastRuntimeTokenUsedAt, time.Now())
+}
+
+func runtimeAwareAvailabilityFromLastRuntimeToken(connectionMode string, availability Availability, lastUsedAt *time.Time, now time.Time) Availability {
+	if !isQueuedRuntimeConnectionMode(connectionMode) {
+		return availability
+	}
+	if lastUsedAt != nil && !lastUsedAt.Before(now.Add(-5*time.Minute)) {
+		return availability
+	}
+	availability.Status = "unreachable"
+	availability.Label = "不可达"
+	availability.Hint = "Runtime Agent 最近没有运行时心跳、WebSocket 连接或领取轮询，暂不建议试用。"
+	return availability
+}
+
 func isQueuedRuntimeConnectionMode(mode string) bool {
 	return mode == ConnectionModeRuntimePull || mode == ConnectionModeRuntimeWS
+}
+
+func stringPtrFromUUID(id *uuid.UUID) *string {
+	if id == nil {
+		return nil
+	}
+	s := id.String()
+	return &s
 }
 
 func readinessForAgent(

@@ -124,6 +124,28 @@ SELECT child_run_id, parent_run_id, caller_agent_id, reason, created_at
 FROM run_delegations
 WHERE child_run_id = $1;
 
+-- name: ListDelegationLineage :many
+WITH RECURSIVE lineage AS (
+    SELECT r.id, r.agent_id, 0 AS depth
+    FROM runs r
+    WHERE r.id = $1
+  UNION ALL
+    SELECT p.id, p.agent_id, lineage.depth + 1
+    FROM lineage
+    JOIN run_delegations d ON d.child_run_id = lineage.id
+    JOIN runs p ON p.id = d.parent_run_id
+    WHERE lineage.depth < $2
+)
+SELECT agent_id
+FROM lineage
+ORDER BY depth ASC;
+
+-- name: CountRunningDelegations :one
+SELECT COUNT(*)::int AS total
+FROM run_delegations d
+JOIN runs r ON r.id = d.child_run_id
+WHERE r.status = 'running';
+
 -- name: ListChildRunsByParentAndUser :many
 SELECT c.id AS child_run_id, d.parent_run_id, d.caller_agent_id, d.reason,
        c.status, c.cost_cents, c.duration_ms, c.started_at, c.finished_at, c.source,

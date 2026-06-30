@@ -345,6 +345,56 @@ func (q *Queries) GetRunDelegationByChild(ctx context.Context, childRunID uuid.U
 	return delegation, err
 }
 
+const listDelegationLineage = `-- name: ListDelegationLineage :many
+WITH RECURSIVE lineage AS (
+    SELECT r.id, r.agent_id, 0 AS depth
+    FROM runs r
+    WHERE r.id = $1
+  UNION ALL
+    SELECT p.id, p.agent_id, lineage.depth + 1
+    FROM lineage
+    JOIN run_delegations d ON d.child_run_id = lineage.id
+    JOIN runs p ON p.id = d.parent_run_id
+    WHERE lineage.depth < $2
+)
+SELECT agent_id
+FROM lineage
+ORDER BY depth ASC`
+
+type ListDelegationLineageParams struct {
+	RunID    uuid.UUID `db:"run_id" json:"run_id"`
+	MaxDepth int32     `db:"max_depth" json:"max_depth"`
+}
+
+func (q *Queries) ListDelegationLineage(ctx context.Context, arg ListDelegationLineageParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listDelegationLineage, arg.RunID, arg.MaxDepth)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var agentID uuid.UUID
+		if err := rows.Scan(&agentID); err != nil {
+			return nil, err
+		}
+		items = append(items, agentID)
+	}
+	return items, rows.Err()
+}
+
+const countRunningDelegations = `-- name: CountRunningDelegations :one
+SELECT COUNT(*)::int AS total
+FROM run_delegations d
+JOIN runs r ON r.id = d.child_run_id
+WHERE r.status = 'running'`
+
+func (q *Queries) CountRunningDelegations(ctx context.Context) (int32, error) {
+	var total int32
+	err := q.db.QueryRow(ctx, countRunningDelegations).Scan(&total)
+	return total, err
+}
+
 const listChildRunsByParentAndUser = `-- name: ListChildRunsByParentAndUser :many
 SELECT c.id AS child_run_id, d.parent_run_id, d.caller_agent_id, d.reason,
        c.status, c.cost_cents, c.duration_ms, c.started_at, c.finished_at, c.source,

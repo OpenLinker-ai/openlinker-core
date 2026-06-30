@@ -25,6 +25,12 @@ FROM workflow_nodes
 WHERE workflow_id = $1
 ORDER BY position ASC, created_at ASC;
 
+-- name: ListWorkflowNodesByWorkflowIDs :many
+SELECT id, workflow_id, node_key, node_type, agent_id, title, config, position, created_at
+FROM workflow_nodes
+WHERE workflow_id = ANY($1::uuid[])
+ORDER BY workflow_id ASC, position ASC, created_at ASC;
+
 -- name: ListWorkflowsByUser :many
 SELECT id, user_id, name, description, status, edges, created_at, updated_at
 FROM workflows
@@ -233,3 +239,11 @@ SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
 FROM workflow_run_steps
 WHERE workflow_run_id = $1
 ORDER BY sequence ASC;
+
+-- name: ListWorkflowRunStepsByRunIDs :many
+SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
+       status, input, output, error_message, sequence, started_at, finished_at,
+       created_at, updated_at
+FROM workflow_run_steps
+WHERE workflow_run_id = ANY($1::uuid[])
+ORDER BY workflow_run_id ASC, sequence ASC;

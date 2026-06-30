@@ -57,6 +57,15 @@ func TestConfigureGothSetsSessionStoreAndProviders(t *testing.T) {
 	}
 }
 
+func TestOAuthSessionSecretPrefersDedicatedSecret(t *testing.T) {
+	if got := oauthSessionSecret(&config.Config{JWTSecret: "jwt", OAuthSessionSecret: " oauth "}); got != "oauth" {
+		t.Fatalf("oauthSessionSecret = %q, want dedicated secret", got)
+	}
+	if got := oauthSessionSecret(&config.Config{JWTSecret: "jwt"}); got != "jwt" {
+		t.Fatalf("oauthSessionSecret fallback = %q, want jwt", got)
+	}
+}
+
 func TestConfigureGothUsesOAuthCallbackBaseURLWhenSet(t *testing.T) {
 	resetGothGlobals(t)
 

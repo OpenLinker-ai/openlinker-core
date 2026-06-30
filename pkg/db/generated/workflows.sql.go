@@ -102,6 +102,29 @@ func (q *Queries) ListWorkflowNodes(ctx context.Context, workflowID uuid.UUID) (
 	return items, rows.Err()
 }
 
+const listWorkflowNodesByWorkflowIDs = `-- name: ListWorkflowNodesByWorkflowIDs :many
+SELECT id, workflow_id, node_key, node_type, agent_id, title, config, position, created_at
+FROM workflow_nodes
+WHERE workflow_id = ANY($1::uuid[])
+ORDER BY workflow_id ASC, position ASC, created_at ASC`
+
+func (q *Queries) ListWorkflowNodesByWorkflowIDs(ctx context.Context, workflowIds []uuid.UUID) ([]WorkflowNode, error) {
+	rows, err := q.db.Query(ctx, listWorkflowNodesByWorkflowIDs, workflowIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WorkflowNode
+	for rows.Next() {
+		var n WorkflowNode
+		if err := scanWorkflowNode(rows, &n); err != nil {
+			return nil, err
+		}
+		items = append(items, n)
+	}
+	return items, rows.Err()
+}
+
 const listWorkflowsByUser = `-- name: ListWorkflowsByUser :many
 SELECT id, user_id, name, description, status, edges, created_at, updated_at
 FROM workflows
@@ -533,6 +556,31 @@ ORDER BY sequence ASC`
 
 func (q *Queries) ListWorkflowRunSteps(ctx context.Context, workflowRunID uuid.UUID) ([]WorkflowRunStep, error) {
 	rows, err := q.db.Query(ctx, listWorkflowRunSteps, workflowRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WorkflowRunStep
+	for rows.Next() {
+		var s WorkflowRunStep
+		if err := scanWorkflowRunStep(rows, &s); err != nil {
+			return nil, err
+		}
+		items = append(items, s)
+	}
+	return items, rows.Err()
+}
+
+const listWorkflowRunStepsByRunIDs = `-- name: ListWorkflowRunStepsByRunIDs :many
+SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
+       status, input, output, error_message, sequence, started_at, finished_at,
+       created_at, updated_at
+FROM workflow_run_steps
+WHERE workflow_run_id = ANY($1::uuid[])
+ORDER BY workflow_run_id ASC, sequence ASC`
+
+func (q *Queries) ListWorkflowRunStepsByRunIDs(ctx context.Context, workflowRunIds []uuid.UUID) ([]WorkflowRunStep, error) {
+	rows, err := q.db.Query(ctx, listWorkflowRunStepsByRunIDs, workflowRunIds)
 	if err != nil {
 		return nil, err
 	}

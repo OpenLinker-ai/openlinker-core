@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -27,6 +28,12 @@ func (c *Charger) Charge(ctx context.Context, tx pgx.Tx, userID uuid.UUID, amoun
 }
 
 func (c *Charger) CreditCreator(ctx context.Context, tx pgx.Tx, creatorID uuid.UUID, amountCents int64) error {
+	if amountCents < 0 {
+		return fmt.Errorf("wallet: amountCents must be non-negative, got %d", amountCents)
+	}
+	if amountCents == 0 {
+		return nil
+	}
 	_, err := tx.Exec(ctx, `
 UPDATE wallets
 SET earnings_cents = earnings_cents + $2,
@@ -41,6 +48,12 @@ func (c *Charger) Refund(ctx context.Context, tx pgx.Tx, userID uuid.UUID, amoun
 }
 
 func charge(ctx context.Context, exec txExecutor, userID uuid.UUID, amountCents int64) (bool, error) {
+	if amountCents < 0 {
+		return false, fmt.Errorf("wallet: amountCents must be non-negative, got %d", amountCents)
+	}
+	if amountCents == 0 {
+		return true, nil
+	}
 	tag, err := exec.Exec(ctx, `
 UPDATE wallets
 SET balance_cents = balance_cents - $2,
@@ -54,6 +67,12 @@ WHERE user_id = $1 AND balance_cents >= $2
 }
 
 func refund(ctx context.Context, exec txExecutor, userID uuid.UUID, amountCents int64) error {
+	if amountCents < 0 {
+		return fmt.Errorf("wallet: amountCents must be non-negative, got %d", amountCents)
+	}
+	if amountCents == 0 {
+		return nil
+	}
 	_, err := exec.Exec(ctx, `
 UPDATE wallets
 SET balance_cents = balance_cents + $2,

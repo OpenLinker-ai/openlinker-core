@@ -135,6 +135,14 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 			BatchSize:       int32(cfg.RuntimePullRunWorkerTimeoutBatchSize),
 		})
 	}
+	if cfg.RuntimeEndpointRunWorkerEnabled {
+		go runtime.StartEndpointRunWorker(rootCtx, runtimeSvc, runtime.EndpointRunWorkerConfig{
+			Interval:   time.Duration(cfg.RuntimeEndpointRunWorkerIntervalSeconds) * time.Second,
+			StaleAfter: time.Duration(cfg.RuntimeEndpointRunTimeoutSeconds) * time.Second,
+			RunTimeout: time.Duration(cfg.RunTimeoutSeconds) * time.Second,
+			BatchSize:  int32(cfg.RuntimeEndpointRunWorkerBatchSize),
+		})
+	}
 	if cfg.AvailabilityMonitorEnabled {
 		agent.StartAvailabilityMonitor(rootCtx, agentSvc, agent.AvailabilityMonitorConfig{
 			Interval:     time.Duration(cfg.AvailabilityMonitorIntervalSeconds) * time.Second,
@@ -147,6 +155,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	webhookSvc := webhook.NewService(pool, cfg)
 	webhookHandler := webhook.NewHandler(webhookSvc, cfg)
 	webhookHandler.RegisterProtected(api, jwtMiddleware)
+	runtimeSvc.SetWebhookEnqueuer(webhookSvc)
 	runtimeSvc.SetTaskCallbackEnqueuer(webhookSvc)
 	go webhook.StartWorker(rootCtx, webhookSvc)
 
@@ -218,7 +227,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 
 // ConfigureGoth initializes OAuth providers and the cookie session store.
 func ConfigureGoth(cfg *config.Config) {
-	store := sessions.NewCookieStore([]byte(cfg.JWTSecret))
+	store := sessions.NewCookieStore([]byte(oauthSessionSecret(cfg)))
 	store.Options.HttpOnly = true
 	store.Options.Secure = cfg.IsProduction()
 	store.Options.SameSite = http.SameSiteLaxMode
@@ -236,6 +245,16 @@ func ConfigureGoth(cfg *config.Config) {
 		goth.UseProviders(gothgithub.New(cfg.GithubClientID, cfg.GithubClientSecret, callback, "user:email"))
 		log.Info().Str("callback", callback).Msg("github oauth configured")
 	}
+}
+
+func oauthSessionSecret(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if value := strings.TrimSpace(cfg.OAuthSessionSecret); value != "" {
+		return value
+	}
+	return cfg.JWTSecret
 }
 
 func oauthCallbackBaseURL(cfg *config.Config) string {

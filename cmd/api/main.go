@@ -51,6 +51,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
 	}
+	if err := validateProductionConfig(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
 
 	openlinkerlog.Init(cfg.LogLevel, cfg.IsProduction())
 	log.Info().Str("env", cfg.Env).Int("port", cfg.Port).Msg("openlinker-core starting")
@@ -97,7 +101,7 @@ func main() {
 	if opts.LLMClient != nil {
 		log.Info().Msg("anthropic llm client configured")
 	}
-	if verifier := auth.NewRemoteAPIKeyVerifier(cfg.APIKeyVerifyURL); verifier != nil {
+	if verifier := auth.NewRemoteAPIKeyVerifier(cfg.APIKeyVerifyURL, cfg.APIKeyVerifySecret); verifier != nil {
 		opts.APIKeyVerifier = verifier
 		log.Info().Str("endpoint", cfg.APIKeyVerifyURL).Msg("remote api key verifier configured")
 	}
@@ -231,6 +235,19 @@ func allowedCORSOrigins(cfg *config.Config) []string {
 	return origins
 }
 
+func validateProductionConfig(cfg *config.Config) error {
+	if cfg == nil || !cfg.IsProduction() {
+		return nil
+	}
+	if strings.TrimSpace(cfg.FrontendURL) == "" {
+		return fmt.Errorf("FRONTEND_URL is required in production")
+	}
+	if strings.TrimSpace(cfg.APIKeyVerifyURL) != "" && strings.TrimSpace(cfg.APIKeyVerifySecret) == "" {
+		return fmt.Errorf("API_KEY_VERIFY_SECRET is required in production when API_KEY_VERIFY_URL is configured")
+	}
+	return nil
+}
+
 func rateLimiterConfig(stores ...emw.RateLimiterStore) emw.RateLimiterConfig {
 	var store emw.RateLimiterStore = emw.NewRateLimiterMemoryStoreWithConfig(emw.RateLimiterMemoryStoreConfig{
 		Rate:      50,
@@ -247,7 +264,7 @@ func rateLimiterConfig(stores ...emw.RateLimiterStore) emw.RateLimiterConfig {
 		},
 		Store: store,
 		DenyHandler: func(c echo.Context, _ string, _ error) error {
-			return httpx.NewError(http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁，请稍后再试")
+			return httpx.NewError(http.StatusTooManyRequests, httpx.CodeRateLimited, "请求过于频繁，请稍后再试")
 		},
 	}
 }

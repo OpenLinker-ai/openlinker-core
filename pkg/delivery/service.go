@@ -76,9 +76,24 @@ func nextRetryDelay(attempt int) time.Duration {
 // HMAC 签名（webhook）/ Slack incoming webhook（slack）。
 type Service struct {
 	queries        deliveryQueries
+	txRunner       deliveryTxRunner
 	pool           *pgxpool.Pool
 	httpClient     *http.Client
 	allowLocalHTTP bool
+}
+
+type deliveryTxRunner interface {
+	runInTx(context.Context, func(deliveryQueries) error) error
+}
+
+type pgxDeliveryTxRunner struct {
+	pool *pgxpool.Pool
+}
+
+func (r pgxDeliveryTxRunner) runInTx(ctx context.Context, fn func(deliveryQueries) error) error {
+	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		return fn(db.New(tx))
+	})
 }
 
 type deliveryQueries interface {
@@ -113,6 +128,9 @@ func NewService(pool *pgxpool.Pool, cfg ...*config.Config) *Service {
 	}
 	if len(cfg) > 0 && cfg[0] != nil {
 		s.allowLocalHTTP = cfg[0].AllowLocalHTTPEndpoints
+	}
+	if pool != nil {
+		s.txRunner = pgxDeliveryTxRunner{pool: pool}
 	}
 	return s
 }
@@ -150,24 +168,35 @@ func (s *Service) CreateTarget(ctx context.Context, userID uuid.UUID, req *Creat
 		return nil, httpx.Internal("序列化 config 失败")
 	}
 
-	// is_default=true 时先清原 default
-	if req.IsDefault {
-		if err := s.queries.ClearDefaultDeliveryTarget(ctx, userID); err != nil {
-			log.Error().Err(err).Msg("delivery.CreateTarget: ClearDefaultDeliveryTarget")
-			return nil, httpx.Internal("清除原默认目标失败")
+	var t db.DeliveryTarget
+	create := func(q deliveryQueries) error {
+		if req.IsDefault {
+			if err := q.ClearDefaultDeliveryTarget(ctx, userID); err != nil {
+				return fmt.Errorf("clear default: %w", err)
+			}
 		}
+		var createErr error
+		t, createErr = q.CreateDeliveryTarget(ctx, db.CreateDeliveryTargetParams{
+			UserID:    userID,
+			Name:      req.Name,
+			Type:      req.Type,
+			Config:    cfg,
+			Secret:    secret,
+			IsDefault: req.IsDefault,
+		})
+		if createErr != nil {
+			return fmt.Errorf("create target: %w", createErr)
+		}
+		return nil
 	}
 
-	t, err := s.queries.CreateDeliveryTarget(ctx, db.CreateDeliveryTargetParams{
-		UserID:    userID,
-		Name:      req.Name,
-		Type:      req.Type,
-		Config:    cfg,
-		Secret:    secret,
-		IsDefault: req.IsDefault,
-	})
+	if req.IsDefault {
+		err = s.runInTx(ctx, create)
+	} else {
+		err = create(s.queries)
+	}
 	if err != nil {
-		log.Error().Err(err).Msg("delivery.CreateTarget: CreateDeliveryTarget")
+		log.Error().Err(err).Msg("delivery.CreateTarget")
 		return nil, httpx.Internal("创建投递目标失败")
 	}
 	resp := toTargetResponse(t, true)
@@ -206,22 +235,36 @@ func (s *Service) DeleteTarget(ctx context.Context, targetID, userID uuid.UUID) 
 
 // SetDefault 将指定 target 设为默认（清掉原 default）。
 func (s *Service) SetDefault(ctx context.Context, targetID, userID uuid.UUID) error {
-	if err := s.queries.ClearDefaultDeliveryTarget(ctx, userID); err != nil {
-		log.Error().Err(err).Msg("delivery.SetDefault: ClearDefaultDeliveryTarget")
-		return httpx.Internal("清除原默认目标失败")
-	}
-	rows, err := s.queries.SetDeliveryTargetDefault(ctx, db.SetDeliveryTargetDefaultParams{
-		ID:     targetID,
-		UserID: userID,
+	var rows int64
+	err := s.runInTx(ctx, func(q deliveryQueries) error {
+		if err := q.ClearDefaultDeliveryTarget(ctx, userID); err != nil {
+			return fmt.Errorf("clear default: %w", err)
+		}
+		var setErr error
+		rows, setErr = q.SetDeliveryTargetDefault(ctx, db.SetDeliveryTargetDefaultParams{
+			ID:     targetID,
+			UserID: userID,
+		})
+		if setErr != nil {
+			return fmt.Errorf("set default: %w", setErr)
+		}
+		return nil
 	})
 	if err != nil {
-		log.Error().Err(err).Msg("delivery.SetDefault: SetDeliveryTargetDefault")
+		log.Error().Err(err).Msg("delivery.SetDefault")
 		return httpx.Internal("更新默认目标失败")
 	}
 	if rows == 0 {
 		return httpx.NotFound("投递目标不存在")
 	}
 	return nil
+}
+
+func (s *Service) runInTx(ctx context.Context, fn func(deliveryQueries) error) error {
+	if s.txRunner == nil {
+		return fn(s.queries)
+	}
+	return s.txRunner.runInTx(ctx, fn)
 }
 
 func (s *Service) UpdateTarget(ctx context.Context, targetID, userID uuid.UUID, req *UpdateTargetRequest) (*TargetResponse, error) {

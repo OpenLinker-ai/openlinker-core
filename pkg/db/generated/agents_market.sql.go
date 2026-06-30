@@ -9,6 +9,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -19,7 +20,15 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        a.lifecycle_status, a.visibility, a.certification_status,
        a.rejection_reason, a.certified_at, a.total_calls, a.total_revenue_cents,
        a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
-       u.display_name AS creator_name
+       u.display_name AS creator_name,
+       COALESCE(av.availability_status, 'unknown') AS availability_status,
+       av.last_successful_run_at AS availability_last_successful_run_at,
+       av.last_failed_run_at AS availability_last_failed_run_at,
+       av.last_checked_at AS availability_last_checked_at,
+       COALESCE(av.consecutive_failures, 0)::int AS availability_consecutive_failures,
+       rt.last_runtime_token_used_at,
+       COALESCE(skill_stats.verified_count, 0)::int AS verified_skill_count,
+       skill_stats.latest_batch_id AS latest_benchmark_id
 FROM agents a
 JOIN users u ON u.id = a.creator_id
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
@@ -30,6 +39,20 @@ LEFT JOIN LATERAL (
       AND revoked_at IS NULL
       AND 'agent:pull' = ANY(scopes)
 ) rt ON TRUE
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*) FILTER (WHERE s.status = 'verified')::int AS verified_count,
+        (
+            SELECT latest.last_batch_id
+            FROM agent_skill_scores latest
+            WHERE latest.agent_id = a.id
+              AND latest.last_batch_id IS NOT NULL
+            ORDER BY latest.updated_at DESC
+            LIMIT 1
+        ) AS latest_batch_id
+    FROM agent_skill_scores s
+    WHERE s.agent_id = a.id
+) skill_stats ON TRUE
 WHERE a.visibility = 'public'
   AND a.lifecycle_status = 'active'
   AND NOT EXISTS (
@@ -96,7 +119,15 @@ type ListPublicAgentsParams struct {
 
 type ListPublicAgentsRow struct {
 	Agent
-	CreatorName string `db:"creator_name" json:"creator_name"`
+	CreatorName                     string     `db:"creator_name" json:"creator_name"`
+	AvailabilityStatus              string     `db:"availability_status" json:"availability_status"`
+	AvailabilityLastSuccessfulRunAt *time.Time `db:"availability_last_successful_run_at" json:"availability_last_successful_run_at"`
+	AvailabilityLastFailedRunAt     *time.Time `db:"availability_last_failed_run_at" json:"availability_last_failed_run_at"`
+	AvailabilityLastCheckedAt       *time.Time `db:"availability_last_checked_at" json:"availability_last_checked_at"`
+	AvailabilityConsecutiveFailures int32      `db:"availability_consecutive_failures" json:"availability_consecutive_failures"`
+	LastRuntimeTokenUsedAt          *time.Time `db:"last_runtime_token_used_at" json:"last_runtime_token_used_at"`
+	VerifiedSkillCount              int32      `db:"verified_skill_count" json:"verified_skill_count"`
+	LatestBenchmarkID               *uuid.UUID `db:"latest_benchmark_id" json:"latest_benchmark_id"`
 }
 
 // ListPublicAgents 市场列表（visibility=public + lifecycle=active；tag/keyword 过滤；分页）。
@@ -138,6 +169,14 @@ func (q *Queries) ListPublicAgents(ctx context.Context, arg ListPublicAgentsPara
 			&r.CreatedAt,
 			&r.UpdatedAt,
 			&r.CreatorName,
+			&r.AvailabilityStatus,
+			&r.AvailabilityLastSuccessfulRunAt,
+			&r.AvailabilityLastFailedRunAt,
+			&r.AvailabilityLastCheckedAt,
+			&r.AvailabilityConsecutiveFailures,
+			&r.LastRuntimeTokenUsedAt,
+			&r.VerifiedSkillCount,
+			&r.LatestBenchmarkID,
 		); err != nil {
 			return nil, err
 		}

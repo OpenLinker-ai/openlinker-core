@@ -42,6 +42,17 @@ func TestChargeUsesBalanceGuard(t *testing.T) {
 	}
 }
 
+func TestChargeRejectsNegativeAndAllowsZeroNoop(t *testing.T) {
+	userID := uuid.New()
+	exec := &fakeWalletExec{tag: pgconn.NewCommandTag("UPDATE 1")}
+	if ok, err := charge(context.Background(), exec, userID, -1); err == nil || ok {
+		t.Fatalf("negative charge ok=%v err=%v, want error", ok, err)
+	}
+	if ok, err := charge(context.Background(), exec, userID, 0); err != nil || !ok {
+		t.Fatalf("zero charge ok=%v err=%v, want noop success", ok, err)
+	}
+}
+
 func TestRefundClampsTotalSpent(t *testing.T) {
 	userID := uuid.New()
 	exec := &fakeWalletExec{tag: pgconn.NewCommandTag("UPDATE 1")}
@@ -53,5 +64,16 @@ func TestRefundClampsTotalSpent(t *testing.T) {
 	}
 	if len(exec.args) != 2 || exec.args[0] != userID || exec.args[1] != int64(125) {
 		t.Fatalf("refund args = %#v", exec.args)
+	}
+}
+
+func TestRefundRejectsNegativeAndAllowsZeroNoop(t *testing.T) {
+	userID := uuid.New()
+	exec := &fakeWalletExec{tag: pgconn.NewCommandTag("UPDATE 1")}
+	if err := refund(context.Background(), exec, userID, -1); err == nil {
+		t.Fatal("negative refund should fail")
+	}
+	if err := refund(context.Background(), exec, userID, 0); err != nil {
+		t.Fatalf("zero refund should be noop: %v", err)
 	}
 }

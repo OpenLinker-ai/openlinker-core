@@ -243,6 +243,115 @@ func TestWorkflowRunExecutesIndependentBranchesInParallelAndAggregatesOutputs(t 
 	mu.Unlock()
 }
 
+func TestWorkflowParallelBranchFailureCancelsSiblingHTTPRun(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+
+	var mu sync.Mutex
+	calls := []string{}
+	failStarted := make(chan struct{})
+	slowStarted := make(chan struct{})
+	slowCanceled := make(chan struct{})
+	var closeFailStarted sync.Once
+	var closeSlowStarted sync.Once
+	var closeSlowCanceled sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req runtimemod.AgentRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		nodeKey, _ := req.Input["node_key"].(string)
+
+		mu.Lock()
+		calls = append(calls, nodeKey)
+		mu.Unlock()
+
+		switch nodeKey {
+		case "fail":
+			closeFailStarted.Do(func() { close(failStarted) })
+			select {
+			case <-slowStarted:
+			case <-time.After(2 * time.Second):
+			}
+			http.Error(w, "branch failed", http.StatusInternalServerError)
+		case "slow":
+			closeSlowStarted.Do(func() { close(slowStarted) })
+			select {
+			case <-r.Context().Done():
+				closeSlowCanceled.Do(func() { close(slowCanceled) })
+				return
+			case <-time.After(3 * time.Second):
+				w.Header().Set("Content-Type", "application/json")
+				require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+					"output": map[string]interface{}{"step": nodeKey},
+				}))
+			}
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+				"output": map[string]interface{}{"step": nodeKey},
+			}))
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	userID := insertWorkflowUser(t, pool, "wf-cancel-sibling-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-cancel-sibling-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
+
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		PlatformFeeRate:         0,
+		RunTimeoutSeconds:       10,
+		AllowLocalHTTPEndpoints: true,
+	})
+	svc := workflow.NewService(pool, runtimeSvc)
+
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Fail-fast DAG workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "fail", Title: "Fail", AgentID: agentID},
+			{Key: "slow", Title: "Slow", AgentID: agentID},
+			{Key: "join", Title: "Join", AgentID: agentID},
+		},
+		Edges: []map[string]interface{}{
+			{"from": "fail", "to": "join"},
+			{"from": "slow", "to": "join"},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = svc.RunWorkflow(context.Background(), userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"topic": "cancel sibling"},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "workflow 执行失败")
+	select {
+	case <-failStarted:
+	default:
+		t.Fatal("fail branch was not called")
+	}
+	select {
+	case <-slowStarted:
+	default:
+		t.Fatal("slow branch was not called")
+	}
+	select {
+	case <-slowCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow branch HTTP request was not canceled after sibling failure")
+	}
+
+	mu.Lock()
+	require.ElementsMatch(t, []string{"fail", "slow"}, calls)
+	require.NotContains(t, calls, "join")
+	mu.Unlock()
+
+	history, err := svc.ListWorkflowRuns(context.Background(), userID, uuid.MustParse(created.ID), 10)
+	require.NoError(t, err)
+	require.Len(t, history.Items, 1)
+	require.Equal(t, "failed", history.Items[0].Status)
+	require.Len(t, history.Items[0].Steps, 2)
+	require.NotContains(t, []string{history.Items[0].Steps[0].NodeKey, history.Items[0].Steps[1].NodeKey}, "join")
+}
+
 func TestRerunWorkflowStepReusesUnaffectedStepsAndComparesRuns(t *testing.T) {
 	pool := setupWorkflowTestDB(t)
 

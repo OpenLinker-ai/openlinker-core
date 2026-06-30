@@ -25,6 +25,7 @@ func TestRemoteAPIKeyVerifierVerifySuccess(t *testing.T) {
 	var seenKey string
 	var seenContentType string
 	var seenAccept string
+	var seenSecret string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -32,6 +33,7 @@ func TestRemoteAPIKeyVerifierVerifySuccess(t *testing.T) {
 		}
 		seenContentType = r.Header.Get("Content-Type")
 		seenAccept = r.Header.Get("Accept")
+		seenSecret = r.Header.Get(internalSecretHeader)
 		var body remoteAPIKeyVerifyRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request: %v", err)
@@ -47,7 +49,7 @@ func TestRemoteAPIKeyVerifierVerifySuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	verifier := NewRemoteAPIKeyVerifier(" " + server.URL + " ")
+	verifier := NewRemoteAPIKeyVerifier(" "+server.URL+" ", " shared-secret ")
 	gotUserID, scopes, err := verifier.Verify(context.Background(), "ol_live_test")
 	if err != nil {
 		t.Fatalf("Verify error = %v", err)
@@ -55,8 +57,8 @@ func TestRemoteAPIKeyVerifierVerifySuccess(t *testing.T) {
 	if gotUserID != userID || len(scopes) != 2 || scopes[0] != "agents:run" {
 		t.Fatalf("Verify = %s %#v", gotUserID, scopes)
 	}
-	if seenKey != "ol_live_test" || seenContentType != "application/json" || seenAccept != "application/json" {
-		t.Fatalf("request key=%q content-type=%q accept=%q", seenKey, seenContentType, seenAccept)
+	if seenKey != "ol_live_test" || seenContentType != "application/json" || seenAccept != "application/json" || seenSecret != "shared-secret" {
+		t.Fatalf("request key=%q content-type=%q accept=%q secret=%q", seenKey, seenContentType, seenAccept, seenSecret)
 	}
 }
 

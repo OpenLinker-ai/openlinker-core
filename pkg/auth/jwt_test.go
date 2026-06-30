@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,6 +41,13 @@ func TestGenerateAndParseToken_HappyPath(t *testing.T) {
 	got, err := ParseToken(tok, testSecret)
 	require.NoError(t, err, "ParseToken should succeed for fresh token")
 	assert.Equal(t, uid, got, "parsed user_id must match")
+
+	parsed, err := jwt.ParseWithClaims(tok, &Claims{}, func(_ *jwt.Token) (interface{}, error) {
+		return []byte(testSecret), nil
+	})
+	require.NoError(t, err)
+	claims := parsed.Claims.(*Claims)
+	assert.Equal(t, jwtIssuer, claims.Issuer)
 }
 
 func TestParseToken_InvalidSignature(t *testing.T) {
@@ -122,4 +130,24 @@ func TestGenerateToken_DifferentSecrets(t *testing.T) {
 	got2, err := ParseToken(tok, testSecret)
 	require.NoError(t, err)
 	assert.Equal(t, uid, got2)
+}
+
+func TestParseTokenRejectsMissingIssuer(t *testing.T) {
+	t.Parallel()
+
+	uid := uuid.NewString()
+	now := time.Now()
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   uid,
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(defaultTTL)),
+		},
+	})
+	signed, err := token.SignedString([]byte(testSecret))
+	require.NoError(t, err)
+
+	got, err := ParseToken(signed, testSecret)
+	assert.Error(t, err)
+	assert.Empty(t, got)
 }

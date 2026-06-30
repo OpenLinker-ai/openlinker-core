@@ -23,6 +23,8 @@ func unsetEnv(t *testing.T, key string) {
 func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://dev:dev@localhost/openlinker_test")
 	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("OAUTH_SESSION_SECRET", "oauth-secret")
+	t.Setenv("API_KEY_VERIFY_SECRET", "internal-secret")
 	t.Setenv("ENV", "production")
 	t.Setenv("PORT", "9090")
 	t.Setenv("ALLOW_LOCAL_HTTP_ENDPOINTS", "true")
@@ -44,6 +46,12 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	if cfg.OAuthCallbackBaseURL != "https://openlinker.test" {
 		t.Fatalf("OAuthCallbackBaseURL = %q", cfg.OAuthCallbackBaseURL)
 	}
+	if cfg.OAuthSessionSecret != "oauth-secret" {
+		t.Fatalf("OAuthSessionSecret = %q", cfg.OAuthSessionSecret)
+	}
+	if cfg.APIKeyVerifySecret != "internal-secret" {
+		t.Fatalf("APIKeyVerifySecret = %q", cfg.APIKeyVerifySecret)
+	}
 	if cfg.DBMaxConns != 20 || cfg.DBMinConns != 2 || cfg.DBMaxConnLifetimeMinutes != 30 ||
 		cfg.DBMaxConnIdleTimeMinutes != 5 || cfg.DBHealthCheckPeriodSeconds != 60 {
 		t.Fatalf("unexpected db pool defaults: %#v", cfg)
@@ -56,6 +64,14 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	}
 	if cfg.RuntimePullRunWorkerTimeoutBatchSize != 50 {
 		t.Fatalf("unexpected runtime pull batch default: %d", cfg.RuntimePullRunWorkerTimeoutBatchSize)
+	}
+	if !cfg.RuntimeEndpointRunWorkerEnabled {
+		t.Fatalf("expected RuntimeEndpointRunWorkerEnabled default true")
+	}
+	if cfg.RuntimeEndpointRunWorkerIntervalSeconds != 30 ||
+		cfg.RuntimeEndpointRunTimeoutSeconds != 0 ||
+		cfg.RuntimeEndpointRunWorkerBatchSize != 50 {
+		t.Fatalf("unexpected runtime endpoint worker defaults: %#v", cfg)
 	}
 }
 

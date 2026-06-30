@@ -132,6 +132,27 @@ ORDER BY r.started_at ASC
 LIMIT $3
 FOR UPDATE SKIP LOCKED;
 
+-- name: ListStaleEndpointRuns :many
+-- direct_http / mcp_server 由 core API 进程主动调用 endpoint。若进程在创建
+-- running run 后崩溃、重启或 DB 暂时不可写，普通执行协程可能来不及把 run
+-- 收敛到终态；该查询只扫描非队列型 endpoint run，队列型 runtime_pull/runtime_ws
+-- 仍由 ListStaleRuntimePullRuns 处理。
+SELECT r.id, r.user_id, r.agent_id, r.cost_cents, r.started_at,
+       COALESCE(NULLIF(a.connection_mode, ''), 'direct_http')::text AS connection_mode,
+       'ENDPOINT_RUN_TIMEOUT'::text AS error_code,
+       CASE COALESCE(NULLIF(a.connection_mode, ''), 'direct_http')
+           WHEN 'mcp_server' THEN 'Agent MCP server 调用超过平台兜底时间，已自动标记 timeout。请确认 MCP endpoint/tool 响应时间，长任务建议改用 runtime_ws/runtime_pull。'
+           ELSE 'Agent endpoint 调用超过平台兜底时间，已自动标记 timeout。请确认 endpoint 响应时间或网络连通性，长任务建议改用 runtime_ws/runtime_pull。'
+       END::text AS error_message
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+WHERE r.status = 'running'
+  AND COALESCE(NULLIF(a.connection_mode, ''), 'direct_http') IN ('direct_http', 'mcp_server')
+  AND r.started_at < $1
+ORDER BY r.started_at ASC
+LIMIT $2
+FOR UPDATE SKIP LOCKED;
+
 -- name: CreateRunEvent :one
 -- 追加 run event；锁 run 行来保证同一个 run 内 sequence 单调递增。
 WITH locked_run AS (

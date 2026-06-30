@@ -161,6 +161,13 @@ func TestRuntimePullAndTimeoutOptionHelpers(t *testing.T) {
 	require.Equal(t, time.Hour, cfg.ResultTimeout)
 	require.Equal(t, int32(3), cfg.BatchSize)
 
+	endpointCfg := normalizeEndpointRunTimeoutConfig(EndpointRunTimeoutConfig{})
+	require.Equal(t, defaultEndpointRunTimeout, endpointCfg.StaleAfter)
+	require.Equal(t, int32(defaultEndpointRunBatchSize), endpointCfg.BatchSize)
+	endpointCfg = normalizeEndpointRunTimeoutConfig(EndpointRunTimeoutConfig{StaleAfter: time.Hour, BatchSize: 3})
+	require.Equal(t, time.Hour, endpointCfg.StaleAfter)
+	require.Equal(t, int32(3), endpointCfg.BatchSize)
+
 	require.True(t, hasRuntimeScope([]string{"agent:pull"}, "agent:pull"))
 	require.False(t, hasRuntimeScope([]string{"agent:call"}, "agent:pull"))
 	require.True(t, hasAnyRuntimeScope([]string{"agent:call"}, "agent:pull", "agent:call"))

@@ -257,6 +257,39 @@ type RegistryNode struct {
 	UpdatedAt       time.Time  `db:"updated_at" json:"updated_at"`
 }
 
+// RegistryPeer stores trusted remote registry credentials for federated proxy
+// routing. BearerToken is intentionally omitted from JSON output.
+type RegistryPeer struct {
+	ID             uuid.UUID  `db:"id" json:"id"`
+	OwnerUserID    uuid.UUID  `db:"owner_user_id" json:"owner_user_id"`
+	Name           string     `db:"name" json:"name"`
+	APIBaseURL     string     `db:"api_base_url" json:"api_base_url"`
+	BearerToken    string     `db:"bearer_token" json:"-"`
+	CredentialHint string     `db:"credential_hint" json:"credential_hint"`
+	Status         string     `db:"status" json:"status"`
+	LastUsedAt     *time.Time `db:"last_used_at" json:"last_used_at"`
+	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// RegistryFederationInvite is a one-time token exchange record used to create
+// a RegistryPeer without copying the remote bearer token by hand.
+type RegistryFederationInvite struct {
+	ID             uuid.UUID  `db:"id" json:"id"`
+	OwnerUserID    uuid.UUID  `db:"owner_user_id" json:"owner_user_id"`
+	Name           string     `db:"name" json:"name"`
+	APIBaseURL     string     `db:"api_base_url" json:"api_base_url"`
+	BearerToken    string     `db:"bearer_token" json:"-"`
+	TokenPrefix    string     `db:"token_prefix" json:"token_prefix"`
+	TokenHash      string     `db:"token_hash" json:"-"`
+	CredentialHint string     `db:"credential_hint" json:"credential_hint"`
+	Status         string     `db:"status" json:"status"`
+	ExpiresAt      time.Time  `db:"expires_at" json:"expires_at"`
+	ConsumedAt     *time.Time `db:"consumed_at" json:"consumed_at"`
+	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+}
+
 // CloudListingLink 对应 cloud_listing_links 表。
 //
 // 它表达“用户显式把某个本地 Agent 暴露成 Cloud Listing”的关系。

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -26,9 +27,7 @@ const (
 )
 
 var runtimeWSUpgrader = websocket.Upgrader{
-	CheckOrigin: func(_ *http.Request) bool {
-		return true
-	},
+	CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "" },
 }
 
 type runtimeWSHub struct {
@@ -106,7 +105,9 @@ func (s *Service) ServeRuntimeWebSocket(w http.ResponseWriter, r *http.Request, 
 		return httpx.Conflict("Agent 不是队列型 runtime 接入模式")
 	}
 
-	ws, err := runtimeWSUpgrader.Upgrade(w, r, nil)
+	upgrader := runtimeWSUpgrader
+	upgrader.CheckOrigin = s.checkRuntimeWSOrigin
+	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return err
 	}
@@ -138,6 +139,49 @@ func (s *Service) ServeRuntimeWebSocket(w http.ResponseWriter, r *http.Request, 
 
 	conn.readLoop(ctx)
 	return nil
+}
+
+func (s *Service) checkRuntimeWSOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	cfg := s.cfg
+	if cfg == nil {
+		return false
+	}
+	if originMatchesConfiguredURL(origin, cfg.FrontendURL) || originMatchesConfiguredURL(origin, cfg.APIURL) {
+		return true
+	}
+	if !cfg.IsProduction() {
+		parsed, err := url.Parse(origin)
+		if err == nil && isLocalRuntimeWSOriginHost(parsed.Hostname()) {
+			return true
+		}
+	}
+	return false
+}
+
+func originMatchesConfiguredURL(origin, configured string) bool {
+	originURL, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil || originURL.Scheme == "" || originURL.Host == "" {
+		return false
+	}
+	configuredURL, err := url.Parse(strings.TrimSpace(configured))
+	if err != nil || configuredURL.Scheme == "" || configuredURL.Host == "" {
+		return false
+	}
+	return strings.EqualFold(originURL.Scheme, configuredURL.Scheme) &&
+		strings.EqualFold(originURL.Host, configuredURL.Host)
+}
+
+func isLocalRuntimeWSOriginHost(host string) bool {
+	switch strings.ToLower(strings.Trim(host, "[]")) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *runtimeWSConn) writeLoop() {

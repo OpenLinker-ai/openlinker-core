@@ -1056,6 +1056,140 @@ func TestRegistryBridgeQueriesScanRowsAndScalars(t *testing.T) {
 	requireSQLName(t, dbtx.queryRowSQL, "CountPendingProxyRunsByNode")
 }
 
+func TestRegistryPeerFederationQueriesScanRowsAndAffectedRows(t *testing.T) {
+	ownerID := uuid.New()
+	peerID := uuid.New()
+	inviteID := uuid.New()
+	now := time.Date(2026, 6, 20, 17, 15, 0, 0, time.UTC)
+	lastUsed := now.Add(30 * time.Second)
+	expiresAt := now.Add(15 * time.Minute)
+	consumedAt := now.Add(time.Minute)
+	peerValues := registryPeerRow(peerID, ownerID, now, &lastUsed)
+	inviteValues := registryFederationInviteRow(inviteID, ownerID, now, expiresAt, &consumedAt)
+	dbtx := &fakeDBTX{
+		row:       fakeRow{values: peerValues},
+		queryRows: &fakeRows{rows: [][]any{peerValues}},
+		execTag:   pgconn.NewCommandTag("UPDATE 2"),
+	}
+	q := New(dbtx)
+
+	peer, err := q.CreateRegistryPeer(context.Background(), CreateRegistryPeerParams{
+		OwnerUserID:    ownerID,
+		Name:           "Peer",
+		APIBaseURL:     "https://peer.example/api/v1",
+		BearerToken:    "peer-token",
+		CredentialHint: "sha256:abc",
+		Status:         "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateRegistryPeer error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateRegistryPeer")
+	if peer.ID != peerID || peer.BearerToken != "peer-token" || peer.LastUsedAt == nil {
+		t.Fatalf("CreateRegistryPeer scan = %#v", peer)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{ownerID, "Peer", "https://peer.example/api/v1", "peer-token", "sha256:abc", "active"}) {
+		t.Fatalf("CreateRegistryPeer args = %#v", dbtx.queryRowArgs)
+	}
+
+	peerRows := &fakeRows{rows: [][]any{peerValues}}
+	dbtx.queryRows = peerRows
+	peers, err := q.ListRegistryPeersByOwner(context.Background(), ownerID)
+	if err != nil {
+		t.Fatalf("ListRegistryPeersByOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRegistryPeersByOwner")
+	if !peerRows.closed || len(peers) != 1 || peers[0].ID != peerID {
+		t.Fatalf("ListRegistryPeersByOwner scan = %#v closed=%v", peers, peerRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: peerValues}
+	activePeer, err := q.GetActiveRegistryPeerForOwner(context.Background(), GetActiveRegistryPeerForOwnerParams{ID: peerID, OwnerUserID: ownerID})
+	if err != nil {
+		t.Fatalf("GetActiveRegistryPeerForOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetActiveRegistryPeerForOwner")
+	if activePeer.ID != peerID || activePeer.Status != "active" {
+		t.Fatalf("GetActiveRegistryPeerForOwner scan = %#v", activePeer)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{peerID, ownerID}) {
+		t.Fatalf("GetActiveRegistryPeerForOwner args = %#v", dbtx.queryRowArgs)
+	}
+
+	autoPeerRows := &fakeRows{rows: [][]any{peerValues}}
+	dbtx.queryRows = autoPeerRows
+	autoPeers, err := q.ListActiveRegistryPeersForAutoRoute(context.Background(), ownerID)
+	if err != nil {
+		t.Fatalf("ListActiveRegistryPeersForAutoRoute error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListActiveRegistryPeersForAutoRoute")
+	if !autoPeerRows.closed || len(autoPeers) != 1 || autoPeers[0].APIBaseURL != "https://peer.example/api/v1" {
+		t.Fatalf("ListActiveRegistryPeersForAutoRoute scan = %#v closed=%v", autoPeers, autoPeerRows.closed)
+	}
+
+	if rows, err := q.DeleteRegistryPeerForOwner(context.Background(), DeleteRegistryPeerForOwnerParams{ID: peerID, OwnerUserID: ownerID}); err != nil || rows != 2 {
+		t.Fatalf("DeleteRegistryPeerForOwner = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "DeleteRegistryPeerForOwner")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{peerID, ownerID}) {
+		t.Fatalf("DeleteRegistryPeerForOwner args = %#v", dbtx.execArgs)
+	}
+
+	if err := q.MarkRegistryPeerUsed(context.Background(), MarkRegistryPeerUsedParams{ID: peerID, OwnerUserID: ownerID}); err != nil {
+		t.Fatalf("MarkRegistryPeerUsed error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkRegistryPeerUsed")
+
+	dbtx.row = fakeRow{values: inviteValues}
+	invite, err := q.CreateRegistryFederationInvite(context.Background(), CreateRegistryFederationInviteParams{
+		OwnerUserID:      ownerID,
+		Name:             "Invite",
+		APIBaseURL:       "https://peer.example/api/v1",
+		BearerToken:      "peer-token",
+		TokenPrefix:      "rf_live_abcd",
+		TokenHash:        "hash",
+		CredentialHint:   "sha256:def",
+		ExpiresInSeconds: 900,
+	})
+	if err != nil {
+		t.Fatalf("CreateRegistryFederationInvite error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateRegistryFederationInvite")
+	if invite.ID != inviteID || invite.TokenPrefix != "rf_live_abcd" || invite.ConsumedAt == nil {
+		t.Fatalf("CreateRegistryFederationInvite scan = %#v", invite)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{ownerID, "Invite", "https://peer.example/api/v1", "peer-token", "rf_live_abcd", "hash", "sha256:def", int32(900)}) {
+		t.Fatalf("CreateRegistryFederationInvite args = %#v", dbtx.queryRowArgs)
+	}
+
+	inviteRows := &fakeRows{rows: [][]any{inviteValues}}
+	dbtx.queryRows = inviteRows
+	invites, err := q.ListActiveRegistryFederationInvitesByPrefixForUpdate(context.Background(), "rf_live_abcd")
+	if err != nil {
+		t.Fatalf("ListActiveRegistryFederationInvitesByPrefixForUpdate error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListActiveRegistryFederationInvitesByPrefixForUpdate")
+	if !inviteRows.closed || len(invites) != 1 || invites[0].TokenHash != "hash" {
+		t.Fatalf("ListActiveRegistryFederationInvitesByPrefixForUpdate scan = %#v closed=%v", invites, inviteRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{"rf_live_abcd"}) {
+		t.Fatalf("ListActiveRegistryFederationInvitesByPrefixForUpdate args = %#v", dbtx.queryArgs)
+	}
+
+	if err := q.MarkRegistryFederationInviteExpired(context.Background(), inviteID); err != nil {
+		t.Fatalf("MarkRegistryFederationInviteExpired error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkRegistryFederationInviteExpired")
+
+	if rows, err := q.MarkRegistryFederationInviteConsumed(context.Background(), inviteID); err != nil || rows != 2 {
+		t.Fatalf("MarkRegistryFederationInviteConsumed = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "MarkRegistryFederationInviteConsumed")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{inviteID}) {
+		t.Fatalf("MarkRegistryFederationInviteConsumed args = %#v", dbtx.execArgs)
+	}
+}
+
 func TestProxyRunAndTaskCallbackQueriesScanRowsAndArgs(t *testing.T) {
 	ownerID := uuid.New()
 	requestingUserID := uuid.New()
@@ -1501,6 +1635,30 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 		t.Fatalf("GetRunDelegationByChild scan = %#v", gotDelegation)
 	}
 
+	lineageRows := &fakeRows{rows: [][]any{{agentID}, {callerAgentID}}}
+	dbtx.queryRows = lineageRows
+	lineage, err := q.ListDelegationLineage(context.Background(), ListDelegationLineageParams{RunID: childRunID, MaxDepth: 9})
+	if err != nil {
+		t.Fatalf("ListDelegationLineage error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListDelegationLineage")
+	if !lineageRows.closed || len(lineage) != 2 || lineage[1] != callerAgentID {
+		t.Fatalf("ListDelegationLineage scan = %#v closed=%v", lineage, lineageRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{childRunID, int32(9)}) {
+		t.Fatalf("ListDelegationLineage args = %#v", dbtx.queryArgs)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(4)}}
+	runningDelegations, err := q.CountRunningDelegations(context.Background())
+	if err != nil || runningDelegations != 4 {
+		t.Fatalf("CountRunningDelegations = %d, %v", runningDelegations, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountRunningDelegations")
+	if len(dbtx.queryRowArgs) != 0 {
+		t.Fatalf("CountRunningDelegations args = %#v", dbtx.queryRowArgs)
+	}
+
 	targetAgentID := uuid.New()
 	mappingID := uuid.New()
 	dbtx.row = fakeRow{values: a2aContextMappingRow(mappingID, childRunID, userID, agentID, parentRunID, callerAgentID, targetAgentID, now)}
@@ -1840,6 +1998,10 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			_, err := q.ListStaleRuntimePullRuns(ctx, ListStaleRuntimePullRunsParams{DispatchStaleBefore: now, ResultStaleBefore: now, Limit: 10})
 			return err
 		}},
+		{name: "ListStaleEndpointRuns", run: func() error {
+			_, err := q.ListStaleEndpointRuns(ctx, ListStaleEndpointRunsParams{StaleBefore: now, Limit: 10})
+			return err
+		}},
 		{name: "ListRunsByUser", run: func() error {
 			_, err := q.ListRunsByUser(ctx, ListRunsByUserParams{UserID: id, Limit: 10})
 			return err
@@ -1896,6 +2058,10 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			_, err := q.ListWorkflowNodes(ctx, id)
 			return err
 		}},
+		{name: "ListWorkflowNodesByWorkflowIDs", run: func() error {
+			_, err := q.ListWorkflowNodesByWorkflowIDs(ctx, []uuid.UUID{id})
+			return err
+		}},
 		{name: "ListWorkflowsByUser", run: func() error {
 			_, err := q.ListWorkflowsByUser(ctx, ListWorkflowsByUserParams{UserID: id, Limit: 10})
 			return err
@@ -1906,6 +2072,10 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 		}},
 		{name: "ListWorkflowRunSteps", run: func() error {
 			_, err := q.ListWorkflowRunSteps(ctx, id)
+			return err
+		}},
+		{name: "ListWorkflowRunStepsByRunIDs", run: func() error {
+			_, err := q.ListWorkflowRunStepsByRunIDs(ctx, []uuid.UUID{id})
 			return err
 		}},
 	}
@@ -2133,6 +2303,20 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	requireSQLName(t, dbtx.querySQL, "ListWorkflowNodes")
 	if len(nodes) != 1 || nodes[0].ID != nodeID {
 		t.Fatalf("ListWorkflowNodes scan = %#v", nodes)
+	}
+
+	nodeRows := &fakeRows{rows: [][]any{nodeValues}}
+	dbtx.queryRows = nodeRows
+	nodes, err = q.ListWorkflowNodesByWorkflowIDs(context.Background(), []uuid.UUID{workflowID})
+	if err != nil {
+		t.Fatalf("ListWorkflowNodesByWorkflowIDs error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListWorkflowNodesByWorkflowIDs")
+	if !nodeRows.closed || len(nodes) != 1 || nodes[0].WorkflowID != workflowID {
+		t.Fatalf("ListWorkflowNodesByWorkflowIDs scan = %#v closed=%v", nodes, nodeRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{[]uuid.UUID{workflowID}}) {
+		t.Fatalf("ListWorkflowNodesByWorkflowIDs args = %#v", dbtx.queryArgs)
 	}
 
 	dbtx.row = fakeRow{values: runValues}
@@ -2368,6 +2552,20 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	requireSQLName(t, dbtx.querySQL, "ListWorkflowRunSteps")
 	if !stepRows.closed || len(steps) != 1 || steps[0].ID != stepID {
 		t.Fatalf("ListWorkflowRunSteps scan = %#v closed=%v", steps, stepRows.closed)
+	}
+
+	stepRows = &fakeRows{rows: [][]any{stepValues}}
+	dbtx.queryRows = stepRows
+	steps, err = q.ListWorkflowRunStepsByRunIDs(context.Background(), []uuid.UUID{runID})
+	if err != nil {
+		t.Fatalf("ListWorkflowRunStepsByRunIDs error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListWorkflowRunStepsByRunIDs")
+	if !stepRows.closed || len(steps) != 1 || steps[0].WorkflowRunID != runID {
+		t.Fatalf("ListWorkflowRunStepsByRunIDs scan = %#v closed=%v", steps, stepRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{[]uuid.UUID{runID}}) {
+		t.Fatalf("ListWorkflowRunStepsByRunIDs args = %#v", dbtx.queryArgs)
 	}
 }
 
@@ -3366,6 +3564,7 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 	agentID := uuid.New()
 	runID := uuid.New()
 	runtimeTokenID := uuid.New()
+	latestBenchmarkID := uuid.New()
 	now := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	authHeader := "Bearer secret"
 	webhookURL := "https://example.com/hook"
@@ -3379,6 +3578,17 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 	runValues := runRow(runID, userID, agentID, []byte(`{"prompt":"hi"}`), []byte(`{"ok":true}`), "running", nil, nil, 100, 25, 75, &duration, now, &finishedAt, "api")
 	agentValues := agentRow(agentID, creatorID, now, &authHeader, &webhookURL, &mcpTool)
 	agentMarketValues := append(append([]any{}, agentValues...), "Creator Name")
+	agentListMarketValues := append(
+		append([]any{}, agentMarketValues...),
+		"healthy",
+		&now,
+		nil,
+		&now,
+		int32(0),
+		&now,
+		int32(2),
+		&latestBenchmarkID,
+	)
 	pendingAgentValues := append(append([]any{}, agentValues...), "creator@example.com", "Creator Name")
 	userValues := userRow(userID, now, nil, &provider, &oauthID, &avatar, nil)
 	dbtx := &fakeDBTX{
@@ -3472,7 +3682,7 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 	}
 	requireSQLName(t, dbtx.execSQL, "IncrementAgentStats")
 
-	publicRows := &fakeRows{rows: [][]any{agentMarketValues}}
+	publicRows := &fakeRows{rows: [][]any{agentListMarketValues}}
 	dbtx.queryRows = publicRows
 	publicAgents, err := q.ListPublicAgents(context.Background(), ListPublicAgentsParams{
 		Tags:         []string{"data"},
@@ -3487,6 +3697,15 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 	requireSQLName(t, dbtx.querySQL, "ListPublicAgents")
 	if !publicRows.closed || len(publicAgents) != 1 || publicAgents[0].CreatorName != "Creator Name" {
 		t.Fatalf("ListPublicAgents scan = %#v closed=%v", publicAgents, publicRows.closed)
+	}
+	if publicAgents[0].AvailabilityStatus != "healthy" ||
+		publicAgents[0].AvailabilityLastSuccessfulRunAt == nil ||
+		publicAgents[0].AvailabilityConsecutiveFailures != 0 ||
+		publicAgents[0].LastRuntimeTokenUsedAt == nil ||
+		publicAgents[0].VerifiedSkillCount != 2 ||
+		publicAgents[0].LatestBenchmarkID == nil ||
+		*publicAgents[0].LatestBenchmarkID != latestBenchmarkID {
+		t.Fatalf("ListPublicAgents availability/benchmark scan = %#v", publicAgents[0])
 	}
 
 	dbtx.row = fakeRow{values: []any{int32(6)}}
@@ -3573,6 +3792,20 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 	requireSQLName(t, dbtx.querySQL, "ListStaleRuntimePullRuns")
 	if !staleRows.closed || len(staleRuns) != 1 || staleRuns[0].ErrorCode != "RUNTIME_PULL_RESULT_TIMEOUT" {
 		t.Fatalf("ListStaleRuntimePullRuns scan = %#v closed=%v", staleRuns, staleRows.closed)
+	}
+
+	endpointRows := &fakeRows{rows: [][]any{{runID, userID, agentID, int32(100), now, "mcp_server", "ENDPOINT_RUN_TIMEOUT", "Agent endpoint timed out"}}}
+	dbtx.queryRows = endpointRows
+	endpointRuns, err := q.ListStaleEndpointRuns(context.Background(), ListStaleEndpointRunsParams{
+		StaleBefore: now.Add(-time.Hour),
+		Limit:       25,
+	})
+	if err != nil {
+		t.Fatalf("ListStaleEndpointRuns error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListStaleEndpointRuns")
+	if !endpointRows.closed || len(endpointRuns) != 1 || endpointRuns[0].ConnectionMode != "mcp_server" || endpointRuns[0].ErrorCode != "ENDPOINT_RUN_TIMEOUT" {
+		t.Fatalf("ListStaleEndpointRuns scan = %#v closed=%v", endpointRuns, endpointRows.closed)
 	}
 }
 
@@ -3717,6 +3950,39 @@ func registryNodeRow(id, ownerID uuid.UUID, now time.Time, baseURL *string) []an
 		"healthy",
 		&now,
 		nil,
+		now,
+		now.Add(time.Minute),
+	}
+}
+
+func registryPeerRow(id, ownerID uuid.UUID, now time.Time, lastUsedAt *time.Time) []any {
+	return []any{
+		id,
+		ownerID,
+		"Peer",
+		"https://peer.example/api/v1",
+		"peer-token",
+		"sha256:abc",
+		"active",
+		lastUsedAt,
+		now,
+		now.Add(time.Minute),
+	}
+}
+
+func registryFederationInviteRow(id, ownerID uuid.UUID, now, expiresAt time.Time, consumedAt *time.Time) []any {
+	return []any{
+		id,
+		ownerID,
+		"Invite",
+		"https://peer.example/api/v1",
+		"peer-token",
+		"rf_live_abcd",
+		"hash",
+		"sha256:def",
+		"active",
+		expiresAt,
+		consumedAt,
 		now,
 		now.Add(time.Minute),
 	}

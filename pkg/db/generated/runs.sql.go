@@ -324,3 +324,66 @@ func (q *Queries) ListStaleRuntimePullRuns(ctx context.Context, arg ListStaleRun
 	}
 	return items, nil
 }
+
+const listStaleEndpointRuns = `-- name: ListStaleEndpointRuns :many
+SELECT r.id, r.user_id, r.agent_id, r.cost_cents, r.started_at,
+       COALESCE(NULLIF(a.connection_mode, ''), 'direct_http')::text AS connection_mode,
+       'ENDPOINT_RUN_TIMEOUT'::text AS error_code,
+       CASE COALESCE(NULLIF(a.connection_mode, ''), 'direct_http')
+           WHEN 'mcp_server' THEN 'Agent MCP server 调用超过平台兜底时间，已自动标记 timeout。请确认 MCP endpoint/tool 响应时间，长任务建议改用 runtime_ws/runtime_pull。'
+           ELSE 'Agent endpoint 调用超过平台兜底时间，已自动标记 timeout。请确认 endpoint 响应时间或网络连通性，长任务建议改用 runtime_ws/runtime_pull。'
+       END::text AS error_message
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+WHERE r.status = 'running'
+  AND COALESCE(NULLIF(a.connection_mode, ''), 'direct_http') IN ('direct_http', 'mcp_server')
+  AND r.started_at < $1
+ORDER BY r.started_at ASC
+LIMIT $2
+FOR UPDATE SKIP LOCKED`
+
+type ListStaleEndpointRunsParams struct {
+	StaleBefore time.Time `db:"stale_before" json:"stale_before"`
+	Limit       int32     `db:"limit" json:"limit"`
+}
+
+type ListStaleEndpointRunsRow struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	UserID         uuid.UUID `db:"user_id" json:"user_id"`
+	AgentID        uuid.UUID `db:"agent_id" json:"agent_id"`
+	CostCents      int32     `db:"cost_cents" json:"cost_cents"`
+	StartedAt      time.Time `db:"started_at" json:"started_at"`
+	ConnectionMode string    `db:"connection_mode" json:"connection_mode"`
+	ErrorCode      string    `db:"error_code" json:"error_code"`
+	ErrorMessage   string    `db:"error_message" json:"error_message"`
+}
+
+func (q *Queries) ListStaleEndpointRuns(ctx context.Context, arg ListStaleEndpointRunsParams) ([]ListStaleEndpointRunsRow, error) {
+	rows, err := q.db.Query(ctx, listStaleEndpointRuns, arg.StaleBefore, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []ListStaleEndpointRunsRow
+	for rows.Next() {
+		var item ListStaleEndpointRunsRow
+		if err := rows.Scan(
+			&item.ID,
+			&item.UserID,
+			&item.AgentID,
+			&item.CostCents,
+			&item.StartedAt,
+			&item.ConnectionMode,
+			&item.ErrorCode,
+			&item.ErrorMessage,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

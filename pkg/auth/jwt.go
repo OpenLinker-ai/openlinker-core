@@ -8,6 +8,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+const jwtIssuer = "openlinker"
+
 // Claims JWT payload。
 //
 //	sub = user_id (UUID 字符串)
@@ -21,6 +23,7 @@ func GenerateToken(userID, secret string, ttl time.Duration) (string, error) {
 	now := time.Now()
 	claims := Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    jwtIssuer,
 			Subject:   userID,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
@@ -41,7 +44,7 @@ func ParseToken(tokenStr, secret string) (string, error) {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
 		return []byte(secret), nil
-	})
+	}, jwt.WithIssuer(jwtIssuer))
 	if err != nil {
 		return "", err
 	}

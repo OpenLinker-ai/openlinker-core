@@ -54,34 +54,8 @@ type Service struct {
 	pool *pgxpool.Pool
 }
 
-type registryPeerRow struct {
-	ID             uuid.UUID
-	OwnerUserID    uuid.UUID
-	Name           string
-	APIBaseURL     string
-	BearerToken    string
-	CredentialHint string
-	Status         string
-	LastUsedAt     *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-}
-
-type registryFederationInviteRow struct {
-	ID             uuid.UUID
-	OwnerUserID    uuid.UUID
-	Name           string
-	APIBaseURL     string
-	BearerToken    string
-	TokenPrefix    string
-	TokenHash      string
-	CredentialHint string
-	Status         string
-	ExpiresAt      time.Time
-	ConsumedAt     *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-}
+type registryPeerRow = db.RegistryPeer
+type registryFederationInviteRow = db.RegistryFederationInvite
 
 func NewService(pool *pgxpool.Pool) *Service {
 	return &Service{q: db.New(pool), pool: pool}
@@ -443,12 +417,14 @@ func (s *Service) CreateRegistryPeer(ctx context.Context, ownerID uuid.UUID, req
 	if status != "active" && status != "paused" {
 		return nil, httpx.Unprocessable("initial_status 只能是 active 或 paused")
 	}
-	row, err := scanRegistryPeer(s.pool.QueryRow(ctx, `
-		INSERT INTO registry_peers (owner_user_id, name, api_base_url, bearer_token, credential_hint, status)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, owner_user_id, name, api_base_url, bearer_token, credential_hint, status,
-		          last_used_at, created_at, updated_at
-	`, ownerID, name, apiBaseURL, token, registryCredentialHint(token), status))
+	row, err := s.q.CreateRegistryPeer(ctx, db.CreateRegistryPeerParams{
+		OwnerUserID:    ownerID,
+		Name:           name,
+		APIBaseURL:     apiBaseURL,
+		BearerToken:    token,
+		CredentialHint: registryCredentialHint(token),
+		Status:         status,
+	})
 	if err != nil {
 		log.Error().Err(err).Str("owner_id", ownerID.String()).Str("api_base_url", apiBaseURL).Msg("registry.CreateRegistryPeer")
 		return nil, httpx.Internal("创建 Registry Peer 失败")
@@ -461,30 +437,14 @@ func (s *Service) ListRegistryPeers(ctx context.Context, ownerID uuid.UUID) ([]R
 	if s.pool == nil {
 		return nil, httpx.Internal("Registry Peer 存储未初始化")
 	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, owner_user_id, name, api_base_url, bearer_token, credential_hint, status,
-		       last_used_at, created_at, updated_at
-		FROM registry_peers
-		WHERE owner_user_id = $1
-		ORDER BY created_at DESC
-	`, ownerID)
+	rows, err := s.q.ListRegistryPeersByOwner(ctx, ownerID)
 	if err != nil {
 		log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.ListRegistryPeers")
 		return nil, httpx.Internal("查询 Registry Peer 失败")
 	}
-	defer rows.Close()
-	out := []RegistryPeerResponse{}
-	for rows.Next() {
-		row, err := scanRegistryPeer(rows)
-		if err != nil {
-			log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.ListRegistryPeers: scan")
-			return nil, httpx.Internal("查询 Registry Peer 失败")
-		}
+	out := make([]RegistryPeerResponse, 0, len(rows))
+	for _, row := range rows {
 		out = append(out, registryPeerToResponse(row))
-	}
-	if err := rows.Err(); err != nil {
-		log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.ListRegistryPeers: rows")
-		return nil, httpx.Internal("查询 Registry Peer 失败")
 	}
 	return out, nil
 }
@@ -493,15 +453,15 @@ func (s *Service) DeleteRegistryPeer(ctx context.Context, ownerID, peerID uuid.U
 	if s.pool == nil {
 		return httpx.Internal("Registry Peer 存储未初始化")
 	}
-	tag, err := s.pool.Exec(ctx, `
-		DELETE FROM registry_peers
-		WHERE id = $1 AND owner_user_id = $2
-	`, peerID, ownerID)
+	affected, err := s.q.DeleteRegistryPeerForOwner(ctx, db.DeleteRegistryPeerForOwnerParams{
+		ID:          peerID,
+		OwnerUserID: ownerID,
+	})
 	if err != nil {
 		log.Error().Err(err).Str("peer_id", peerID.String()).Msg("registry.DeleteRegistryPeer")
 		return httpx.Internal("删除 Registry Peer 失败")
 	}
-	if tag.RowsAffected() == 0 {
+	if affected == 0 {
 		return httpx.NotFound("Registry Peer 不存在")
 	}
 	return nil
@@ -540,15 +500,16 @@ func (s *Service) CreateRegistryFederationInvite(ctx context.Context, ownerID uu
 		log.Error().Err(err).Msg("registry.CreateRegistryFederationInvite: hash token")
 		return nil, httpx.Internal("生成 Federation Token 失败")
 	}
-	row, err := scanRegistryFederationInvite(s.pool.QueryRow(ctx, `
-		INSERT INTO registry_federation_invites (
-		    owner_user_id, name, api_base_url, bearer_token,
-		    token_prefix, token_hash, credential_hint, expires_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + ($8::int * INTERVAL '1 second'))
-		RETURNING id, owner_user_id, name, api_base_url, bearer_token,
-		          token_prefix, token_hash, credential_hint, status,
-		          expires_at, consumed_at, created_at, updated_at
-	`, ownerID, name, apiBaseURL, tokenForPeer, tokenPrefix, string(tokenHash), registryCredentialHint(tokenForPeer), int32(ttl.Seconds())))
+	row, err := s.q.CreateRegistryFederationInvite(ctx, db.CreateRegistryFederationInviteParams{
+		OwnerUserID:      ownerID,
+		Name:             name,
+		APIBaseURL:       apiBaseURL,
+		BearerToken:      tokenForPeer,
+		TokenPrefix:      tokenPrefix,
+		TokenHash:        string(tokenHash),
+		CredentialHint:   registryCredentialHint(tokenForPeer),
+		ExpiresInSeconds: int32(ttl.Seconds()),
+	})
 	if err != nil {
 		log.Error().Err(err).Str("owner_id", ownerID.String()).Str("api_base_url", apiBaseURL).Msg("registry.CreateRegistryFederationInvite")
 		return nil, httpx.Internal("创建 Registry Federation Invite 失败")
@@ -569,31 +530,11 @@ func (s *Service) ConsumeRegistryFederationInvite(ctx context.Context, req *Cons
 	prefix := token[:federationTokenPrefixLen]
 	var matched registryFederationInviteRow
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `
-			SELECT id, owner_user_id, name, api_base_url, bearer_token,
-			       token_prefix, token_hash, credential_hint, status,
-			       expires_at, consumed_at, created_at, updated_at
-			FROM registry_federation_invites
-			WHERE token_prefix = $1 AND status = 'active'
-			FOR UPDATE
-		`, prefix)
+		qtx := s.q.WithTx(tx)
+		candidates, err := qtx.ListActiveRegistryFederationInvitesByPrefixForUpdate(ctx, prefix)
 		if err != nil {
 			return err
 		}
-		candidates := []registryFederationInviteRow{}
-		for rows.Next() {
-			row, scanErr := scanRegistryFederationInvite(rows)
-			if scanErr != nil {
-				rows.Close()
-				return scanErr
-			}
-			candidates = append(candidates, row)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		rows.Close()
 		for _, row := range candidates {
 			if bcrypt.CompareHashAndPassword([]byte(row.TokenHash), []byte(token)) == nil {
 				matched = row
@@ -604,22 +545,14 @@ func (s *Service) ConsumeRegistryFederationInvite(ctx context.Context, req *Cons
 			return pgx.ErrNoRows
 		}
 		if time.Now().After(matched.ExpiresAt) {
-			_, _ = tx.Exec(ctx, `
-				UPDATE registry_federation_invites
-				SET status = 'expired'
-				WHERE id = $1 AND status = 'active'
-			`, matched.ID)
+			_ = qtx.MarkRegistryFederationInviteExpired(ctx, matched.ID)
 			return errFederationInviteExpired
 		}
-		tag, err := tx.Exec(ctx, `
-			UPDATE registry_federation_invites
-			SET status = 'consumed', consumed_at = NOW()
-			WHERE id = $1 AND status = 'active'
-		`, matched.ID)
+		affected, err := qtx.MarkRegistryFederationInviteConsumed(ctx, matched.ID)
 		if err != nil {
 			return err
 		}
-		if tag.RowsAffected() == 0 {
+		if affected == 0 {
 			return pgx.ErrNoRows
 		}
 		return nil
@@ -871,12 +804,10 @@ func (s *Service) resolveRemoteRegistryCredentials(ctx context.Context, requesti
 	if err != nil {
 		return "", "", "", "", httpx.BadRequest("registry_peer_id 不是合法 uuid")
 	}
-	row, err := scanRegistryPeer(s.pool.QueryRow(ctx, `
-		SELECT id, owner_user_id, name, api_base_url, bearer_token, credential_hint, status,
-		       last_used_at, created_at, updated_at
-		FROM registry_peers
-		WHERE id = $1 AND owner_user_id = $2 AND status = 'active'
-	`, peerID, requestingUserID))
+	row, err := s.q.GetActiveRegistryPeerForOwner(ctx, db.GetActiveRegistryPeerForOwnerParams{
+		ID:          peerID,
+		OwnerUserID: requestingUserID,
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", "", "", httpx.NotFound("Registry Peer 不存在或已暂停")
 	}
@@ -894,30 +825,9 @@ func (s *Service) resolveSingleActiveRegistryPeer(ctx context.Context, ownerID u
 	if s.pool == nil {
 		return registryPeerRow{}, httpx.Internal("Registry Peer 存储未初始化")
 	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, owner_user_id, name, api_base_url, bearer_token, credential_hint, status,
-		       last_used_at, created_at, updated_at
-		FROM registry_peers
-		WHERE owner_user_id = $1 AND status = 'active'
-		ORDER BY last_used_at ASC NULLS FIRST, created_at ASC
-		LIMIT 2
-	`, ownerID)
+	peers, err := s.q.ListActiveRegistryPeersForAutoRoute(ctx, ownerID)
 	if err != nil {
 		log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.resolveSingleActiveRegistryPeer")
-		return registryPeerRow{}, httpx.Internal("查询 Registry Peer 失败")
-	}
-	defer rows.Close()
-	peers := []registryPeerRow{}
-	for rows.Next() {
-		row, err := scanRegistryPeer(rows)
-		if err != nil {
-			log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.resolveSingleActiveRegistryPeer: scan")
-			return registryPeerRow{}, httpx.Internal("查询 Registry Peer 失败")
-		}
-		peers = append(peers, row)
-	}
-	if err := rows.Err(); err != nil {
-		log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.resolveSingleActiveRegistryPeer: rows")
 		return registryPeerRow{}, httpx.Internal("查询 Registry Peer 失败")
 	}
 	switch len(peers) {
@@ -931,12 +841,10 @@ func (s *Service) resolveSingleActiveRegistryPeer(ctx context.Context, ownerID u
 }
 
 func (s *Service) markRegistryPeerUsed(ctx context.Context, peerID, ownerID uuid.UUID) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE registry_peers
-		SET last_used_at = NOW()
-		WHERE id = $1 AND owner_user_id = $2
-	`, peerID, ownerID)
-	return err
+	return s.q.MarkRegistryPeerUsed(ctx, db.MarkRegistryPeerUsedParams{
+		ID:          peerID,
+		OwnerUserID: ownerID,
+	})
 }
 
 func (s *Service) ExpireStaleProxyRuns(ctx context.Context, staleAfter time.Duration) (int32, error) {
@@ -1436,51 +1344,6 @@ func generateFederationToken() (plaintext, prefix string, err error) {
 	}
 	plaintext = federationTokenPrefix + hex.EncodeToString(buf)
 	return plaintext, plaintext[:federationTokenPrefixLen], nil
-}
-
-type registryPeerScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanRegistryPeer(scanner registryPeerScanner) (registryPeerRow, error) {
-	var row registryPeerRow
-	err := scanner.Scan(
-		&row.ID,
-		&row.OwnerUserID,
-		&row.Name,
-		&row.APIBaseURL,
-		&row.BearerToken,
-		&row.CredentialHint,
-		&row.Status,
-		&row.LastUsedAt,
-		&row.CreatedAt,
-		&row.UpdatedAt,
-	)
-	return row, err
-}
-
-type registryFederationInviteScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanRegistryFederationInvite(scanner registryFederationInviteScanner) (registryFederationInviteRow, error) {
-	var row registryFederationInviteRow
-	err := scanner.Scan(
-		&row.ID,
-		&row.OwnerUserID,
-		&row.Name,
-		&row.APIBaseURL,
-		&row.BearerToken,
-		&row.TokenPrefix,
-		&row.TokenHash,
-		&row.CredentialHint,
-		&row.Status,
-		&row.ExpiresAt,
-		&row.ConsumedAt,
-		&row.CreatedAt,
-		&row.UpdatedAt,
-	)
-	return row, err
 }
 
 func registryCredentialHint(token string) string {

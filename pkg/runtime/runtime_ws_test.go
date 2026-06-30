@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
@@ -40,6 +41,28 @@ func TestRuntimeWSHubTracksConnectionsByAgent(t *testing.T) {
 	hub.unregister(connA2)
 	if got := len(hub.connections(agentA)); got != 0 {
 		t.Fatalf("agentA connections after final unregister = %d, want 0", got)
+	}
+}
+
+func TestRuntimeWSOriginPolicy(t *testing.T) {
+	prodSvc := &Service{cfg: &config.Config{
+		Env:         "production",
+		FrontendURL: "https://app.example",
+		APIURL:      "https://api.example",
+	}}
+	if !prodSvc.checkRuntimeWSOrigin(&http.Request{Header: http.Header{}}) {
+		t.Fatal("non-browser runtime client without Origin should be allowed")
+	}
+	if !prodSvc.checkRuntimeWSOrigin(&http.Request{Header: http.Header{"Origin": {"https://app.example"}}}) {
+		t.Fatal("configured frontend origin should be allowed")
+	}
+	if prodSvc.checkRuntimeWSOrigin(&http.Request{Header: http.Header{"Origin": {"https://evil.example"}}}) {
+		t.Fatal("unexpected production origin should be denied")
+	}
+
+	devSvc := &Service{cfg: &config.Config{Env: "development"}}
+	if !devSvc.checkRuntimeWSOrigin(&http.Request{Header: http.Header{"Origin": {"http://localhost:3000"}}}) {
+		t.Fatal("local development origin should be allowed")
 	}
 }
 

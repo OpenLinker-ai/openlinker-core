@@ -154,6 +154,13 @@ type RuntimePullRunTimeoutConfig struct {
 	BatchSize       int32
 }
 
+// EndpointRunTimeoutConfig controls how long direct_http / mcp_server runs may
+// stay running before the platform converts them to terminal timeout.
+type EndpointRunTimeoutConfig struct {
+	StaleAfter time.Duration
+	BatchSize  int32
+}
+
 // SetWebhookEnqueuer 注入 webhook 触发器（main.go 启动时调用）。
 //
 // 用 setter 而非 NewService 参数，避免 runtime ↔ webhook 循环依赖
@@ -1139,7 +1146,6 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 		resp.CallerAgentID = delegation.CallerAgentID.String()
 		resp.BillingMode = "free_delegation"
 		decorateNextAction(resp)
-		s.attachRunEvidenceSummary(ctx, runID, resp)
 		return resp, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -1678,6 +1684,85 @@ func (s *Service) TimeoutStaleRuntimePullRuns(ctx context.Context, cfg RuntimePu
 	return int32(len(staleRuns)), nil
 }
 
+// TimeoutStaleEndpointRuns converts abandoned direct_http / mcp_server runs
+// into timeout terminal states. Normal endpoint calls are completed by the
+// in-process goroutine; this worker is only a crash / restart / DB outage
+// recovery net for runs that have exceeded the configured stale window.
+func (s *Service) TimeoutStaleEndpointRuns(ctx context.Context, cfg EndpointRunTimeoutConfig) (int32, error) {
+	cfg = normalizeEndpointRunTimeoutConfig(cfg)
+	now := time.Now()
+	var staleRuns []db.ListStaleEndpointRunsRow
+
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		q := s.queries.WithTx(tx)
+		rows, err := q.ListStaleEndpointRuns(ctx, db.ListStaleEndpointRunsParams{
+			StaleBefore: now.Add(-cfg.StaleAfter),
+			Limit:       cfg.BatchSize,
+		})
+		if err != nil {
+			return err
+		}
+		staleRuns = rows
+		for _, run := range rows {
+			code := run.ErrorCode
+			message := run.ErrorMessage
+			duration := int32(now.Sub(run.StartedAt).Milliseconds())
+			if duration < 0 {
+				duration = 0
+			}
+			if err := q.MarkRunFailed(ctx, db.MarkRunFailedParams{
+				ID:           run.ID,
+				Status:       "timeout",
+				ErrorCode:    &code,
+				ErrorMessage: &message,
+				DurationMs:   duration,
+			}); err != nil {
+				return err
+			}
+			if s.walletCharger != nil && run.CostCents > 0 {
+				if err := s.walletCharger.Refund(ctx, tx, run.UserID, int64(run.CostCents)); err != nil {
+					return err
+				}
+			}
+			if _, err := q.MarkAgentAvailabilityFailure(ctx, run.AgentID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("runtime.TimeoutStaleEndpointRuns")
+		return 0, err
+	}
+
+	for _, run := range staleRuns {
+		duration := int32(now.Sub(run.StartedAt).Milliseconds())
+		if duration < 0 {
+			duration = 0
+		}
+		s.recordRunEventBestEffort(ctx, run.ID, "run.failed", map[string]interface{}{
+			"status":          "timeout",
+			"error_code":      run.ErrorCode,
+			"error_message":   run.ErrorMessage,
+			"duration_ms":     duration,
+			"connection_mode": run.ConnectionMode,
+		})
+		resp := &RunResponse{
+			RunID:      run.ID.String(),
+			Status:     "timeout",
+			ErrorCode:  run.ErrorCode,
+			ErrorMsg:   run.ErrorMessage,
+			DurationMs: duration,
+		}
+		s.decorateDelegationCompletion(ctx, run.ID, run.AgentID, resp)
+		if s.shouldTriggerExternalDelivery(ctx, run.ID) {
+			s.triggerWebhookByRun(run.ID)
+			s.triggerDelivery(run.ID)
+		}
+	}
+	return int32(len(staleRuns)), nil
+}
+
 func normalizeRuntimePullRunTimeoutConfig(cfg RuntimePullRunTimeoutConfig) RuntimePullRunTimeoutConfig {
 	if cfg.DispatchTimeout <= 0 {
 		cfg.DispatchTimeout = 2 * time.Minute
@@ -1690,6 +1775,16 @@ func normalizeRuntimePullRunTimeoutConfig(cfg RuntimePullRunTimeoutConfig) Runti
 	}
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 50
+	}
+	return cfg
+}
+
+func normalizeEndpointRunTimeoutConfig(cfg EndpointRunTimeoutConfig) EndpointRunTimeoutConfig {
+	if cfg.StaleAfter <= 0 {
+		cfg.StaleAfter = defaultEndpointRunTimeout
+	}
+	if cfg.BatchSize <= 0 {
+		cfg.BatchSize = defaultEndpointRunBatchSize
 	}
 	return cfg
 }
@@ -1910,7 +2005,7 @@ type mcpToolCallError struct {
 func (s *Service) callMCPServer(
 	ctx context.Context, agent *db.Agent, runID, userID uuid.UUID, req *RunRequest, delegation *Delegation,
 ) (map[string]interface{}, []AgentEvent, *AgentError, error) {
-	toolName := strings.TrimSpace("")
+	var toolName string
 	if agent.MCPToolName != nil {
 		toolName = strings.TrimSpace(*agent.MCPToolName)
 	}
@@ -2035,9 +2130,8 @@ func (s *Service) DryRun(
 	return output, ""
 }
 
-// handleSuccess 成功路径：MarkRunSuccess + 可选创作者入账 + IncrementAgentStats（一个事务）。
-//
-// 即使事务失败也不影响返回结果（用户已收到 output；对账系统补救）。
+// handleSuccess 成功路径优先保证用户可见 run 状态落库。分账、统计、
+// availability 和 artifact 均不得把已完成的 run 回滚回 running。
 func (s *Service) handleSuccess(
 	ctx context.Context,
 	runID, agentID, creatorID uuid.UUID,
@@ -2057,38 +2151,42 @@ func (s *Service) handleSuccess(
 
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
-		if e := q.MarkRunSuccess(ctx, db.MarkRunSuccessParams{
+		return q.MarkRunSuccess(ctx, db.MarkRunSuccessParams{
 			ID:         runID,
 			Output:     outputJSON,
 			DurationMs: duration,
-		}); e != nil {
-			return e
-		}
-		if settle && s.walletCharger != nil {
-			if e := s.walletCharger.CreditCreator(ctx, tx, creatorID, int64(revenue)); e != nil {
-				return e
-			}
-		}
-		if e := q.IncrementAgentStats(ctx, db.IncrementAgentStatsParams{
-			ID:           agentID,
-			RevenueCents: int64(revenue),
-		}); e != nil {
-			return e
-		}
-		if _, e := q.MarkAgentAvailabilitySuccess(ctx, agentID); e != nil {
-			return e
-		}
-		if e := s.createRunArtifacts(ctx, q, runID, output); e != nil {
-			return e
-		}
-		return nil
+		})
 	})
 	if err != nil {
-		// 已扣钱、已得到结果，事务失败仅影响分账与统计；记日志由对账补救
+		// 已扣钱、已得到结果，状态落库失败只能由对账系统补救。
 		log.Error().Err(err).Str("run_id", runID.String()).
-			Str("creator_id", creatorID.String()).Int32("revenue_cents", revenue).
-			Msg("runtime.handleSuccess: settle tx failed")
+			Msg("runtime.handleSuccess: mark success failed")
 	} else {
+		if artifactErr := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+			return s.createRunArtifacts(ctx, s.queries.WithTx(tx), runID, output)
+		}); artifactErr != nil {
+			log.Error().Err(artifactErr).Str("run_id", runID.String()).Msg("runtime.handleSuccess: create artifacts failed")
+		}
+		if settleErr := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+			q := s.queries.WithTx(tx)
+			if settle && s.walletCharger != nil {
+				if e := s.walletCharger.CreditCreator(ctx, tx, creatorID, int64(revenue)); e != nil {
+					return e
+				}
+			}
+			if e := q.IncrementAgentStats(ctx, db.IncrementAgentStatsParams{
+				ID:           agentID,
+				RevenueCents: int64(revenue),
+			}); e != nil {
+				return e
+			}
+			_, e := q.MarkAgentAvailabilitySuccess(ctx, agentID)
+			return e
+		}); settleErr != nil {
+			log.Error().Err(settleErr).Str("run_id", runID.String()).
+				Str("creator_id", creatorID.String()).Int32("revenue_cents", revenue).
+				Msg("runtime.handleSuccess: settle tx failed")
+		}
 		s.recordAgentEventsBestEffort(ctx, runID, agentEvents)
 		s.recordRunEventBestEffort(ctx, runID, "run.completed", map[string]interface{}{
 			"status":      "success",

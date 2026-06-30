@@ -51,6 +51,30 @@ func TestAllowedCORSOrigins(t *testing.T) {
 	}
 }
 
+func TestValidateProductionConfig(t *testing.T) {
+	if err := validateProductionConfig(&config.Config{Env: "development"}); err != nil {
+		t.Fatalf("development config should pass: %v", err)
+	}
+	if err := validateProductionConfig(&config.Config{Env: "production"}); err == nil || !strings.Contains(err.Error(), "FRONTEND_URL") {
+		t.Fatalf("missing frontend error = %v", err)
+	}
+	if err := validateProductionConfig(&config.Config{
+		Env:             "production",
+		FrontendURL:     "https://app.example",
+		APIKeyVerifyURL: "https://cloud.example/internal/api-keys/verify",
+	}); err == nil || !strings.Contains(err.Error(), "API_KEY_VERIFY_SECRET") {
+		t.Fatalf("missing verify secret error = %v", err)
+	}
+	if err := validateProductionConfig(&config.Config{
+		Env:                "production",
+		FrontendURL:        "https://app.example",
+		APIKeyVerifyURL:    "https://cloud.example/internal/api-keys/verify",
+		APIKeyVerifySecret: "secret",
+	}); err != nil {
+		t.Fatalf("valid production config error = %v", err)
+	}
+}
+
 func TestRateLimiterConfigSkipsHealthAndDeniesWithStandardError(t *testing.T) {
 	cfg := rateLimiterConfig()
 	e := echo.New()
