@@ -61,11 +61,16 @@ func (s *Service) SendProtocolMessage(ctx context.Context, userID uuid.UUID, slu
 		return nil, err
 	}
 	metadata := protocolMetadata(params)
-	resp, err := s.runtime.Run(ctx, userID, &runtime.RunRequest{
+	runReq := &runtime.RunRequest{
 		AgentID:  agent.ID.String(),
 		Input:    input,
 		Metadata: metadata,
-	}, "api")
+	}
+	run := s.runtime.Run
+	if shouldReturnA2AMessageImmediately(params) {
+		run = s.runtime.StartRun
+	}
+	resp, err := run(ctx, userID, runReq, "api")
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +121,7 @@ func (s *Service) createInlinePushConfig(ctx context.Context, userID uuid.UUID, 
 	}
 	cfg := params.Configuration.PushNotificationConfig
 	if cfg == nil && params.Configuration.TaskPushNotificationConfig != nil {
-		cfg = &params.Configuration.TaskPushNotificationConfig.PushNotificationConfig
+		cfg = pushConfigFromTaskPushConfig(params.Configuration.TaskPushNotificationConfig)
 	}
 	if cfg == nil {
 		return nil
@@ -126,6 +131,19 @@ func (s *Service) createInlinePushConfig(ctx context.Context, userID uuid.UUID, 
 		PushNotificationConfig: *cfg,
 	})
 	return err
+}
+
+func shouldReturnA2AMessageImmediately(params *A2AMessageSendParams) bool {
+	if params == nil || params.Configuration == nil {
+		return false
+	}
+	if params.Configuration.ReturnImmediately != nil {
+		return *params.Configuration.ReturnImmediately
+	}
+	if params.Configuration.Blocking != nil {
+		return !*params.Configuration.Blocking
+	}
+	return false
 }
 
 // GetProtocolTask maps an owner-readable OpenLinker run back to the A2A Task shape.

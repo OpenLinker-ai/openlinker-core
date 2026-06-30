@@ -58,6 +58,7 @@ func TestNormalizeA2AResultForCurrentVersionRemovesLegacyDiscriminators(t *testi
 	assert.Equal(t, "TASK_STATE_COMPLETED", status["state"])
 	message := status["message"].(map[string]interface{})
 	assert.NotContains(t, message, "kind")
+	assert.Equal(t, "ROLE_AGENT", message["role"])
 	parts := message["parts"].([]interface{})
 	assert.Equal(t, map[string]interface{}{"text": "done"}, parts[0])
 	assert.Equal(t, "application/json", parts[1].(map[string]interface{})["mediaType"])
@@ -110,6 +111,43 @@ func TestNormalizeA2AResultForVersionCompatibilityEdges(t *testing.T) {
 	assert.NotContains(t, items[2].(map[string]interface{}), "kind")
 }
 
+func TestNormalizeA2AResultForCurrentVersionUsesProtoPushAndEventShapes(t *testing.T) {
+	normalized := normalizeA2AResultForVersion(map[string]interface{}{
+		"items": []interface{}{
+			map[string]interface{}{
+				"taskId": "task-1",
+				"pushNotificationConfig": map[string]interface{}{
+					"id":             "cfg-1",
+					"url":            "https://hooks.example/a2a",
+					"token":          "secret",
+					"authentication": map[string]interface{}{"scheme": "Bearer"},
+				},
+			},
+		},
+		"statusUpdate": map[string]interface{}{
+			"kind":      "status-update",
+			"taskId":    "task-1",
+			"contextId": "ctx-1",
+			"status":    map[string]interface{}{"state": "working"},
+			"final":     false,
+		},
+	}, a2aProtocolVersionCurrent)
+
+	body := normalized.(map[string]interface{})
+	assert.NotContains(t, body, "items")
+	configs := body["configs"].([]interface{})
+	cfg := configs[0].(map[string]interface{})
+	assert.Equal(t, "cfg-1", cfg["id"])
+	assert.Equal(t, "task-1", cfg["taskId"])
+	assert.Equal(t, "https://hooks.example/a2a", cfg["url"])
+	assert.NotContains(t, cfg, "pushNotificationConfig")
+
+	statusUpdate := body["statusUpdate"].(map[string]interface{})
+	assert.NotContains(t, statusUpdate, "kind")
+	assert.NotContains(t, statusUpdate, "final")
+	assert.Equal(t, "TASK_STATE_WORKING", statusUpdate["status"].(map[string]interface{})["state"])
+}
+
 func TestNormalizeA2ATaskStateForCurrentCoversStandardStates(t *testing.T) {
 	for _, tc := range []struct {
 		raw  string
@@ -130,6 +168,14 @@ func TestNormalizeA2ATaskStateForCurrentCoversStandardStates(t *testing.T) {
 	}
 }
 
+func TestNormalizeA2ARoleForCurrentCoversStandardRoles(t *testing.T) {
+	assert.Equal(t, "ROLE_USER", normalizeA2ARoleForCurrent("user"))
+	assert.Equal(t, "ROLE_AGENT", normalizeA2ARoleForCurrent("agent"))
+	assert.Equal(t, "ROLE_AGENT", normalizeA2ARoleForCurrent("assistant"))
+	assert.Equal(t, "ROLE_UNSPECIFIED", normalizeA2ARoleForCurrent("unspecified"))
+	assert.Equal(t, "vendor_role", normalizeA2ARoleForCurrent("vendor_role"))
+}
+
 func TestNormalizeA2AJSONRPCMethodAcceptsStandardAliases(t *testing.T) {
 	assert.Equal(t, "message/send", normalizeA2AJSONRPCMethod("SendMessage"))
 	assert.Equal(t, "message/stream", normalizeA2AJSONRPCMethod("SendStreamingMessage"))
@@ -137,7 +183,11 @@ func TestNormalizeA2AJSONRPCMethodAcceptsStandardAliases(t *testing.T) {
 	assert.Equal(t, "tasks/list", normalizeA2AJSONRPCMethod("ListTasks"))
 	assert.Equal(t, "tasks/cancel", normalizeA2AJSONRPCMethod("CancelTask"))
 	assert.Equal(t, "tasks/resubscribe", normalizeA2AJSONRPCMethod("SubscribeToTask"))
+	assert.Equal(t, "tasks/pushNotificationConfig/set", normalizeA2AJSONRPCMethod("CreateTaskPushNotificationConfig"))
+	assert.Equal(t, "tasks/pushNotificationConfig/get", normalizeA2AJSONRPCMethod("GetTaskPushNotificationConfig"))
 	assert.Equal(t, "tasks/pushNotificationConfig/list", normalizeA2AJSONRPCMethod("ListTaskPushNotificationConfigs"))
+	assert.Equal(t, "tasks/pushNotificationConfig/delete", normalizeA2AJSONRPCMethod("DeleteTaskPushNotificationConfig"))
+	assert.Equal(t, "agent/getExtendedCard", normalizeA2AJSONRPCMethod("GetExtendedAgentCard"))
 }
 
 func TestAfterSequenceFromA2ASSEUsesQueryBeforeLastEventID(t *testing.T) {

@@ -33,6 +33,7 @@ type A2AMessageSendParams struct {
 type A2ASendConfiguration struct {
 	AcceptedOutputModes        []string                       `json:"acceptedOutputModes,omitempty"`
 	Blocking                   *bool                          `json:"blocking,omitempty"`
+	ReturnImmediately          *bool                          `json:"returnImmediately,omitempty"`
 	PushNotificationConfig     *A2APushNotificationConfig     `json:"pushNotificationConfig,omitempty"`
 	TaskPushNotificationConfig *A2ATaskPushNotificationConfig `json:"taskPushNotificationConfig,omitempty"`
 	HistoryLength              *int                           `json:"historyLength,omitempty"`
@@ -55,19 +56,39 @@ type A2APushAuthenticationInfo struct {
 }
 
 type A2ATaskPushNotificationConfig struct {
-	TaskID                 string                    `json:"taskId"`
-	PushNotificationConfig A2APushNotificationConfig `json:"pushNotificationConfig"`
+	Tenant                 string                     `json:"tenant,omitempty"`
+	ID                     string                     `json:"id,omitempty"`
+	TaskID                 string                     `json:"taskId,omitempty"`
+	URL                    string                     `json:"url,omitempty"`
+	Token                  string                     `json:"token,omitempty"`
+	Secret                 string                     `json:"secret,omitempty"`
+	Authentication         *A2APushAuthenticationInfo `json:"authentication,omitempty"`
+	Metadata               map[string]interface{}     `json:"metadata,omitempty"`
+	EventTypes             []string                   `json:"eventTypes,omitempty"`
+	EventTypesAlias        []string                   `json:"event_types,omitempty"`
+	PushNotificationConfig A2APushNotificationConfig  `json:"pushNotificationConfig,omitempty"`
 }
 
 type A2ATaskPushConfigParams struct {
-	ID                       string                    `json:"id,omitempty"`
-	TaskID                   string                    `json:"taskId,omitempty"`
-	PushNotificationConfigID string                    `json:"pushNotificationConfigId,omitempty"`
-	PushNotificationConfig   A2APushNotificationConfig `json:"pushNotificationConfig,omitempty"`
+	ID                       string                     `json:"id,omitempty"`
+	TaskID                   string                     `json:"taskId,omitempty"`
+	PushNotificationConfigID string                     `json:"pushNotificationConfigId,omitempty"`
+	PushNotificationConfig   A2APushNotificationConfig  `json:"pushNotificationConfig,omitempty"`
+	URL                      string                     `json:"url,omitempty"`
+	Token                    string                     `json:"token,omitempty"`
+	Secret                   string                     `json:"secret,omitempty"`
+	Authentication           *A2APushAuthenticationInfo `json:"authentication,omitempty"`
+	Metadata                 map[string]interface{}     `json:"metadata,omitempty"`
+	EventTypes               []string                   `json:"eventTypes,omitempty"`
+	EventTypesAlias          []string                   `json:"event_types,omitempty"`
+	PageSize                 *int                       `json:"pageSize,omitempty"`
+	PageToken                string                     `json:"pageToken,omitempty"`
 }
 
 type A2ATaskPushConfigList struct {
-	Items []A2ATaskPushNotificationConfig `json:"items"`
+	Configs       []A2ATaskPushNotificationConfig `json:"configs,omitempty"`
+	NextPageToken string                          `json:"nextPageToken,omitempty"`
+	Items         []A2ATaskPushNotificationConfig `json:"items,omitempty"`
 }
 
 type A2ATaskQueryParams struct {
@@ -149,4 +170,9 @@ type A2AStreamResponse struct {
 	Message        *A2AMessage                 `json:"message,omitempty"`
 	StatusUpdate   *A2ATaskStatusUpdateEvent   `json:"statusUpdate,omitempty"`
 	ArtifactUpdate *A2ATaskArtifactUpdateEvent `json:"artifactUpdate,omitempty"`
+}
+
+type A2ASendMessageResponse struct {
+	Task    *A2ATask    `json:"task,omitempty"`
+	Message *A2AMessage `json:"message,omitempty"`
 }

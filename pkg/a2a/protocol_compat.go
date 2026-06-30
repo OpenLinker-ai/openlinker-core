@@ -96,6 +96,7 @@ func normalizeA2AValueForCurrent(value interface{}) interface{} {
 		}
 		return typed
 	case map[string]interface{}:
+		normalizeA2APushConfigMapForCurrent(typed)
 		if parts, ok := typed["parts"].([]interface{}); ok {
 			normalized := make([]interface{}, 0, len(parts))
 			for _, rawPart := range parts {
@@ -117,6 +118,14 @@ func normalizeA2AValueForCurrent(value interface{}) interface{} {
 		if state, ok := typed["state"].(string); ok {
 			typed["state"] = normalizeA2ATaskStateForCurrent(state)
 		}
+		if role, ok := typed["role"].(string); ok {
+			typed["role"] = normalizeA2ARoleForCurrent(role)
+		}
+		if _, hasTaskID := typed["taskId"]; hasTaskID {
+			if _, hasStatus := typed["status"]; hasStatus {
+				delete(typed, "final")
+			}
+		}
 		if shouldDropA2AKind(typed) {
 			delete(typed, "kind")
 		}
@@ -124,6 +133,34 @@ func normalizeA2AValueForCurrent(value interface{}) interface{} {
 	default:
 		return value
 	}
+}
+
+func normalizeA2APushConfigMapForCurrent(value map[string]interface{}) {
+	if items, ok := value["items"].([]interface{}); ok {
+		if _, hasConfigs := value["configs"]; !hasConfigs {
+			value["configs"] = items
+		}
+		delete(value, "items")
+	}
+	rawNested, hasNested := value["pushNotificationConfig"]
+	if !hasNested {
+		return
+	}
+	nested, ok := rawNested.(map[string]interface{})
+	if !ok {
+		return
+	}
+	if _, hasTaskID := value["taskId"]; !hasTaskID {
+		return
+	}
+	for _, key := range []string{"id", "url", "token", "secret", "authentication", "metadata", "eventTypes", "event_types"} {
+		if _, exists := value[key]; !exists {
+			if nestedValue, ok := nested[key]; ok {
+				value[key] = nestedValue
+			}
+		}
+	}
+	delete(value, "pushNotificationConfig")
 }
 
 func normalizeA2ATaskStateForCurrent(state string) string {
@@ -148,6 +185,19 @@ func normalizeA2ATaskStateForCurrent(state string) string {
 		return "TASK_STATE_UNSPECIFIED"
 	default:
 		return state
+	}
+}
+
+func normalizeA2ARoleForCurrent(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "user", "role_user":
+		return "ROLE_USER"
+	case "agent", "assistant", "role_agent":
+		return "ROLE_AGENT"
+	case "unspecified", "role_unspecified":
+		return "ROLE_UNSPECIFIED"
+	default:
+		return role
 	}
 }
 

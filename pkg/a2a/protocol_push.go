@@ -107,7 +107,7 @@ func (s *Service) SetPushNotificationConfig(ctx context.Context, userID uuid.UUI
 	if err != nil {
 		return nil, err
 	}
-	cfg := params.PushNotificationConfig
+	cfg := pushConfigFromPushParams(params)
 	if strings.TrimSpace(cfg.URL) == "" {
 		return nil, httpx.BadRequest("pushNotificationConfig.url 不能为空")
 	}
@@ -124,17 +124,16 @@ func (s *Service) SetPushNotificationConfig(ctx context.Context, userID uuid.UUI
 		return nil, err
 	}
 	out := A2ATaskPushNotificationConfig{
-		TaskID: taskID,
-		PushNotificationConfig: A2APushNotificationConfig{
-			ID:         resp.ID,
-			URL:        resp.TargetURL,
-			EventTypes: resp.EventTypes,
-			Metadata:   cfg.Metadata,
-		},
+		TaskID:     taskID,
+		ID:         resp.ID,
+		URL:        resp.TargetURL,
+		EventTypes: resp.EventTypes,
+		Metadata:   cfg.Metadata,
 	}
 	if scheme != "" {
-		out.PushNotificationConfig.Authentication = &A2APushAuthenticationInfo{Scheme: scheme}
+		out.Authentication = &A2APushAuthenticationInfo{Scheme: scheme}
 	}
+	out.PushNotificationConfig = pushNotificationConfigFromTaskPush(out)
 	return &out, nil
 }
 
@@ -151,10 +150,7 @@ func (s *Service) GetPushNotificationConfig(ctx context.Context, userID uuid.UUI
 	if err != nil {
 		return nil, err
 	}
-	configID := strings.TrimSpace(params.PushNotificationConfigID)
-	if configID == "" {
-		configID = strings.TrimSpace(params.PushNotificationConfig.ID)
-	}
+	configID := configIDFromPushParams(params)
 	if configID == "" && len(items) == 1 {
 		item := a2aPushConfigFromTaskCallback(taskID, items[0], false)
 		return &item, nil
@@ -188,7 +184,7 @@ func (s *Service) ListPushNotificationConfigs(ctx context.Context, userID uuid.U
 	for _, item := range items {
 		out = append(out, a2aPushConfigFromTaskCallback(taskID, item, false))
 	}
-	return &A2ATaskPushConfigList{Items: out}, nil
+	return &A2ATaskPushConfigList{Configs: out, Items: out}, nil
 }
 
 func (s *Service) DeletePushNotificationConfig(ctx context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) error {
@@ -203,10 +199,7 @@ func (s *Service) DeletePushNotificationConfig(ctx context.Context, userID uuid.
 	if err != nil {
 		return err
 	}
-	configID := strings.TrimSpace(params.PushNotificationConfigID)
-	if configID == "" {
-		configID = strings.TrimSpace(params.PushNotificationConfig.ID)
-	}
+	configID := configIDFromPushParams(params)
 	if configID == "" {
 		return httpx.BadRequest("pushNotificationConfigId 不能为空")
 	}
@@ -239,6 +232,86 @@ func taskIDFromPushParams(params *A2ATaskPushConfigParams) string {
 		return strings.TrimSpace(params.TaskID)
 	}
 	return strings.TrimSpace(params.ID)
+}
+
+func configIDFromPushParams(params *A2ATaskPushConfigParams) string {
+	if params == nil {
+		return ""
+	}
+	if strings.TrimSpace(params.PushNotificationConfigID) != "" {
+		return strings.TrimSpace(params.PushNotificationConfigID)
+	}
+	if strings.TrimSpace(params.PushNotificationConfig.ID) != "" {
+		return strings.TrimSpace(params.PushNotificationConfig.ID)
+	}
+	if strings.TrimSpace(params.TaskID) != "" {
+		return strings.TrimSpace(params.ID)
+	}
+	return ""
+}
+
+func pushConfigFromPushParams(params *A2ATaskPushConfigParams) A2APushNotificationConfig {
+	if params == nil {
+		return A2APushNotificationConfig{}
+	}
+	cfg := params.PushNotificationConfig
+	if cfg.ID == "" && strings.TrimSpace(params.TaskID) != "" {
+		cfg.ID = strings.TrimSpace(params.ID)
+	}
+	if cfg.URL == "" {
+		cfg.URL = params.URL
+	}
+	if cfg.Token == "" {
+		cfg.Token = params.Token
+	}
+	if cfg.Secret == "" {
+		cfg.Secret = params.Secret
+	}
+	if cfg.Authentication == nil {
+		cfg.Authentication = params.Authentication
+	}
+	if cfg.Metadata == nil {
+		cfg.Metadata = params.Metadata
+	}
+	if len(cfg.EventTypes) == 0 {
+		cfg.EventTypes = params.EventTypes
+	}
+	if len(cfg.EventTypesAlias) == 0 {
+		cfg.EventTypesAlias = params.EventTypesAlias
+	}
+	return cfg
+}
+
+func pushConfigFromTaskPushConfig(taskCfg *A2ATaskPushNotificationConfig) *A2APushNotificationConfig {
+	if taskCfg == nil {
+		return nil
+	}
+	cfg := taskCfg.PushNotificationConfig
+	if cfg.ID == "" {
+		cfg.ID = taskCfg.ID
+	}
+	if cfg.URL == "" {
+		cfg.URL = taskCfg.URL
+	}
+	if cfg.Token == "" {
+		cfg.Token = taskCfg.Token
+	}
+	if cfg.Secret == "" {
+		cfg.Secret = taskCfg.Secret
+	}
+	if cfg.Authentication == nil {
+		cfg.Authentication = taskCfg.Authentication
+	}
+	if cfg.Metadata == nil {
+		cfg.Metadata = taskCfg.Metadata
+	}
+	if len(cfg.EventTypes) == 0 {
+		cfg.EventTypes = taskCfg.EventTypes
+	}
+	if len(cfg.EventTypesAlias) == 0 {
+		cfg.EventTypesAlias = taskCfg.EventTypesAlias
+	}
+	return &cfg
 }
 
 func callbackAuthFromA2AConfig(cfg A2APushNotificationConfig) (string, string) {
@@ -293,7 +366,45 @@ func a2aPushConfigFromTaskCallback(taskID string, sub db.TaskCallbackSubscriptio
 		}
 		cfg.Authentication = auth
 	}
-	return A2ATaskPushNotificationConfig{TaskID: taskID, PushNotificationConfig: cfg}
+	return A2ATaskPushNotificationConfig{
+		ID:                     cfg.ID,
+		TaskID:                 taskID,
+		URL:                    cfg.URL,
+		Authentication:         cfg.Authentication,
+		Metadata:               cfg.Metadata,
+		EventTypes:             cfg.EventTypes,
+		EventTypesAlias:        cfg.EventTypesAlias,
+		PushNotificationConfig: cfg,
+	}
+}
+
+func pushNotificationConfigFromTaskPush(taskCfg A2ATaskPushNotificationConfig) A2APushNotificationConfig {
+	cfg := taskCfg.PushNotificationConfig
+	if cfg.ID == "" {
+		cfg.ID = taskCfg.ID
+	}
+	if cfg.URL == "" {
+		cfg.URL = taskCfg.URL
+	}
+	if cfg.Token == "" {
+		cfg.Token = taskCfg.Token
+	}
+	if cfg.Secret == "" {
+		cfg.Secret = taskCfg.Secret
+	}
+	if cfg.Authentication == nil {
+		cfg.Authentication = taskCfg.Authentication
+	}
+	if cfg.Metadata == nil {
+		cfg.Metadata = taskCfg.Metadata
+	}
+	if len(cfg.EventTypes) == 0 {
+		cfg.EventTypes = taskCfg.EventTypes
+	}
+	if len(cfg.EventTypesAlias) == 0 {
+		cfg.EventTypesAlias = taskCfg.EventTypesAlias
+	}
+	return cfg
 }
 
 func a2aMetadataFromTaskCallback(sub db.TaskCallbackSubscription) map[string]interface{} {
