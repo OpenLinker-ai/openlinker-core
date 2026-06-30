@@ -20,9 +20,10 @@ INSERT INTO runs (
 ) VALUES (
     $1, $2, $3, 'running', $4, $5, $6, $7
 )
-RETURNING id, user_id, agent_id, input, output, status, error_code, error_message,
-          cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
-          started_at, finished_at, source;
+RETURNING runs.id, runs.user_id, runs.agent_id, runs.input, runs.output,
+          runs.status, runs.error_code, runs.error_message, runs.cost_cents,
+          runs.platform_fee_cents, runs.creator_revenue_cents, runs.duration_ms,
+          runs.started_at, runs.finished_at, runs.source;
 
 -- name: MarkRunSuccess :exec
 -- 调用成功：写 output, status=success, duration_ms, finished_at
@@ -31,7 +32,7 @@ SET status = 'success',
     output = $2,
     duration_ms = $3,
     finished_at = NOW()
-WHERE id = $1 AND status = 'running';
+WHERE runs.id = $1 AND runs.status = 'running';
 
 -- name: MarkRunFailed :exec
 -- 调用失败：写 status, error_code, error_message, duration_ms
@@ -41,7 +42,7 @@ SET status = $2,
     error_message = $4,
     duration_ms = $5,
     finished_at = NOW()
-WHERE id = $1 AND status = 'running';
+WHERE runs.id = $1 AND runs.status = 'running';
 
 -- name: CancelRun :one
 -- 用户取消 running run。仅 owner 可取消，终态 run 不被覆盖。
@@ -51,17 +52,19 @@ SET status = 'canceled',
     error_message = $3,
     duration_ms = GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000))::int,
     finished_at = NOW()
-WHERE id = $1 AND user_id = $2 AND status = 'running'
-RETURNING id, user_id, agent_id, input, output, status, error_code, error_message,
-          cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
-          started_at, finished_at, source;
+WHERE runs.id = $1 AND runs.user_id = $2 AND runs.status = 'running'
+RETURNING runs.id, runs.user_id, runs.agent_id, runs.input, runs.output,
+          runs.status, runs.error_code, runs.error_message, runs.cost_cents,
+          runs.platform_fee_cents, runs.creator_revenue_cents, runs.duration_ms,
+          runs.started_at, runs.finished_at, runs.source;
 
 -- name: GetRunByID :one
-SELECT id, user_id, agent_id, input, output, status, error_code, error_message,
-       cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
-       started_at, finished_at, source
-FROM runs
-WHERE id = $1;
+SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
+       r.error_code, r.error_message, r.cost_cents, r.platform_fee_cents,
+       r.creator_revenue_cents, r.duration_ms, r.started_at, r.finished_at,
+       r.source
+FROM runs r
+WHERE r.id = $1;
 
 -- name: ClaimRuntimePullRun :one
 -- Agent 通过绑定自身的访问令牌主动拉取自己名下队列型 runtime 模式的 pending run。
@@ -98,10 +101,10 @@ WHERE r.agent_id = $1
   AND (r.claimed_at IS NULL OR r.claimed_at < NOW() - INTERVAL '5 minutes');
 
 -- name: GetRuntimePullRunState :one
-SELECT id, user_id, agent_id, status, cost_cents, creator_revenue_cents,
-       started_at, claimed_by_runtime_token_id
-FROM runs
-WHERE id = $1;
+SELECT r.id, r.user_id, r.agent_id, r.status, r.cost_cents,
+       r.creator_revenue_cents, r.started_at, r.claimed_by_runtime_token_id
+FROM runs r
+WHERE r.id = $1;
 
 -- name: ListStaleRuntimePullRuns :many
 -- 队列型 runtime 任务如果长时间未被领取或已领取但未回传终态，需要自动收敛为 timeout，
@@ -132,7 +135,7 @@ FOR UPDATE SKIP LOCKED;
 -- name: CreateRunEvent :one
 -- 追加 run event；锁 run 行来保证同一个 run 内 sequence 单调递增。
 WITH locked_run AS (
-    SELECT id FROM runs WHERE id = $1 FOR UPDATE
+    SELECT r.id FROM runs r WHERE r.id = $1 FOR UPDATE
 ),
 next_sequence AS (
     SELECT COALESCE(MAX(e.sequence), 0)::int + 1 AS sequence
@@ -145,25 +148,27 @@ INSERT INTO run_events (
 SELECT
     locked_run.id, $2, next_sequence.sequence, $3, $4
 FROM locked_run, next_sequence
-RETURNING id, run_id, parent_run_id, sequence, event_type, payload, created_at;
+RETURNING run_events.id, run_events.run_id, run_events.parent_run_id,
+          run_events.sequence, run_events.event_type, run_events.payload,
+          run_events.created_at;
 
 -- name: ListRunEventsByRun :many
-SELECT id, run_id, parent_run_id, sequence, event_type, payload, created_at
-FROM run_events
-WHERE run_id = $1 AND sequence > $2
-ORDER BY sequence ASC
+SELECT e.id, e.run_id, e.parent_run_id, e.sequence, e.event_type, e.payload, e.created_at
+FROM run_events e
+WHERE e.run_id = $1 AND e.sequence > $2
+ORDER BY e.sequence ASC
 LIMIT $3;
 
 -- ## 模块 6（双面板数据查询）
 -- subagent-6a 在此区块下追加 query
 
 -- name: ListRunsByUser :many
-SELECT id, user_id, agent_id, input, output, status, error_code, error_message,
-       cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
-       started_at, finished_at, source
-FROM runs
-WHERE user_id = $1
-ORDER BY started_at DESC
+SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code, r.error_message,
+       r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
+       r.started_at, r.finished_at, r.source
+FROM runs r
+WHERE r.user_id = $1
+ORDER BY r.started_at DESC
 LIMIT $2 OFFSET $3;
 
 -- name: ListRunsByUserWithAgent :many
@@ -181,27 +186,41 @@ LIMIT $2 OFFSET $3;
 
 -- name: ListRunsByUserAndAgent :many
 -- A2A ListTasks: owner-scoped keyset page for one public Agent.
-SELECT id, user_id, agent_id, input, output, status, error_code, error_message,
-       cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
-       started_at, finished_at, source
-FROM runs
-WHERE user_id = $1
-  AND agent_id = $2
-  AND ($3::bool OR (started_at, id) < ($4::timestamptz, $5::uuid))
-  AND ($6::bool OR status = ANY($7::text[]))
-  AND ($8::bool OR COALESCE(finished_at, started_at) >= $9::timestamptz)
-  AND ($10::text = '' OR input->>'a2a_context_id' = $10 OR id::text = $10)
-ORDER BY started_at DESC, id DESC
+SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code, r.error_message,
+       r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
+       r.started_at, r.finished_at, r.source
+FROM runs r
+LEFT JOIN a2a_context_mappings ctx ON ctx.run_id = r.id
+WHERE r.user_id = $1
+  AND r.agent_id = $2
+  AND ($3::bool OR (r.started_at, r.id) < ($4::timestamptz, $5::uuid))
+  AND ($6::bool OR r.status = ANY($7::text[]))
+  AND ($8::bool OR COALESCE(r.finished_at, r.started_at) >= $9::timestamptz)
+  AND (
+      $10::text = ''
+      OR ctx.protocol_context_id = $10
+      OR ctx.root_context_id = $10
+      OR r.input->>'a2a_context_id' = $10
+      OR r.id::text = $10
+  )
+ORDER BY r.started_at DESC, r.id DESC
 LIMIT $11;
 
 -- name: CountRunsByUserAndAgent :one
 SELECT COUNT(*)::int AS total
-FROM runs
-WHERE user_id = $1
-  AND agent_id = $2
-  AND ($3::bool OR status = ANY($4::text[]))
-  AND ($5::bool OR COALESCE(finished_at, started_at) >= $6::timestamptz)
-  AND ($7::text = '' OR input->>'a2a_context_id' = $7 OR id::text = $7);
+FROM runs r
+LEFT JOIN a2a_context_mappings ctx ON ctx.run_id = r.id
+WHERE r.user_id = $1
+  AND r.agent_id = $2
+  AND ($3::bool OR r.status = ANY($4::text[]))
+  AND ($5::bool OR COALESCE(r.finished_at, r.started_at) >= $6::timestamptz)
+  AND (
+      $7::text = ''
+      OR ctx.protocol_context_id = $7
+      OR ctx.root_context_id = $7
+      OR r.input->>'a2a_context_id' = $7
+      OR r.id::text = $7
+  );
 
 -- name: ListRunsByCreatorAgentWithAgent :many
 -- 创作者查看某个自己 Agent 的被调用历史。

@@ -5,17 +5,33 @@ import (
 	"strings"
 
 	"github.com/labstack/echo/v4"
-
-	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 const (
 	a2aProtocolVersionLegacy  = "0.3"
 	a2aProtocolVersionCurrent = "1.0"
 	a2aVersionHeader          = "A2A-Version"
+	a2aExtensionsHeader       = "A2A-Extensions"
 )
 
 var a2aSupportedProtocolVersions = []string{a2aProtocolVersionLegacy, a2aProtocolVersionCurrent}
+
+type a2aServiceParameters struct {
+	Version    string
+	Extensions []string
+}
+
+func a2aServiceParametersFromRequest(c echo.Context, requiredExtensions []string) (a2aServiceParameters, error) {
+	version, err := a2aVersionFromRequest(c)
+	if err != nil {
+		return a2aServiceParameters{}, err
+	}
+	extensions := a2aExtensionsFromRequest(c)
+	if missing := missingA2ARequiredExtensions(requiredExtensions, extensions); len(missing) > 0 {
+		return a2aServiceParameters{}, a2aExtensionSupportRequired(missing)
+	}
+	return a2aServiceParameters{Version: version, Extensions: extensions}, nil
+}
 
 func a2aVersionFromRequest(c echo.Context) (string, error) {
 	raw := strings.TrimSpace(c.Request().Header.Get(a2aVersionHeader))
@@ -36,7 +52,7 @@ func a2aVersionFromRequest(c echo.Context) (string, error) {
 	case a2aProtocolVersionLegacy, a2aProtocolVersionCurrent:
 		return normalized, nil
 	default:
-		return "", httpx.BadRequest("不支持的 A2A-Version: " + raw)
+		return "", a2aVersionNotSupported(raw)
 	}
 }
 
@@ -59,10 +75,62 @@ func setA2AVersionHeader(c echo.Context, version string) {
 }
 
 func a2aUnsupportedVersionJSONRPCError(id json.RawMessage, err error) JSONRPCResponse {
-	return jsonRPCError(id, -32009, err.Error(), map[string]interface{}{
-		"code":               "VERSION_NOT_SUPPORTED",
-		"supported_versions": a2aSupportedProtocolVersions,
-	})
+	return jsonRPCErrorFrom(id, err)
+}
+
+func a2aExtensionsFromRequest(c echo.Context) []string {
+	raw := strings.TrimSpace(c.Request().Header.Get(a2aExtensionsHeader))
+	if raw == "" {
+		raw = strings.TrimSpace(c.QueryParam(a2aExtensionsHeader))
+	}
+	if raw == "" {
+		raw = strings.TrimSpace(c.QueryParam("a2a_extensions"))
+	}
+	return normalizeA2AExtensionList(raw)
+}
+
+func normalizeA2AExtensionList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
+func missingA2ARequiredExtensions(required, declared []string) []string {
+	if len(required) == 0 {
+		return nil
+	}
+	declaredSet := map[string]struct{}{}
+	for _, item := range declared {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			declaredSet[item] = struct{}{}
+		}
+	}
+	missing := make([]string, 0)
+	for _, item := range required {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := declaredSet[item]; !ok {
+			missing = append(missing, item)
+		}
+	}
+	return missing
 }
 
 func jsonRPCResultWithVersion(id json.RawMessage, result interface{}, version string) JSONRPCResponse {

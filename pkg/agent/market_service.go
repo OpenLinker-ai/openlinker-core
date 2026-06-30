@@ -323,6 +323,18 @@ func (s *MarketService) getAgentCardBySlug(ctx context.Context, slug string, ext
 			PushNotificationsLegacy: true,
 			Delegation:              true,
 			ExtendedAgentCard:       true,
+			Extensions: []AgentCardExtension{
+				{
+					URI:         "https://openlinker.ai/extensions/a2a/context-lineage/v1",
+					Description: "Carries protocol context, root context, parent task and trace identifiers across delegated runs.",
+					Required:    false,
+				},
+				{
+					URI:         "https://openlinker.ai/extensions/a2a/task-callbacks/v1",
+					Description: "Maps A2A push notification configs to OpenLinker task callback subscriptions.",
+					Required:    false,
+				},
+			},
 		},
 		DefaultInputModes:         []string{"application/json", "text/plain"},
 		DefaultOutputModes:        []string{"application/json", "text/plain"},

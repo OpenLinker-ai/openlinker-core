@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +57,10 @@ func (s *Service) SendProtocolMessage(ctx context.Context, userID uuid.UUID, slu
 		log.Error().Err(err).Str("slug", slug).Msg("a2a.SendProtocolMessage: GetAgentBySlug")
 		return nil, httpx.Internal("查询 Agent 失败")
 	}
+	normalizeProtocolMessageContext(params)
+	if err := validateA2AMessageSendParams(params); err != nil {
+		return nil, err
+	}
 
 	input, err := inputFromA2AMessage(params.Message)
 	if err != nil {
@@ -62,9 +68,10 @@ func (s *Service) SendProtocolMessage(ctx context.Context, userID uuid.UUID, slu
 	}
 	metadata := protocolMetadata(params)
 	runReq := &runtime.RunRequest{
-		AgentID:  agent.ID.String(),
-		Input:    input,
-		Metadata: metadata,
+		AgentID:    agent.ID.String(),
+		Input:      input,
+		Metadata:   metadata,
+		A2AContext: protocolRunA2AContext(params),
 	}
 	run := s.runtime.Run
 	if shouldReturnA2AMessageImmediately(params) {
@@ -97,14 +104,19 @@ func (s *Service) StartProtocolMessage(ctx context.Context, userID uuid.UUID, sl
 		log.Error().Err(err).Str("slug", slug).Msg("a2a.StartProtocolMessage: GetAgentBySlug")
 		return nil, httpx.Internal("查询 Agent 失败")
 	}
+	normalizeProtocolMessageContext(params)
+	if err := validateA2AMessageSendParams(params); err != nil {
+		return nil, err
+	}
 	input, err := inputFromA2AMessage(params.Message)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := s.runtime.StartRun(ctx, userID, &runtime.RunRequest{
-		AgentID:  agent.ID.String(),
-		Input:    input,
-		Metadata: protocolMetadata(params),
+		AgentID:    agent.ID.String(),
+		Input:      input,
+		Metadata:   protocolMetadata(params),
+		A2AContext: protocolRunA2AContext(params),
 	}, "api")
 	if err != nil {
 		return nil, err
@@ -146,6 +158,145 @@ func shouldReturnA2AMessageImmediately(params *A2AMessageSendParams) bool {
 	return false
 }
 
+func normalizeProtocolMessageContext(params *A2AMessageSendParams) {
+	if params == nil {
+		return
+	}
+	params.Message.ContextID = strings.TrimSpace(params.Message.ContextID)
+	if params.Message.ContextID == "" {
+		params.Message.ContextID = "ctx-" + uuid.NewString()
+	}
+	params.Message.TaskID = strings.TrimSpace(params.Message.TaskID)
+	params.Message.MessageID = strings.TrimSpace(params.Message.MessageID)
+}
+
+func protocolRunA2AContext(params *A2AMessageSendParams) *runtime.RunA2AContextRequest {
+	if params == nil {
+		return nil
+	}
+	traceID := protocolTraceID(params)
+	if traceID == "" {
+		traceID = params.Message.ContextID
+	}
+	return &runtime.RunA2AContextRequest{
+		ProtocolContextID: params.Message.ContextID,
+		ParentTaskID:      params.Message.TaskID,
+		RootContextID:     params.Message.ContextID,
+		TraceID:           traceID,
+		ReferenceTaskIDs:  normalizeProtocolReferenceTaskIDs(params.Message.ReferenceTaskIDs),
+		Source:            "a2a_protocol",
+	}
+}
+
+func protocolTraceID(params *A2AMessageSendParams) string {
+	if params == nil {
+		return ""
+	}
+	for _, source := range []map[string]interface{}{params.Metadata, params.Message.Metadata} {
+		for _, key := range []string{"trace_id", "traceId", "trace"} {
+			if value, ok := source[key].(string); ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	return ""
+}
+
+func normalizeProtocolReferenceTaskIDs(raw []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
+var a2aSupportedOutputModes = map[string]struct{}{
+	"application/json": {},
+	"text/plain":       {},
+	"text/markdown":    {},
+}
+
+var a2aSupportedInputMediaTypes = map[string]struct{}{
+	"application/json":         {},
+	"application/octet-stream": {},
+	"application/pdf":          {},
+	"image/gif":                {},
+	"image/jpeg":               {},
+	"image/png":                {},
+	"text/csv":                 {},
+	"text/markdown":            {},
+	"text/plain":               {},
+}
+
+func validateA2AMessageSendParams(params *A2AMessageSendParams) error {
+	if params == nil {
+		return httpx.BadRequest("请求体不能为空")
+	}
+	if err := validateA2AAcceptedOutputModes(params.Configuration); err != nil {
+		return err
+	}
+	return validateA2AMessagePartMediaTypes(params.Message)
+}
+
+func validateA2AAcceptedOutputModes(cfg *A2ASendConfiguration) error {
+	if cfg == nil || len(cfg.AcceptedOutputModes) == 0 {
+		return nil
+	}
+	for _, raw := range cfg.AcceptedOutputModes {
+		mode := normalizeA2AMediaType(raw)
+		if _, ok := a2aSupportedOutputModes[mode]; ok {
+			return nil
+		}
+	}
+	return a2aContentTypeNotSupported("acceptedOutputModes 与服务端支持的输出类型不匹配", map[string]string{
+		"accepted_output_modes":  strings.Join(cfg.AcceptedOutputModes, ","),
+		"supported_output_modes": strings.Join(mapKeys(a2aSupportedOutputModes), ","),
+	})
+}
+
+func validateA2AMessagePartMediaTypes(message A2AMessage) error {
+	for _, part := range message.Parts {
+		mediaType := normalizeA2AMediaType(firstPartString(part, "mediaType", "mimeType"))
+		if mediaType == "" {
+			continue
+		}
+		if _, ok := a2aSupportedInputMediaTypes[mediaType]; ok {
+			continue
+		}
+		return a2aContentTypeNotSupported("A2A message part mediaType 不受支持: "+mediaType, map[string]string{
+			"media_type":            mediaType,
+			"supported_input_modes": strings.Join(mapKeys(a2aSupportedInputMediaTypes), ","),
+		})
+	}
+	return nil
+}
+
+func normalizeA2AMediaType(raw string) string {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if idx := strings.Index(value, ";"); idx >= 0 {
+		value = strings.TrimSpace(value[:idx])
+	}
+	return value
+}
+
+func mapKeys(values map[string]struct{}) []string {
+	out := make([]string, 0, len(values))
+	for key := range values {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // GetProtocolTask maps an owner-readable OpenLinker run back to the A2A Task shape.
 func (s *Service) GetProtocolTask(ctx context.Context, userID uuid.UUID, slug, taskID string, historyLength *int) (*A2ATask, error) {
 	slug = strings.TrimSpace(slug)
@@ -167,7 +318,7 @@ func (s *Service) GetProtocolTask(ctx context.Context, userID uuid.UUID, slug, t
 	}
 	runRow, err := s.queries.GetRunByID(ctx, runID)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (runRow.UserID != userID || runRow.AgentID != agent.ID)) {
-		return nil, httpx.NotFound("任务不存在")
+		return nil, a2aTaskNotFound("任务不存在")
 	}
 	if err != nil {
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("a2a.GetProtocolTask: GetRunByID")
@@ -192,7 +343,7 @@ func (s *Service) GetProtocolTask(ctx context.Context, userID uuid.UUID, slug, t
 			messages = messages[len(messages)-*historyLength:]
 		}
 	}
-	return taskFromRun(resp, a2aContextIDFromRunInput(runRow.Input), artifacts, messages), nil
+	return taskFromRun(resp, s.protocolContextIDForRun(ctx, runID, runRow.Input), artifacts, messages), nil
 }
 
 func (s *Service) ListProtocolTasks(ctx context.Context, userID uuid.UUID, slug string, params *A2ATaskListParams) (*A2ATaskListResponse, error) {
@@ -296,7 +447,11 @@ func (s *Service) ListProtocolTasks(ctx context.Context, userID uuid.UUID, slug 
 				messages = messages[len(messages)-*params.HistoryLength:]
 			}
 		}
-		tasks = append(tasks, *taskFromDBRun(row, includeArtifacts, artifacts, messages))
+		task := taskFromDBRun(row, includeArtifacts, artifacts, messages)
+		if contextID := s.protocolContextIDForRun(ctx, row.ID, row.Input); contextID != "" {
+			task.ContextID = contextID
+		}
+		tasks = append(tasks, *task)
 	}
 	return &A2ATaskListResponse{
 		Tasks:         tasks,
@@ -314,6 +469,10 @@ func (s *Service) CancelProtocolTask(ctx context.Context, userID uuid.UUID, slug
 	}
 	resp, err := s.runtime.CancelRun(ctx, userID, runID)
 	if err != nil {
+		var he *httpx.HTTPError
+		if errors.As(err, &he) && he.Status == http.StatusConflict {
+			return nil, a2aTaskNotCancelable(he.Message)
+		}
 		return nil, err
 	}
 	return taskFromRun(resp, contextID, nil, nil), nil
@@ -364,13 +523,24 @@ func (s *Service) ensureProtocolRunContext(ctx context.Context, userID uuid.UUID
 	}
 	runRow, err := s.queries.GetRunByID(ctx, runID)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (runRow.UserID != userID || runRow.AgentID != agent.ID)) {
-		return uuid.Nil, "", httpx.NotFound("任务不存在")
+		return uuid.Nil, "", a2aTaskNotFound("任务不存在")
 	}
 	if err != nil {
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("a2a.ensureProtocolRun: GetRunByID")
 		return uuid.Nil, "", httpx.Internal("查询任务失败")
 	}
-	return runID, a2aContextIDFromRunInput(runRow.Input), nil
+	return runID, s.protocolContextIDForRun(ctx, runID, runRow.Input), nil
+}
+
+func (s *Service) protocolContextIDForRun(ctx context.Context, runID uuid.UUID, input []byte) string {
+	mapping, err := s.queries.GetA2AContextMappingByRun(ctx, runID)
+	if err == nil && strings.TrimSpace(mapping.ProtocolContextID) != "" {
+		return strings.TrimSpace(mapping.ProtocolContextID)
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		log.Warn().Err(err).Str("run_id", runID.String()).Msg("a2a.protocolContextIDForRun")
+	}
+	return a2aContextIDFromRunInput(input)
 }
 
 func normalizeA2AListTasksPageSize(raw *int) (int32, error) {
@@ -581,6 +751,9 @@ func attachA2AInputIDs(input map[string]interface{}, message A2AMessage) {
 	if message.TaskID != "" {
 		input["a2a_task_id"] = message.TaskID
 	}
+	if refs := normalizeProtocolReferenceTaskIDs(message.ReferenceTaskIDs); len(refs) > 0 {
+		input["a2a_reference_task_ids"] = refs
+	}
 }
 
 func partKind(part map[string]interface{}) string {
@@ -673,16 +846,21 @@ func protocolMetadata(params *A2AMessageSendParams) map[string]interface{} {
 	}
 	metadata["source"] = "a2a"
 	metadata["a2a"] = map[string]interface{}{
-		"protocol":   "jsonrpc-http",
-		"method":     "message/send",
-		"message_id": params.Message.MessageID,
-		"context_id": params.Message.ContextID,
-		"task_id":    params.Message.TaskID,
+		"protocol":           "jsonrpc-http",
+		"method":             "message/send",
+		"message_id":         params.Message.MessageID,
+		"context_id":         params.Message.ContextID,
+		"task_id":            params.Message.TaskID,
+		"extensions":         normalizeProtocolReferenceTaskIDs(params.Message.Extensions),
+		"reference_task_ids": normalizeProtocolReferenceTaskIDs(params.Message.ReferenceTaskIDs),
 	}
 	return metadata
 }
 
 func taskFromRun(resp *runtime.RunResponse, contextID string, artifacts []runtime.RunArtifactResponse, messages []runtime.RunMessageResponse) *A2ATask {
+	if resp != nil && resp.A2AContext != nil && resp.A2AContext.ProtocolContextID != "" {
+		contextID = resp.A2AContext.ProtocolContextID
+	}
 	if contextID == "" {
 		contextID = resp.RunID
 	}
@@ -710,6 +888,9 @@ func taskFromRun(resp *runtime.RunResponse, contextID string, artifacts []runtim
 	}
 	if resp.CallerAgentID != "" {
 		task.Metadata["openlinker"].(map[string]interface{})["caller_agent_id"] = resp.CallerAgentID
+	}
+	if resp.A2AContext != nil {
+		task.Metadata["openlinker"].(map[string]interface{})["a2a_context"] = resp.A2AContext
 	}
 
 	if msg := statusMessageFromRun(resp); msg != nil {

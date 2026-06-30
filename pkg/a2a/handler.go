@@ -16,9 +16,10 @@ import (
 )
 
 type Handler struct {
-	svc          service
-	cardProvider AgentCardProvider
-	validator    *validator.Validate
+	svc                   service
+	cardProvider          AgentCardProvider
+	validator             *validator.Validate
+	requiredA2AExtensions []string
 }
 
 type service interface {

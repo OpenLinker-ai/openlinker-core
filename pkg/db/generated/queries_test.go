@@ -1502,6 +1502,57 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	}
 
 	targetAgentID := uuid.New()
+	mappingID := uuid.New()
+	dbtx.row = fakeRow{values: a2aContextMappingRow(mappingID, childRunID, userID, agentID, parentRunID, callerAgentID, targetAgentID, now)}
+	mapping, err := q.UpsertA2AContextMapping(context.Background(), UpsertA2AContextMappingParams{
+		RunID:             childRunID,
+		UserID:            userID,
+		AgentID:           agentID,
+		ProtocolContextID: "ctx-root",
+		ProtocolTaskID:    "task-child",
+		RootContextID:     "ctx-root",
+		ParentContextID:   "ctx-root",
+		ParentTaskID:      "task-parent",
+		ParentRunID:       &parentRunID,
+		CallerAgentID:     &callerAgentID,
+		TargetAgentID:     &targetAgentID,
+		TraceID:           "trace-root",
+		ReferenceTaskIDs:  []string{"task-parent"},
+		Source:            "agent_delegation",
+	})
+	if err != nil {
+		t.Fatalf("UpsertA2AContextMapping error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpsertA2AContextMapping")
+	if mapping.ID != mappingID || mapping.ProtocolContextID != "ctx-root" || mapping.ParentRunID == nil {
+		t.Fatalf("UpsertA2AContextMapping scan = %#v", mapping)
+	}
+
+	dbtx.row = fakeRow{values: a2aContextMappingRow(mappingID, childRunID, userID, agentID, parentRunID, callerAgentID, targetAgentID, now)}
+	gotMapping, err := q.GetA2AContextMappingByRun(context.Background(), childRunID)
+	if err != nil {
+		t.Fatalf("GetA2AContextMappingByRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetA2AContextMappingByRun")
+	if gotMapping.RunID != childRunID || gotMapping.RootContextID != "ctx-root" {
+		t.Fatalf("GetA2AContextMappingByRun scan = %#v", gotMapping)
+	}
+
+	mappingRows := &fakeRows{rows: [][]any{
+		a2aContextMappingRow(mappingID, childRunID, userID, agentID, parentRunID, callerAgentID, targetAgentID, now),
+	}}
+	dbtx.queryRows = mappingRows
+	mappings, err := q.ListA2AContextMappingsByRoot(context.Background(), ListA2AContextMappingsByRootParams{
+		UserID: userID, RootContextID: "ctx-root", Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("ListA2AContextMappingsByRoot error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListA2AContextMappingsByRoot")
+	if !mappingRows.closed || len(mappings) != 1 || mappings[0].TraceID != "trace-root" {
+		t.Fatalf("ListA2AContextMappingsByRoot scan = %#v closed=%v", mappings, mappingRows.closed)
+	}
+
 	duration := int32(250)
 	finishedAt := now.Add(time.Minute)
 	childRows := &fakeRows{rows: [][]any{{
@@ -1526,6 +1577,14 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 		[]string{"data"},
 		[]string{"data/sql-query"},
 		[]string{"SQL query"},
+		"ctx-root",
+		"task-child",
+		"ctx-root",
+		"ctx-root",
+		"task-parent",
+		"trace-root",
+		[]string{"task-parent"},
+		"agent_delegation",
 	}}}
 	dbtx.queryRows = childRows
 	childRuns, err := q.ListChildRunsByParentAndUser(context.Background(), ListChildRunsByParentAndUserParams{ParentRunID: parentRunID, UserID: userID})
@@ -1535,6 +1594,9 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	requireSQLName(t, dbtx.querySQL, "ListChildRunsByParentAndUser")
 	if !childRows.closed || len(childRuns) != 1 || childRuns[0].TargetAgentID != targetAgentID || childRuns[0].CallerSkillIDs[0] != "ai/agent-orchestration" {
 		t.Fatalf("ListChildRunsByParentAndUser scan = %#v closed=%v", childRuns, childRows.closed)
+	}
+	if childRuns[0].RootContextID != "ctx-root" || childRuns[0].ContextSource != "agent_delegation" {
+		t.Fatalf("ListChildRunsByParentAndUser context = %#v", childRuns[0])
 	}
 	if !reflect.DeepEqual(dbtx.queryArgs, []any{parentRunID, userID}) {
 		t.Fatalf("ListChildRunsByParentAndUser args = %#v", dbtx.queryArgs)
@@ -1558,6 +1620,10 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 		int32(1),
 		int32(3),
 		&lastUsedAt,
+		"ctx-root",
+		"task-parent",
+		"ctx-root",
+		"trace-root",
 	}}}
 	dbtx.queryRows = parentRows
 	parentRuns, err := q.ListParentRunsWithDelegationsByUser(context.Background(), ListParentRunsWithDelegationsByUserParams{UserID: userID, Search: "caller", Limit: 20, Offset: 5})
@@ -1567,6 +1633,9 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	requireSQLName(t, dbtx.querySQL, "ListParentRunsWithDelegationsByUser")
 	if !parentRows.closed || len(parentRuns) != 1 || parentRuns[0].ChildCount != 2 || parentRuns[0].ActiveRuntimeTokenCount != 3 {
 		t.Fatalf("ListParentRunsWithDelegationsByUser scan = %#v closed=%v", parentRuns, parentRows.closed)
+	}
+	if parentRuns[0].RootContextID != "ctx-root" || parentRuns[0].TraceID != "trace-root" {
+		t.Fatalf("ListParentRunsWithDelegationsByUser context = %#v", parentRuns[0])
 	}
 	if !reflect.DeepEqual(dbtx.queryArgs, []any{userID, "caller", int32(20), int32(5)}) {
 		t.Fatalf("ListParentRunsWithDelegationsByUser args = %#v", dbtx.queryArgs)
@@ -3810,6 +3879,28 @@ func agentRuntimeTokenRow(id, agentID, userID uuid.UUID, now time.Time, lastUsed
 
 func runDelegationRow(childRunID, parentRunID, callerAgentID uuid.UUID, createdAt time.Time) []any {
 	return []any{childRunID, parentRunID, callerAgentID, "delegate analysis", createdAt}
+}
+
+func a2aContextMappingRow(id, runID, userID, agentID, parentRunID, callerAgentID, targetAgentID uuid.UUID, now time.Time) []any {
+	return []any{
+		id,
+		runID,
+		userID,
+		agentID,
+		"ctx-root",
+		"task-child",
+		"ctx-root",
+		"ctx-root",
+		"task-parent",
+		&parentRunID,
+		&callerAgentID,
+		&targetAgentID,
+		"trace-root",
+		[]string{"task-parent"},
+		"agent_delegation",
+		now,
+		now.Add(time.Minute),
+	}
 }
 
 func workflowRow(id, userID uuid.UUID, now time.Time) []any {

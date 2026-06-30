@@ -556,9 +556,16 @@ func TestGetAgentCardBySlug_HappyPath(t *testing.T) {
 	require.Len(t, card.SupportedInterfaces, 3)
 	assert.Equal(t, "JSONRPC", card.SupportedInterfaces[0].ProtocolBinding)
 	assert.Equal(t, "1.0", card.SupportedInterfaces[0].ProtocolVersion)
+	for _, item := range card.SupportedInterfaces {
+		assert.NotEqual(t, "gRPC", item.ProtocolBinding)
+	}
 	assert.True(t, card.Capabilities.Streaming)
 	assert.True(t, card.Capabilities.PushNotifications)
 	assert.True(t, card.Capabilities.PushNotificationsLegacy)
+	require.Len(t, card.Capabilities.Extensions, 2)
+	for _, ext := range card.Capabilities.Extensions {
+		assert.False(t, ext.Required)
+	}
 	assert.Equal(t, []string{"application/json", "text/plain"}, card.DefaultInputModesCurrent)
 	assert.Equal(t, []string{"Bearer"}, card.Authentication.Schemes)
 	assert.Contains(t, card.Authentication.Scopes, "agents:run")

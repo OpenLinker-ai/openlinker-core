@@ -378,6 +378,27 @@ type RunDelegation struct {
 	CreatedAt     time.Time `db:"created_at" json:"created_at"`
 }
 
+// A2AContextMapping links protocol context/task ids to OpenLinker run lineage.
+type A2AContextMapping struct {
+	ID                uuid.UUID  `db:"id" json:"id"`
+	RunID             uuid.UUID  `db:"run_id" json:"run_id"`
+	UserID            uuid.UUID  `db:"user_id" json:"user_id"`
+	AgentID           uuid.UUID  `db:"agent_id" json:"agent_id"`
+	ProtocolContextID string     `db:"protocol_context_id" json:"protocol_context_id"`
+	ProtocolTaskID    string     `db:"protocol_task_id" json:"protocol_task_id"`
+	RootContextID     string     `db:"root_context_id" json:"root_context_id"`
+	ParentContextID   string     `db:"parent_context_id" json:"parent_context_id"`
+	ParentTaskID      string     `db:"parent_task_id" json:"parent_task_id"`
+	ParentRunID       *uuid.UUID `db:"parent_run_id" json:"parent_run_id"`
+	CallerAgentID     *uuid.UUID `db:"caller_agent_id" json:"caller_agent_id"`
+	TargetAgentID     *uuid.UUID `db:"target_agent_id" json:"target_agent_id"`
+	TraceID           string     `db:"trace_id" json:"trace_id"`
+	ReferenceTaskIDs  []string   `db:"reference_task_ids" json:"reference_task_ids"`
+	Source            string     `db:"source" json:"source"`
+	CreatedAt         time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time  `db:"updated_at" json:"updated_at"`
+}
+
 // Skill 对应 skills 表（平台维护的 30 个核心 skill）。
 //
 // id 形如 "content/translation" / "dev/code-review"；category 是 id 前的目录名。

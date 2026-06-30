@@ -212,6 +212,126 @@ func (q *Queries) CreateRunDelegation(ctx context.Context, arg CreateRunDelegati
 	return delegation, err
 }
 
+const upsertA2AContextMapping = `-- name: UpsertA2AContextMapping :one
+INSERT INTO a2a_context_mappings (
+    run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+    root_context_id, parent_context_id, parent_task_id, parent_run_id,
+    caller_agent_id, target_agent_id, trace_id, reference_task_ids, source
+) VALUES (
+    $1, $2, $3, $4, $5,
+    $6, $7, $8, $9,
+    $10, $11, $12, $13, $14
+)
+ON CONFLICT (run_id) DO UPDATE
+SET protocol_context_id = EXCLUDED.protocol_context_id,
+    protocol_task_id = EXCLUDED.protocol_task_id,
+    root_context_id = EXCLUDED.root_context_id,
+    parent_context_id = EXCLUDED.parent_context_id,
+    parent_task_id = EXCLUDED.parent_task_id,
+    parent_run_id = EXCLUDED.parent_run_id,
+    caller_agent_id = EXCLUDED.caller_agent_id,
+    target_agent_id = EXCLUDED.target_agent_id,
+    trace_id = EXCLUDED.trace_id,
+    reference_task_ids = EXCLUDED.reference_task_ids,
+    source = EXCLUDED.source,
+    updated_at = NOW()
+RETURNING id, run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+          root_context_id, parent_context_id, parent_task_id, parent_run_id,
+          caller_agent_id, target_agent_id, trace_id, reference_task_ids,
+          source, created_at, updated_at`
+
+type UpsertA2AContextMappingParams struct {
+	RunID             uuid.UUID  `db:"run_id" json:"run_id"`
+	UserID            uuid.UUID  `db:"user_id" json:"user_id"`
+	AgentID           uuid.UUID  `db:"agent_id" json:"agent_id"`
+	ProtocolContextID string     `db:"protocol_context_id" json:"protocol_context_id"`
+	ProtocolTaskID    string     `db:"protocol_task_id" json:"protocol_task_id"`
+	RootContextID     string     `db:"root_context_id" json:"root_context_id"`
+	ParentContextID   string     `db:"parent_context_id" json:"parent_context_id"`
+	ParentTaskID      string     `db:"parent_task_id" json:"parent_task_id"`
+	ParentRunID       *uuid.UUID `db:"parent_run_id" json:"parent_run_id"`
+	CallerAgentID     *uuid.UUID `db:"caller_agent_id" json:"caller_agent_id"`
+	TargetAgentID     *uuid.UUID `db:"target_agent_id" json:"target_agent_id"`
+	TraceID           string     `db:"trace_id" json:"trace_id"`
+	ReferenceTaskIDs  []string   `db:"reference_task_ids" json:"reference_task_ids"`
+	Source            string     `db:"source" json:"source"`
+}
+
+func (q *Queries) UpsertA2AContextMapping(ctx context.Context, arg UpsertA2AContextMappingParams) (A2AContextMapping, error) {
+	var mapping A2AContextMapping
+	err := q.db.QueryRow(ctx, upsertA2AContextMapping,
+		arg.RunID, arg.UserID, arg.AgentID, arg.ProtocolContextID, arg.ProtocolTaskID,
+		arg.RootContextID, arg.ParentContextID, arg.ParentTaskID, arg.ParentRunID,
+		arg.CallerAgentID, arg.TargetAgentID, arg.TraceID, arg.ReferenceTaskIDs, arg.Source,
+	).Scan(
+		&mapping.ID, &mapping.RunID, &mapping.UserID, &mapping.AgentID,
+		&mapping.ProtocolContextID, &mapping.ProtocolTaskID, &mapping.RootContextID,
+		&mapping.ParentContextID, &mapping.ParentTaskID, &mapping.ParentRunID,
+		&mapping.CallerAgentID, &mapping.TargetAgentID, &mapping.TraceID,
+		&mapping.ReferenceTaskIDs, &mapping.Source, &mapping.CreatedAt, &mapping.UpdatedAt,
+	)
+	return mapping, err
+}
+
+const getA2AContextMappingByRun = `-- name: GetA2AContextMappingByRun :one
+SELECT id, run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+       root_context_id, parent_context_id, parent_task_id, parent_run_id,
+       caller_agent_id, target_agent_id, trace_id, reference_task_ids,
+       source, created_at, updated_at
+FROM a2a_context_mappings
+WHERE run_id = $1`
+
+func (q *Queries) GetA2AContextMappingByRun(ctx context.Context, runID uuid.UUID) (A2AContextMapping, error) {
+	var mapping A2AContextMapping
+	err := q.db.QueryRow(ctx, getA2AContextMappingByRun, runID).Scan(
+		&mapping.ID, &mapping.RunID, &mapping.UserID, &mapping.AgentID,
+		&mapping.ProtocolContextID, &mapping.ProtocolTaskID, &mapping.RootContextID,
+		&mapping.ParentContextID, &mapping.ParentTaskID, &mapping.ParentRunID,
+		&mapping.CallerAgentID, &mapping.TargetAgentID, &mapping.TraceID,
+		&mapping.ReferenceTaskIDs, &mapping.Source, &mapping.CreatedAt, &mapping.UpdatedAt,
+	)
+	return mapping, err
+}
+
+const listA2AContextMappingsByRoot = `-- name: ListA2AContextMappingsByRoot :many
+SELECT id, run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+       root_context_id, parent_context_id, parent_task_id, parent_run_id,
+       caller_agent_id, target_agent_id, trace_id, reference_task_ids,
+       source, created_at, updated_at
+FROM a2a_context_mappings
+WHERE user_id = $1 AND root_context_id = $2
+ORDER BY created_at ASC, run_id ASC
+LIMIT $3`
+
+type ListA2AContextMappingsByRootParams struct {
+	UserID        uuid.UUID `db:"user_id" json:"user_id"`
+	RootContextID string    `db:"root_context_id" json:"root_context_id"`
+	Limit         int32     `db:"limit" json:"limit"`
+}
+
+func (q *Queries) ListA2AContextMappingsByRoot(ctx context.Context, arg ListA2AContextMappingsByRootParams) ([]A2AContextMapping, error) {
+	rows, err := q.db.Query(ctx, listA2AContextMappingsByRoot, arg.UserID, arg.RootContextID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []A2AContextMapping
+	for rows.Next() {
+		var mapping A2AContextMapping
+		if err := rows.Scan(
+			&mapping.ID, &mapping.RunID, &mapping.UserID, &mapping.AgentID,
+			&mapping.ProtocolContextID, &mapping.ProtocolTaskID, &mapping.RootContextID,
+			&mapping.ParentContextID, &mapping.ParentTaskID, &mapping.ParentRunID,
+			&mapping.CallerAgentID, &mapping.TargetAgentID, &mapping.TraceID,
+			&mapping.ReferenceTaskIDs, &mapping.Source, &mapping.CreatedAt, &mapping.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, mapping)
+	}
+	return items, rows.Err()
+}
+
 const getRunDelegationByChild = `-- name: GetRunDelegationByChild :one
 SELECT child_run_id, parent_run_id, caller_agent_id, reason, created_at
 FROM run_delegations
@@ -235,12 +355,21 @@ SELECT c.id AS child_run_id, d.parent_run_id, d.caller_agent_id, d.reason,
        target.id AS target_agent_id, target.slug AS target_agent_slug,
        target.name AS target_agent_name, target.tags AS target_agent_tags,
        COALESCE(target_skills.skill_ids, ARRAY[]::text[]) AS target_skill_ids,
-       COALESCE(target_skills.skill_names, ARRAY[]::text[]) AS target_skill_names
+       COALESCE(target_skills.skill_names, ARRAY[]::text[]) AS target_skill_names,
+       COALESCE(child_ctx.protocol_context_id, '')::text AS protocol_context_id,
+       COALESCE(child_ctx.protocol_task_id, '')::text AS protocol_task_id,
+       COALESCE(child_ctx.root_context_id, '')::text AS root_context_id,
+       COALESCE(child_ctx.parent_context_id, '')::text AS parent_context_id,
+       COALESCE(child_ctx.parent_task_id, '')::text AS parent_task_id,
+       COALESCE(child_ctx.trace_id, '')::text AS trace_id,
+       COALESCE(child_ctx.reference_task_ids, ARRAY[]::text[]) AS reference_task_ids,
+       COALESCE(child_ctx.source, '')::text AS context_source
 FROM run_delegations d
 JOIN runs p ON p.id = d.parent_run_id
 JOIN runs c ON c.id = d.child_run_id
 JOIN agents caller ON caller.id = d.caller_agent_id
 JOIN agents target ON target.id = c.agent_id
+LEFT JOIN a2a_context_mappings child_ctx ON child_ctx.run_id = c.id
 LEFT JOIN LATERAL (
     SELECT ARRAY_AGG(s.id ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_ids,
            ARRAY_AGG(s.name ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_names
@@ -264,27 +393,35 @@ type ListChildRunsByParentAndUserParams struct {
 }
 
 type ListChildRunsByParentAndUserRow struct {
-	ChildRunID       uuid.UUID  `json:"child_run_id"`
-	ParentRunID      uuid.UUID  `json:"parent_run_id"`
-	CallerAgentID    uuid.UUID  `json:"caller_agent_id"`
-	Reason           string     `json:"reason"`
-	Status           string     `json:"status"`
-	CostCents        int32      `json:"cost_cents"`
-	DurationMs       *int32     `json:"duration_ms"`
-	StartedAt        time.Time  `json:"started_at"`
-	FinishedAt       *time.Time `json:"finished_at"`
-	Source           string     `json:"source"`
-	CallerAgentSlug  string     `json:"caller_agent_slug"`
-	CallerAgentName  string     `json:"caller_agent_name"`
-	CallerAgentTags  []string   `json:"caller_agent_tags"`
-	CallerSkillIDs   []string   `json:"caller_skill_ids"`
-	CallerSkillNames []string   `json:"caller_skill_names"`
-	TargetAgentID    uuid.UUID  `json:"target_agent_id"`
-	TargetAgentSlug  string     `json:"target_agent_slug"`
-	TargetAgentName  string     `json:"target_agent_name"`
-	TargetAgentTags  []string   `json:"target_agent_tags"`
-	TargetSkillIDs   []string   `json:"target_skill_ids"`
-	TargetSkillNames []string   `json:"target_skill_names"`
+	ChildRunID        uuid.UUID  `json:"child_run_id"`
+	ParentRunID       uuid.UUID  `json:"parent_run_id"`
+	CallerAgentID     uuid.UUID  `json:"caller_agent_id"`
+	Reason            string     `json:"reason"`
+	Status            string     `json:"status"`
+	CostCents         int32      `json:"cost_cents"`
+	DurationMs        *int32     `json:"duration_ms"`
+	StartedAt         time.Time  `json:"started_at"`
+	FinishedAt        *time.Time `json:"finished_at"`
+	Source            string     `json:"source"`
+	CallerAgentSlug   string     `json:"caller_agent_slug"`
+	CallerAgentName   string     `json:"caller_agent_name"`
+	CallerAgentTags   []string   `json:"caller_agent_tags"`
+	CallerSkillIDs    []string   `json:"caller_skill_ids"`
+	CallerSkillNames  []string   `json:"caller_skill_names"`
+	TargetAgentID     uuid.UUID  `json:"target_agent_id"`
+	TargetAgentSlug   string     `json:"target_agent_slug"`
+	TargetAgentName   string     `json:"target_agent_name"`
+	TargetAgentTags   []string   `json:"target_agent_tags"`
+	TargetSkillIDs    []string   `json:"target_skill_ids"`
+	TargetSkillNames  []string   `json:"target_skill_names"`
+	ProtocolContextID string     `json:"protocol_context_id"`
+	ProtocolTaskID    string     `json:"protocol_task_id"`
+	RootContextID     string     `json:"root_context_id"`
+	ParentContextID   string     `json:"parent_context_id"`
+	ParentTaskID      string     `json:"parent_task_id"`
+	TraceID           string     `json:"trace_id"`
+	ReferenceTaskIDs  []string   `json:"reference_task_ids"`
+	ContextSource     string     `json:"context_source"`
 }
 
 func (q *Queries) ListChildRunsByParentAndUser(ctx context.Context, arg ListChildRunsByParentAndUserParams) ([]ListChildRunsByParentAndUserRow, error) {
@@ -302,6 +439,8 @@ func (q *Queries) ListChildRunsByParentAndUser(ctx context.Context, arg ListChil
 			&item.Source, &item.CallerAgentSlug, &item.CallerAgentName, &item.CallerAgentTags,
 			&item.CallerSkillIDs, &item.CallerSkillNames, &item.TargetAgentID, &item.TargetAgentSlug,
 			&item.TargetAgentName, &item.TargetAgentTags, &item.TargetSkillIDs, &item.TargetSkillNames,
+			&item.ProtocolContextID, &item.ProtocolTaskID, &item.RootContextID, &item.ParentContextID,
+			&item.ParentTaskID, &item.TraceID, &item.ReferenceTaskIDs, &item.ContextSource,
 		); err != nil {
 			return nil, err
 		}
@@ -320,11 +459,23 @@ SELECT p.id AS parent_run_id, a.id AS caller_agent_id, a.slug AS caller_agent_sl
        (COUNT(d.child_run_id) FILTER (WHERE c.status = 'success'))::int AS successful_child_count,
        (COUNT(d.child_run_id) FILTER (WHERE c.status = 'running'))::int AS running_child_count,
        COALESCE(token_stats.active_runtime_token_count, 0)::int AS active_runtime_token_count,
-       token_stats.last_runtime_token_used_at
+       token_stats.last_runtime_token_used_at,
+       COALESCE(parent_ctx.protocol_context_id, '')::text AS protocol_context_id,
+       COALESCE(parent_ctx.protocol_task_id, '')::text AS protocol_task_id,
+       COALESCE(child_root.root_context_id, parent_ctx.root_context_id, '')::text AS root_context_id,
+       COALESCE(child_root.trace_id, parent_ctx.trace_id, '')::text AS trace_id
 FROM runs p
 JOIN run_delegations d ON d.parent_run_id = p.id
 JOIN runs c ON c.id = d.child_run_id
 JOIN agents a ON a.id = p.agent_id
+LEFT JOIN a2a_context_mappings parent_ctx ON parent_ctx.run_id = p.id
+LEFT JOIN LATERAL (
+    SELECT root_context_id, trace_id
+    FROM a2a_context_mappings
+    WHERE parent_run_id = p.id
+    ORDER BY created_at ASC
+    LIMIT 1
+) child_root ON TRUE
 LEFT JOIN LATERAL (
     SELECT ARRAY_AGG(s.id ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_ids,
            ARRAY_AGG(s.name ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_names
@@ -383,7 +534,9 @@ WHERE p.user_id = $1
 GROUP BY p.id, a.id, a.slug, a.name, a.tags, caller_skills.skill_ids,
          caller_skills.skill_names, token_stats.active_runtime_token_count,
          token_stats.last_runtime_token_used_at, p.source, p.status, p.duration_ms,
-         p.started_at, p.finished_at
+         p.started_at, p.finished_at, parent_ctx.protocol_context_id,
+         parent_ctx.protocol_task_id, parent_ctx.root_context_id, parent_ctx.trace_id,
+         child_root.root_context_id, child_root.trace_id
 ORDER BY p.started_at DESC
 LIMIT $3 OFFSET $4`
 
@@ -412,6 +565,10 @@ type ListParentRunsWithDelegationsByUserRow struct {
 	RunningChildCount       int32      `json:"running_child_count"`
 	ActiveRuntimeTokenCount int32      `json:"active_runtime_token_count"`
 	LastRuntimeTokenUsedAt  *time.Time `json:"last_runtime_token_used_at"`
+	ProtocolContextID       string     `json:"protocol_context_id"`
+	ProtocolTaskID          string     `json:"protocol_task_id"`
+	RootContextID           string     `json:"root_context_id"`
+	TraceID                 string     `json:"trace_id"`
 }
 
 func (q *Queries) ListParentRunsWithDelegationsByUser(ctx context.Context, arg ListParentRunsWithDelegationsByUserParams) ([]ListParentRunsWithDelegationsByUserRow, error) {
@@ -428,7 +585,8 @@ func (q *Queries) ListParentRunsWithDelegationsByUser(ctx context.Context, arg L
 			&item.CallerAgentTags, &item.CallerSkillIDs, &item.CallerSkillNames, &item.ParentSource,
 			&item.Status, &item.DurationMs, &item.StartedAt, &item.FinishedAt, &item.ChildCount,
 			&item.SuccessfulChildCount, &item.RunningChildCount, &item.ActiveRuntimeTokenCount,
-			&item.LastRuntimeTokenUsedAt,
+			&item.LastRuntimeTokenUsedAt, &item.ProtocolContextID, &item.ProtocolTaskID,
+			&item.RootContextID, &item.TraceID,
 		); err != nil {
 			return nil, err
 		}

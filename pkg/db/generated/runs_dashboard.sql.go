@@ -145,17 +145,24 @@ func (q *Queries) ListRunsByUserWithAgent(ctx context.Context, arg ListRunsByUse
 }
 
 const listRunsByUserAndAgent = `-- name: ListRunsByUserAndAgent :many
-SELECT id, user_id, agent_id, input, output, status, error_code, error_message,
-       cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
-       started_at, finished_at, source
-FROM runs
-WHERE user_id = $1
-  AND agent_id = $2
-  AND ($3::bool OR (started_at, id) < ($4::timestamptz, $5::uuid))
-  AND ($6::bool OR status = ANY($7::text[]))
-  AND ($8::bool OR COALESCE(finished_at, started_at) >= $9::timestamptz)
-  AND ($10::text = '' OR input->>'a2a_context_id' = $10 OR id::text = $10)
-ORDER BY started_at DESC, id DESC
+SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code, r.error_message,
+       r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
+       r.started_at, r.finished_at, r.source
+FROM runs r
+LEFT JOIN a2a_context_mappings ctx ON ctx.run_id = r.id
+WHERE r.user_id = $1
+  AND r.agent_id = $2
+  AND ($3::bool OR (r.started_at, r.id) < ($4::timestamptz, $5::uuid))
+  AND ($6::bool OR r.status = ANY($7::text[]))
+  AND ($8::bool OR COALESCE(r.finished_at, r.started_at) >= $9::timestamptz)
+  AND (
+      $10::text = ''
+      OR ctx.protocol_context_id = $10
+      OR ctx.root_context_id = $10
+      OR r.input->>'a2a_context_id' = $10
+      OR r.id::text = $10
+  )
+ORDER BY r.started_at DESC, r.id DESC
 LIMIT $11`
 
 // ListRunsByUserAndAgentParams 入参。
@@ -196,12 +203,19 @@ func (q *Queries) ListRunsByUserAndAgent(ctx context.Context, arg ListRunsByUser
 
 const countRunsByUserAndAgent = `-- name: CountRunsByUserAndAgent :one
 SELECT COUNT(*)::int AS total
-FROM runs
-WHERE user_id = $1
-  AND agent_id = $2
-  AND ($3::bool OR status = ANY($4::text[]))
-  AND ($5::bool OR COALESCE(finished_at, started_at) >= $6::timestamptz)
-  AND ($7::text = '' OR input->>'a2a_context_id' = $7 OR id::text = $7)`
+FROM runs r
+LEFT JOIN a2a_context_mappings ctx ON ctx.run_id = r.id
+WHERE r.user_id = $1
+  AND r.agent_id = $2
+  AND ($3::bool OR r.status = ANY($4::text[]))
+  AND ($5::bool OR COALESCE(r.finished_at, r.started_at) >= $6::timestamptz)
+  AND (
+      $7::text = ''
+      OR ctx.protocol_context_id = $7
+      OR ctx.root_context_id = $7
+      OR r.input->>'a2a_context_id' = $7
+      OR r.id::text = $7
+  )`
 
 type CountRunsByUserAndAgentParams struct {
 	UserID         uuid.UUID `db:"user_id" json:"user_id"`

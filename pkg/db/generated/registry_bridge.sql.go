@@ -153,13 +153,13 @@ func (q *Queries) MarkRegistryNodeHeartbeat(ctx context.Context, id uuid.UUID) (
 
 const revokeRegistryNodeForOwner = `-- name: RevokeRegistryNodeForOwner :one
 WITH revoked AS (
-    UPDATE registry_nodes
+    UPDATE registry_nodes rn
     SET revoked_at = COALESCE(revoked_at, NOW()),
         heartbeat_status = 'revoked'
-    WHERE id = $1 AND owner_user_id = $2
-    RETURNING id, owner_user_id, node_name, node_type, base_url,
-              secret_prefix, secret_hash, scopes, heartbeat_status,
-              last_heartbeat_at, revoked_at, created_at, updated_at
+    WHERE rn.id = $1 AND rn.owner_user_id = $2
+    RETURNING rn.id, rn.owner_user_id, rn.node_name, rn.node_type, rn.base_url,
+              rn.secret_prefix, rn.secret_hash, rn.scopes, rn.heartbeat_status,
+              rn.last_heartbeat_at, rn.revoked_at, rn.created_at, rn.updated_at
 ),
 paused_links AS (
     UPDATE cloud_listing_links l
@@ -170,10 +170,10 @@ paused_links AS (
       AND l.sync_status = 'linked'
     RETURNING l.id
 )
-SELECT id, owner_user_id, node_name, node_type, base_url,
-       secret_prefix, secret_hash, scopes, heartbeat_status,
-       last_heartbeat_at, revoked_at, created_at, updated_at
-FROM revoked`
+SELECT r.id, r.owner_user_id, r.node_name, r.node_type, r.base_url,
+       r.secret_prefix, r.secret_hash, r.scopes, r.heartbeat_status,
+       r.last_heartbeat_at, r.revoked_at, r.created_at, r.updated_at
+FROM revoked r`
 
 type RevokeRegistryNodeForOwnerParams struct {
 	ID          uuid.UUID `db:"id" json:"id"`
@@ -796,12 +796,12 @@ func (q *Queries) GetProxyRunForNode(ctx context.Context, arg GetProxyRunForNode
 
 const claimPendingProxyRun = `-- name: ClaimPendingProxyRun :one
 WITH candidate AS (
-    SELECT id, COALESCE(node_input, input, '{}'::jsonb) AS claim_input
-    FROM proxy_runs
-    WHERE registry_node_id = $1
-      AND status = 'pending'
-      AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-    ORDER BY created_at ASC
+    SELECT p.id, COALESCE(p.node_input, p.input, '{}'::jsonb) AS claim_input
+    FROM proxy_runs p
+    WHERE p.registry_node_id = $1
+      AND p.status = 'pending'
+      AND (p.next_retry_at IS NULL OR p.next_retry_at <= NOW())
+    ORDER BY p.created_at ASC
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )

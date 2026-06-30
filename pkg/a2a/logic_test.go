@@ -51,6 +51,27 @@ func TestA2AVersionJSONRPCAndQueryHelpers(t *testing.T) {
 	if err != nil || version != a2aProtocolVersionLegacy {
 		t.Fatalf("query version = %q, %v", version, err)
 	}
+	c = newA2ATestContext(&a2aHandlerRequest{
+		method:  http.MethodGet,
+		target:  "/?a2a_extensions=https://example.com/ext/b,https://example.com/ext/a",
+		headers: map[string]string{a2aExtensionsHeader: "https://example.com/ext/a, https://example.com/ext/a"},
+	})
+	extensions := a2aExtensionsFromRequest(c)
+	if !reflect.DeepEqual(extensions, []string{"https://example.com/ext/a"}) {
+		t.Fatalf("header extensions = %#v", extensions)
+	}
+	params, err := a2aServiceParametersFromRequest(c, []string{"https://example.com/ext/a"})
+	if err != nil || params.Version != a2aProtocolVersionLegacy || len(params.Extensions) != 1 {
+		t.Fatalf("service params = %#v, %v", params, err)
+	}
+	if _, err := a2aServiceParametersFromRequest(c, []string{"https://example.com/ext/missing"}); err == nil {
+		t.Fatalf("missing required extension should fail")
+	} else {
+		got := jsonRPCErrorFrom(nil, err)
+		if got.Error == nil || got.Error.Code != -32008 {
+			t.Fatalf("required extension JSON-RPC mapping = %#v", got)
+		}
+	}
 	c = newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/?version=2.0"})
 	if _, err := a2aVersionFromRequest(c); err == nil {
 		t.Fatalf("unsupported version should fail")
@@ -72,12 +93,12 @@ func TestA2AVersionJSONRPCAndQueryHelpers(t *testing.T) {
 		}
 	}
 
-	badVersion := a2aUnsupportedVersionJSONRPCError(json.RawMessage(`"req-1"`), httpx.BadRequest("bad version"))
+	badVersion := a2aUnsupportedVersionJSONRPCError(json.RawMessage(`"req-1"`), a2aVersionNotSupported("2.0"))
 	if badVersion.Error == nil || badVersion.Error.Code != -32009 {
 		t.Fatalf("unexpected unsupported version JSON-RPC error: %#v", badVersion)
 	}
-	data, ok := badVersion.Error.Data.(map[string]interface{})
-	if !ok || data["code"] != "VERSION_NOT_SUPPORTED" {
+	data, ok := badVersion.Error.Data.([]map[string]interface{})
+	if !ok || len(data) != 1 || data[0]["reason"] != a2aErrorVersionNotSupported {
 		t.Fatalf("unexpected unsupported version data: %#v", badVersion.Error.Data)
 	}
 
@@ -108,10 +129,10 @@ func TestA2AVersionJSONRPCAndQueryHelpers(t *testing.T) {
 	}{
 		{err: httpx.BadRequest("bad"), wantCode: jsonRPCInvalidParams},
 		{err: httpx.Unprocessable("invalid"), wantCode: jsonRPCInvalidParams},
-		{err: httpx.Unauthorized("auth"), wantCode: -32001},
-		{err: httpx.Forbidden("scope"), wantCode: -32003},
-		{err: httpx.NotFound("missing"), wantCode: -32004},
-		{err: httpx.Conflict("conflict"), wantCode: -32009},
+		{err: httpx.Unauthorized("auth"), wantCode: -32010},
+		{err: httpx.Forbidden("scope"), wantCode: -32011},
+		{err: httpx.NotFound("missing"), wantCode: -32001},
+		{err: httpx.Conflict("conflict"), wantCode: -32002},
 		{err: errors.New("boom"), wantCode: jsonRPCInternalError},
 	} {
 		got := jsonRPCErrorFrom(nil, tc.err)
@@ -351,7 +372,7 @@ func TestA2AHandlerUtilityHelpers(t *testing.T) {
 	if err := writeA2ASSEError(rec, json.RawMessage(`"id"`), httpx.NotFound("missing"), true); err != nil {
 		t.Fatalf("writeA2ASSEError jsonrpc: %v", err)
 	}
-	if !strings.Contains(rec.Body.String(), `"code":-32004`) {
+	if !strings.Contains(rec.Body.String(), `"code":-32001`) {
 		t.Fatalf("JSON-RPC SSE error body = %s", rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
@@ -496,15 +517,40 @@ func TestA2AProtocolServiceInputCursorAndStatusHelpers(t *testing.T) {
 	if err := validateA2AFileURI("file:///tmp/a.txt"); err == nil {
 		t.Fatalf("non-http file uri should fail")
 	}
+	if err := validateA2AMessageSendParams(&A2AMessageSendParams{
+		Message: A2AMessage{Parts: []map[string]interface{}{{"kind": "text", "text": "hi"}}},
+		Configuration: &A2ASendConfiguration{
+			AcceptedOutputModes: []string{"application/xml"},
+		},
+	}); err == nil {
+		t.Fatalf("unsupported acceptedOutputModes should fail")
+	} else if got := jsonRPCErrorFrom(nil, err); got.Error == nil || got.Error.Code != -32005 {
+		t.Fatalf("acceptedOutputModes error mapping = %#v", got)
+	}
+	if err := validateA2AMessageSendParams(&A2AMessageSendParams{
+		Message: A2AMessage{Parts: []map[string]interface{}{{"kind": "file", "url": "https://files.example/a.bin", "mediaType": "application/x-unknown"}}},
+	}); err == nil {
+		t.Fatalf("unsupported part mediaType should fail")
+	} else if got := jsonRPCErrorFrom(nil, err); got.Error == nil || got.Error.Code != -32005 {
+		t.Fatalf("mediaType error mapping = %#v", got)
+	}
+	if err := validateA2AMessageSendParams(&A2AMessageSendParams{
+		Message: A2AMessage{Parts: []map[string]interface{}{{"kind": "file", "url": "https://files.example/a.pdf", "mediaType": "application/pdf; charset=binary"}}},
+		Configuration: &A2ASendConfiguration{
+			AcceptedOutputModes: []string{"application/json"},
+		},
+	}); err != nil {
+		t.Fatalf("supported media/output modes rejected: %v", err)
+	}
 
 	metadata := protocolMetadata(&A2AMessageSendParams{
-		Message:  A2AMessage{MessageID: "m", ContextID: "c", TaskID: "t", Metadata: map[string]interface{}{"message": "meta"}},
+		Message:  A2AMessage{MessageID: "m", ContextID: "c", TaskID: "t", Extensions: []string{"https://example.com/ext/a"}, Metadata: map[string]interface{}{"message": "meta"}},
 		Metadata: map[string]interface{}{"trace": "root"},
 	})
 	if metadata["source"] != "a2a" || metadata["trace"] != "root" || metadata["message"] != "meta" {
 		t.Fatalf("protocolMetadata merge = %#v", metadata)
 	}
-	if nested := metadata["a2a"].(map[string]interface{}); nested["message_id"] != "m" || nested["context_id"] != "c" || nested["task_id"] != "t" {
+	if nested := metadata["a2a"].(map[string]interface{}); nested["message_id"] != "m" || nested["context_id"] != "c" || nested["task_id"] != "t" || len(nested["extensions"].([]string)) != 1 {
 		t.Fatalf("protocolMetadata a2a block = %#v", nested)
 	}
 }
@@ -1341,7 +1387,7 @@ func TestA2AJSONRPCHandlerValidationBeforeServiceDispatch(t *testing.T) {
 	if err := h.JSONRPC(c); err != nil {
 		t.Fatalf("JSONRPC unsupported version returned error: %v", err)
 	}
-	if !strings.Contains(c.(*a2ATestContext).rec.Body.String(), `VERSION_NOT_SUPPORTED`) {
+	if !strings.Contains(c.(*a2ATestContext).rec.Body.String(), a2aErrorVersionNotSupported) {
 		t.Fatalf("unsupported version JSONRPC body = %s", c.(*a2ATestContext).rec.Body.String())
 	}
 
@@ -1349,7 +1395,7 @@ func TestA2AJSONRPCHandlerValidationBeforeServiceDispatch(t *testing.T) {
 	if err := h.JSONRPC(c); err != nil {
 		t.Fatalf("JSONRPC missing scope returned error: %v", err)
 	}
-	if !strings.Contains(c.(*a2ATestContext).rec.Body.String(), `-32003`) {
+	if !strings.Contains(c.(*a2ATestContext).rec.Body.String(), `-32011`) {
 		t.Fatalf("missing scope JSONRPC body = %s", c.(*a2ATestContext).rec.Body.String())
 	}
 
@@ -1367,6 +1413,23 @@ func TestA2AJSONRPCHandlerAdditionalErrorAndNullParamEdges(t *testing.T) {
 	taskID := uuid.MustParse("c93dbab2-404f-4460-bcb7-0f17ece85567").String()
 	const slug = "agent-one"
 
+	svcWithExtensions := newFakeA2AService(taskID)
+	hWithExtensions := NewHandler(svcWithExtensions)
+	cWithExtensions := newA2ATestContext(&a2aHandlerRequest{
+		method:     http.MethodPost,
+		target:     "/?version=1.0",
+		body:       `{"jsonrpc":"2.0","id":"ext","method":"SendMessage","params":{"message":{"role":"user","parts":[{"text":"hi"}]}}}`,
+		userID:     userID.String(),
+		authMethod: "apikey",
+		scopes:     []string{"agents:run"},
+		headers:    map[string]string{a2aExtensionsHeader: "https://example.com/ext/a, https://example.com/ext/b"},
+		params:     map[string]string{"slug": slug},
+	})
+	require.NoError(t, hWithExtensions.JSONRPC(cWithExtensions))
+	if got, ok := svcWithExtensions.sendParams.Metadata["a2a_extensions"].([]string); !ok || len(got) != 2 {
+		t.Fatalf("A2A extensions metadata = %#v", svcWithExtensions.sendParams.Metadata)
+	}
+
 	h := NewHandler(newFakeA2AService(taskID))
 	c := newA2ATestContext(&a2aHandlerRequest{
 		method: http.MethodPost,
@@ -1375,7 +1438,7 @@ func TestA2AJSONRPCHandlerAdditionalErrorAndNullParamEdges(t *testing.T) {
 		params: map[string]string{"slug": slug},
 	})
 	require.NoError(t, h.JSONRPC(c))
-	if body := c.(*a2ATestContext).rec.Body.String(); !strings.Contains(body, `-32001`) {
+	if body := c.(*a2ATestContext).rec.Body.String(); !strings.Contains(body, `-32010`) {
 		t.Fatalf("missing user JSON-RPC body = %s", body)
 	}
 
@@ -1406,7 +1469,7 @@ func TestA2AJSONRPCHandlerAdditionalErrorAndNullParamEdges(t *testing.T) {
 		params:     map[string]string{"slug": slug},
 	})
 	require.NoError(t, h.JSONRPC(c))
-	if body := c.(*a2ATestContext).rec.Body.String(); !strings.Contains(body, `-32603`) {
+	if body := c.(*a2ATestContext).rec.Body.String(); !strings.Contains(body, `-32007`) {
 		t.Fatalf("missing card provider JSON-RPC body = %s", body)
 	}
 
@@ -2122,7 +2185,7 @@ func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 func TestA2AAgentCardHandlersUnavailableWithoutProvider(t *testing.T) {
 	h := NewHandler(newFakeA2AService(uuid.NewString()))
 	requireA2AHTTPStatus(t, h.GetPublicAgentCardHTTP(newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", params: map[string]string{"slug": "agent-one"}})), http.StatusServiceUnavailable)
-	requireA2AHTTPStatus(t, h.GetExtendedAgentCardHTTP(newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", userID: uuid.NewString(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": "agent-one"}})), http.StatusServiceUnavailable)
+	requireA2AHTTPStatus(t, h.GetExtendedAgentCardHTTP(newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", userID: uuid.NewString(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": "agent-one"}})), http.StatusBadRequest)
 }
 
 type noopTaskCallbackManager struct{}

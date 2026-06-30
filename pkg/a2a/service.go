@@ -434,6 +434,21 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 	if err := s.validateCallerTaskCallbackConfig(taskCallbackConfig); err != nil {
 		return nil, err
 	}
+	childContext, err := s.childRunA2AContext(ctx, parentRunID, parent, callerToken.AgentID, targetAgentID, req)
+	if err != nil {
+		return nil, err
+	}
+	metadata := copyMetadata(req.Metadata)
+	if childContext != nil {
+		metadata["a2a"] = map[string]interface{}{
+			"protocol_context_id": childContext.ProtocolContextID,
+			"root_context_id":     childContext.RootContextID,
+			"parent_context_id":   childContext.ParentContextID,
+			"parent_task_id":      childContext.ParentTaskID,
+			"trace_id":            childContext.TraceID,
+			"reference_task_ids":  childContext.ReferenceTaskIDs,
+		}
+	}
 
 	_ = s.queries.TouchAgentRuntimeToken(ctx, callerToken.ID)
 	resp, err := s.runtime.RunDelegated(ctx, parent.UserID, runtime.Delegation{
@@ -441,9 +456,10 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 		CallerAgentID: callerToken.AgentID,
 		Reason:        strings.TrimSpace(req.Reason),
 	}, &runtime.RunRequest{
-		AgentID:  targetAgentID.String(),
-		Input:    req.Input,
-		Metadata: req.Metadata,
+		AgentID:    targetAgentID.String(),
+		Input:      req.Input,
+		Metadata:   metadata,
+		A2AContext: childContext,
 	})
 	if err != nil {
 		return nil, err
@@ -548,6 +564,111 @@ func currentRunIDFromRequest(req *CallAgentRequest) (uuid.UUID, error) {
 	return parsed, nil
 }
 
+func (s *Service) childRunA2AContext(
+	ctx context.Context,
+	parentRunID uuid.UUID,
+	parent db.Run,
+	callerAgentID uuid.UUID,
+	targetAgentID uuid.UUID,
+	req *CallAgentRequest,
+) (*runtime.RunA2AContextRequest, error) {
+	explicitContextID := strings.TrimSpace(req.ContextID)
+	if explicitContextID == "" {
+		explicitContextID = strings.TrimSpace(req.ContextIDAlias)
+	}
+	explicitTraceID := strings.TrimSpace(req.TraceID)
+	if explicitTraceID == "" {
+		explicitTraceID = strings.TrimSpace(req.TraceIDAlias)
+	}
+	referenceTaskIDs := callRequestReferenceTaskIDs(req)
+
+	parentContextID := a2aContextIDFromRunInput(parent.Input)
+	parentTaskID := parentRunID.String()
+	rootContextID := parentContextID
+	traceID := ""
+	mapping, err := s.queries.GetA2AContextMappingByRun(ctx, parentRunID)
+	if err == nil {
+		parentContextID = mapping.ProtocolContextID
+		parentTaskID = mapping.ProtocolTaskID
+		rootContextID = mapping.RootContextID
+		traceID = mapping.TraceID
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		log.Warn().Err(err).Str("parent_run_id", parentRunID.String()).Msg("a2a.childRunA2AContext: parent mapping")
+	}
+	if parentTaskID == "" {
+		parentTaskID = parentRunID.String()
+	}
+	contextID := explicitContextID
+	if contextID == "" {
+		if parentContextID != "" {
+			contextID = parentContextID
+		} else if rootContextID != "" {
+			contextID = rootContextID
+		} else {
+			contextID = "ctx-" + parentRunID.String()
+		}
+	}
+	if rootContextID == "" {
+		rootContextID = contextID
+	}
+	if explicitTraceID != "" {
+		traceID = explicitTraceID
+	}
+	if traceID == "" {
+		traceID = rootContextID
+	}
+	referenceTaskIDs = appendUniqueString(referenceTaskIDs, parentTaskID)
+
+	return &runtime.RunA2AContextRequest{
+		ProtocolContextID: contextID,
+		RootContextID:     rootContextID,
+		ParentContextID:   parentContextID,
+		ParentTaskID:      parentTaskID,
+		ParentRunID:       parentRunID.String(),
+		CallerAgentID:     callerAgentID.String(),
+		TargetAgentID:     targetAgentID.String(),
+		TraceID:           traceID,
+		ReferenceTaskIDs:  referenceTaskIDs,
+		Source:            "agent_delegation",
+	}, nil
+}
+
+func callRequestReferenceTaskIDs(req *CallAgentRequest) []string {
+	if req == nil {
+		return nil
+	}
+	values := req.ReferenceTaskIDs
+	if len(values) == 0 {
+		values = req.ReferenceTaskIDsAlias
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = appendUniqueString(out, strings.TrimSpace(value))
+	}
+	return out
+}
+
+func appendUniqueString(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func copyMetadata(metadata map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(metadata)+1)
+	for k, v := range metadata {
+		out[k] = v
+	}
+	return out
+}
+
 func (s *Service) ListChildren(ctx context.Context, userID, parentRunID uuid.UUID) ([]ChildRunResponse, error) {
 	rows, err := s.queries.ListChildRunsByParentAndUser(ctx, db.ListChildRunsByParentAndUserParams{
 		ParentRunID: parentRunID, UserID: userID,
@@ -567,6 +688,7 @@ func (s *Service) ListChildren(ctx context.Context, userID, parentRunID uuid.UUI
 			Reason: row.Reason, Status: row.Status, CostCents: row.CostCents,
 			DurationMs: row.DurationMs, StartedAt: row.StartedAt.UTC().Format(time.RFC3339),
 			Source: row.Source, BillingMode: "free_delegation",
+			A2AContext: contextRefFromChildRow(row),
 		}
 		if row.FinishedAt != nil {
 			formatted := row.FinishedAt.UTC().Format(time.RFC3339)
@@ -616,6 +738,7 @@ func (s *Service) ListParentRuns(ctx context.Context, userID uuid.UUID, page, si
 			Status: row.Status, DurationMs: row.DurationMs, StartedAt: row.StartedAt.UTC().Format(time.RFC3339),
 			ChildCount: row.ChildCount, SuccessfulChildCount: row.SuccessfulChildCount,
 			RunningChildCount: row.RunningChildCount,
+			A2AContext:        contextRefFromParentRow(row),
 		}
 		if row.FinishedAt != nil {
 			formatted := row.FinishedAt.UTC().Format(time.RFC3339)
@@ -652,6 +775,34 @@ func skillRefs(ids, names []string) []SkillRef {
 		items = append(items, SkillRef{ID: id, Name: name})
 	}
 	return items
+}
+
+func contextRefFromChildRow(row db.ListChildRunsByParentAndUserRow) *A2AContextRef {
+	if row.ProtocolContextID == "" && row.RootContextID == "" && row.TraceID == "" {
+		return nil
+	}
+	return &A2AContextRef{
+		ProtocolContextID: row.ProtocolContextID,
+		ProtocolTaskID:    row.ProtocolTaskID,
+		RootContextID:     row.RootContextID,
+		ParentContextID:   row.ParentContextID,
+		ParentTaskID:      row.ParentTaskID,
+		TraceID:           row.TraceID,
+		ReferenceTaskIDs:  row.ReferenceTaskIDs,
+		Source:            row.ContextSource,
+	}
+}
+
+func contextRefFromParentRow(row db.ListParentRunsWithDelegationsByUserRow) *A2AContextRef {
+	if row.ProtocolContextID == "" && row.RootContextID == "" && row.TraceID == "" {
+		return nil
+	}
+	return &A2AContextRef{
+		ProtocolContextID: row.ProtocolContextID,
+		ProtocolTaskID:    row.ProtocolTaskID,
+		RootContextID:     row.RootContextID,
+		TraceID:           row.TraceID,
+	}
 }
 
 func (s *Service) ownerAgent(ctx context.Context, userID, agentID uuid.UUID) (db.Agent, error) {

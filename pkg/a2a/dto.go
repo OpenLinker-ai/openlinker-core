@@ -87,6 +87,12 @@ type CallAgentRequest struct {
 	Reason                 string                     `json:"reason" validate:"max=500"`
 	Input                  map[string]interface{}     `json:"input" validate:"required"`
 	Metadata               map[string]interface{}     `json:"metadata,omitempty"`
+	ContextID              string                     `json:"context_id,omitempty"`
+	ContextIDAlias         string                     `json:"contextId,omitempty"`
+	TraceID                string                     `json:"trace_id,omitempty"`
+	TraceIDAlias           string                     `json:"traceId,omitempty"`
+	ReferenceTaskIDs       []string                   `json:"reference_task_ids,omitempty"`
+	ReferenceTaskIDsAlias  []string                   `json:"referenceTaskIds,omitempty"`
 	TaskCallback           *A2APushNotificationConfig `json:"task_callback,omitempty"`
 	PushNotification       *A2APushNotificationConfig `json:"push_notification,omitempty"`
 	PushNotificationAlias  *A2APushNotificationConfig `json:"pushNotification,omitempty"`
@@ -99,47 +105,60 @@ type SkillRef struct {
 	Name string `json:"name"`
 }
 
+type A2AContextRef struct {
+	ProtocolContextID string   `json:"protocol_context_id,omitempty"`
+	ProtocolTaskID    string   `json:"protocol_task_id,omitempty"`
+	RootContextID     string   `json:"root_context_id,omitempty"`
+	ParentContextID   string   `json:"parent_context_id,omitempty"`
+	ParentTaskID      string   `json:"parent_task_id,omitempty"`
+	TraceID           string   `json:"trace_id,omitempty"`
+	ReferenceTaskIDs  []string `json:"reference_task_ids,omitempty"`
+	Source            string   `json:"source,omitempty"`
+}
+
 type ChildRunResponse struct {
-	ChildRunID      string     `json:"child_run_id"`
-	ParentRunID     string     `json:"parent_run_id"`
-	CallerAgentID   string     `json:"caller_agent_id"`
-	CallerAgentSlug string     `json:"caller_agent_slug"`
-	CallerAgentName string     `json:"caller_agent_name"`
-	CallerAgentTags []string   `json:"caller_agent_tags"`
-	CallerSkills    []SkillRef `json:"caller_skills"`
-	TargetAgentID   string     `json:"target_agent_id"`
-	TargetAgentSlug string     `json:"target_agent_slug"`
-	TargetAgentName string     `json:"target_agent_name"`
-	TargetAgentTags []string   `json:"target_agent_tags"`
-	TargetSkills    []SkillRef `json:"target_skills"`
-	Reason          string     `json:"reason"`
-	Status          string     `json:"status"`
-	CostCents       int32      `json:"cost_cents"`
-	DurationMs      *int32     `json:"duration_ms,omitempty"`
-	StartedAt       string     `json:"started_at"`
-	FinishedAt      *string    `json:"finished_at,omitempty"`
-	Source          string     `json:"source"`
-	BillingMode     string     `json:"billing_mode"`
+	ChildRunID      string         `json:"child_run_id"`
+	ParentRunID     string         `json:"parent_run_id"`
+	CallerAgentID   string         `json:"caller_agent_id"`
+	CallerAgentSlug string         `json:"caller_agent_slug"`
+	CallerAgentName string         `json:"caller_agent_name"`
+	CallerAgentTags []string       `json:"caller_agent_tags"`
+	CallerSkills    []SkillRef     `json:"caller_skills"`
+	TargetAgentID   string         `json:"target_agent_id"`
+	TargetAgentSlug string         `json:"target_agent_slug"`
+	TargetAgentName string         `json:"target_agent_name"`
+	TargetAgentTags []string       `json:"target_agent_tags"`
+	TargetSkills    []SkillRef     `json:"target_skills"`
+	Reason          string         `json:"reason"`
+	Status          string         `json:"status"`
+	CostCents       int32          `json:"cost_cents"`
+	DurationMs      *int32         `json:"duration_ms,omitempty"`
+	StartedAt       string         `json:"started_at"`
+	FinishedAt      *string        `json:"finished_at,omitempty"`
+	Source          string         `json:"source"`
+	BillingMode     string         `json:"billing_mode"`
+	A2AContext      *A2AContextRef `json:"a2a_context,omitempty"`
 }
 
 // ParentRunSummary identifies one user-owned run that delegated work to child Agents.
 type ParentRunSummary struct {
-	ParentRunID             string     `json:"parent_run_id"`
-	CallerAgentID           string     `json:"caller_agent_id"`
-	CallerAgentSlug         string     `json:"caller_agent_slug"`
-	CallerAgentName         string     `json:"caller_agent_name"`
-	CallerAgentTags         []string   `json:"caller_agent_tags"`
-	CallerSkills            []SkillRef `json:"caller_skills"`
-	Source                  string     `json:"source"`
-	Status                  string     `json:"status"`
-	DurationMs              *int32     `json:"duration_ms,omitempty"`
-	StartedAt               string     `json:"started_at"`
-	FinishedAt              *string    `json:"finished_at,omitempty"`
-	ChildCount              int32      `json:"child_count"`
-	SuccessfulChildCount    int32      `json:"successful_child_count"`
-	RunningChildCount       int32      `json:"running_child_count"`
-	ActiveRuntimeTokenCount int32      `json:"active_runtime_token_count"`
-	LastRuntimeTokenUsedAt  *string    `json:"last_runtime_token_used_at,omitempty"`
+	ParentRunID             string         `json:"parent_run_id"`
+	CallerAgentID           string         `json:"caller_agent_id"`
+	CallerAgentSlug         string         `json:"caller_agent_slug"`
+	CallerAgentName         string         `json:"caller_agent_name"`
+	CallerAgentTags         []string       `json:"caller_agent_tags"`
+	CallerSkills            []SkillRef     `json:"caller_skills"`
+	Source                  string         `json:"source"`
+	Status                  string         `json:"status"`
+	DurationMs              *int32         `json:"duration_ms,omitempty"`
+	StartedAt               string         `json:"started_at"`
+	FinishedAt              *string        `json:"finished_at,omitempty"`
+	ChildCount              int32          `json:"child_count"`
+	SuccessfulChildCount    int32          `json:"successful_child_count"`
+	RunningChildCount       int32          `json:"running_child_count"`
+	ActiveRuntimeTokenCount int32          `json:"active_runtime_token_count"`
+	LastRuntimeTokenUsedAt  *string        `json:"last_runtime_token_used_at,omitempty"`
+	A2AContext              *A2AContextRef `json:"a2a_context,omitempty"`
 }
 
 // ParentRunListResponse is the user's A2A entry directory.

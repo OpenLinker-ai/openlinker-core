@@ -44,6 +44,7 @@ const runtimePullEmptyClaimRetryAfter = 30 * time.Second
 const runtimePullHeartbeatInterval = 60 * time.Second
 const runtimePullMaxLongPollWait = 30 * time.Second
 const runtimePullLongPollTick = 5 * time.Second
+const maxA2AContextIDLen = 200
 
 const (
 	connectionModeDirectHTTP  = "direct_http"
@@ -211,16 +212,41 @@ func (s *Service) agentA2AContext(runID uuid.UUID, delegation *Delegation) *Agen
 	return ctx
 }
 
+func (s *Service) agentA2AContextForRequest(runID uuid.UUID, delegation *Delegation, reqCtx *RunA2AContextRequest) *AgentA2AContext {
+	base := s.agentA2AContext(runID, delegation)
+	if reqCtx == nil {
+		return base
+	}
+	base.ProtocolContextID = reqCtx.ProtocolContextID
+	base.ProtocolTaskID = reqCtx.ProtocolTaskID
+	if base.ProtocolTaskID == "" {
+		base.ProtocolTaskID = runID.String()
+	}
+	base.RootContextID = reqCtx.RootContextID
+	base.ParentContextID = reqCtx.ParentContextID
+	base.ParentTaskID = reqCtx.ParentTaskID
+	base.TraceID = reqCtx.TraceID
+	base.ReferenceTaskIDs = append([]string(nil), reqCtx.ReferenceTaskIDs...)
+	return base
+}
+
 func (s *Service) agentA2AContextForRun(ctx context.Context, runID uuid.UUID) *AgentA2AContext {
 	base := s.agentA2AContext(runID, nil)
 	delegation, err := s.queries.GetRunDelegationByChild(ctx, runID)
 	if err == nil {
 		base.ParentRunID = delegation.ParentRunID.String()
 		base.CallerAgentID = delegation.CallerAgentID.String()
-		return base
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.agentA2AContextForRun")
+	}
+	mapping, err := s.queries.GetA2AContextMappingByRun(ctx, runID)
+	if err == nil {
+		applyA2AContextMappingToAgentContext(base, mapping)
+		return base
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.agentA2AContextForRun.mapping")
 	}
 	return base
 }
@@ -254,7 +280,224 @@ func agentA2AContextMap(ctx *AgentA2AContext) map[string]interface{} {
 	if ctx.CallerAgentID != "" {
 		value["caller_agent_id"] = ctx.CallerAgentID
 	}
+	if ctx.ProtocolContextID != "" {
+		value["protocol_context_id"] = ctx.ProtocolContextID
+	}
+	if ctx.ProtocolTaskID != "" {
+		value["protocol_task_id"] = ctx.ProtocolTaskID
+	}
+	if ctx.RootContextID != "" {
+		value["root_context_id"] = ctx.RootContextID
+	}
+	if ctx.ParentContextID != "" {
+		value["parent_context_id"] = ctx.ParentContextID
+	}
+	if ctx.ParentTaskID != "" {
+		value["parent_task_id"] = ctx.ParentTaskID
+	}
+	if ctx.TraceID != "" {
+		value["trace_id"] = ctx.TraceID
+	}
+	if len(ctx.ReferenceTaskIDs) > 0 {
+		value["reference_task_ids"] = ctx.ReferenceTaskIDs
+	}
 	return value
+}
+
+func normalizeRunA2AContextRequest(raw *RunA2AContextRequest, delegation *Delegation, targetAgentID uuid.UUID) (*RunA2AContextRequest, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	ctx := &RunA2AContextRequest{
+		ProtocolContextID: trimA2AContextField(raw.ProtocolContextID),
+		ProtocolTaskID:    trimA2AContextField(raw.ProtocolTaskID),
+		RootContextID:     trimA2AContextField(raw.RootContextID),
+		ParentContextID:   trimA2AContextField(raw.ParentContextID),
+		ParentTaskID:      trimA2AContextField(raw.ParentTaskID),
+		ParentRunID:       strings.TrimSpace(raw.ParentRunID),
+		CallerAgentID:     strings.TrimSpace(raw.CallerAgentID),
+		TargetAgentID:     strings.TrimSpace(raw.TargetAgentID),
+		TraceID:           trimA2AContextField(raw.TraceID),
+		ReferenceTaskIDs:  normalizeA2AReferenceTaskIDs(raw.ReferenceTaskIDs),
+		Source:            strings.TrimSpace(raw.Source),
+	}
+	if ctx.ProtocolContextID == "" && ctx.RootContextID != "" {
+		ctx.ProtocolContextID = ctx.RootContextID
+	}
+	if ctx.ProtocolContextID == "" {
+		return nil, httpx.BadRequest("a2a_context.protocol_context_id 不能为空")
+	}
+	if ctx.RootContextID == "" {
+		ctx.RootContextID = ctx.ProtocolContextID
+	}
+	if ctx.Source == "" {
+		if delegation != nil {
+			ctx.Source = "agent_delegation"
+		} else {
+			ctx.Source = "a2a_protocol"
+		}
+	}
+	if ctx.Source != "a2a_protocol" && ctx.Source != "agent_delegation" {
+		return nil, httpx.BadRequest("a2a_context.source 取值非法")
+	}
+	if delegation != nil {
+		if ctx.ParentRunID == "" {
+			ctx.ParentRunID = delegation.ParentRunID.String()
+		}
+		if ctx.CallerAgentID == "" {
+			ctx.CallerAgentID = delegation.CallerAgentID.String()
+		}
+	}
+	if targetAgentID != uuid.Nil && ctx.TargetAgentID == "" {
+		ctx.TargetAgentID = targetAgentID.String()
+	}
+	for _, rawID := range []struct {
+		label string
+		value string
+	}{
+		{label: "parent_run_id", value: ctx.ParentRunID},
+		{label: "caller_agent_id", value: ctx.CallerAgentID},
+		{label: "target_agent_id", value: ctx.TargetAgentID},
+	} {
+		if rawID.value == "" {
+			continue
+		}
+		if _, err := uuid.Parse(rawID.value); err != nil {
+			return nil, httpx.BadRequest("a2a_context." + rawID.label + " 不是合法 UUID")
+		}
+	}
+	return ctx, nil
+}
+
+func trimA2AContextField(raw string) string {
+	value := strings.TrimSpace(raw)
+	runes := []rune(value)
+	if len(runes) > maxA2AContextIDLen {
+		return string(runes[:maxA2AContextIDLen])
+	}
+	return value
+}
+
+func normalizeA2AReferenceTaskIDs(raw []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		item = trimA2AContextField(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
+func parseOptionalUUID(raw string) *uuid.UUID {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parsed, err := uuid.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
+func copyRunInput(input map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(input)+6)
+	for k, v := range input {
+		out[k] = v
+	}
+	return out
+}
+
+func attachRunA2AContextToInput(input map[string]interface{}, ctx *RunA2AContextRequest) {
+	if input == nil || ctx == nil {
+		return
+	}
+	if ctx.ProtocolContextID != "" {
+		input["a2a_context_id"] = ctx.ProtocolContextID
+	}
+	if ctx.ProtocolTaskID != "" {
+		input["a2a_task_id"] = ctx.ProtocolTaskID
+	}
+	if ctx.RootContextID != "" {
+		input["a2a_root_context_id"] = ctx.RootContextID
+	}
+	if ctx.ParentContextID != "" {
+		input["a2a_parent_context_id"] = ctx.ParentContextID
+	}
+	if ctx.ParentTaskID != "" {
+		input["a2a_parent_task_id"] = ctx.ParentTaskID
+	}
+	if len(ctx.ReferenceTaskIDs) > 0 {
+		input["a2a_reference_task_ids"] = ctx.ReferenceTaskIDs
+	}
+}
+
+func runA2AContextResponseFromRequest(ctx *RunA2AContextRequest) *RunA2AContextResponse {
+	if ctx == nil {
+		return nil
+	}
+	return &RunA2AContextResponse{
+		ProtocolContextID: ctx.ProtocolContextID,
+		ProtocolTaskID:    ctx.ProtocolTaskID,
+		RootContextID:     ctx.RootContextID,
+		ParentContextID:   ctx.ParentContextID,
+		ParentTaskID:      ctx.ParentTaskID,
+		ParentRunID:       ctx.ParentRunID,
+		CallerAgentID:     ctx.CallerAgentID,
+		TargetAgentID:     ctx.TargetAgentID,
+		TraceID:           ctx.TraceID,
+		ReferenceTaskIDs:  append([]string(nil), ctx.ReferenceTaskIDs...),
+		Source:            ctx.Source,
+	}
+}
+
+func runA2AContextResponseFromMapping(mapping db.A2AContextMapping) *RunA2AContextResponse {
+	resp := &RunA2AContextResponse{
+		ProtocolContextID: mapping.ProtocolContextID,
+		ProtocolTaskID:    mapping.ProtocolTaskID,
+		RootContextID:     mapping.RootContextID,
+		ParentContextID:   mapping.ParentContextID,
+		ParentTaskID:      mapping.ParentTaskID,
+		TraceID:           mapping.TraceID,
+		ReferenceTaskIDs:  append([]string(nil), mapping.ReferenceTaskIDs...),
+		Source:            mapping.Source,
+	}
+	if mapping.ParentRunID != nil {
+		resp.ParentRunID = mapping.ParentRunID.String()
+	}
+	if mapping.CallerAgentID != nil {
+		resp.CallerAgentID = mapping.CallerAgentID.String()
+	}
+	if mapping.TargetAgentID != nil {
+		resp.TargetAgentID = mapping.TargetAgentID.String()
+	}
+	return resp
+}
+
+func applyA2AContextMappingToAgentContext(ctx *AgentA2AContext, mapping db.A2AContextMapping) {
+	if ctx == nil {
+		return
+	}
+	ctx.ProtocolContextID = mapping.ProtocolContextID
+	ctx.ProtocolTaskID = mapping.ProtocolTaskID
+	ctx.RootContextID = mapping.RootContextID
+	ctx.ParentContextID = mapping.ParentContextID
+	ctx.ParentTaskID = mapping.ParentTaskID
+	ctx.TraceID = mapping.TraceID
+	ctx.ReferenceTaskIDs = append([]string(nil), mapping.ReferenceTaskIDs...)
+	if mapping.ParentRunID != nil && ctx.ParentRunID == "" {
+		ctx.ParentRunID = mapping.ParentRunID.String()
+	}
+	if mapping.CallerAgentID != nil && ctx.CallerAgentID == "" {
+		ctx.CallerAgentID = mapping.CallerAgentID.String()
+	}
 }
 
 // Run 调用 Agent。
@@ -407,6 +650,15 @@ func (s *Service) createRunningRun(
 	if err != nil {
 		return nil, nil, err
 	}
+	runA2AContext, err := normalizeRunA2AContextRequest(req.A2AContext, opts.delegation, agentID)
+	if err != nil {
+		return nil, nil, err
+	}
+	normalizedReq := *req
+	normalizedReq.Input = copyRunInput(req.Input)
+	normalizedReq.A2AContext = runA2AContext
+	attachRunA2AContextToInput(normalizedReq.Input, runA2AContext)
+	req = &normalizedReq
 
 	// 2. 计算费用：抽成 = floor(cost × effective_rate)，creator_revenue = cost - fee
 	cost := agent.PricePerCallCents
@@ -457,6 +709,37 @@ func (s *Service) createRunningRun(
 			return createErr
 		}
 		runID = run.ID
+		if runA2AContext != nil {
+			if runA2AContext.ProtocolTaskID == "" {
+				runA2AContext.ProtocolTaskID = runID.String()
+				attachRunA2AContextToInput(req.Input, runA2AContext)
+				updatedInputJSON, marshalErr := json.Marshal(req.Input)
+				if marshalErr != nil {
+					return marshalErr
+				}
+				if _, updateErr := tx.Exec(ctx, `UPDATE runs SET input = $2 WHERE id = $1`, runID, updatedInputJSON); updateErr != nil {
+					return updateErr
+				}
+			}
+			if _, createErr = q.UpsertA2AContextMapping(ctx, db.UpsertA2AContextMappingParams{
+				RunID:             runID,
+				UserID:            userID,
+				AgentID:           agentID,
+				ProtocolContextID: runA2AContext.ProtocolContextID,
+				ProtocolTaskID:    runA2AContext.ProtocolTaskID,
+				RootContextID:     runA2AContext.RootContextID,
+				ParentContextID:   runA2AContext.ParentContextID,
+				ParentTaskID:      runA2AContext.ParentTaskID,
+				ParentRunID:       parseOptionalUUID(runA2AContext.ParentRunID),
+				CallerAgentID:     parseOptionalUUID(runA2AContext.CallerAgentID),
+				TargetAgentID:     parseOptionalUUID(runA2AContext.TargetAgentID),
+				TraceID:           runA2AContext.TraceID,
+				ReferenceTaskIDs:  runA2AContext.ReferenceTaskIDs,
+				Source:            runA2AContext.Source,
+			}); createErr != nil {
+				return createErr
+			}
+		}
 		if taskCallback != nil {
 			sub, createErr := q.CreateTaskCallbackSubscription(ctx, db.CreateTaskCallbackSubscriptionParams{
 				RunID:           runID,
@@ -490,6 +773,7 @@ func (s *Service) createRunningRun(
 				"target_agent_id": agentID.String(),
 				"reason":          opts.delegation.Reason,
 				"billing_mode":    "free_delegation",
+				"a2a_context":     runA2AContextResponseFromRequest(runA2AContext),
 			}); eventErr != nil {
 				return eventErr
 			}
@@ -503,6 +787,9 @@ func (s *Service) createRunningRun(
 		if opts.delegation != nil {
 			payload["caller_agent_id"] = opts.delegation.CallerAgentID.String()
 			payload["billing_mode"] = "free_delegation"
+		}
+		if runA2AContext != nil {
+			payload["a2a_context"] = runA2AContextResponseFromRequest(runA2AContext)
 		}
 		if eventErr := createRunEvent(ctx, q, runID, parentRunID, "run.created", payload); eventErr != nil {
 			return eventErr
@@ -554,6 +841,7 @@ func (s *Service) createRunningRun(
 		Status:       "running",
 		CostCents:    cost,
 		Source:       source,
+		A2AContext:   runA2AContextResponseFromRequest(runA2AContext),
 		TaskCallback: taskCallbackResp,
 	}
 	if opts.delegation != nil {
@@ -842,6 +1130,7 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 	}
 	resp := runToResponse(&r)
 	s.attachRunAgentSummary(ctx, r.AgentID, resp)
+	s.attachRunA2AContext(ctx, runID, resp)
 	s.attachRunRequirementEvidence(ctx, runID, resp)
 	s.attachRunEvidenceSummary(ctx, runID, resp)
 	delegation, err := s.queries.GetRunDelegationByChild(ctx, runID)
@@ -858,6 +1147,20 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 		return nil, httpx.Internal("查询调用关系失败")
 	}
 	return resp, nil
+}
+
+func (s *Service) attachRunA2AContext(ctx context.Context, runID uuid.UUID, resp *RunResponse) {
+	if resp == nil {
+		return
+	}
+	mapping, err := s.queries.GetA2AContextMappingByRun(ctx, runID)
+	if err == nil {
+		resp.A2AContext = runA2AContextResponseFromMapping(mapping)
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.attachRunA2AContext")
+	}
 }
 
 func (s *Service) attachRunAgentSummary(ctx context.Context, agentID uuid.UUID, resp *RunResponse) {
@@ -1518,7 +1821,7 @@ func (s *Service) callAgentEndpoint(
 		Input:    req.Input,
 		Metadata: req.Metadata,
 		RunID:    runID.String(),
-		A2A:      s.agentA2AContext(runID, delegation),
+		A2A:      s.agentA2AContextForRequest(runID, delegation, req.A2AContext),
 	}
 	if delegation != nil {
 		request.ParentRunID = delegation.ParentRunID.String()
@@ -1627,7 +1930,7 @@ func (s *Service) callMCPServer(
 		metadata["parent_run_id"] = delegation.ParentRunID.String()
 		metadata["caller_agent_id"] = delegation.CallerAgentID.String()
 	}
-	metadata["a2a"] = agentA2AContextMap(s.agentA2AContext(runID, delegation))
+	metadata["a2a"] = agentA2AContextMap(s.agentA2AContextForRequest(runID, delegation, req.A2AContext))
 	payload, err := json.Marshal(mcpToolCallRequest{
 		JSONRPC: "2.0",
 		ID:      runID.String(),

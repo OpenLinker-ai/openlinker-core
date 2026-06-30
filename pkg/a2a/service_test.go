@@ -260,6 +260,12 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 		CurrentRunID      string   `json:"current_run_id"`
 		ParentRunID       string   `json:"parent_run_id"`
 		CallerAgentID     string   `json:"caller_agent_id"`
+		ProtocolContextID string   `json:"protocol_context_id"`
+		ProtocolTaskID    string   `json:"protocol_task_id"`
+		RootContextID     string   `json:"root_context_id"`
+		ParentTaskID      string   `json:"parent_task_id"`
+		TraceID           string   `json:"trace_id"`
+		ReferenceTaskIDs  []string `json:"reference_task_ids"`
 		CallAgentEndpoint string   `json:"call_agent_endpoint"`
 		RuntimeScopes     []string `json:"runtime_scopes"`
 	}
@@ -294,6 +300,9 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	child, err := svc.CallAgent(context.Background(), token.PlaintextToken, &a2a.CallAgentRequest{
 		ParentRunID: parentRunID.String(), TargetAgentID: targetID.String(),
 		Reason: "summarize", Input: map[string]any{"q": "hello"},
+		ContextID:        "ctx-delegation",
+		TraceID:          "trace-delegation",
+		ReferenceTaskIDs: []string{"task-explicit"},
 		TaskCallback: &a2a.A2APushNotificationConfig{
 			URL:    pushServer.URL + "/a2a/events",
 			Secret: "caller-a2a-secret",
@@ -319,6 +328,12 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	assert.Equal(t, child.RunID, receivedA2A.CurrentRunID)
 	assert.Equal(t, parentRunID.String(), receivedA2A.ParentRunID)
 	assert.Equal(t, callerID.String(), receivedA2A.CallerAgentID)
+	assert.Equal(t, "ctx-delegation", receivedA2A.ProtocolContextID)
+	assert.Equal(t, child.RunID, receivedA2A.ProtocolTaskID)
+	assert.Equal(t, "ctx-delegation", receivedA2A.RootContextID)
+	assert.Equal(t, parentRunID.String(), receivedA2A.ParentTaskID)
+	assert.Equal(t, "trace-delegation", receivedA2A.TraceID)
+	assert.ElementsMatch(t, []string{"task-explicit", parentRunID.String()}, receivedA2A.ReferenceTaskIDs)
 	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", receivedA2A.CallAgentEndpoint)
 	assert.Contains(t, receivedA2A.RuntimeScopes, "agent:call")
 
@@ -327,6 +342,10 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	assert.Equal(t, parentRunID.String(), reloaded.ParentRunID)
 	assert.Equal(t, callerID.String(), reloaded.CallerAgentID)
 	assert.Equal(t, "free_delegation", reloaded.BillingMode)
+	require.NotNil(t, reloaded.A2AContext)
+	assert.Equal(t, "ctx-delegation", reloaded.A2AContext.ProtocolContextID)
+	assert.Equal(t, child.RunID, reloaded.A2AContext.ProtocolTaskID)
+	assert.Equal(t, "trace-delegation", reloaded.A2AContext.TraceID)
 	var subscriptionCount int
 	require.NoError(t, pool.QueryRow(context.Background(),
 		`SELECT COUNT(*) FROM task_callback_subscriptions WHERE run_id=$1 AND owner_user_id=$2 AND target_url=$3`,
@@ -339,6 +358,9 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	require.Len(t, children, 1)
 	assert.Equal(t, child.RunID, children[0].ChildRunID)
 	assert.Equal(t, targetID.String(), children[0].TargetAgentID)
+	require.NotNil(t, children[0].A2AContext)
+	assert.Equal(t, "ctx-delegation", children[0].A2AContext.ProtocolContextID)
+	assert.Equal(t, child.RunID, children[0].A2AContext.ProtocolTaskID)
 
 	var parentEvents int
 	err = pool.QueryRow(context.Background(),
@@ -602,10 +624,11 @@ func TestProtocolMessageSendAndGetTask(t *testing.T) {
 
 	task, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
 		Message: a2a.A2AMessage{
-			Kind:      "message",
-			MessageID: "msg-1",
-			ContextID: "ctx-1",
-			Role:      "user",
+			Kind:             "message",
+			MessageID:        "msg-1",
+			ContextID:        "ctx-1",
+			ReferenceTaskIDs: []string{"task-parent"},
+			Role:             "user",
 			Parts: []map[string]any{{
 				"kind": "text",
 				"text": "请完成一次标准 A2A 调用",
@@ -620,6 +643,19 @@ func TestProtocolMessageSendAndGetTask(t *testing.T) {
 	require.NotNil(t, task.Status.Message)
 	require.NotEmpty(t, task.Artifacts)
 	assert.Equal(t, "请完成一次标准 A2A 调用", receivedInput["message"])
+	var protocolContextID, protocolTaskID, rootContextID, traceID string
+	var referenceTaskIDs []string
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT protocol_context_id, protocol_task_id, root_context_id, trace_id, reference_task_ids
+		   FROM a2a_context_mappings
+		  WHERE run_id=$1`,
+		task.ID,
+	).Scan(&protocolContextID, &protocolTaskID, &rootContextID, &traceID, &referenceTaskIDs))
+	assert.Equal(t, "ctx-1", protocolContextID)
+	assert.Equal(t, task.ID, protocolTaskID)
+	assert.Equal(t, "ctx-1", rootContextID)
+	assert.Equal(t, "a2a-protocol-test", traceID)
+	assert.Equal(t, []string{"task-parent"}, referenceTaskIDs)
 
 	historyLength := 10
 	reloaded, err := svc.GetProtocolTask(context.Background(), owner, slug, task.ID, &historyLength)

@@ -178,17 +178,30 @@ func TestRuntimePull_RunDelegatedQueuesFreeChildAndCompletesParent(t *testing.T)
 	markRuntimePullAvailable(t, svc, token)
 	parentRunID := insertRunningRun(t, pool, userID, callerAgentID)
 
+	childReq := makeRunReq(targetAgentID, map[string]any{"q": "queued child"})
+	childReq.A2AContext = &runtime.RunA2AContextRequest{
+		ProtocolContextID: "ctx-runtime-pull",
+		RootContextID:     "ctx-runtime-pull",
+		ParentTaskID:      parentRunID.String(),
+		TraceID:           "trace-runtime-pull",
+		ReferenceTaskIDs:  []string{"task-runtime-parent"},
+		Source:            "agent_delegation",
+	}
 	started, err := svc.RunDelegated(ctx, userID, runtime.Delegation{
 		ParentRunID:   parentRunID,
 		CallerAgentID: callerAgentID,
 		Reason:        "delegate queued runtime",
-	}, makeRunReq(targetAgentID, map[string]any{"q": "queued child"}))
+	}, childReq)
 	require.NoError(t, err)
 	require.Equal(t, "running", started.Status)
 	assert.Equal(t, int32(0), started.CostCents)
 	assert.Equal(t, parentRunID.String(), started.ParentRunID)
 	assert.Equal(t, callerAgentID.String(), started.CallerAgentID)
 	assert.Equal(t, "free_delegation", started.BillingMode)
+	require.NotNil(t, started.A2AContext)
+	assert.Equal(t, "ctx-runtime-pull", started.A2AContext.ProtocolContextID)
+	assert.Equal(t, started.RunID, started.A2AContext.ProtocolTaskID)
+	assert.Equal(t, "trace-runtime-pull", started.A2AContext.TraceID)
 	childRunID := mustParseUUID(t, started.RunID)
 
 	child := readRun(t, pool, childRunID)
@@ -202,10 +215,18 @@ func TestRuntimePull_RunDelegatedQueuesFreeChildAndCompletesParent(t *testing.T)
 	require.NotNil(t, claimed)
 	assert.Equal(t, started.RunID, claimed.RunID)
 	assert.Equal(t, "api", claimed.Source)
+	assert.Equal(t, "ctx-runtime-pull", claimed.Input["a2a_context_id"])
+	assert.Equal(t, started.RunID, claimed.Input["a2a_task_id"])
 	require.NotNil(t, claimed.A2A)
 	assert.Equal(t, started.RunID, claimed.A2A.CurrentRunID)
 	assert.Equal(t, parentRunID.String(), claimed.A2A.ParentRunID)
 	assert.Equal(t, callerAgentID.String(), claimed.A2A.CallerAgentID)
+	assert.Equal(t, "ctx-runtime-pull", claimed.A2A.ProtocolContextID)
+	assert.Equal(t, started.RunID, claimed.A2A.ProtocolTaskID)
+	assert.Equal(t, "ctx-runtime-pull", claimed.A2A.RootContextID)
+	assert.Equal(t, parentRunID.String(), claimed.A2A.ParentTaskID)
+	assert.Equal(t, "trace-runtime-pull", claimed.A2A.TraceID)
+	assert.Equal(t, []string{"task-runtime-parent"}, claimed.A2A.ReferenceTaskIDs)
 	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", claimed.A2A.CallAgentEndpoint)
 	assert.Contains(t, claimed.A2A.RuntimeScopes, "agent:call")
 

@@ -35,11 +35,11 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 	if req.JSONRPC != "2.0" || strings.TrimSpace(req.Method) == "" {
 		return c.JSON(http.StatusOK, jsonRPCError(req.ID, jsonRPCInvalidRequest, "JSON-RPC 请求必须包含 jsonrpc=2.0 和 method", nil))
 	}
-	protocolVersion, err := a2aVersionFromRequest(c)
+	serviceParams, err := a2aServiceParametersFromRequest(c, h.requiredA2AExtensions)
 	if err != nil {
 		return c.JSON(http.StatusOK, a2aUnsupportedVersionJSONRPCError(req.ID, err))
 	}
-	setA2AVersionHeader(c, protocolVersion)
+	setA2AVersionHeader(c, serviceParams.Version)
 
 	userID, err := userIDFromCtx(c)
 	if err != nil {
@@ -55,12 +55,12 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		if err := decodeJSONRPCParams(req.Params, &params); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCError(req.ID, jsonRPCInvalidParams, err.Error(), nil))
 		}
-		attachProtocolVersionMetadata(&params, protocolVersion)
+		attachProtocolServiceMetadata(&params, serviceParams)
 		task, err := h.svc.SendProtocolMessage(c.Request().Context(), userID, c.Param("slug"), &params)
 		if err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
-		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, sendMessageResultForVersion(task, protocolVersion), protocolVersion))
+		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, sendMessageResultForVersion(task, serviceParams.Version), serviceParams.Version))
 	case "message/stream":
 		if err := requireScope(c, "agents:run"); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
@@ -69,12 +69,12 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		if err := decodeJSONRPCParams(req.Params, &params); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCError(req.ID, jsonRPCInvalidParams, err.Error(), nil))
 		}
-		attachProtocolVersionMetadata(&params, protocolVersion)
+		attachProtocolServiceMetadata(&params, serviceParams)
 		task, err := h.svc.StartProtocolMessage(c.Request().Context(), userID, c.Param("slug"), &params)
 		if err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
-		return h.streamProtocolTask(c, userID, c.Param("slug"), task.ID, req.ID, true, task, protocolVersion)
+		return h.streamProtocolTask(c, userID, c.Param("slug"), task.ID, req.ID, true, task, serviceParams.Version)
 	case "tasks/get":
 		if err := requireScope(c, "runs:read"); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
@@ -87,7 +87,7 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		if err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
-		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, task, protocolVersion))
+		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, task, serviceParams.Version))
 	case "tasks/list":
 		if err := requireScope(c, "runs:read"); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
@@ -102,7 +102,7 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		if err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
-		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, resp, protocolVersion))
+		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, resp, serviceParams.Version))
 	case "tasks/cancel":
 		if err := requireScope(c, "agents:run"); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
@@ -115,7 +115,7 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		if err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
-		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, task, protocolVersion))
+		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, task, serviceParams.Version))
 	case "tasks/resubscribe":
 		if err := requireScope(c, "runs:read"); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
@@ -128,7 +128,7 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		if err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
-		return h.streamProtocolTask(c, userID, c.Param("slug"), params.ID, req.ID, true, task, protocolVersion)
+		return h.streamProtocolTask(c, userID, c.Param("slug"), params.ID, req.ID, true, task, serviceParams.Version)
 	case "tasks/pushNotificationConfig/set":
 		if err := requireScope(c, "runs:read"); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
@@ -141,7 +141,7 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		if err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
-		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, resp, protocolVersion))
+		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, resp, serviceParams.Version))
 	case "tasks/pushNotificationConfig/get":
 		if err := requireScope(c, "runs:read"); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
@@ -154,7 +154,7 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		if err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
-		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, resp, protocolVersion))
+		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, resp, serviceParams.Version))
 	case "tasks/pushNotificationConfig/list":
 		if err := requireScope(c, "runs:read"); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
@@ -167,7 +167,7 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		if err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
-		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, resp, protocolVersion))
+		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, resp, serviceParams.Version))
 	case "tasks/pushNotificationConfig/delete":
 		if err := requireScope(c, "runs:read"); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
@@ -188,7 +188,7 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		if err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
-		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, card, protocolVersion))
+		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, card, serviceParams.Version))
 	default:
 		return c.JSON(http.StatusOK, jsonRPCError(req.ID, jsonRPCMethodNotFound, "不支持的 A2A 方法: "+req.Method, nil))
 	}
@@ -209,11 +209,11 @@ func (h *Handler) GetPublicAgentCardHTTP(c echo.Context) error {
 }
 
 func (h *Handler) GetExtendedAgentCardHTTP(c echo.Context) error {
-	protocolVersion, err := a2aVersionFromRequest(c)
+	serviceParams, err := a2aServiceParametersFromRequest(c, h.requiredA2AExtensions)
 	if err != nil {
 		return err
 	}
-	setA2AVersionHeader(c, protocolVersion)
+	setA2AVersionHeader(c, serviceParams.Version)
 	if err := requireScope(c, "runs:read"); err != nil {
 		return err
 	}
@@ -221,23 +221,23 @@ func (h *Handler) GetExtendedAgentCardHTTP(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(card, protocolVersion))
+	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(card, serviceParams.Version))
 }
 
 func (h *Handler) extendedAgentCard(c echo.Context) (interface{}, error) {
 	if h.cardProvider == nil {
-		return nil, httpx.ServiceUnavailable("A2A Extended Agent Card 服务未启用")
+		return nil, a2aProtocolError(a2aErrorExtendedAgentCardNotConfigured, http.StatusBadRequest, "A2A Extended Agent Card 服务未配置", nil)
 	}
 	return h.cardProvider.GetExtendedAgentCardBySlug(c.Request().Context(), c.Param("slug"))
 }
 
 // SendMessageHTTP handles the A2A HTTP+JSON alias POST /message:send.
 func (h *Handler) SendMessageHTTP(c echo.Context) error {
-	protocolVersion, err := a2aVersionFromRequest(c)
+	serviceParams, err := a2aServiceParametersFromRequest(c, h.requiredA2AExtensions)
 	if err != nil {
 		return err
 	}
-	setA2AVersionHeader(c, protocolVersion)
+	setA2AVersionHeader(c, serviceParams.Version)
 	if err := requireScope(c, "agents:run"); err != nil {
 		return err
 	}
@@ -249,20 +249,20 @@ func (h *Handler) SendMessageHTTP(c echo.Context) error {
 	if err := c.Bind(&params); err != nil {
 		return httpx.BadRequest("请求体格式错误")
 	}
-	attachProtocolVersionMetadata(&params, protocolVersion)
+	attachProtocolServiceMetadata(&params, serviceParams)
 	task, err := h.svc.SendProtocolMessage(c.Request().Context(), userID, c.Param("slug"), &params)
 	if err != nil {
 		return err
 	}
-	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(sendMessageResultForVersion(task, protocolVersion), protocolVersion))
+	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(sendMessageResultForVersion(task, serviceParams.Version), serviceParams.Version))
 }
 
 func (h *Handler) ListTasksHTTP(c echo.Context) error {
-	protocolVersion, err := a2aVersionFromRequest(c)
+	serviceParams, err := a2aServiceParametersFromRequest(c, h.requiredA2AExtensions)
 	if err != nil {
 		return err
 	}
-	setA2AVersionHeader(c, protocolVersion)
+	setA2AVersionHeader(c, serviceParams.Version)
 	if err := requireScope(c, "runs:read"); err != nil {
 		return err
 	}
@@ -278,7 +278,7 @@ func (h *Handler) ListTasksHTTP(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(resp, protocolVersion))
+	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(resp, serviceParams.Version))
 }
 
 // MessageHTTP dispatches literal A2A colon actions such as /message:send and /message:stream.
@@ -302,11 +302,11 @@ func (h *Handler) MessageHTTP(c echo.Context) error {
 
 // StreamMessageHTTP handles the A2A HTTP+JSON alias POST /message:stream.
 func (h *Handler) StreamMessageHTTP(c echo.Context) error {
-	protocolVersion, err := a2aVersionFromRequest(c)
+	serviceParams, err := a2aServiceParametersFromRequest(c, h.requiredA2AExtensions)
 	if err != nil {
 		return err
 	}
-	setA2AVersionHeader(c, protocolVersion)
+	setA2AVersionHeader(c, serviceParams.Version)
 	if err := requireScope(c, "agents:run"); err != nil {
 		return err
 	}
@@ -318,12 +318,12 @@ func (h *Handler) StreamMessageHTTP(c echo.Context) error {
 	if err := c.Bind(&params); err != nil {
 		return httpx.BadRequest("请求体格式错误")
 	}
-	attachProtocolVersionMetadata(&params, protocolVersion)
+	attachProtocolServiceMetadata(&params, serviceParams)
 	task, err := h.svc.StartProtocolMessage(c.Request().Context(), userID, c.Param("slug"), &params)
 	if err != nil {
 		return err
 	}
-	return h.streamProtocolTask(c, userID, c.Param("slug"), task.ID, nil, false, task, protocolVersion)
+	return h.streamProtocolTask(c, userID, c.Param("slug"), task.ID, nil, false, task, serviceParams.Version)
 }
 
 // GetTaskHTTP handles the A2A HTTP+JSON alias GET /tasks/:taskID.
@@ -331,11 +331,11 @@ func (h *Handler) GetTaskHTTP(c echo.Context) error {
 	if taskID := strings.TrimSpace(c.Param("taskID")); strings.HasSuffix(taskID, ":subscribe") {
 		return h.SubscribeTaskHTTP(c)
 	}
-	protocolVersion, err := a2aVersionFromRequest(c)
+	serviceParams, err := a2aServiceParametersFromRequest(c, h.requiredA2AExtensions)
 	if err != nil {
 		return err
 	}
-	setA2AVersionHeader(c, protocolVersion)
+	setA2AVersionHeader(c, serviceParams.Version)
 	if err := requireScope(c, "runs:read"); err != nil {
 		return err
 	}
@@ -351,16 +351,16 @@ func (h *Handler) GetTaskHTTP(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(task, protocolVersion))
+	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(task, serviceParams.Version))
 }
 
 // SubscribeTaskHTTP handles the A2A HTTP+JSON task subscription alias.
 func (h *Handler) SubscribeTaskHTTP(c echo.Context) error {
-	protocolVersion, err := a2aVersionFromRequest(c)
+	serviceParams, err := a2aServiceParametersFromRequest(c, h.requiredA2AExtensions)
 	if err != nil {
 		return err
 	}
-	setA2AVersionHeader(c, protocolVersion)
+	setA2AVersionHeader(c, serviceParams.Version)
 	if err := requireScope(c, "runs:read"); err != nil {
 		return err
 	}
@@ -376,7 +376,7 @@ func (h *Handler) SubscribeTaskHTTP(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return h.streamProtocolTask(c, userID, c.Param("slug"), taskID, nil, false, task, protocolVersion)
+	return h.streamProtocolTask(c, userID, c.Param("slug"), taskID, nil, false, task, serviceParams.Version)
 }
 
 // TaskActionHTTP dispatches literal A2A task colon actions such as /tasks/{id}:subscribe and /tasks/{id}:cancel.
@@ -394,11 +394,11 @@ func (h *Handler) TaskActionHTTP(c echo.Context) error {
 
 // CancelTaskHTTP handles the A2A HTTP+JSON alias POST /tasks/:taskID:cancel.
 func (h *Handler) CancelTaskHTTP(c echo.Context) error {
-	protocolVersion, err := a2aVersionFromRequest(c)
+	serviceParams, err := a2aServiceParametersFromRequest(c, h.requiredA2AExtensions)
 	if err != nil {
 		return err
 	}
-	setA2AVersionHeader(c, protocolVersion)
+	setA2AVersionHeader(c, serviceParams.Version)
 	if err := requireScope(c, "agents:run"); err != nil {
 		return err
 	}
@@ -414,15 +414,15 @@ func (h *Handler) CancelTaskHTTP(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(task, protocolVersion))
+	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(task, serviceParams.Version))
 }
 
 func (h *Handler) SetTaskPushNotificationHTTP(c echo.Context) error {
-	protocolVersion, err := a2aVersionFromRequest(c)
+	serviceParams, err := a2aServiceParametersFromRequest(c, h.requiredA2AExtensions)
 	if err != nil {
 		return err
 	}
-	setA2AVersionHeader(c, protocolVersion)
+	setA2AVersionHeader(c, serviceParams.Version)
 	if err := requireScope(c, "runs:read"); err != nil {
 		return err
 	}
@@ -441,15 +441,15 @@ func (h *Handler) SetTaskPushNotificationHTTP(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return a2aJSON(c, http.StatusCreated, normalizeA2AResultForVersion(resp, protocolVersion))
+	return a2aJSON(c, http.StatusCreated, normalizeA2AResultForVersion(resp, serviceParams.Version))
 }
 
 func (h *Handler) ListTaskPushNotificationsHTTP(c echo.Context) error {
-	protocolVersion, err := a2aVersionFromRequest(c)
+	serviceParams, err := a2aServiceParametersFromRequest(c, h.requiredA2AExtensions)
 	if err != nil {
 		return err
 	}
-	setA2AVersionHeader(c, protocolVersion)
+	setA2AVersionHeader(c, serviceParams.Version)
 	if err := requireScope(c, "runs:read"); err != nil {
 		return err
 	}
@@ -461,15 +461,15 @@ func (h *Handler) ListTaskPushNotificationsHTTP(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(resp, protocolVersion))
+	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(resp, serviceParams.Version))
 }
 
 func (h *Handler) GetTaskPushNotificationHTTP(c echo.Context) error {
-	protocolVersion, err := a2aVersionFromRequest(c)
+	serviceParams, err := a2aServiceParametersFromRequest(c, h.requiredA2AExtensions)
 	if err != nil {
 		return err
 	}
-	setA2AVersionHeader(c, protocolVersion)
+	setA2AVersionHeader(c, serviceParams.Version)
 	if err := requireScope(c, "runs:read"); err != nil {
 		return err
 	}
@@ -484,15 +484,15 @@ func (h *Handler) GetTaskPushNotificationHTTP(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(resp, protocolVersion))
+	return a2aJSON(c, http.StatusOK, normalizeA2AResultForVersion(resp, serviceParams.Version))
 }
 
 func (h *Handler) DeleteTaskPushNotificationHTTP(c echo.Context) error {
-	protocolVersion, err := a2aVersionFromRequest(c)
+	serviceParams, err := a2aServiceParametersFromRequest(c, h.requiredA2AExtensions)
 	if err != nil {
 		return err
 	}
-	setA2AVersionHeader(c, protocolVersion)
+	setA2AVersionHeader(c, serviceParams.Version)
 	if err := requireScope(c, "runs:read"); err != nil {
 		return err
 	}
@@ -538,14 +538,17 @@ func normalizeA2AJSONRPCMethod(method string) string {
 	}
 }
 
-func attachProtocolVersionMetadata(params *A2AMessageSendParams, version string) {
-	if params == nil || version == "" {
+func attachProtocolServiceMetadata(params *A2AMessageSendParams, serviceParams a2aServiceParameters) {
+	if params == nil || serviceParams.Version == "" {
 		return
 	}
 	if params.Metadata == nil {
 		params.Metadata = map[string]interface{}{}
 	}
-	params.Metadata["a2a_protocol_version"] = version
+	params.Metadata["a2a_protocol_version"] = serviceParams.Version
+	if len(serviceParams.Extensions) > 0 {
+		params.Metadata["a2a_extensions"] = append([]string{}, serviceParams.Extensions...)
+	}
 }
 
 func sendMessageResultForVersion(task *A2ATask, version string) interface{} {
@@ -589,23 +592,29 @@ func jsonRPCError(id json.RawMessage, code int, message string, data interface{}
 func jsonRPCErrorFrom(id json.RawMessage, err error) JSONRPCResponse {
 	var he *httpx.HTTPError
 	if errors.As(err, &he) {
+		if errorType := a2aErrorTypeFromHTTPError(he); errorType != "" {
+			return jsonRPCError(id, a2aJSONRPCCode(errorType), he.Message, he.Details)
+		}
 		code := jsonRPCInternalError
 		switch he.Status {
 		case http.StatusBadRequest, http.StatusUnprocessableEntity:
 			code = jsonRPCInvalidParams
 		case http.StatusUnauthorized:
-			code = -32001
+			code = -32010
 		case http.StatusForbidden:
-			code = -32003
+			code = -32011
 		case http.StatusNotFound:
-			code = -32004
+			code = -32001
 		case http.StatusConflict:
-			code = -32009
+			code = -32002
+		case http.StatusServiceUnavailable:
+			code = -32013
 		}
-		return jsonRPCError(id, code, he.Message, map[string]interface{}{
-			"http_status": he.Status,
-			"code":        he.Code,
-		})
+		data := he.Details
+		if data == nil {
+			data = a2aErrorDetails(string(he.Code), map[string]string{"http_status": strconv.Itoa(he.Status)})
+		}
+		return jsonRPCError(id, code, he.Message, data)
 	}
 	return jsonRPCError(id, jsonRPCInternalError, "internal error", nil)
 }

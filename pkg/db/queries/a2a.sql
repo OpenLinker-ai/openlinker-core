@@ -73,6 +73,52 @@ INSERT INTO run_delegations (child_run_id, parent_run_id, caller_agent_id, reaso
 VALUES ($1, $2, $3, $4)
 RETURNING child_run_id, parent_run_id, caller_agent_id, reason, created_at;
 
+-- name: UpsertA2AContextMapping :one
+INSERT INTO a2a_context_mappings (
+    run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+    root_context_id, parent_context_id, parent_task_id, parent_run_id,
+    caller_agent_id, target_agent_id, trace_id, reference_task_ids, source
+) VALUES (
+    $1, $2, $3, $4, $5,
+    $6, $7, $8, $9,
+    $10, $11, $12, $13, $14
+)
+ON CONFLICT (run_id) DO UPDATE
+SET protocol_context_id = EXCLUDED.protocol_context_id,
+    protocol_task_id = EXCLUDED.protocol_task_id,
+    root_context_id = EXCLUDED.root_context_id,
+    parent_context_id = EXCLUDED.parent_context_id,
+    parent_task_id = EXCLUDED.parent_task_id,
+    parent_run_id = EXCLUDED.parent_run_id,
+    caller_agent_id = EXCLUDED.caller_agent_id,
+    target_agent_id = EXCLUDED.target_agent_id,
+    trace_id = EXCLUDED.trace_id,
+    reference_task_ids = EXCLUDED.reference_task_ids,
+    source = EXCLUDED.source,
+    updated_at = NOW()
+RETURNING id, run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+          root_context_id, parent_context_id, parent_task_id, parent_run_id,
+          caller_agent_id, target_agent_id, trace_id, reference_task_ids,
+          source, created_at, updated_at;
+
+-- name: GetA2AContextMappingByRun :one
+SELECT id, run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+       root_context_id, parent_context_id, parent_task_id, parent_run_id,
+       caller_agent_id, target_agent_id, trace_id, reference_task_ids,
+       source, created_at, updated_at
+FROM a2a_context_mappings
+WHERE run_id = $1;
+
+-- name: ListA2AContextMappingsByRoot :many
+SELECT id, run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+       root_context_id, parent_context_id, parent_task_id, parent_run_id,
+       caller_agent_id, target_agent_id, trace_id, reference_task_ids,
+       source, created_at, updated_at
+FROM a2a_context_mappings
+WHERE user_id = $1 AND root_context_id = $2
+ORDER BY created_at ASC, run_id ASC
+LIMIT $3;
+
 -- name: GetRunDelegationByChild :one
 SELECT child_run_id, parent_run_id, caller_agent_id, reason, created_at
 FROM run_delegations
@@ -88,12 +134,21 @@ SELECT c.id AS child_run_id, d.parent_run_id, d.caller_agent_id, d.reason,
        target.id AS target_agent_id, target.slug AS target_agent_slug,
        target.name AS target_agent_name, target.tags AS target_agent_tags,
        COALESCE(target_skills.skill_ids, ARRAY[]::text[]) AS target_skill_ids,
-       COALESCE(target_skills.skill_names, ARRAY[]::text[]) AS target_skill_names
+       COALESCE(target_skills.skill_names, ARRAY[]::text[]) AS target_skill_names,
+       COALESCE(child_ctx.protocol_context_id, '')::text AS protocol_context_id,
+       COALESCE(child_ctx.protocol_task_id, '')::text AS protocol_task_id,
+       COALESCE(child_ctx.root_context_id, '')::text AS root_context_id,
+       COALESCE(child_ctx.parent_context_id, '')::text AS parent_context_id,
+       COALESCE(child_ctx.parent_task_id, '')::text AS parent_task_id,
+       COALESCE(child_ctx.trace_id, '')::text AS trace_id,
+       COALESCE(child_ctx.reference_task_ids, ARRAY[]::text[]) AS reference_task_ids,
+       COALESCE(child_ctx.source, '')::text AS context_source
 FROM run_delegations d
 JOIN runs p ON p.id = d.parent_run_id
 JOIN runs c ON c.id = d.child_run_id
 JOIN agents caller ON caller.id = d.caller_agent_id
 JOIN agents target ON target.id = c.agent_id
+LEFT JOIN a2a_context_mappings child_ctx ON child_ctx.run_id = c.id
 LEFT JOIN LATERAL (
     SELECT ARRAY_AGG(s.id ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_ids,
            ARRAY_AGG(s.name ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_names
@@ -121,11 +176,23 @@ SELECT p.id AS parent_run_id, a.id AS caller_agent_id, a.slug AS caller_agent_sl
        (COUNT(d.child_run_id) FILTER (WHERE c.status = 'success'))::int AS successful_child_count,
        (COUNT(d.child_run_id) FILTER (WHERE c.status = 'running'))::int AS running_child_count,
        COALESCE(token_stats.active_runtime_token_count, 0)::int AS active_runtime_token_count,
-       token_stats.last_runtime_token_used_at
+       token_stats.last_runtime_token_used_at,
+       COALESCE(parent_ctx.protocol_context_id, '')::text AS protocol_context_id,
+       COALESCE(parent_ctx.protocol_task_id, '')::text AS protocol_task_id,
+       COALESCE(child_root.root_context_id, parent_ctx.root_context_id, '')::text AS root_context_id,
+       COALESCE(child_root.trace_id, parent_ctx.trace_id, '')::text AS trace_id
 FROM runs p
 JOIN run_delegations d ON d.parent_run_id = p.id
 JOIN runs c ON c.id = d.child_run_id
 JOIN agents a ON a.id = p.agent_id
+LEFT JOIN a2a_context_mappings parent_ctx ON parent_ctx.run_id = p.id
+LEFT JOIN LATERAL (
+    SELECT root_context_id, trace_id
+    FROM a2a_context_mappings
+    WHERE parent_run_id = p.id
+    ORDER BY created_at ASC
+    LIMIT 1
+) child_root ON TRUE
 LEFT JOIN LATERAL (
     SELECT ARRAY_AGG(s.id ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_ids,
            ARRAY_AGG(s.name ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_names
@@ -184,7 +251,9 @@ WHERE p.user_id = $1
 GROUP BY p.id, a.id, a.slug, a.name, a.tags, caller_skills.skill_ids,
          caller_skills.skill_names, token_stats.active_runtime_token_count,
          token_stats.last_runtime_token_used_at, p.source, p.status, p.duration_ms,
-         p.started_at, p.finished_at
+         p.started_at, p.finished_at, parent_ctx.protocol_context_id,
+         parent_ctx.protocol_task_id, parent_ctx.root_context_id, parent_ctx.trace_id,
+         child_root.root_context_id, child_root.trace_id
 ORDER BY p.started_at DESC
 LIMIT $3 OFFSET $4;
 

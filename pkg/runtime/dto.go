@@ -11,6 +11,7 @@ type RunRequest struct {
 	AgentID                string                 `json:"agent_id" validate:"required,uuid"`
 	Input                  map[string]interface{} `json:"input" validate:"required"`
 	Metadata               map[string]interface{} `json:"metadata,omitempty"`
+	A2AContext             *RunA2AContextRequest  `json:"a2a_context,omitempty"`
 	TaskCallback           *TaskCallbackConfig    `json:"task_callback,omitempty"`
 	PushNotification       *TaskCallbackConfig    `json:"push_notification,omitempty"`
 	PushNotificationAlias  *TaskCallbackConfig    `json:"pushNotification,omitempty"`
@@ -30,6 +31,34 @@ type TaskCallbackConfig struct {
 	Metadata        map[string]interface{}      `json:"metadata,omitempty"`
 	EventTypes      []string                    `json:"eventTypes,omitempty"`
 	EventTypesAlias []string                    `json:"event_types,omitempty"`
+}
+
+type RunA2AContextRequest struct {
+	ProtocolContextID string   `json:"protocol_context_id,omitempty"`
+	ProtocolTaskID    string   `json:"protocol_task_id,omitempty"`
+	RootContextID     string   `json:"root_context_id,omitempty"`
+	ParentContextID   string   `json:"parent_context_id,omitempty"`
+	ParentTaskID      string   `json:"parent_task_id,omitempty"`
+	ParentRunID       string   `json:"parent_run_id,omitempty"`
+	CallerAgentID     string   `json:"caller_agent_id,omitempty"`
+	TargetAgentID     string   `json:"target_agent_id,omitempty"`
+	TraceID           string   `json:"trace_id,omitempty"`
+	ReferenceTaskIDs  []string `json:"reference_task_ids,omitempty"`
+	Source            string   `json:"source,omitempty"`
+}
+
+type RunA2AContextResponse struct {
+	ProtocolContextID string   `json:"protocol_context_id"`
+	ProtocolTaskID    string   `json:"protocol_task_id"`
+	RootContextID     string   `json:"root_context_id"`
+	ParentContextID   string   `json:"parent_context_id,omitempty"`
+	ParentTaskID      string   `json:"parent_task_id,omitempty"`
+	ParentRunID       string   `json:"parent_run_id,omitempty"`
+	CallerAgentID     string   `json:"caller_agent_id,omitempty"`
+	TargetAgentID     string   `json:"target_agent_id,omitempty"`
+	TraceID           string   `json:"trace_id,omitempty"`
+	ReferenceTaskIDs  []string `json:"reference_task_ids,omitempty"`
+	Source            string   `json:"source,omitempty"`
 }
 
 // RunResponse POST /api/v1/run 同步响应体，或 POST /api/v1/runs 异步启动响应体。
@@ -54,6 +83,7 @@ type RunResponse struct {
 	ParentRunID         string                          `json:"parent_run_id,omitempty"`
 	CallerAgentID       string                          `json:"caller_agent_id,omitempty"`
 	BillingMode         string                          `json:"billing_mode,omitempty"`
+	A2AContext          *RunA2AContextResponse          `json:"a2a_context,omitempty"`
 	TaskCallback        *RunTaskCallbackResponse        `json:"task_callback,omitempty"`
 	RequirementEvidence *RunRequirementEvidenceResponse `json:"requirement_evidence,omitempty"`
 	EvidenceSummary     *RunEvidenceSummary             `json:"evidence_summary,omitempty"`
@@ -196,6 +226,13 @@ type AgentA2AContext struct {
 	CurrentRunID      string   `json:"current_run_id"`
 	ParentRunID       string   `json:"parent_run_id,omitempty"`
 	CallerAgentID     string   `json:"caller_agent_id,omitempty"`
+	ProtocolContextID string   `json:"protocol_context_id,omitempty"`
+	ProtocolTaskID    string   `json:"protocol_task_id,omitempty"`
+	RootContextID     string   `json:"root_context_id,omitempty"`
+	ParentContextID   string   `json:"parent_context_id,omitempty"`
+	ParentTaskID      string   `json:"parent_task_id,omitempty"`
+	TraceID           string   `json:"trace_id,omitempty"`
+	ReferenceTaskIDs  []string `json:"reference_task_ids,omitempty"`
 	CallAgentEndpoint string   `json:"call_agent_endpoint"`
 	CallAgentMethod   string   `json:"call_agent_method"`
 	RuntimeTokenType  string   `json:"runtime_token_type"`

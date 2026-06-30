@@ -97,12 +97,12 @@ LIMIT $2;
 -- name: GetAgentVerifiedSkillStats :one
 -- 公开市场详情页用：某 Agent 的 verified skill 数 + 最近一次 batch_id。
 SELECT
-    COUNT(*) FILTER (WHERE status = 'verified')::int AS verified_count,
-    (SELECT last_batch_id FROM agent_skill_scores
-     WHERE agent_id = $1 AND last_batch_id IS NOT NULL
-     ORDER BY updated_at DESC LIMIT 1) AS latest_batch_id
-FROM agent_skill_scores
-WHERE agent_id = $1;
+    COUNT(*) FILTER (WHERE s.status = 'verified')::int AS verified_count,
+    (SELECT latest.last_batch_id FROM agent_skill_scores latest
+     WHERE latest.agent_id = $1 AND latest.last_batch_id IS NOT NULL
+     ORDER BY latest.updated_at DESC LIMIT 1) AS latest_batch_id
+FROM agent_skill_scores s
+WHERE s.agent_id = $1;
 
 -- ──────────────────────────────────────────────────────
 -- agent_skill_scores
@@ -116,7 +116,7 @@ INSERT INTO agent_skill_scores (
     agent_id, skill_id, status, average_score,
     pass_count, total_count, last_batch_id, verified_at, updated_at
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-ON CONFLICT (agent_id, skill_id) DO UPDATE
+ON CONFLICT ON CONSTRAINT agent_skill_scores_pkey DO UPDATE
 SET status = EXCLUDED.status,
     average_score = EXCLUDED.average_score,
     pass_count = EXCLUDED.pass_count,
@@ -124,8 +124,11 @@ SET status = EXCLUDED.status,
     last_batch_id = EXCLUDED.last_batch_id,
     verified_at = COALESCE(EXCLUDED.verified_at, agent_skill_scores.verified_at),
     updated_at = NOW()
-RETURNING agent_id, skill_id, status, average_score,
-          pass_count, total_count, last_batch_id, verified_at, updated_at;
+RETURNING agent_skill_scores.agent_id, agent_skill_scores.skill_id,
+          agent_skill_scores.status, agent_skill_scores.average_score,
+          agent_skill_scores.pass_count, agent_skill_scores.total_count,
+          agent_skill_scores.last_batch_id, agent_skill_scores.verified_at,
+          agent_skill_scores.updated_at;
 
 -- name: GetAgentSkillScore :one
 -- 单条查询（service 内部用）。

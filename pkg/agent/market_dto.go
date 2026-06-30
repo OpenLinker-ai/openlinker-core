@@ -149,11 +149,19 @@ type AgentCardProvider struct {
 }
 
 type AgentCardCapabilities struct {
-	Streaming               bool `json:"streaming"`
-	PushNotifications       bool `json:"pushNotifications"`
-	PushNotificationsLegacy bool `json:"push_notifications"`
-	Delegation              bool `json:"delegation"`
-	ExtendedAgentCard       bool `json:"extendedAgentCard,omitempty"`
+	Streaming               bool                 `json:"streaming"`
+	PushNotifications       bool                 `json:"pushNotifications"`
+	PushNotificationsLegacy bool                 `json:"push_notifications"`
+	Delegation              bool                 `json:"delegation"`
+	ExtendedAgentCard       bool                 `json:"extendedAgentCard,omitempty"`
+	Extensions              []AgentCardExtension `json:"extensions,omitempty"`
+}
+
+type AgentCardExtension struct {
+	URI         string                 `json:"uri"`
+	Description string                 `json:"description,omitempty"`
+	Required    bool                   `json:"required"`
+	Params      map[string]interface{} `json:"params,omitempty"`
 }
 
 type AgentCardInterface struct {

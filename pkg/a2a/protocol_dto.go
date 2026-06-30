@@ -114,13 +114,15 @@ type A2ATaskListResponse struct {
 }
 
 type A2AMessage struct {
-	Kind      string                   `json:"kind,omitempty"`
-	MessageID string                   `json:"messageId,omitempty"`
-	ContextID string                   `json:"contextId,omitempty"`
-	TaskID    string                   `json:"taskId,omitempty"`
-	Role      string                   `json:"role,omitempty"`
-	Parts     []map[string]interface{} `json:"parts,omitempty"`
-	Metadata  map[string]interface{}   `json:"metadata,omitempty"`
+	Kind             string                   `json:"kind,omitempty"`
+	MessageID        string                   `json:"messageId,omitempty"`
+	ContextID        string                   `json:"contextId,omitempty"`
+	TaskID           string                   `json:"taskId,omitempty"`
+	ReferenceTaskIDs []string                 `json:"referenceTaskIds,omitempty"`
+	Extensions       []string                 `json:"extensions,omitempty"`
+	Role             string                   `json:"role,omitempty"`
+	Parts            []map[string]interface{} `json:"parts,omitempty"`
+	Metadata         map[string]interface{}   `json:"metadata,omitempty"`
 }
 
 type A2ATask struct {
@@ -142,6 +144,7 @@ type A2ATaskStatus struct {
 type A2AArtifact struct {
 	ArtifactID string                   `json:"artifactId"`
 	Name       string                   `json:"name,omitempty"`
+	Extensions []string                 `json:"extensions,omitempty"`
 	Parts      []map[string]interface{} `json:"parts,omitempty"`
 	Metadata   map[string]interface{}   `json:"metadata,omitempty"`
 }

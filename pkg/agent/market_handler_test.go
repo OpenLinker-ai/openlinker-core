@@ -312,12 +312,23 @@ func TestGetAgentCard_HandlerHappyPath(t *testing.T) {
 	assert.Equal(t, "/api/v1/a2a/agents/agent-card", card["url"])
 	assert.Equal(t, "1.0", card["protocolVersion"])
 	require.Contains(t, card, "supportedInterfaces")
+	for _, raw := range card["supportedInterfaces"].([]any) {
+		item := raw.(map[string]any)
+		assert.NotEqual(t, "gRPC", item["protocolBinding"])
+	}
 	capabilities, ok := card["capabilities"].(map[string]any)
 	require.True(t, ok, "capabilities must exist; body=%s", string(raw))
 	assert.Equal(t, true, capabilities["streaming"])
 	assert.Equal(t, true, capabilities["pushNotifications"])
 	assert.Equal(t, true, capabilities["push_notifications"])
 	assert.Equal(t, true, capabilities["extendedAgentCard"])
+	extensions, ok := capabilities["extensions"].([]any)
+	require.True(t, ok, "capabilities.extensions must exist; body=%s", string(raw))
+	require.Len(t, extensions, 2)
+	for _, rawExt := range extensions {
+		ext := rawExt.(map[string]any)
+		assert.Equal(t, false, ext["required"])
+	}
 	openlinker, ok := card["openlinker"].(map[string]any)
 	require.True(t, ok, "openlinker extension must exist; body=%s", string(raw))
 	assert.Equal(t, "agent-card", openlinker["slug"])
