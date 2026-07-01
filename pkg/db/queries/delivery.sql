@@ -27,6 +27,11 @@ SELECT id, user_id, name, type, config, secret, is_default, created_at, updated_
 FROM delivery_targets
 WHERE id = $1;
 
+-- name: GetDeliveryTargetByIDForUser :one
+SELECT id, user_id, name, type, config, secret, is_default, created_at, updated_at
+FROM delivery_targets
+WHERE id = $1 AND user_id = $2;
+
 -- name: GetDefaultDeliveryTarget :one
 SELECT id, user_id, name, type, config, secret, is_default, created_at, updated_at
 FROM delivery_targets

@@ -86,6 +86,26 @@ func TestAuthHandlerDispatchesServiceSuccess(t *testing.T) {
 		}
 	})
 
+	t.Run("refresh", func(t *testing.T) {
+		mock := &mockAuthService{refreshResp: authResp}
+		c, rec := newAuthRecorderContext(http.MethodPost, "/auth/refresh", "", userID.String())
+
+		if err := NewHandler(mock).PostRefresh(c); err != nil {
+			t.Fatalf("PostRefresh error = %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		if mock.refreshUserID != userID {
+			t.Fatalf("captured refresh user = %s", mock.refreshUserID)
+		}
+		var body AuthResponse
+		decodeAuthDispatchJSON(t, rec, &body)
+		if body.UserID != userID.String() || body.JWT == "" {
+			t.Fatalf("body = %#v", body)
+		}
+	})
+
 	t.Run("get me", func(t *testing.T) {
 		mock := &mockAuthService{getMeResp: meResp}
 		c, rec := newAuthRecorderContext(http.MethodGet, "/me", "", userID.String())
@@ -167,6 +187,12 @@ func TestAuthHandlerPropagatesServiceErrors(t *testing.T) {
 		requireAuthHTTPStatus(t, NewHandler(mock).PostOAuthExchange(c), http.StatusUnauthorized)
 	})
 
+	t.Run("refresh", func(t *testing.T) {
+		mock := &mockAuthService{refreshErr: httpx.Unauthorized("expired")}
+		c, _ := newAuthRecorderContext(http.MethodPost, "/auth/refresh", "", userID.String())
+		requireAuthHTTPStatus(t, NewHandler(mock).PostRefresh(c), http.StatusUnauthorized)
+	})
+
 	t.Run("get me", func(t *testing.T) {
 		mock := &mockAuthService{getMeErr: httpx.NotFound("missing")}
 		c, _ := newAuthRecorderContext(http.MethodGet, "/me", "", userID.String())
@@ -214,6 +240,10 @@ type mockAuthService struct {
 	exchangeResp     *AuthResponse
 	exchangeErr      error
 
+	refreshUserID uuid.UUID
+	refreshResp   *AuthResponse
+	refreshErr    error
+
 	getMeUserID uuid.UUID
 	getMeResp   *MeResponse
 	getMeErr    error
@@ -255,6 +285,11 @@ func (m *mockAuthService) IssueOAuthCode(_ context.Context, resp *AuthResponse) 
 func (m *mockAuthService) ExchangeOAuthCode(_ context.Context, code string) (*AuthResponse, error) {
 	m.exchangeCode = code
 	return m.exchangeResp, m.exchangeErr
+}
+
+func (m *mockAuthService) RefreshToken(_ context.Context, userID uuid.UUID) (*AuthResponse, error) {
+	m.refreshUserID = userID
+	return m.refreshResp, m.refreshErr
 }
 
 func (m *mockAuthService) GetMe(_ context.Context, userID uuid.UUID) (*MeResponse, error) {

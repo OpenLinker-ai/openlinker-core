@@ -169,6 +169,8 @@ func shouldReturnA2AMessageImmediately(params *A2AMessageSendParams) bool {
 		return *params.Configuration.ReturnImmediately
 	}
 	if params.Configuration.Blocking != nil {
+		// A2A uses returnImmediately for async "accept and return pending"
+		// semantics, while blocking=true asks the server to wait synchronously.
 		return !*params.Configuration.Blocking
 	}
 	return false

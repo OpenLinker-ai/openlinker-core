@@ -145,6 +145,19 @@ func (s *Service) Login(ctx context.Context, req *LoginRequest) (*AuthResponse, 
 	}, nil
 }
 
+// RefreshToken issues a fresh JWT for the currently authenticated user.
+func (s *Service) RefreshToken(ctx context.Context, userID uuid.UUID) (*AuthResponse, error) {
+	user, err := s.queries.GetUserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.Unauthorized("用户不存在或会话已失效")
+		}
+		log.Error().Err(err).Str("user_id", userID.String()).Msg("auth.RefreshToken: GetUserByID")
+		return nil, httpx.Internal("刷新登录会话失败")
+	}
+	return s.respondWithToken(&user)
+}
+
 // FindOrCreateOAuthUser 处理 Google OAuth 回调用户。
 //
 // Phase 1 决策（docs/13）：邮箱已被密码用户占用 -> Conflict，不自动合并账号。

@@ -112,6 +112,23 @@ func (q *Queries) GetDeliveryTargetByID(ctx context.Context, id uuid.UUID) (Deli
 	return t, err
 }
 
+const getDeliveryTargetByIDForUser = `-- name: GetDeliveryTargetByIDForUser :one
+SELECT id, user_id, name, type, config, secret, is_default, created_at, updated_at
+FROM delivery_targets
+WHERE id = $1 AND user_id = $2`
+
+type GetDeliveryTargetByIDForUserParams struct {
+	ID     uuid.UUID `db:"id" json:"id"`
+	UserID uuid.UUID `db:"user_id" json:"user_id"`
+}
+
+func (q *Queries) GetDeliveryTargetByIDForUser(ctx context.Context, arg GetDeliveryTargetByIDForUserParams) (DeliveryTarget, error) {
+	row := q.db.QueryRow(ctx, getDeliveryTargetByIDForUser, arg.ID, arg.UserID)
+	var t DeliveryTarget
+	err := scanDeliveryTarget(row, &t)
+	return t, err
+}
+
 const getDefaultDeliveryTarget = `-- name: GetDefaultDeliveryTarget :one
 SELECT id, user_id, name, type, config, secret, is_default, created_at, updated_at
 FROM delivery_targets

@@ -24,6 +24,7 @@ const (
 	maxTaskResultSummaryLen = 2000
 	maxTaskRevisionNoteLen  = 2000
 	maxTaskPublicSummaryLen = 240
+	skillCatalogTTL         = 5 * time.Minute
 	taskVisibilityPrivate   = "private"
 	taskVisibilityPublic    = "public"
 )
@@ -61,14 +62,15 @@ type RuntimeStarter interface {
 
 // Service 任务驱动 A 形态业务逻辑。
 //
-// allSkills 在 NewService 时一次性预热，后续仅读不写；30 个固定值，内存可忽略。
+// allSkills 在 NewService 时预热，并按 TTL 刷新，避免运营更新长期滞后。
 type Service struct {
-	pool      *pgxpool.Pool
-	queries   *db.Queries
-	llm       llm.Client
-	skillSvc  SkillRecommender
-	runner    RuntimeStarter
-	allSkills []db.Skill
+	pool              *pgxpool.Pool
+	queries           *db.Queries
+	llm               llm.Client
+	skillSvc          SkillRecommender
+	runner            RuntimeStarter
+	allSkills         []db.Skill
+	allSkillsLoadedAt time.Time
 }
 
 // NewService 构造 Service，并立即预热 skill catalog。
@@ -94,6 +96,7 @@ func NewService(pool *pgxpool.Pool, llmClient llm.Client, skillSvc SkillRecommen
 		return s
 	}
 	s.allSkills = skills
+	s.allSkillsLoadedAt = time.Now()
 	log.Info().Int("skill_count", len(skills)).Bool("llm_enabled", llmClient != nil).
 		Msg("task service ready")
 	return s
@@ -105,17 +108,27 @@ func (s *Service) SetRunStarter(runner RuntimeStarter) {
 }
 
 func (s *Service) skills(ctx context.Context) ([]db.Skill, error) {
-	skills := s.allSkills
-	if len(skills) > 0 {
-		return skills, nil
+	now := time.Now()
+	if len(s.allSkills) > 0 && (s.allSkillsLoadedAt.IsZero() || now.Sub(s.allSkillsLoadedAt) < skillCatalogTTL) {
+		return s.allSkills, nil
 	}
-	var err error
-	skills, err = s.skillSvc.ListAll(ctx)
+	if s.skillSvc == nil {
+		if len(s.allSkills) > 0 {
+			return s.allSkills, nil
+		}
+		return nil, httpx.Internal("加载 skill 列表失败")
+	}
+	skills, err := s.skillSvc.ListAll(ctx)
 	if err != nil {
+		if len(s.allSkills) > 0 {
+			log.Warn().Err(err).Msg("task.skills: ListAll stale fallback")
+			return s.allSkills, nil
+		}
 		log.Error().Err(err).Msg("task.skills: ListAll")
 		return nil, httpx.Internal("加载 skill 列表失败")
 	}
 	s.allSkills = skills
+	s.allSkillsLoadedAt = now
 	return skills, nil
 }
 
@@ -647,14 +660,9 @@ func (s *Service) ListBoard(ctx context.Context, limit int32) ([]PublicTaskItem,
 		log.Error().Err(err).Msg("task.ListBoard: query")
 		return nil, httpx.Internal("查询任务广场失败")
 	}
-	skills := s.allSkills
-	if len(skills) == 0 {
-		if loaded, err := s.skillSvc.ListAll(ctx); err == nil {
-			skills = loaded
-			s.allSkills = loaded
-		} else {
-			log.Warn().Err(err).Msg("task.ListBoard: ListAll")
-		}
+	skills, err := s.skills(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("task.ListBoard: skills")
 	}
 	skillByID := skillCatalogByID(skills)
 	out := make([]PublicTaskItem, 0, len(rows))
@@ -715,12 +723,9 @@ func (s *Service) detailFromTask(ctx context.Context, t *db.TaskQuery) (*DetailR
 	attachTaskDeliveryFields(t, &resp.DeliveryStatus, &resp.DeliveryVisibility, &resp.DeliveryArtifact, &resp.AcceptedAt, &resp.RevisionRequestedAt, &resp.RevisionNote)
 
 	// 用 catalog 回填 Why 文案（与 Recommend 一致）
-	skills := s.allSkills
-	if len(skills) == 0 {
-		if loaded, err := s.skillSvc.ListAll(ctx); err == nil {
-			skills = loaded
-			s.allSkills = loaded
-		}
+	skills, err := s.skills(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("task.detailFromTask: skills")
 	}
 	skillByID := skillCatalogByID(skills)
 	resp.ParsedSkillRefs = skillRefsForIDs(t.ParsedSkills, skillByID)

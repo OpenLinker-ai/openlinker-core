@@ -8,14 +8,18 @@ import "time"
 // Input 必填，为创作者 endpoint 接收的入参（透传）。
 // Metadata 可选，平台原样转发给 endpoint，常用于 trace_id / 客户端版本等。
 type RunRequest struct {
-	AgentID                string                 `json:"agent_id" validate:"required,uuid"`
-	Input                  map[string]interface{} `json:"input" validate:"required"`
-	Metadata               map[string]interface{} `json:"metadata,omitempty"`
-	A2AContext             *RunA2AContextRequest  `json:"a2a_context,omitempty"`
-	TaskCallback           *TaskCallbackConfig    `json:"task_callback,omitempty"`
-	PushNotification       *TaskCallbackConfig    `json:"push_notification,omitempty"`
-	PushNotificationAlias  *TaskCallbackConfig    `json:"pushNotification,omitempty"`
-	PushNotificationConfig *TaskCallbackConfig    `json:"pushNotificationConfig,omitempty"`
+	AgentID    string                 `json:"agent_id" validate:"required,uuid"`
+	Input      map[string]interface{} `json:"input" validate:"required"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	A2AContext *RunA2AContextRequest  `json:"a2a_context,omitempty"`
+	// TaskCallback is OpenLinker's canonical callback field. PushNotification,
+	// PushNotificationAlias, and PushNotificationConfig are A2A compatibility
+	// aliases; taskCallbackConfigFromRunRequest chooses the first non-empty
+	// value in this declaration order.
+	TaskCallback           *TaskCallbackConfig `json:"task_callback,omitempty"`
+	PushNotification       *TaskCallbackConfig `json:"push_notification,omitempty"`
+	PushNotificationAlias  *TaskCallbackConfig `json:"pushNotification,omitempty"`
+	PushNotificationConfig *TaskCallbackConfig `json:"pushNotificationConfig,omitempty"`
 }
 
 type TaskCallbackAuthentication struct {
@@ -67,15 +71,17 @@ type RunA2AContextResponse struct {
 // 失败 / 超时 时 Output 为空、ErrorCode + ErrorMsg 必填，CostCents=0（已退款）。
 // Source: 'web' / 'mcp' / 'api'，由 handler 从鉴权方式推导。
 type RunResponse struct {
-	RunID               string                          `json:"run_id"`
-	AgentID             string                          `json:"agent_id,omitempty"`
-	AgentSlug           string                          `json:"agent_slug,omitempty"`
-	AgentName           string                          `json:"agent_name,omitempty"`
-	AgentConnectionMode string                          `json:"agent_connection_mode,omitempty"`
-	Status              string                          `json:"status"`
-	Input               map[string]interface{}          `json:"input,omitempty"`
-	Output              map[string]interface{}          `json:"output,omitempty"`
-	ErrorCode           string                          `json:"error_code,omitempty"`
+	RunID               string                 `json:"run_id"`
+	AgentID             string                 `json:"agent_id,omitempty"`
+	AgentSlug           string                 `json:"agent_slug,omitempty"`
+	AgentName           string                 `json:"agent_name,omitempty"`
+	AgentConnectionMode string                 `json:"agent_connection_mode,omitempty"`
+	Status              string                 `json:"status"`
+	Input               map[string]interface{} `json:"input,omitempty"`
+	Output              map[string]interface{} `json:"output,omitempty"`
+	ErrorCode           string                 `json:"error_code,omitempty"`
+	// ErrorMsg keeps the historical Go field name while preserving the public
+	// JSON contract as error_message.
 	ErrorMsg            string                          `json:"error_message,omitempty"`
 	CostCents           int32                           `json:"cost_cents"`
 	DurationMs          int32                           `json:"duration_ms"`

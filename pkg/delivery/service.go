@@ -105,6 +105,7 @@ type deliveryQueries interface {
 	UpdateDeliveryTargetConfig(context.Context, db.UpdateDeliveryTargetConfigParams) (db.DeliveryTarget, error)
 	GetRunByID(context.Context, uuid.UUID) (db.Run, error)
 	GetDeliveryTargetByID(context.Context, uuid.UUID) (db.DeliveryTarget, error)
+	GetDeliveryTargetByIDForUser(context.Context, db.GetDeliveryTargetByIDForUserParams) (db.DeliveryTarget, error)
 	GetDefaultDeliveryTarget(context.Context, uuid.UUID) (db.DeliveryTarget, error)
 	GetAgentByID(context.Context, uuid.UUID) (db.Agent, error)
 	CreateRunDelivery(context.Context, db.CreateRunDeliveryParams) (db.RunDelivery, error)
@@ -274,15 +275,15 @@ func (s *Service) UpdateTarget(ctx context.Context, targetID, userID uuid.UUID, 
 	if len(req.EventTypes) == 0 {
 		return nil, httpx.BadRequest("event_types 至少选择一个")
 	}
-	target, err := s.queries.GetDeliveryTargetByID(ctx, targetID)
+	target, err := s.queries.GetDeliveryTargetByIDForUser(ctx, db.GetDeliveryTargetByIDForUserParams{
+		ID:     targetID,
+		UserID: userID,
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, httpx.NotFound("投递目标不存在")
 		}
 		return nil, httpx.Internal("查询投递目标失败")
-	}
-	if target.UserID != userID {
-		return nil, httpx.NotFound("投递目标不存在")
 	}
 	cfg := parseTargetConfig(target.Config)
 	cfg.EventTypes = normalizeDeliveryEventTypes(req.EventTypes)
@@ -326,15 +327,15 @@ func (s *Service) DeliverRun(ctx context.Context, userID, runID uuid.UUID, targe
 	// 选 target
 	var target db.DeliveryTarget
 	if targetID != nil {
-		t, err := s.queries.GetDeliveryTargetByID(ctx, *targetID)
+		t, err := s.queries.GetDeliveryTargetByIDForUser(ctx, db.GetDeliveryTargetByIDForUserParams{
+			ID:     *targetID,
+			UserID: userID,
+		})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, httpx.NotFound("投递目标不存在")
 			}
 			return nil, httpx.Internal("查询投递目标失败")
-		}
-		if t.UserID != userID {
-			return nil, httpx.NotFound("投递目标不存在")
 		}
 		target = t
 	} else {

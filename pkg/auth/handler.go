@@ -41,6 +41,7 @@ type authService interface {
 	FindOrCreateOAuthUser(context.Context, string, string, string, string, string) (*AuthResponse, error)
 	IssueOAuthCode(context.Context, *AuthResponse) (string, error)
 	ExchangeOAuthCode(context.Context, string) (*AuthResponse, error)
+	RefreshToken(context.Context, uuid.UUID) (*AuthResponse, error)
 	GetMe(context.Context, uuid.UUID) (*MeResponse, error)
 	UpdateMe(context.Context, uuid.UUID, *UpdateMeRequest) (*MeResponse, error)
 	ChangePassword(context.Context, uuid.UUID, *ChangePasswordRequest) error
@@ -90,7 +91,9 @@ func (h *Handler) Register(api *echo.Group) {
 //	GET   /me
 //	PATCH /me
 //	POST  /me/password
+//	POST  /auth/refresh
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
+	api.POST("/auth/refresh", h.PostRefresh, jwtMiddleware)
 	api.GET("/me", h.GetMe, jwtMiddleware)
 	api.PATCH("/me", h.PatchMe, jwtMiddleware)
 	api.POST("/me/password", h.PostChangePassword, jwtMiddleware)
@@ -122,6 +125,19 @@ func (h *Handler) PostLogin(c echo.Context) error {
 		return httpx.Unprocessable(err.Error())
 	}
 	resp, err := h.svc.Login(c.Request().Context(), &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// PostRefresh 刷新当前网页登录 JWT。
+func (h *Handler) PostRefresh(c echo.Context) error {
+	userID, err := currentUserID(c)
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.RefreshToken(c.Request().Context(), userID)
 	if err != nil {
 		return err
 	}

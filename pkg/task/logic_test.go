@@ -310,6 +310,28 @@ func TestTaskServiceConstructionAndSkillLoading(t *testing.T) {
 	require.Equal(t, 1, recommender.listCalls)
 	require.Equal(t, []db.Skill{loadedSkill}, svc.allSkills)
 
+	refreshedSkill := db.Skill{ID: "refreshed", Name: "Refreshed"}
+	recommender = &fakeTaskSkillRecommender{skills: []db.Skill{refreshedSkill}}
+	svc = &Service{
+		skillSvc:          recommender,
+		allSkills:         []db.Skill{cachedSkill},
+		allSkillsLoadedAt: time.Now().Add(-skillCatalogTTL - time.Second),
+	}
+	got, err = svc.skills(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []db.Skill{refreshedSkill}, got)
+	require.Equal(t, 1, recommender.listCalls)
+
+	recommender = &fakeTaskSkillRecommender{err: errors.New("offline")}
+	svc = &Service{
+		skillSvc:          recommender,
+		allSkills:         []db.Skill{cachedSkill},
+		allSkillsLoadedAt: time.Now().Add(-skillCatalogTTL - time.Second),
+	}
+	got, err = svc.skills(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []db.Skill{cachedSkill}, got)
+
 	svc = &Service{skillSvc: &fakeTaskSkillRecommender{err: errors.New("offline")}}
 	_, err = svc.skills(context.Background())
 	require.Error(t, err)

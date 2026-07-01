@@ -341,6 +341,9 @@ func TestDeliveryServiceTargetCRUDAndHistory(t *testing.T) {
 	if len(updated.EventTypes) != 1 || updated.EventTypes[0] != eventRunFailed {
 		t.Fatalf("updated target = %#v", updated)
 	}
+	if queries.targetForUserArg.ID != targetID || queries.targetForUserArg.UserID != userID {
+		t.Fatalf("target for user arg = %#v", queries.targetForUserArg)
+	}
 	var updateCfg deliveryTargetConfig
 	if err := json.Unmarshal(queries.updateTargetArg.Config, &updateCfg); err != nil || updateCfg.URL != "https://example.com/hook" || len(updateCfg.EventTypes) != 1 || updateCfg.EventTypes[0] != eventRunFailed {
 		t.Fatalf("update target config = %#v %v", updateCfg, err)
@@ -840,8 +843,9 @@ type fakeDeliveryQueries struct {
 	run    db.Run
 	runErr error
 
-	target    db.DeliveryTarget
-	targetErr error
+	target           db.DeliveryTarget
+	targetErr        error
+	targetForUserArg db.GetDeliveryTargetByIDForUserParams
 
 	defaultTarget db.DeliveryTarget
 	defaultGetErr error
@@ -951,6 +955,17 @@ func (q *fakeDeliveryQueries) GetRunByID(context.Context, uuid.UUID) (db.Run, er
 }
 
 func (q *fakeDeliveryQueries) GetDeliveryTargetByID(context.Context, uuid.UUID) (db.DeliveryTarget, error) {
+	return q.target, q.targetErr
+}
+
+func (q *fakeDeliveryQueries) GetDeliveryTargetByIDForUser(_ context.Context, arg db.GetDeliveryTargetByIDForUserParams) (db.DeliveryTarget, error) {
+	q.targetForUserArg = arg
+	if q.targetErr != nil {
+		return db.DeliveryTarget{}, q.targetErr
+	}
+	if q.target.UserID != uuid.Nil && q.target.UserID != arg.UserID {
+		return db.DeliveryTarget{}, pgx.ErrNoRows
+	}
 	return q.target, q.targetErr
 }
 
