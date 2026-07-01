@@ -452,14 +452,30 @@ func TestChangePassword_HappyPathAndGuards(t *testing.T) {
 	require.NoError(t, err)
 
 	err = svc.ChangePassword(ctx, uid, &ChangePasswordRequest{
-		CurrentPassword: "wrong-password",
-		NewPassword:     newPassword,
+		CurrentPassword:    "wrong-password",
+		NewPassword:        newPassword,
+		NewPasswordConfirm: newPassword,
 	})
-	assertHTTPStatus(t, err, http.StatusUnauthorized)
+	assertHTTPStatus(t, err, http.StatusBadRequest)
 
 	err = svc.ChangePassword(ctx, uid, &ChangePasswordRequest{
-		CurrentPassword: oldPassword,
-		NewPassword:     newPassword,
+		CurrentPassword:    oldPassword,
+		NewPassword:        newPassword,
+		NewPasswordConfirm: "different-secret",
+	})
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	err = svc.ChangePassword(ctx, uid, &ChangePasswordRequest{
+		CurrentPassword:    oldPassword,
+		NewPassword:        oldPassword,
+		NewPasswordConfirm: oldPassword,
+	})
+	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
+
+	err = svc.ChangePassword(ctx, uid, &ChangePasswordRequest{
+		CurrentPassword:    oldPassword,
+		NewPassword:        newPassword,
+		NewPasswordConfirm: newPassword,
 	})
 	require.NoError(t, err)
 

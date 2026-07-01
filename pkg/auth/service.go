@@ -345,6 +345,13 @@ WHERE id = $1 AND deleted_at IS NULL
 
 // ChangePassword 修改当前邮箱密码用户的密码。
 func (s *Service) ChangePassword(ctx context.Context, userID uuid.UUID, req *ChangePasswordRequest) error {
+	if req.NewPasswordConfirm != "" && req.NewPasswordConfirm != req.NewPassword {
+		return httpx.Unprocessable("两次输入的新密码不一致")
+	}
+	if req.CurrentPassword == req.NewPassword {
+		return httpx.Unprocessable("新密码不能与当前密码相同")
+	}
+
 	user, err := s.queries.GetUserByID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -357,7 +364,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID uuid.UUID, req *Cha
 		return httpx.BadRequest("第三方登录账号暂不支持设置密码")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(*user.PasswordHash), []byte(req.CurrentPassword)); err != nil {
-		return httpx.Unauthorized("当前密码错误")
+		return httpx.BadRequest("当前密码错误")
 	}
 
 	hashed, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcryptCost)

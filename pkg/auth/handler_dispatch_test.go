@@ -130,7 +130,7 @@ func TestAuthHandlerDispatchesServiceSuccess(t *testing.T) {
 		c, rec := newAuthRecorderContext(
 			http.MethodPost,
 			"/me/password",
-			`{"current_password":"old-password","new_password":"new-password-123"}`,
+			`{"current_password":"old-password","new_password":"new-password-123","new_password_confirm":"new-password-123"}`,
 			userID.String(),
 		)
 
@@ -140,7 +140,7 @@ func TestAuthHandlerDispatchesServiceSuccess(t *testing.T) {
 		if rec.Code != http.StatusNoContent {
 			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 		}
-		if mock.changePasswordUserID != userID || mock.changePasswordReq == nil || mock.changePasswordReq.NewPassword != "new-password-123" {
+		if mock.changePasswordUserID != userID || mock.changePasswordReq == nil || mock.changePasswordReq.NewPassword != "new-password-123" || mock.changePasswordReq.NewPasswordConfirm != "new-password-123" {
 			t.Fatalf("captured change password = user %s req %#v", mock.changePasswordUserID, mock.changePasswordReq)
 		}
 	})
@@ -180,14 +180,14 @@ func TestAuthHandlerPropagatesServiceErrors(t *testing.T) {
 	})
 
 	t.Run("change password", func(t *testing.T) {
-		mock := &mockAuthService{changePasswordErr: httpx.Unauthorized("bad password")}
+		mock := &mockAuthService{changePasswordErr: httpx.BadRequest("bad password")}
 		c, _ := newAuthRecorderContext(
 			http.MethodPost,
 			"/me/password",
-			`{"current_password":"old-password","new_password":"new-password-123"}`,
+			`{"current_password":"old-password","new_password":"new-password-123","new_password_confirm":"new-password-123"}`,
 			userID.String(),
 		)
-		requireAuthHTTPStatus(t, NewHandler(mock).PostChangePassword(c), http.StatusUnauthorized)
+		requireAuthHTTPStatus(t, NewHandler(mock).PostChangePassword(c), http.StatusBadRequest)
 	})
 }
 
