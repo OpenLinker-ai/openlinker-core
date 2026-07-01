@@ -45,25 +45,27 @@ type UpdateVisibilityRequest struct {
 // Creator 字段仅在 admin 人工处理队列等接口填充，普通创作者列表为空。
 // EndpointAuthHeader 不返回（避免泄露），仅 owner GET 需要时才单独返回。
 type AgentResponse struct {
-	ID                  string   `json:"id"`
-	Slug                string   `json:"slug"`
-	Name                string   `json:"name"`
-	Description         string   `json:"description"`
-	EndpointURL         string   `json:"endpoint_url"`
-	PricePerCallCents   int32    `json:"price_per_call_cents"`
-	Tags                []string `json:"tags"`
-	Status              string   `json:"status"` // 派生，老前端兼容
-	LifecycleStatus     string   `json:"lifecycle_status"`
-	Visibility          string   `json:"visibility"`
-	CertificationStatus string   `json:"certification_status"`
-	RejectionReason     *string  `json:"rejection_reason,omitempty"`
-	TotalCalls          int32    `json:"total_calls"`
-	TotalRevenueCents   int64    `json:"total_revenue_cents"`
-	ConnectionMode      string   `json:"connection_mode"`
-	MCPToolName         *string  `json:"mcp_tool_name,omitempty"`
-	CreatedAt           string   `json:"created_at"`
-	CertifiedAt         *string  `json:"certified_at,omitempty"`
-	Creator             *Creator `json:"creator,omitempty"`
+	ID                  string        `json:"id"`
+	Slug                string        `json:"slug"`
+	Name                string        `json:"name"`
+	Description         string        `json:"description"`
+	EndpointURL         string        `json:"endpoint_url"`
+	PricePerCallCents   int32         `json:"price_per_call_cents"`
+	Tags                []string      `json:"tags"`
+	Status              string        `json:"status"` // 派生，老前端兼容
+	LifecycleStatus     string        `json:"lifecycle_status"`
+	Visibility          string        `json:"visibility"`
+	CertificationStatus string        `json:"certification_status"`
+	RejectionReason     *string       `json:"rejection_reason,omitempty"`
+	TotalCalls          int32         `json:"total_calls"`
+	TotalRevenueCents   int64         `json:"total_revenue_cents"`
+	ConnectionMode      string        `json:"connection_mode"`
+	MCPToolName         *string       `json:"mcp_tool_name,omitempty"`
+	Availability        *Availability `json:"availability,omitempty"`
+	Readiness           *Readiness    `json:"readiness,omitempty"`
+	CreatedAt           string        `json:"created_at"`
+	CertifiedAt         *string       `json:"certified_at,omitempty"`
+	Creator             *Creator      `json:"creator,omitempty"`
 }
 
 // Creator admin 视图嵌入的创作者信息。

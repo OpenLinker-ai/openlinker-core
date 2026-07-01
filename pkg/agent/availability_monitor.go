@@ -111,12 +111,12 @@ func (s *Service) RunDueAvailabilityChecks(ctx context.Context, limit, staleSeco
 	}
 	for i := range agents {
 		agentRow := agents[i]
-		before := s.agentAvailability(ctx, agentRow.ID)
+		before := s.agentAvailability(ctx, agentRow.ID, agentRow.ConnectionMode)
 		dryRun, err := s.RunDryRun(ctx, agentRow.ID, agentRow.CreatorID)
 		resp.Checked++
 		if err != nil {
 			errMsg := err.Error()
-			availability := s.markAvailabilityAfterDryRun(ctx, agentRow.ID, "fail", errMsg)
+			availability := s.markAvailabilityAfterDryRun(ctx, &agentRow, "fail", errMsg)
 			resp.Failed++
 			alert, alertErr := s.createAvailabilityFailureAlert(ctx, &agentRow, availability, errMsg, nil)
 			if alertErr != nil {

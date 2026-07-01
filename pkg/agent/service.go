@@ -136,7 +136,7 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 		return nil, httpx.Internal("创建 Agent 失败")
 	}
 
-	resp := toAgentResponse(&created)
+	resp := s.toAgentResponseWithReadiness(ctx, &created)
 	s.ensureOnboardingStatusBestEffort(ctx, created.ID)
 	return &resp, nil
 }
@@ -206,7 +206,7 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 		MCPToolName:        connection.MCPToolName,
 	})
 	if err == nil {
-		resp := toAgentResponse(&updated)
+		resp := s.toAgentResponseWithReadiness(ctx, &updated)
 		return &resp, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -271,7 +271,7 @@ func (s *Service) SetVisibility(ctx context.Context, agentID, creatorID uuid.UUI
 		log.Error().Err(err).Msg("agent.SetVisibility: refresh")
 		return nil, httpx.Internal("查询 Agent 失败")
 	}
-	resp := toAgentResponse(&updated)
+	resp := s.toAgentResponseWithReadiness(ctx, &updated)
 	return &resp, nil
 }
 
@@ -300,7 +300,7 @@ func (s *Service) ListMyAgents(ctx context.Context, creatorID uuid.UUID) ([]Agen
 	}
 	out := make([]AgentResponse, 0, len(rows))
 	for i := range rows {
-		out = append(out, toAgentResponse(&rows[i]))
+		out = append(out, s.toAgentResponseWithReadiness(ctx, &rows[i]))
 	}
 	return out, nil
 }
@@ -318,14 +318,22 @@ func (s *Service) GetMyAgent(ctx context.Context, agentID, creatorID uuid.UUID) 
 		log.Error().Err(err).Msg("agent.GetMyAgent: GetAgentByIDForOwner")
 		return nil, httpx.Internal("查询 Agent 失败")
 	}
-	resp := toAgentResponse(&a)
+	resp := s.toAgentResponseWithReadiness(ctx, &a)
 	return &resp, nil
 }
 
 // GetAgentOnboarding 查询创作者侧接入完成度、能力声明和 examples。
 func (s *Service) GetAgentOnboarding(ctx context.Context, agentID, creatorID uuid.UUID) (*OnboardingResponse, error) {
-	if err := s.ensureAgentOwner(ctx, agentID, creatorID); err != nil {
-		return nil, err
+	agentRow, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
+		ID:        agentID,
+		CreatorID: creatorID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("Agent 不存在")
+		}
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("agent.GetAgentOnboarding: GetAgentByIDForOwner")
+		return nil, httpx.Internal("查询 Agent 失败")
 	}
 	s.ensureOnboardingStatusBestEffort(ctx, agentID)
 
@@ -365,7 +373,7 @@ func (s *Service) GetAgentOnboarding(ctx context.Context, agentID, creatorID uui
 		Status:       toOnboardingStatusResponse(&status),
 		Capability:   capability,
 		Examples:     examples,
-		Availability: s.agentAvailability(ctx, agentID),
+		Availability: s.agentAvailability(ctx, agentID, agentRow.ConnectionMode),
 	}, nil
 }
 
@@ -587,7 +595,7 @@ func (s *Service) RunDryRun(ctx context.Context, agentID, creatorID uuid.UUID) (
 		log.Warn().Err(dbErr).Str("agent_id", agentID.String()).Msg("agent.RunDryRun: UpdateDryRunResult")
 	}
 
-	availability := s.markAvailabilityAfterDryRun(ctx, agentID, result, errMsg)
+	availability := s.markAvailabilityAfterDryRun(ctx, &agentRow, result, errMsg)
 
 	return &DryRunResponse{
 		Result:       result,
@@ -848,22 +856,22 @@ func deriveLegacyStatus(a *db.Agent) string {
 	}
 }
 
-func (s *Service) markAvailabilityAfterDryRun(ctx context.Context, agentID uuid.UUID, result, errMsg string) Availability {
+func (s *Service) markAvailabilityAfterDryRun(ctx context.Context, agent *db.Agent, result, errMsg string) Availability {
 	var (
 		snapshot db.AgentAvailabilitySnapshot
 		err      error
 	)
 	if result == "pass" {
-		snapshot, err = s.queries.MarkAgentAvailabilitySuccess(ctx, agentID)
+		snapshot, err = s.queries.MarkAgentAvailabilitySuccess(ctx, agent.ID)
 	} else {
-		snapshot, err = s.queries.MarkAgentAvailabilityFailure(ctx, agentID)
+		snapshot, err = s.queries.MarkAgentAvailabilityFailure(ctx, agent.ID)
 	}
 	if err != nil {
-		log.Warn().Err(err).Str("agent_id", agentID.String()).Str("result", result).Str("error", errMsg).
+		log.Warn().Err(err).Str("agent_id", agent.ID.String()).Str("result", result).Str("error", errMsg).
 			Msg("agent.markAvailabilityAfterDryRun")
-		return s.agentAvailability(ctx, agentID)
+		return s.agentAvailability(ctx, agent.ID, agent.ConnectionMode)
 	}
-	return availabilityFromSnapshot(snapshot)
+	return s.runtimeAwareAvailability(ctx, agent.ID, agent.ConnectionMode, availabilityFromSnapshot(snapshot))
 }
 
 func availabilityFromSnapshot(snapshot db.AgentAvailabilitySnapshot) Availability {
@@ -876,15 +884,50 @@ func availabilityFromSnapshot(snapshot db.AgentAvailabilitySnapshot) Availabilit
 	)
 }
 
-func (s *Service) agentAvailability(ctx context.Context, agentID uuid.UUID) Availability {
+func (s *Service) agentAvailability(ctx context.Context, agentID uuid.UUID, connectionMode string) Availability {
 	snapshot, err := s.queries.GetAgentAvailabilitySnapshot(ctx, agentID)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.agentAvailability")
 		}
-		return availabilityResponse("unknown", nil, nil, nil, 0)
+		return s.runtimeAwareAvailability(ctx, agentID, connectionMode, availabilityResponse("unknown", nil, nil, nil, 0))
 	}
-	return availabilityFromSnapshot(snapshot)
+	return s.runtimeAwareAvailability(ctx, agentID, connectionMode, availabilityFromSnapshot(snapshot))
+}
+
+func (s *Service) runtimeAwareAvailability(ctx context.Context, agentID uuid.UUID, connectionMode string, availability Availability) Availability {
+	if !isQueuedRuntimeConnectionMode(connectionMode) {
+		return availability
+	}
+	hasRuntime, err := s.queries.HasRecentRuntimePullToken(ctx, agentID)
+	if err != nil {
+		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.runtimeAwareAvailability")
+		return availability
+	}
+	if hasRuntime {
+		return availability
+	}
+	availability.Status = "unreachable"
+	availability.Label = "不可达"
+	availability.Hint = "Runtime Agent 最近没有运行时心跳、WebSocket 连接或领取轮询，暂不建议试用。"
+	return availability
+}
+
+func (s *Service) toAgentResponseWithReadiness(ctx context.Context, a *db.Agent) AgentResponse {
+	resp := toAgentResponse(a)
+	availability := s.agentAvailability(ctx, a.ID, a.ConnectionMode)
+	readiness := readinessForAgent(
+		a.Slug,
+		a.LifecycleStatus,
+		a.Visibility,
+		a.CertificationStatus,
+		availability,
+		0,
+		nil,
+	)
+	resp.Availability = &availability
+	resp.Readiness = &readiness
+	return resp
 }
 
 func repairHintsForDryRun(agent *db.Agent, errMsg string) []string {
