@@ -603,6 +603,9 @@ func TestRun_HappyPath(t *testing.T) {
 	assert.Equal(t, "run.created", events[0].EventType)
 	assert.Equal(t, "running", events[0].Payload["status"])
 	assert.Equal(t, "run.started", events[1].EventType)
+	assert.Equal(t, "direct_http", events[1].Payload["connection_mode"])
+	assert.Equal(t, "http_endpoint", events[1].Payload["transport"])
+	assert.NotEmpty(t, events[1].Payload["endpoint_host"])
 	assert.Equal(t, int32(3), events[2].Sequence)
 	assert.Equal(t, "run.completed", events[2].EventType)
 	assert.Equal(t, "success", events[2].Payload["status"])
@@ -1338,6 +1341,7 @@ func TestListRunEvents_HappyPath(t *testing.T) {
 	require.Len(t, events, 2)
 	assert.Equal(t, int32(2), events[0].Sequence)
 	assert.Equal(t, "run.started", events[0].EventType)
+	assert.Equal(t, "direct_http", events[0].Payload["connection_mode"])
 	assert.Equal(t, "run.completed", events[1].EventType)
 }
 

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -802,11 +803,7 @@ func (s *Service) createRunningRun(
 		if eventErr := createRunEvent(ctx, q, runID, parentRunID, "run.created", payload); eventErr != nil {
 			return eventErr
 		}
-		if eventErr := createRunEvent(ctx, q, runID, parentRunID, "run.started", map[string]interface{}{
-			"agent_id": agentID.String(),
-			"user_id":  userID.String(),
-			"status":   "running",
-		}); eventErr != nil {
+		if eventErr := createRunEvent(ctx, q, runID, parentRunID, "run.started", runStartedEventPayload(agent, userID)); eventErr != nil {
 			return eventErr
 		}
 		if requirementSnapshot != nil {
@@ -860,6 +857,47 @@ func (s *Service) createRunningRun(
 	s.attachRunRequirementEvidence(ctx, runID, resp)
 	decorateNextAction(resp)
 	return invocation, resp, nil
+}
+
+func runStartedEventPayload(agent db.Agent, userID uuid.UUID) map[string]interface{} {
+	connectionMode := strings.TrimSpace(agent.ConnectionMode)
+	if connectionMode == "" {
+		connectionMode = connectionModeDirectHTTP
+	}
+	payload := map[string]interface{}{
+		"agent_id":        agent.ID.String(),
+		"user_id":         userID.String(),
+		"status":          "running",
+		"connection_mode": connectionMode,
+	}
+	switch connectionMode {
+	case connectionModeMCPServer:
+		payload["transport"] = "mcp_server"
+		if host := endpointHost(agent.EndpointURL); host != "" {
+			payload["endpoint_host"] = host
+		}
+		if agent.MCPToolName != nil && strings.TrimSpace(*agent.MCPToolName) != "" {
+			payload["mcp_tool_name"] = strings.TrimSpace(*agent.MCPToolName)
+		}
+	case connectionModeRuntimePull:
+		payload["transport"] = "runtime_pull"
+	case connectionModeRuntimeWS:
+		payload["transport"] = "runtime_ws"
+	default:
+		payload["transport"] = "http_endpoint"
+		if host := endpointHost(agent.EndpointURL); host != "" {
+			payload["endpoint_host"] = host
+		}
+	}
+	return payload
+}
+
+func endpointHost(endpoint string) string {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u == nil || u.Host == "" {
+		return ""
+	}
+	return u.Host
 }
 
 func (s *Service) effectivePlatformFeeRate(ctx context.Context, agentID uuid.UUID) (float64, error) {

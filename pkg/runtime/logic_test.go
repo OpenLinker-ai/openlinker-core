@@ -109,6 +109,71 @@ func TestRuntimeAuthScopeAndParsingHelpers(t *testing.T) {
 	require.Equal(t, int32(0), n)
 }
 
+func TestRunStartedEventPayloadIncludesConnectionDetails(t *testing.T) {
+	userID := uuid.New()
+	toolName := "search_docs"
+
+	tests := []struct {
+		name          string
+		agent         db.Agent
+		wantMode      string
+		wantTransport string
+		wantHost      string
+		wantTool      string
+	}{
+		{
+			name: "direct http",
+			agent: db.Agent{
+				ID:             uuid.New(),
+				ConnectionMode: connectionModeDirectHTTP,
+				EndpointURL:    "https://agent.example.com/run",
+			},
+			wantMode:      connectionModeDirectHTTP,
+			wantTransport: "http_endpoint",
+			wantHost:      "agent.example.com",
+		},
+		{
+			name: "mcp",
+			agent: db.Agent{
+				ID:             uuid.New(),
+				ConnectionMode: connectionModeMCPServer,
+				EndpointURL:    "https://mcp.example.com/sse",
+				MCPToolName:    &toolName,
+			},
+			wantMode:      connectionModeMCPServer,
+			wantTransport: "mcp_server",
+			wantHost:      "mcp.example.com",
+			wantTool:      toolName,
+		},
+		{
+			name: "runtime ws",
+			agent: db.Agent{
+				ID:             uuid.New(),
+				ConnectionMode: connectionModeRuntimeWS,
+			},
+			wantMode:      connectionModeRuntimeWS,
+			wantTransport: "runtime_ws",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := runStartedEventPayload(tt.agent, userID)
+			require.Equal(t, tt.agent.ID.String(), got["agent_id"])
+			require.Equal(t, userID.String(), got["user_id"])
+			require.Equal(t, "running", got["status"])
+			require.Equal(t, tt.wantMode, got["connection_mode"])
+			require.Equal(t, tt.wantTransport, got["transport"])
+			if tt.wantHost != "" {
+				require.Equal(t, tt.wantHost, got["endpoint_host"])
+			}
+			if tt.wantTool != "" {
+				require.Equal(t, tt.wantTool, got["mcp_tool_name"])
+			}
+		})
+	}
+}
+
 func TestPlatformFeeCents(t *testing.T) {
 	tests := []struct {
 		name string
