@@ -73,13 +73,14 @@ func (h *runtimeWSHub) connections(agentID uuid.UUID) []*runtimeWSConn {
 }
 
 type runtimeWSConn struct {
-	service   *Service
-	ws        *websocket.Conn
-	token     db.AgentRuntimeToken
-	plaintext string
-	send      chan RuntimeWSServerMessage
-	closed    chan struct{}
-	closeOnce sync.Once
+	service        *Service
+	ws             *websocket.Conn
+	token          db.AgentRuntimeToken
+	plaintext      string
+	connectionMode string
+	send           chan RuntimeWSServerMessage
+	closed         chan struct{}
+	closeOnce      sync.Once
 }
 
 // ServeRuntimeWebSocket accepts an Agent-owned outbound WebSocket and uses it
@@ -112,12 +113,13 @@ func (s *Service) ServeRuntimeWebSocket(w http.ResponseWriter, r *http.Request, 
 		return err
 	}
 	conn := &runtimeWSConn{
-		service:   s,
-		ws:        ws,
-		token:     token,
-		plaintext: plaintextToken,
-		send:      make(chan RuntimeWSServerMessage, runtimeWSSendBuffer),
-		closed:    make(chan struct{}),
+		service:        s,
+		ws:             ws,
+		token:          token,
+		plaintext:      plaintextToken,
+		connectionMode: agent.ConnectionMode,
+		send:           make(chan RuntimeWSServerMessage, runtimeWSSendBuffer),
+		closed:         make(chan struct{}),
 	}
 	s.wsHub.register(conn)
 	defer func() {
@@ -363,7 +365,7 @@ func (s *Service) dispatchRuntimeWSRunBestEffort(ctx context.Context, agentID uu
 }
 
 func (s *Service) assignRuntimeWSRun(ctx context.Context, conn *runtimeWSConn) (bool, error) {
-	run, err := s.claimRuntimePullRunOnce(ctx, conn.token)
+	run, err := s.claimRuntimePullRunOnce(ctx, conn.token, conn.connectionMode)
 	if err != nil {
 		return false, err
 	}

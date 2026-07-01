@@ -746,6 +746,16 @@ func TestRuntimePull_StartRunQueuesWhenWorkerOffline(t *testing.T) {
 	require.NotNil(t, claimed)
 	assert.Equal(t, started.RunID, claimed.RunID)
 	assert.Equal(t, "queue while offline", claimed.Input["q"])
+
+	events = readRunEvents(t, pool, runID)
+	dispatchEvent = nil
+	for i := range events {
+		if events[i].EventType == "run.dispatch.claimed" {
+			dispatchEvent = &events[i]
+		}
+	}
+	require.NotNil(t, dispatchEvent)
+	assert.Equal(t, "runtime_pull", dispatchEvent.Payload["connection_mode"])
 }
 
 func TestRuntimePull_EmptyClaimDoesNotRefreshToken(t *testing.T) {

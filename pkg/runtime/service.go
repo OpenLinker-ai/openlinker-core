@@ -1500,7 +1500,7 @@ func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string
 	claimOpts := normalizeRuntimePullClaimOptions(opts...)
 	startedWaiting := time.Now()
 	for {
-		resp, err := s.claimRuntimePullRunOnce(ctx, token)
+		resp, err := s.claimRuntimePullRunOnce(ctx, token, agent.ConnectionMode)
 		if err != nil || resp != nil || claimOpts.Wait <= 0 || time.Since(startedWaiting) >= claimOpts.Wait {
 			return resp, err
 		}
@@ -1535,7 +1535,7 @@ func normalizeRuntimePullClaimOptions(opts ...RuntimePullClaimOptions) RuntimePu
 	return normalized
 }
 
-func (s *Service) claimRuntimePullRunOnce(ctx context.Context, token db.AgentRuntimeToken) (*RuntimePullRunResponse, error) {
+func (s *Service) claimRuntimePullRunOnce(ctx context.Context, token db.AgentRuntimeToken, connectionMode string) (*RuntimePullRunResponse, error) {
 	run, err := s.queries.ClaimRuntimePullRun(ctx, db.ClaimRuntimePullRunParams{
 		AgentID:        token.AgentID,
 		RuntimeTokenID: token.ID,
@@ -1551,10 +1551,14 @@ func (s *Service) claimRuntimePullRunOnce(ctx context.Context, token db.AgentRun
 		return nil, httpx.Internal("领取任务失败")
 	}
 	_ = s.queries.TouchAgentRuntimeToken(ctx, token.ID)
-	s.recordRunEventBestEffort(ctx, run.ID, "run.dispatch.claimed", map[string]interface{}{
+	claimedPayload := map[string]interface{}{
 		"agent_id":         token.AgentID.String(),
 		"runtime_token_id": token.ID.String(),
-	})
+	}
+	if strings.TrimSpace(connectionMode) != "" {
+		claimedPayload["connection_mode"] = strings.TrimSpace(connectionMode)
+	}
+	s.recordRunEventBestEffort(ctx, run.ID, "run.dispatch.claimed", claimedPayload)
 
 	input := map[string]interface{}{}
 	if len(run.Input) > 0 {
