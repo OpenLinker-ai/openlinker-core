@@ -461,11 +461,29 @@ func (q *Queries) ListAgentStatsForCreator(ctx context.Context, creatorID uuid.U
 }
 
 const countAgentsByCreator = `-- name: CountAgentsByCreator :one
-SELECT COUNT(*)::int AS total FROM agents WHERE creator_id = $1`
+SELECT COUNT(*)::int AS total
+FROM agents
+WHERE creator_id = $1
+  AND lifecycle_status = 'active'`
 
-// CountAgentsByCreator 创作者总 Agent 数。
+// CountAgentsByCreator 创作者当前 Agent 数（不包含已下架 disabled）。
 func (q *Queries) CountAgentsByCreator(ctx context.Context, creatorID uuid.UUID) (int32, error) {
 	row := q.db.QueryRow(ctx, countAgentsByCreator, creatorID)
+	var total int32
+	err := row.Scan(&total)
+	return total, err
+}
+
+const countPublicAgentsByCreator = `-- name: CountPublicAgentsByCreator :one
+SELECT COUNT(*)::int AS total
+FROM agents
+WHERE creator_id = $1
+  AND lifecycle_status = 'active'
+  AND visibility = 'public'`
+
+// CountPublicAgentsByCreator 创作者当前公开 Agent 数。
+func (q *Queries) CountPublicAgentsByCreator(ctx context.Context, creatorID uuid.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, countPublicAgentsByCreator, creatorID)
 	var total int32
 	err := row.Scan(&total)
 	return total, err

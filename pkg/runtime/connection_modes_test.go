@@ -54,9 +54,13 @@ func TestCallAgentEndpointSendsDirectHTTPEnvelope(t *testing.T) {
 	require.NoError(t, callErr)
 	require.Nil(t, agentErr)
 	assert.Equal(t, "direct ok", output["answer"])
-	require.Len(t, events, 1)
-	assert.Equal(t, "run.message.delta", events[0].EventType)
-	assert.Equal(t, "direct progress", events[0].Payload["text"])
+	require.Len(t, events, 2)
+	assert.Equal(t, "run.status.changed", events[0].EventType)
+	assert.Equal(t, "endpoint_response_received", events[0].Payload["status"])
+	assert.Equal(t, "output_object", events[0].Payload["response_shape"])
+	assert.Equal(t, []string{"answer"}, events[0].Payload["output_keys"])
+	assert.Equal(t, "run.message.delta", events[1].EventType)
+	assert.Equal(t, "direct progress", events[1].Payload["text"])
 
 	assert.Equal(t, token, capturedHeader.Get("X-OpenLinker-Token"))
 	assert.Equal(t, runID.String(), capturedHeader.Get("X-OpenLinker-Run-Id"))
@@ -73,6 +77,38 @@ func TestCallAgentEndpointSendsDirectHTTPEnvelope(t *testing.T) {
 	assert.Equal(t, http.MethodPost, captured.A2A.CallAgentMethod)
 	assert.Equal(t, "ol_live", captured.A2A.RuntimeTokenType)
 	assert.Equal(t, []string{"agent:call"}, captured.A2A.RuntimeScopes)
+}
+
+func TestCallAgentEndpointPreservesTopLevelJSONResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"json":{"text":"hello"},"url":"https://agent.example/run","headers":{"X-Test":"ok"}}`))
+	}))
+	defer server.Close()
+
+	svc := &Service{
+		cfg:        &config.Config{APIURL: "https://api.example.test"},
+		httpClient: server.Client(),
+	}
+	agent := &db.Agent{
+		EndpointURL:    server.URL,
+		ConnectionMode: connectionModeDirectHTTP,
+	}
+
+	output, events, agentErr, callErr := svc.callAgentEndpoint(context.Background(), agent, uuid.New(), uuid.New(), &RunRequest{
+		Input: map[string]interface{}{"text": "hello"},
+	}, nil)
+
+	require.NoError(t, callErr)
+	require.Nil(t, agentErr)
+	assert.Equal(t, "https://agent.example/run", output["url"])
+	jsonBody, ok := output["json"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "hello", jsonBody["text"])
+	require.Len(t, events, 1)
+	assert.Equal(t, "run.status.changed", events[0].EventType)
+	assert.Equal(t, "top_level_object", events[0].Payload["response_shape"])
+	assert.Contains(t, events[0].Payload["output_keys"], "json")
 }
 
 func TestCallMCPServerUsesToolsCall(t *testing.T) {

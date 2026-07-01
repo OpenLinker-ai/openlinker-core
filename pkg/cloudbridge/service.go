@@ -37,6 +37,7 @@ type cloudBridgeQueries interface {
 	CountRunsForCreatorThisMonth(context.Context, uuid.UUID) (int32, error)
 	SumEarningsByCreatorThisMonth(context.Context, uuid.UUID) (int64, error)
 	CountAgentsByCreator(context.Context, uuid.UUID) (int32, error)
+	CountPublicAgentsByCreator(context.Context, uuid.UUID) (int32, error)
 	CountPendingAgentsByCreator(context.Context, uuid.UUID) (int32, error)
 	ListAgentStatsForCreator(context.Context, uuid.UUID) ([]db.ListAgentStatsForCreatorRow, error)
 }
@@ -215,6 +216,11 @@ func (s *Service) buildCreatorSummary(ctx context.Context, creatorID uuid.UUID) 
 		log.Error().Err(err).Msg("cloudbridge.buildCreatorSummary: CountAgentsByCreator")
 		return nil, httpx.Internal("查询 Agent 数失败")
 	}
+	publicAgents, err := s.queries.CountPublicAgentsByCreator(ctx, creatorID)
+	if err != nil {
+		log.Error().Err(err).Msg("cloudbridge.buildCreatorSummary: CountPublicAgentsByCreator")
+		return nil, httpx.Internal("查询公开 Agent 数失败")
+	}
 	pendingAgents, err := s.queries.CountPendingAgentsByCreator(ctx, creatorID)
 	if err != nil {
 		log.Error().Err(err).Msg("cloudbridge.buildCreatorSummary: CountPendingAgentsByCreator")
@@ -224,6 +230,7 @@ func (s *Service) buildCreatorSummary(ctx context.Context, creatorID uuid.UUID) 
 		ThisMonthCalls:   monthCalls,
 		ThisMonthRevenue: monthRev,
 		TotalAgents:      totalAgents,
+		PublicAgents:     publicAgents,
 		PendingAgents:    pendingAgents,
 	}, nil
 }

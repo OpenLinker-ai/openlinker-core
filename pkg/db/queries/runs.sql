@@ -314,8 +314,19 @@ WHERE a.creator_id = $1
 ORDER BY a.created_at DESC;
 
 -- name: CountAgentsByCreator :one
--- 创作者总 Agent 数
-SELECT COUNT(*)::int AS total FROM agents WHERE creator_id = $1;
+-- 创作者当前 Agent 数（不包含已下架 disabled）
+SELECT COUNT(*)::int AS total
+FROM agents
+WHERE creator_id = $1
+  AND lifecycle_status = 'active';
+
+-- name: CountPublicAgentsByCreator :one
+-- 创作者当前公开 Agent 数（active + public）
+SELECT COUNT(*)::int AS total
+FROM agents
+WHERE creator_id = $1
+  AND lifecycle_status = 'active'
+  AND visibility = 'public';
 
 -- name: CountPendingAgentsByCreator :one
 -- 创作者人工处理队列 Agent 数

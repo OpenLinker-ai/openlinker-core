@@ -97,6 +97,7 @@ func TestCloudBridgeServiceDashboards(t *testing.T) {
 		creatorMonth:  7,
 		creatorEarned: 330,
 		agentCount:    4,
+		publicCount:   3,
 		pendingCount:  1,
 		listUserRows:  []db.ListRunsByUserWithAgentRow{recentRun},
 	}
@@ -107,7 +108,7 @@ func TestCloudBridgeServiceDashboards(t *testing.T) {
 	if queries.listUserArg.UserID != userID || queries.listUserArg.Limit != recentRuns || queries.listUserArg.Offset != 0 {
 		t.Fatalf("recent query arg = %#v", queries.listUserArg)
 	}
-	if !userResp.IsCreator || userResp.Creator == nil || userResp.Creator.TotalAgents != 4 || userResp.Usage.TotalCalls != 18 {
+	if !userResp.IsCreator || userResp.Creator == nil || userResp.Creator.TotalAgents != 4 || userResp.Creator.PublicAgents != 3 || userResp.Usage.TotalCalls != 18 {
 		t.Fatalf("user dashboard = %#v", userResp)
 	}
 	if len(userResp.RecentRuns) != 1 || userResp.RecentRuns[0].AgentSlug != "analyst" {
@@ -120,6 +121,7 @@ func TestCloudBridgeServiceDashboards(t *testing.T) {
 		creatorMonth:  11,
 		creatorEarned: 900,
 		agentCount:    2,
+		publicCount:   1,
 		pendingCount:  1,
 		agentStatsRows: []db.ListAgentStatsForCreatorRow{
 			{
@@ -139,7 +141,7 @@ func TestCloudBridgeServiceDashboards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCreatorDashboard error = %v", err)
 	}
-	if creatorResp.Summary.ThisMonthCalls != 11 || creatorResp.Summary.ThisMonthRevenue != 900 || len(creatorResp.Agents) != 1 {
+	if creatorResp.Summary.ThisMonthCalls != 11 || creatorResp.Summary.ThisMonthRevenue != 900 || creatorResp.Summary.PublicAgents != 1 || len(creatorResp.Agents) != 1 {
 		t.Fatalf("creator dashboard = %#v", creatorResp)
 	}
 	if creatorResp.Agents[0].ID != statsID.String() || creatorResp.Agents[0].CallsThisMonth != 12 {
@@ -307,6 +309,8 @@ type fakeCloudBridgeQueries struct {
 	creatorEarnErr  error
 	agentCount      int32
 	agentCountErr   error
+	publicCount     int32
+	publicCountErr  error
 	pendingCount    int32
 	pendingCountErr error
 
@@ -360,6 +364,10 @@ func (q *fakeCloudBridgeQueries) SumEarningsByCreatorThisMonth(context.Context, 
 
 func (q *fakeCloudBridgeQueries) CountAgentsByCreator(context.Context, uuid.UUID) (int32, error) {
 	return q.agentCount, q.agentCountErr
+}
+
+func (q *fakeCloudBridgeQueries) CountPublicAgentsByCreator(context.Context, uuid.UUID) (int32, error) {
+	return q.publicCount, q.publicCountErr
 }
 
 func (q *fakeCloudBridgeQueries) CountPendingAgentsByCreator(context.Context, uuid.UUID) (int32, error) {

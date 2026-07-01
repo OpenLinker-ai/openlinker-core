@@ -29,6 +29,7 @@ type CreatorSummary struct {
 	ThisMonthCalls   int32 `json:"this_month_calls_received"`
 	ThisMonthRevenue int64 `json:"this_month_revenue_cents"`
 	TotalAgents      int32 `json:"total_agents"`
+	PublicAgents     int32 `json:"public_agents"`
 	PendingAgents    int32 `json:"pending_agents"`
 }
 

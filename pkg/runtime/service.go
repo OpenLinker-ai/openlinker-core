@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -1955,9 +1956,8 @@ func (s *Service) callAgentEndpoint(
 		return nil, nil, nil, fmt.Errorf("read body: %w", err)
 	}
 
-	// 尝试解析 JSON；解析失败也视为业务级失败（创作者协议错误）
-	var ar AgentResponse
-	if uerr := json.Unmarshal(body, &ar); uerr != nil {
+	output, events, agentErr, responseShape, uerr := decodeAgentEndpointResponse(body)
+	if uerr != nil {
 		return nil, nil, &AgentError{
 			Code:    "INVALID_RESPONSE",
 			Message: "agent endpoint 返回非 JSON: " + truncate(string(body), errMsgMaxLen),
@@ -1965,18 +1965,126 @@ func (s *Service) callAgentEndpoint(
 	}
 
 	// HTTP 状态码 >= 400 或 body.error 非空都是失败
-	if resp.StatusCode >= 400 || ar.Error != nil {
-		if ar.Error == nil {
+	if resp.StatusCode >= 400 || agentErr != nil {
+		if agentErr == nil {
 			msg := truncate(string(body), errMsgMaxLen)
-			ar.Error = &AgentError{
+			agentErr = &AgentError{
 				Code:    fmt.Sprintf("HTTP_%d", resp.StatusCode),
 				Message: msg,
 			}
 		}
-		return nil, nil, ar.Error, nil
+		return nil, nil, agentErr, nil
 	}
 
-	return ar.Output, ar.Events, nil, nil
+	events = prependEndpointResponseEvent(events, agent.ConnectionMode, responseShape, output)
+	return output, events, nil, nil
+}
+
+func decodeAgentEndpointResponse(body []byte) (map[string]interface{}, []AgentEvent, *AgentError, string, error) {
+	var raw interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, nil, nil, "", err
+	}
+
+	var envelope AgentResponse
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		// Top-level arrays / strings are valid JSON, but not the canonical
+		// envelope. Preserve them as output so generic HTTP endpoints are still
+		// useful in Playground.
+		return map[string]interface{}{"response": raw}, nil, nil, jsonValueShape(raw), nil
+	}
+
+	rawMap, ok := raw.(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{"response": raw}, envelope.Events, envelope.Error, jsonValueShape(raw), nil
+	}
+
+	output, shape := normalizeAgentEndpointOutput(rawMap)
+	return output, envelope.Events, envelope.Error, shape, nil
+}
+
+func normalizeAgentEndpointOutput(raw map[string]interface{}) (map[string]interface{}, string) {
+	if raw == nil {
+		return map[string]interface{}{}, "empty"
+	}
+	if value, ok := raw["output"]; ok {
+		if value == nil {
+			return map[string]interface{}{}, "output_null"
+		}
+		if output, ok := value.(map[string]interface{}); ok {
+			return output, "output_object"
+		}
+		return map[string]interface{}{"output": value}, "output_value"
+	}
+
+	output := make(map[string]interface{}, len(raw))
+	for key, value := range raw {
+		switch key {
+		case "events", "metadata", "cost_usd":
+			continue
+		case "error":
+			if value == nil {
+				continue
+			}
+		}
+		output[key] = value
+	}
+	if len(output) == 0 {
+		return map[string]interface{}{}, "empty_object"
+	}
+	return output, "top_level_object"
+}
+
+func jsonValueShape(value interface{}) string {
+	switch value.(type) {
+	case map[string]interface{}:
+		return "top_level_object"
+	case []interface{}:
+		return "top_level_array"
+	case string:
+		return "top_level_string"
+	case float64:
+		return "top_level_number"
+	case bool:
+		return "top_level_boolean"
+	case nil:
+		return "top_level_null"
+	default:
+		return "json_value"
+	}
+}
+
+func prependEndpointResponseEvent(events []AgentEvent, connectionMode, responseShape string, output map[string]interface{}) []AgentEvent {
+	payload := map[string]interface{}{
+		"status":          "endpoint_response_received",
+		"connection_mode": connectionMode,
+		"response_shape":  responseShape,
+	}
+	if connectionMode == "" {
+		payload["connection_mode"] = connectionModeDirectHTTP
+	}
+	if len(output) > 0 {
+		payload["output_keys"] = sortedMapKeys(output, 12)
+	}
+	return append([]AgentEvent{{
+		EventType: "run.status.changed",
+		Payload:   payload,
+	}}, events...)
+}
+
+func sortedMapKeys(value map[string]interface{}, limit int) []string {
+	if len(value) == 0 || limit == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if limit > 0 && len(keys) > limit {
+		keys = keys[:limit]
+	}
+	return keys
 }
 
 type mcpToolCallRequest struct {

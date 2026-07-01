@@ -3521,6 +3521,7 @@ func TestDashboardRunQueriesScanRowsAndScalars(t *testing.T) {
 		{"CountRunsByUserThisMonth", func() (int32, error) { return q.CountRunsByUserThisMonth(context.Background(), userID) }},
 		{"CountRunsForCreatorThisMonth", func() (int32, error) { return q.CountRunsForCreatorThisMonth(context.Background(), creatorID) }},
 		{"CountAgentsByCreator", func() (int32, error) { return q.CountAgentsByCreator(context.Background(), creatorID) }},
+		{"CountPublicAgentsByCreator", func() (int32, error) { return q.CountPublicAgentsByCreator(context.Background(), creatorID) }},
 		{"CountPendingAgentsByCreator", func() (int32, error) { return q.CountPendingAgentsByCreator(context.Background(), creatorID) }},
 	}
 	for _, tc := range scalarInt32Checks {
