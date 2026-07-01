@@ -51,8 +51,6 @@ func TestAuthHandlerValidationOAuthHelpersAndRoutes(t *testing.T) {
 		req    *authHandlerRequest
 		want   int
 	}{
-		{name: "register invalid json", method: h.PostRegister, req: &authHandlerRequest{method: http.MethodPost, target: "/", body: "{"}, want: http.StatusBadRequest},
-		{name: "register validation", method: h.PostRegister, req: &authHandlerRequest{method: http.MethodPost, target: "/", body: `{}`}, want: http.StatusUnprocessableEntity},
 		{name: "login invalid json", method: h.PostLogin, req: &authHandlerRequest{method: http.MethodPost, target: "/", body: "{"}, want: http.StatusBadRequest},
 		{name: "login validation", method: h.PostLogin, req: &authHandlerRequest{method: http.MethodPost, target: "/", body: `{}`}, want: http.StatusUnprocessableEntity},
 		{name: "oauth exchange invalid json", method: h.PostOAuthExchange, req: &authHandlerRequest{method: http.MethodPost, target: "/", body: "{"}, want: http.StatusBadRequest},
@@ -111,7 +109,6 @@ func TestAuthHandlerValidationOAuthHelpersAndRoutes(t *testing.T) {
 		routes[route.Method+" "+route.Path] = true
 	}
 	for _, route := range []string{
-		"POST /api/v1/auth/register",
 		"POST /api/v1/auth/login",
 		"POST /api/v1/auth/oauth/exchange",
 		"GET /api/v1/auth/google",

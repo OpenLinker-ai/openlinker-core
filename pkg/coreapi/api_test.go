@@ -186,7 +186,6 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		"GET /api/v1/dashboard",
 		"GET /api/v1/creator/dashboard",
 		"GET /api/v1/creator/agents/:id/runs",
-		"POST /api/v1/auth/register",
 		"GET /api/v1/me",
 		"GET /api/v1/agents",
 		"POST /api/v1/creator/agents",

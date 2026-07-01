@@ -1,8 +1,8 @@
 // Command a2a-demo verifies a real local Agent-to-Agent completion path through a running API.
 //
-// Start the API with ALLOW_LOCAL_HTTP_ENDPOINTS=true before running this command. It creates a
-// throwaway user, self-registers three loopback demo Agents with a registration-purpose access token, publishes
-// a task recommendation, invokes the parent Agent, and fails unless both delegated child runs
+// Start the API with ALLOW_LOCAL_HTTP_ENDPOINTS=true before running this command. It uses
+// an existing user JWT, self-registers three loopback demo Agents with a registration-purpose access token,
+// publishes a task recommendation, invokes the parent Agent, and fails unless both delegated child runs
 // reach success.
 package main
 
@@ -113,6 +113,7 @@ func runMain(args []string, stdout, stderr io.Writer, waitForStop func()) int {
 	fs := flag.NewFlagSet("a2a-demo", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	apiURL := fs.String("api", "http://localhost:8080", "OpenLinker API base URL")
+	token := fs.String("token", os.Getenv("OPENLINKER_DEMO_JWT"), "JWT for an existing OpenLinker user; can also be set with OPENLINKER_DEMO_JWT")
 	serve := fs.Bool("serve", false, "Keep demo endpoints online for repeated Playground calls")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -126,7 +127,7 @@ func runMain(args []string, stdout, stderr io.Writer, waitForStop func()) int {
 	caller := httptest.NewServer(http.HandlerFunc(cfg.callerEndpoint))
 	defer caller.Close()
 
-	api := &client{baseURL: cfg.apiURL, http: &http.Client{Timeout: 10 * time.Second}}
+	api := &client{baseURL: cfg.apiURL, token: strings.TrimSpace(*token), http: &http.Client{Timeout: 10 * time.Second}}
 	result, err := run(api, cfg, caller.URL, worker.URL, reviewer.URL)
 	if err != nil {
 		fmt.Fprintf(stderr, "A2A demo failed: %v\n", err)
@@ -154,14 +155,9 @@ func printServeInstructions(w io.Writer, result *demoResult) {
 }
 
 func run(api *client, cfg *endpointConfig, callerURL, workerURL, reviewerURL string) (*demoResult, error) {
-	email := fmt.Sprintf("a2a-demo-%d@example.local", time.Now().UnixNano())
-	var signedUp authResponse
-	if err := api.do(http.MethodPost, "/api/v1/auth/register", map[string]any{
-		"email": email, "password": "local-demo-pass-123", "display_name": "Local A2A Demo",
-	}, &signedUp); err != nil {
-		return nil, fmt.Errorf("register user: %w", err)
+	if strings.TrimSpace(api.token) == "" {
+		return nil, fmt.Errorf("JWT token required; pass -token or set OPENLINKER_DEMO_JWT")
 	}
-	api.token = signedUp.JWT
 
 	if err := api.do(http.MethodPost, "/api/v1/me/become-creator", map[string]any{}, nil); err != nil {
 		return nil, fmt.Errorf("become creator: %w", err)
@@ -240,7 +236,7 @@ func run(api *client, cfg *endpointConfig, callerURL, workerURL, reviewerURL str
 	}
 
 	fmt.Println("A2A local completion verified")
-	fmt.Printf("user: %s\n", email)
+	fmt.Println("user: existing JWT")
 	taskStatus := "published"
 	if task.PlannerChosen {
 		taskStatus = "published and planner chosen"
@@ -254,7 +250,6 @@ func run(api *client, cfg *endpointConfig, callerURL, workerURL, reviewerURL str
 		fmt.Printf("child run %d: %s [success]\n", i+1, childID)
 	}
 	return &demoResult{
-		Email:       email,
 		ParentAgent: callerAgent.Agent,
 		WorkerAgent: workerAgent.Agent,
 		ReviewAgent: reviewerAgent.Agent,

@@ -30,26 +30,6 @@ func TestAuthHandlerDispatchesServiceSuccess(t *testing.T) {
 		IsAdmin:     true,
 	}
 
-	t.Run("register", func(t *testing.T) {
-		mock := &mockAuthService{registerResp: authResp}
-		c, rec := newAuthRecorderContext(http.MethodPost, "/auth/register", `{"email":"user@example.com","password":"password123","display_name":"User"}`, "")
-
-		if err := NewHandler(mock).PostRegister(c); err != nil {
-			t.Fatalf("PostRegister error = %v", err)
-		}
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
-		}
-		if mock.registerReq == nil || mock.registerReq.Email != "user@example.com" || mock.registerReq.DisplayName != "User" {
-			t.Fatalf("captured register req = %#v", mock.registerReq)
-		}
-		var body AuthResponse
-		decodeAuthDispatchJSON(t, rec, &body)
-		if body.UserID != userID.String() || body.JWT == "" {
-			t.Fatalf("body = %#v", body)
-		}
-	})
-
 	t.Run("login", func(t *testing.T) {
 		mock := &mockAuthService{loginResp: authResp}
 		c, rec := newAuthRecorderContext(http.MethodPost, "/auth/login", `{"email":"user@example.com","password":"password123"}`, "")
@@ -169,12 +149,6 @@ func TestAuthHandlerDispatchesServiceSuccess(t *testing.T) {
 func TestAuthHandlerPropagatesServiceErrors(t *testing.T) {
 	userID := uuid.New()
 
-	t.Run("register", func(t *testing.T) {
-		mock := &mockAuthService{registerErr: httpx.Conflict("邮箱已注册")}
-		c, _ := newAuthRecorderContext(http.MethodPost, "/auth/register", `{"email":"user@example.com","password":"password123","display_name":"User"}`, "")
-		requireAuthHTTPStatus(t, NewHandler(mock).PostRegister(c), http.StatusConflict)
-	})
-
 	t.Run("login", func(t *testing.T) {
 		mock := &mockAuthService{loginErr: httpx.Unauthorized("bad login")}
 		c, _ := newAuthRecorderContext(http.MethodPost, "/auth/login", `{"email":"user@example.com","password":"password123"}`, "")
@@ -218,10 +192,6 @@ func TestAuthHandlerPropagatesServiceErrors(t *testing.T) {
 }
 
 type mockAuthService struct {
-	registerReq  *RegisterRequest
-	registerResp *AuthResponse
-	registerErr  error
-
 	loginReq  *LoginRequest
 	loginResp *AuthResponse
 	loginErr  error
@@ -256,11 +226,6 @@ type mockAuthService struct {
 	changePasswordUserID uuid.UUID
 	changePasswordReq    *ChangePasswordRequest
 	changePasswordErr    error
-}
-
-func (m *mockAuthService) Register(_ context.Context, req *RegisterRequest) (*AuthResponse, error) {
-	m.registerReq = req
-	return m.registerResp, m.registerErr
 }
 
 func (m *mockAuthService) Login(_ context.Context, req *LoginRequest) (*AuthResponse, error) {

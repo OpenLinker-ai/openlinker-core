@@ -20,7 +20,7 @@ func TestRunMainCompletesWithoutServe(t *testing.T) {
 	defer api.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := runMain([]string{"-api", api.URL}, &stdout, &stderr, func() {
+	code := runMain([]string{"-api", api.URL, "-token", "jwt-token"}, &stdout, &stderr, func() {
 		t.Fatal("non-serve run should not wait for a stop signal")
 	})
 
@@ -35,14 +35,19 @@ func TestRunMainHandlesFlagAndRunErrors(t *testing.T) {
 	require.Equal(t, 2, code)
 	require.Contains(t, stderr.String(), "flag provided but not defined")
 
+	stderr.Reset()
+	code = runMain([]string{"-api", "http://127.0.0.1:1"}, &bytes.Buffer{}, &stderr, func() {})
+	require.Equal(t, 1, code)
+	require.Contains(t, stderr.String(), "A2A demo failed: JWT token required")
+
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "register failed", http.StatusBadGateway)
+		http.Error(w, "become creator failed", http.StatusBadGateway)
 	}))
 	defer api.Close()
 	stderr.Reset()
-	code = runMain([]string{"-api", api.URL}, &bytes.Buffer{}, &stderr, func() {})
+	code = runMain([]string{"-api", api.URL, "-token", "jwt-token"}, &bytes.Buffer{}, &stderr, func() {})
 	require.Equal(t, 1, code)
-	require.Contains(t, stderr.String(), "A2A demo failed: register user")
+	require.Contains(t, stderr.String(), "A2A demo failed: become creator")
 }
 
 func TestPrintServeInstructions(t *testing.T) {
@@ -199,13 +204,6 @@ func TestRunCompletesLocalA2AFlow(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/api/v1/auth/register":
-			require.Equal(t, http.MethodPost, r.Method)
-			var body map[string]any
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-			require.Contains(t, body["email"], "a2a-demo-")
-			require.Equal(t, "local-demo-pass-123", body["password"])
-			_, _ = w.Write([]byte(`{"jwt":"jwt-token"}`))
 		case "/api/v1/me/become-creator":
 			require.Equal(t, "Bearer jwt-token", r.Header.Get("Authorization"))
 			_, _ = w.Write([]byte(`{}`))
@@ -266,10 +264,9 @@ func TestRunCompletesLocalA2AFlow(t *testing.T) {
 	defer api.Close()
 	cfg.apiURL = api.URL
 
-	result, err := run(&client{baseURL: api.URL, http: api.Client()}, cfg, "http://caller/run", "http://worker/run", "http://reviewer/run")
+	result, err := run(&client{baseURL: api.URL, token: "jwt-token", http: api.Client()}, cfg, "http://caller/run", "http://worker/run", "http://reviewer/run")
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Contains(t, result.Email, "a2a-demo-")
 	require.Equal(t, agentResponse{ID: "planner-agent", Slug: "demo-planner"}, result.ParentAgent)
 	require.Equal(t, agentResponse{ID: "worker-agent", Slug: "demo-worker"}, result.WorkerAgent)
 	require.Equal(t, agentResponse{ID: "reviewer-agent", Slug: "demo-reviewer"}, result.ReviewAgent)
@@ -326,7 +323,7 @@ func TestRunValidatesParentChildrenAndTrace(t *testing.T) {
 			defer api.Close()
 			cfg := &endpointConfig{apiURL: api.URL}
 
-			_, err := run(&client{baseURL: api.URL, http: api.Client()}, cfg, "http://caller/run", "http://worker/run", "http://reviewer/run")
+			_, err := run(&client{baseURL: api.URL, token: "jwt-token", http: api.Client()}, cfg, "http://caller/run", "http://worker/run", "http://reviewer/run")
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tt.wantErr)
 		})
@@ -447,8 +444,6 @@ func newRunValidationServer(t *testing.T, parentBody, childBody, eventsBody stri
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/api/v1/auth/register":
-			_, _ = w.Write([]byte(`{"jwt":"jwt-token"}`))
 		case "/api/v1/me/become-creator":
 			_, _ = w.Write([]byte(`{}`))
 		case "/api/v1/creator/agent-registration-tokens":

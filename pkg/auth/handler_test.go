@@ -10,7 +10,6 @@
 //	func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc)
 //
 //	路由：
-//	  POST /api/v1/auth/register   -> 201 AuthResponse
 //	  POST /api/v1/auth/login      -> 200 AuthResponse
 //	  GET  /api/v1/auth/google     -> 302（不在测试覆盖中）
 //	  GET  /api/v1/auth/google/cb  -> 302（不在测试覆盖中）
@@ -33,6 +32,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
@@ -136,99 +136,15 @@ type authResponseBody struct {
 }
 
 // ─────────────────────────────────────────────────────────
-// POST /auth/register
-// ─────────────────────────────────────────────────────────
-
-func TestPostRegister_HappyPath(t *testing.T) {
-	srv, _ := setupTestServer(t)
-
-	body := map[string]string{
-		"email":        "handler-happy-" + uuid.NewString()[:8] + "@example.com",
-		"password":     "supersecret123",
-		"display_name": "Handler Tester",
-	}
-	resp, raw := postJSON(t, srv.URL+"/api/v1/auth/register", body, nil)
-	assert.Equal(t, http.StatusCreated, resp.StatusCode, "body=%s", string(raw))
-
-	var out authResponseBody
-	require.NoError(t, json.Unmarshal(raw, &out))
-	assert.NotEmpty(t, out.JWT)
-	assert.NotEmpty(t, out.UserID)
-	assert.Equal(t, body["email"], out.Email)
-	assert.Equal(t, body["display_name"], out.DisplayName)
-}
-
-func TestPostRegister_InvalidJSON(t *testing.T) {
-	srv, _ := setupTestServer(t)
-
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/auth/register",
-		bytes.NewBufferString("not-json{{{"))
-	require.NoError(t, err)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "invalid JSON should yield 400")
-}
-
-func TestPostRegister_EmailFormat(t *testing.T) {
-	srv, _ := setupTestServer(t)
-
-	body := map[string]string{
-		"email":        "not-an-email",
-		"password":     "supersecret123",
-		"display_name": "Bad Email",
-	}
-	resp, raw := postJSON(t, srv.URL+"/api/v1/auth/register", body, nil)
-	// validator 失败 -> 422
-	assert.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode,
-		"invalid email format must be 422; body=%s", string(raw))
-}
-
-func TestPostRegister_ShortPassword(t *testing.T) {
-	srv, _ := setupTestServer(t)
-
-	body := map[string]string{
-		"email":        "short-pwd-" + uuid.NewString()[:8] + "@example.com",
-		"password":     "short",
-		"display_name": "Short Pwd",
-	}
-	resp, raw := postJSON(t, srv.URL+"/api/v1/auth/register", body, nil)
-	assert.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode,
-		"password<8 must be 422; body=%s", string(raw))
-}
-
-func TestPostRegister_DuplicateEmail(t *testing.T) {
-	srv, _ := setupTestServer(t)
-
-	email := "handler-dup-" + uuid.NewString()[:8] + "@example.com"
-	body := map[string]string{
-		"email":        email,
-		"password":     "supersecret123",
-		"display_name": "Dup1",
-	}
-	resp, _ := postJSON(t, srv.URL+"/api/v1/auth/register", body, nil)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-
-	body["display_name"] = "Dup2"
-	resp2, _ := postJSON(t, srv.URL+"/api/v1/auth/register", body, nil)
-	assert.Equal(t, http.StatusConflict, resp2.StatusCode, "duplicate email must be 409")
-}
-
-// ─────────────────────────────────────────────────────────
 // POST /auth/login
 // ─────────────────────────────────────────────────────────
 
 func TestPostLogin_HappyPath(t *testing.T) {
-	srv, _ := setupTestServer(t)
+	srv, pool := setupTestServer(t)
 
 	email := "login-handler-" + uuid.NewString()[:8] + "@example.com"
 	password := "supersecret123"
-	regResp, _ := postJSON(t, srv.URL+"/api/v1/auth/register", map[string]string{
-		"email": email, "password": password, "display_name": "L Tester",
-	}, nil)
-	require.Equal(t, http.StatusCreated, regResp.StatusCode)
+	insertHandlerPasswordUser(t, pool, email, password, "L Tester")
 
 	loginResp, raw := postJSON(t, srv.URL+"/api/v1/auth/login", map[string]string{
 		"email": email, "password": password,
@@ -242,12 +158,10 @@ func TestPostLogin_HappyPath(t *testing.T) {
 }
 
 func TestPostLogin_WrongPassword(t *testing.T) {
-	srv, _ := setupTestServer(t)
+	srv, pool := setupTestServer(t)
 
 	email := "login-wrong-" + uuid.NewString()[:8] + "@example.com"
-	postJSON(t, srv.URL+"/api/v1/auth/register", map[string]string{
-		"email": email, "password": "rightpass1", "display_name": "x",
-	}, nil)
+	insertHandlerPasswordUser(t, pool, email, "rightpass1", "x")
 
 	resp, _ := postJSON(t, srv.URL+"/api/v1/auth/login", map[string]string{
 		"email": email, "password": "wrongpass",
@@ -267,25 +181,21 @@ func TestGetMe_NoAuth(t *testing.T) {
 }
 
 func TestGetMe_ValidToken(t *testing.T) {
-	srv, _ := setupTestServer(t)
+	srv, pool := setupTestServer(t)
 
 	email := "me-handler-" + uuid.NewString()[:8] + "@example.com"
-	regResp, regBody := postJSON(t, srv.URL+"/api/v1/auth/register", map[string]string{
-		"email": email, "password": "supersecret123", "display_name": "Me User",
-	}, nil)
-	require.Equal(t, http.StatusCreated, regResp.StatusCode)
-
-	var auth authResponseBody
-	require.NoError(t, json.Unmarshal(regBody, &auth))
+	uid := insertHandlerPasswordUser(t, pool, email, "supersecret123", "Me User")
+	jwt, err := GenerateToken(uid.String(), testHandlerSecret, time.Hour)
+	require.NoError(t, err)
 
 	resp, raw := getJSON(t, srv.URL+"/api/v1/me", map[string]string{
-		"Authorization": "Bearer " + auth.JWT,
+		"Authorization": "Bearer " + jwt,
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "body=%s", string(raw))
 
 	var me MeResponse
 	require.NoError(t, json.Unmarshal(raw, &me))
-	assert.Equal(t, auth.UserID, me.UserID)
+	assert.Equal(t, uid.String(), me.UserID)
 	assert.Equal(t, email, me.Email)
 	assert.Equal(t, "Me User", me.DisplayName)
 }
@@ -297,4 +207,18 @@ func TestGetMe_InvalidToken(t *testing.T) {
 		"Authorization": "Bearer not.a.real.jwt",
 	})
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+}
+
+func insertHandlerPasswordUser(t *testing.T, pool *pgxpool.Pool, email, password, displayName string) uuid.UUID {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	require.NoError(t, err)
+	var uid uuid.UUID
+	err = pool.QueryRow(context.Background(), `
+INSERT INTO users (email, password_hash, display_name)
+VALUES ($1, $2, $3)
+RETURNING id
+`, email, string(hash), displayName).Scan(&uid)
+	require.NoError(t, err)
+	return uid
 }
