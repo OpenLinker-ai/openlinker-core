@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -150,6 +151,50 @@ func TestCallMCPServerUsesToolsCall(t *testing.T) {
 	args, ok := params["arguments"].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, "hello", args["text"])
+}
+
+func TestCallAgentEndpointRejectsOversizedResponseBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", maxAgentResponseBodyBytes+1)))
+	}))
+	defer server.Close()
+
+	svc := &Service{httpClient: server.Client()}
+	agent := &db.Agent{
+		EndpointURL:    server.URL,
+		ConnectionMode: connectionModeDirectHTTP,
+	}
+
+	_, _, agentErr, callErr := svc.callAgentEndpoint(context.Background(), agent, uuid.New(), uuid.New(), &RunRequest{
+		Input: map[string]interface{}{"text": "hello"},
+	}, nil)
+
+	require.Error(t, callErr)
+	require.Nil(t, agentErr)
+	assert.Contains(t, callErr.Error(), "response body exceeds")
+}
+
+func TestCallMCPServerRejectsOversizedResponseBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", maxAgentResponseBodyBytes+1)))
+	}))
+	defer server.Close()
+
+	svc := &Service{httpClient: server.Client()}
+	toolName := "analyze_contract"
+	agent := &db.Agent{
+		EndpointURL:    server.URL,
+		ConnectionMode: connectionModeMCPServer,
+		MCPToolName:    &toolName,
+	}
+
+	_, _, agentErr, callErr := svc.callMCPServer(context.Background(), agent, uuid.New(), uuid.New(), &RunRequest{
+		Input: map[string]interface{}{"text": "hello"},
+	}, nil)
+
+	require.Error(t, callErr)
+	require.Nil(t, agentErr)
+	assert.Contains(t, callErr.Error(), "response body exceeds")
 }
 
 func TestNormalizeMCPResultPrefersStructuredContent(t *testing.T) {

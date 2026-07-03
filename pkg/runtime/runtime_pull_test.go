@@ -163,6 +163,87 @@ func TestRuntimePull_ClaimAndCompleteSuccess(t *testing.T) {
 	assert.Contains(t, eventTypes, "run.completed")
 }
 
+func TestRuntimePull_CompleteSettledSuccessCreditsCreator(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	wallet := &recordingRuntimeWalletCharger{ops: make(chan recordedWalletOp, 4), chargeOK: true}
+	svc.SetWalletCharger(wallet)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 20, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
+	markRuntimePullAvailable(t, svc, token)
+
+	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "paid queued"}), "")
+	require.NoError(t, err)
+	require.Equal(t, "running", started.Status)
+	require.Equal(t, int32(20), started.CostCents)
+	charge := waitRecordedWalletOp(t, wallet.ops)
+	assert.Equal(t, recordedWalletOp{Kind: "charge", UserID: userID, Amount: 20}, charge)
+
+	claimed, err := svc.ClaimRuntimePullRun(ctx, token)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	runID := mustParseUUID(t, claimed.RunID)
+
+	completed, err := svc.CompleteRuntimePullRun(ctx, token, runID, &runtime.RuntimePullResultRequest{
+		Status: "success",
+		Output: map[string]interface{}{
+			"answer": "settled",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "success", completed.Status)
+	require.Equal(t, int32(20), completed.CostCents)
+
+	credit := waitRecordedWalletOp(t, wallet.ops)
+	assert.Equal(t, recordedWalletOp{Kind: "credit", UserID: creatorID, Amount: 15}, credit)
+}
+
+func TestRuntimePull_CompleteSettledFailureRefundsUser(t *testing.T) {
+	for _, status := range []string{"failed", "timeout"} {
+		t.Run(status, func(t *testing.T) {
+			pool := setupTestDB(t)
+			svc := newTestService(t, pool)
+			wallet := &recordingRuntimeWalletCharger{ops: make(chan recordedWalletOp, 4), chargeOK: true}
+			svc.SetWalletCharger(wallet)
+			ctx := context.Background()
+
+			userID := insertUserWithBalance(t, pool, 1000)
+			creatorID := insertCreator(t, pool)
+			agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 20, "approved")
+			setRuntimePullMode(t, pool, agentID)
+			token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
+			markRuntimePullAvailable(t, svc, token)
+
+			started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "refund queued"}), "")
+			require.NoError(t, err)
+			require.Equal(t, "running", started.Status)
+			charge := waitRecordedWalletOp(t, wallet.ops)
+			assert.Equal(t, recordedWalletOp{Kind: "charge", UserID: userID, Amount: 20}, charge)
+
+			claimed, err := svc.ClaimRuntimePullRun(ctx, token)
+			require.NoError(t, err)
+			require.NotNil(t, claimed)
+			runID := mustParseUUID(t, claimed.RunID)
+
+			completed, err := svc.CompleteRuntimePullRun(ctx, token, runID, &runtime.RuntimePullResultRequest{
+				Status: status,
+				Error:  &runtime.AgentError{Code: "AGENT_FAIL", Message: "queued failure"},
+			})
+			require.NoError(t, err)
+			require.Equal(t, status, completed.Status)
+			require.Equal(t, int32(0), completed.CostCents)
+
+			refund := waitRecordedWalletOp(t, wallet.ops)
+			assert.Equal(t, recordedWalletOp{Kind: "refund", UserID: userID, Amount: 20}, refund)
+		})
+	}
+}
+
 func TestRuntimePull_RunDelegatedQueuesFreeChildAndCompletesParent(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)

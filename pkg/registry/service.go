@@ -21,8 +21,10 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/credential"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/endpointurl"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
@@ -45,20 +47,56 @@ const (
 
 var defaultNodeScopes = []string{"heartbeat", "listing:sync", "proxy:pull", "proxy:result"}
 
-var proxyArtifactHTTPClient = &http.Client{Timeout: 30 * time.Second}
-var remoteRegistryHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var proxyArtifactHTTPClient = endpointurl.NewHTTPClient(30*time.Second, false)
+var remoteRegistryHTTPClient = endpointurl.NewHTTPClient(30*time.Second, false)
 var errFederationInviteExpired = errors.New("registry federation invite expired")
 
 type Service struct {
-	q    *db.Queries
-	pool *pgxpool.Pool
+	q                  *db.Queries
+	pool               *pgxpool.Pool
+	allowLocalHTTP     bool
+	remoteHTTPClient   *http.Client
+	artifactHTTPClient *http.Client
 }
 
 type registryPeerRow = db.RegistryPeer
 type registryFederationInviteRow = db.RegistryFederationInvite
 
-func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{q: db.New(pool), pool: pool}
+func NewService(pool *pgxpool.Pool, cfg ...*config.Config) *Service {
+	allowLocalHTTP := false
+	if len(cfg) > 0 && cfg[0] != nil {
+		allowLocalHTTP = cfg[0].AllowLocalHTTPEndpoints
+	}
+	return &Service{
+		q:                  db.New(pool),
+		pool:               pool,
+		allowLocalHTTP:     allowLocalHTTP,
+		remoteHTTPClient:   endpointurl.NewHTTPClient(30*time.Second, allowLocalHTTP),
+		artifactHTTPClient: endpointurl.NewHTTPClient(30*time.Second, allowLocalHTTP),
+	}
+}
+
+func (s *Service) SetHTTPClientsForTest(remote, artifact *http.Client) {
+	if remote != nil {
+		s.remoteHTTPClient = remote
+	}
+	if artifact != nil {
+		s.artifactHTTPClient = artifact
+	}
+}
+
+func (s *Service) remoteClient() *http.Client {
+	if s != nil && s.remoteHTTPClient != nil {
+		return s.remoteHTTPClient
+	}
+	return remoteRegistryHTTPClient
+}
+
+func (s *Service) artifactClient() *http.Client {
+	if s != nil && s.artifactHTTPClient != nil {
+		return s.artifactHTTPClient
+	}
+	return proxyArtifactHTTPClient
 }
 
 func (s *Service) CreateNode(ctx context.Context, ownerID uuid.UUID, req *CreateNodeRequest) (*RegistryNodeResponse, error) {
@@ -402,7 +440,7 @@ func (s *Service) CreateRegistryPeer(ctx context.Context, ownerID uuid.UUID, req
 	if len([]rune(name)) < 2 || len([]rune(name)) > 120 {
 		return nil, httpx.Unprocessable("name 长度需在 2-120 字符之间")
 	}
-	apiBaseURL, err := normalizeRemoteAPIBaseURL(req.APIBaseURL)
+	apiBaseURL, err := s.normalizeRemoteAPIBaseURL(req.APIBaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -475,7 +513,7 @@ func (s *Service) CreateRegistryFederationInvite(ctx context.Context, ownerID uu
 	if len([]rune(name)) < 2 || len([]rune(name)) > 120 {
 		return nil, httpx.Unprocessable("name 长度需在 2-120 字符之间")
 	}
-	apiBaseURL, err := normalizeRemoteAPIBaseURL(req.APIBaseURL)
+	apiBaseURL, err := s.normalizeRemoteAPIBaseURL(req.APIBaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -577,7 +615,7 @@ func (s *Service) ConsumeRegistryFederationInvite(ctx context.Context, req *Cons
 }
 
 func (s *Service) ExchangeRegistryFederationInvite(ctx context.Context, ownerID uuid.UUID, req *ExchangeRegistryFederationInviteRequest) (*RegistryFederationExchangeResponse, error) {
-	exchangeURL, err := normalizeFederationExchangeURL(req.ExchangeURL)
+	exchangeURL, err := s.normalizeFederationExchangeURL(req.ExchangeURL)
 	if err != nil {
 		return nil, err
 	}
@@ -594,7 +632,7 @@ func (s *Service) ExchangeRegistryFederationInvite(ctx context.Context, ownerID 
 		return nil, httpx.Unprocessable("exchange_url 不是合法 URL")
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := remoteRegistryHTTPClient.Do(httpReq)
+	resp, err := s.remoteClient().Do(httpReq)
 	if err != nil {
 		log.Warn().Err(err).Str("exchange_url", exchangeURL).Msg("registry.ExchangeRegistryFederationInvite: request")
 		return nil, httpx.ServiceUnavailable("远端 Registry Federation Exchange 不可用")
@@ -730,7 +768,7 @@ func (s *Service) CreateRemoteProxyRun(ctx context.Context, requestingUserID uui
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", "OpenLinker-Cross-Registry-Router/1.0")
 
-	httpResp, err := remoteRegistryHTTPClient.Do(httpReq)
+	httpResp, err := s.remoteClient().Do(httpReq)
 	if err != nil {
 		log.Warn().Err(err).Str("remote_api_base_url", remoteRoot).Msg("registry.CreateRemoteProxyRun: request")
 		return nil, httpx.ServiceUnavailable("远端 Registry 暂不可用")
@@ -784,7 +822,7 @@ func (s *Service) resolveRemoteRegistryCredentials(ctx context.Context, requesti
 			}
 			return row.APIBaseURL, row.BearerToken, row.ID.String(), "registry_peer_auto", nil
 		}
-		remoteRoot, err := normalizeRemoteAPIBaseURL(req.RemoteAPIBaseURL)
+		remoteRoot, err := s.normalizeRemoteAPIBaseURL(req.RemoteAPIBaseURL)
 		if err != nil {
 			return "", "", "", "", err
 		}
@@ -1046,6 +1084,9 @@ func (s *Service) DownloadProxyRunArtifact(ctx context.Context, requestingUserID
 	if fileURL.Scheme != "http" && fileURL.Scheme != "https" {
 		return nil, httpx.Unprocessable("该产物 file_uri 仅支持 http/https")
 	}
+	if err := endpointurl.Validate(fileURL.String(), s.allowLocalHTTP); err != nil {
+		return nil, httpx.Unprocessable("该产物 file_uri 必须是可访问的公网 HTTPS；本地开发需显式允许 loopback")
+	}
 	if artifact.FileSizeBytes != nil && *artifact.FileSizeBytes > maxProxyArtifactDownloadBytes {
 		return nil, httpx.NewError(http.StatusRequestEntityTooLarge, httpx.CodeUnprocessable, "产物超过代理下载大小限制")
 	}
@@ -1056,7 +1097,7 @@ func (s *Service) DownloadProxyRunArtifact(ctx context.Context, requestingUserID
 	}
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", "OpenLinker-Artifact-Proxy/1.0")
-	resp, err := proxyArtifactHTTPClient.Do(req)
+	resp, err := s.artifactClient().Do(req)
 	if err != nil {
 		log.Warn().Err(err).Str("artifact_id", artifactID.String()).Str("file_uri", fileURL.String()).
 			Msg("registry.DownloadProxyRunArtifact: fetch")
@@ -1165,6 +1206,17 @@ func normalizeRemoteAPIBaseURL(raw string) (string, error) {
 	return out, nil
 }
 
+func (s *Service) normalizeRemoteAPIBaseURL(raw string) (string, error) {
+	out, err := normalizeRemoteAPIBaseURL(raw)
+	if err != nil {
+		return "", err
+	}
+	if err := endpointurl.Validate(out, s.allowLocalHTTP); err != nil {
+		return "", httpx.Unprocessable("remote_api_base_url 必须是可访问的公网 HTTPS；本地开发需显式允许 loopback")
+	}
+	return out, nil
+}
+
 func normalizeFederationExchangeURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -1183,6 +1235,17 @@ func normalizeFederationExchangeURL(raw string) (string, error) {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return strings.TrimRight(u.String(), "/"), nil
+}
+
+func (s *Service) normalizeFederationExchangeURL(raw string) (string, error) {
+	out, err := normalizeFederationExchangeURL(raw)
+	if err != nil {
+		return "", err
+	}
+	if err := endpointurl.Validate(out, s.allowLocalHTTP); err != nil {
+		return "", httpx.Unprocessable("exchange_url 必须是可访问的公网 HTTPS；本地开发需显式允许 loopback")
+	}
+	return out, nil
 }
 
 func normalizeScopes(scopes []string) ([]string, error) {

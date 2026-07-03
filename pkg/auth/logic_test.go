@@ -109,6 +109,7 @@ func TestAuthHandlerValidationOAuthHelpersAndRoutes(t *testing.T) {
 		routes[route.Method+" "+route.Path] = true
 	}
 	for _, route := range []string{
+		"POST /api/v1/auth/register",
 		"POST /api/v1/auth/login",
 		"POST /api/v1/auth/oauth/exchange",
 		"GET /api/v1/auth/google",

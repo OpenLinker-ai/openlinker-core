@@ -39,6 +39,7 @@ const errMsgMaxLen = 500
 const defaultRunEventsLimit int32 = 100
 const maxRunEventsLimit int32 = 500
 const maxAgentResponseEvents = 50
+const maxAgentResponseBodyBytes = 4 << 20
 const taskCallbackSecretByteLen = 32
 const maxRunMessageContentLen = 10000
 const runtimePullClaimTTL = 5 * time.Minute
@@ -200,9 +201,7 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		pool:         pool,
 		cfg:          cfg,
 		wsHub:        newRuntimeWSHub(),
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+		httpClient:   endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
 	}
 }
 
@@ -1621,6 +1620,7 @@ func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken str
 		duration = int32(time.Since(state.StartedAt).Milliseconds())
 	}
 	triggerExternalDelivery := s.shouldTriggerExternalDelivery(ctx, runID)
+	settle := s.walletCharger != nil && state.CostCents > 0
 	var resp *RunResponse
 	switch req.Status {
 	case "success":
@@ -1628,19 +1628,19 @@ func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken str
 		if output == nil {
 			output = map[string]interface{}{}
 		}
-		resp = s.handleSuccess(ctx, runID, token.AgentID, agent.CreatorID, state.CostCents, state.CreatorRevenueCents, output, req.Events, duration, false, triggerExternalDelivery)
+		resp = s.handleSuccess(ctx, runID, token.AgentID, agent.CreatorID, state.CostCents, state.CreatorRevenueCents, output, req.Events, duration, settle, triggerExternalDelivery)
 	case "failed":
 		agentErr := req.Error
 		if agentErr == nil {
 			agentErr = &AgentError{Code: "AGENT_REPORTED_FAILURE", Message: "Agent runtime reported failed"}
 		}
-		resp = s.handleFailure(ctx, runID, state.UserID, token.AgentID, state.CostCents, duration, nil, agentErr, false, triggerExternalDelivery)
+		resp = s.handleFailure(ctx, runID, state.UserID, token.AgentID, state.CostCents, duration, nil, agentErr, settle, triggerExternalDelivery)
 	case "timeout":
 		agentErr := req.Error
 		if agentErr == nil {
 			agentErr = &AgentError{Code: "TIMEOUT", Message: "Agent runtime reported timeout"}
 		}
-		resp = s.handleFailure(ctx, runID, state.UserID, token.AgentID, state.CostCents, duration, nil, agentErr, false, triggerExternalDelivery)
+		resp = s.handleFailure(ctx, runID, state.UserID, token.AgentID, state.CostCents, duration, nil, agentErr, settle, triggerExternalDelivery)
 	default:
 		return nil, httpx.BadRequest("status 取值非法")
 	}
@@ -1993,7 +1993,7 @@ func (s *Service) callAgentEndpoint(
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readAgentResponseBody(resp.Body)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("read body: %w", err)
 	}
@@ -2214,7 +2214,7 @@ func (s *Service) callMCPServer(
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readAgentResponseBody(resp.Body)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("read mcp body: %w", err)
 	}
@@ -2239,6 +2239,17 @@ func (s *Service) callMCPServer(
 		}, nil
 	}
 	return normalizeMCPResult(mr.Result), nil, nil, nil
+}
+
+func readAgentResponseBody(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxAgentResponseBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxAgentResponseBodyBytes {
+		return nil, fmt.Errorf("response body exceeds %d bytes", maxAgentResponseBodyBytes)
+	}
+	return body, nil
 }
 
 func normalizeMCPResult(result map[string]interface{}) map[string]interface{} {

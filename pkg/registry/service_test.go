@@ -16,12 +16,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/registry"
 )
 
 const truncateRegistryBridgeTables = "TRUNCATE proxy_runs, registry_peers, registry_federation_invites, cloud_listing_links, registry_nodes, agent_skills, agents, wallets, users RESTART IDENTITY CASCADE"
 const registryTestDBTimeout = 30 * time.Second
+
+func newLocalRegistryService(pool *pgxpool.Pool) *registry.Service {
+	return registry.NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true})
+}
 
 func setupRegistryBridgeDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -85,7 +90,7 @@ func requireHTTPStatus(t *testing.T, err error, status int) {
 
 func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	pool := setupRegistryBridgeDB(t)
-	svc := registry.NewService(pool)
+	svc := newLocalRegistryService(pool)
 	ctx := context.Background()
 
 	ownerID := insertRegistryOwner(t, pool)
@@ -412,7 +417,7 @@ func TestStartProxyRunWorkerStopsWhenCanceled(t *testing.T) {
 
 func TestStartProxyRunWorkerExpiresStaleProxyRuns(t *testing.T) {
 	pool := setupRegistryBridgeDB(t)
-	svc := registry.NewService(pool)
+	svc := newLocalRegistryService(pool)
 	ctx := context.Background()
 
 	ownerID := insertRegistryOwner(t, pool)
@@ -513,7 +518,7 @@ func TestCreateRemoteProxyRunRoutesToRemoteRegistryAPI(t *testing.T) {
 	}))
 	defer remote.Close()
 
-	svc := registry.NewService(nil)
+	svc := newLocalRegistryService(nil)
 	resp, err := svc.CreateRemoteProxyRun(context.Background(), uuid.Nil, &registry.CreateRemoteProxyRunRequest{
 		RemoteAPIBaseURL:     remote.URL,
 		RemoteBearerToken:    "remote-token-123",
@@ -537,7 +542,7 @@ func TestCreateRemoteProxyRunRoutesToRemoteRegistryAPI(t *testing.T) {
 
 func TestRegistryPeerRoutesRemoteProxyRunWithoutRepeatingCredentials(t *testing.T) {
 	pool := setupRegistryBridgeDB(t)
-	svc := registry.NewService(pool)
+	svc := newLocalRegistryService(pool)
 	ctx := context.Background()
 
 	ownerID := insertRegistryOwner(t, pool)
@@ -629,7 +634,7 @@ func TestRegistryPeerRoutesRemoteProxyRunWithoutRepeatingCredentials(t *testing.
 
 func TestRegistryNodePeerAndRemoteRouteBoundaries(t *testing.T) {
 	pool := setupRegistryBridgeDB(t)
-	svc := registry.NewService(pool)
+	svc := newLocalRegistryService(pool)
 	ctx := context.Background()
 
 	ownerID := insertRegistryOwner(t, pool)
@@ -880,7 +885,7 @@ func TestCreateRemoteProxyRunHandlesRemoteFailures(t *testing.T) {
 			remote := httptest.NewServer(tt.handler)
 			defer remote.Close()
 
-			svc := registry.NewService(nil)
+			svc := newLocalRegistryService(nil)
 			_, err := svc.CreateRemoteProxyRun(context.Background(), uuid.Nil, &registry.CreateRemoteProxyRunRequest{
 				RemoteAPIBaseURL:     remote.URL,
 				RemoteBearerToken:    "explicit-token-123",
@@ -895,7 +900,7 @@ func TestCreateRemoteProxyRunHandlesRemoteFailures(t *testing.T) {
 
 func TestRegistryFederationInviteExchangeCreatesPeer(t *testing.T) {
 	pool := setupRegistryBridgeDB(t)
-	svc := registry.NewService(pool)
+	svc := newLocalRegistryService(pool)
 	ctx := context.Background()
 
 	ownerID := insertRegistryOwner(t, pool)
@@ -976,7 +981,7 @@ func TestRegistryFederationInviteExchangeCreatesPeer(t *testing.T) {
 
 func TestProxyRunPayloadPolicies(t *testing.T) {
 	pool := setupRegistryBridgeDB(t)
-	svc := registry.NewService(pool)
+	svc := newLocalRegistryService(pool)
 	ctx := context.Background()
 
 	ownerID := insertRegistryOwner(t, pool)
@@ -1110,7 +1115,7 @@ func TestProxyRunPayloadPolicies(t *testing.T) {
 
 func TestProxyRunRoutesAcrossMultipleHealthyNodesByLoad(t *testing.T) {
 	pool := setupRegistryBridgeDB(t)
-	svc := registry.NewService(pool)
+	svc := newLocalRegistryService(pool)
 	ctx := context.Background()
 
 	ownerID := insertRegistryOwner(t, pool)
@@ -1194,7 +1199,7 @@ func TestProxyRunRoutesAcrossMultipleHealthyNodesByLoad(t *testing.T) {
 
 func TestProxyRunRetryableFailureRequeues(t *testing.T) {
 	pool := setupRegistryBridgeDB(t)
-	svc := registry.NewService(pool)
+	svc := newLocalRegistryService(pool)
 	ctx := context.Background()
 
 	ownerID := insertRegistryOwner(t, pool)

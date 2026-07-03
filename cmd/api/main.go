@@ -40,6 +40,8 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/wallet"
 )
 
+const maxRequestBodySize = "8M"
+
 func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "migrate" {
 		runMigrate(os.Args[2:])
@@ -171,6 +173,7 @@ func newEcho(cfg *config.Config, stores ...emw.RateLimiterStore) *echo.Echo {
 	e.HidePort = true
 	e.Use(emw.Recover())
 	e.Use(emw.RequestID())
+	e.Use(emw.BodyLimit(maxRequestBodySize))
 	e.Use(emw.CORSWithConfig(emw.CORSConfig{
 		AllowOrigins:     allowedCORSOrigins(cfg),
 		AllowCredentials: true,

@@ -36,6 +36,7 @@ type Handler struct {
 }
 
 type authService interface {
+	Register(context.Context, *RegisterRequest) (*AuthResponse, error)
 	Login(context.Context, *LoginRequest) (*AuthResponse, error)
 	FindOrCreateOAuthUser(context.Context, string, string, string, string, string) (*AuthResponse, error)
 	IssueOAuthCode(context.Context, *AuthResponse) (string, error)
@@ -69,12 +70,14 @@ func (h *Handler) SetConfig(cfg *config.Config) *Handler {
 // Register 注册公开认证路由（不需 JWT）。
 //
 //	POST /auth/login
+//	POST /auth/register
 //	GET  /auth/google
 //	GET  /auth/google/callback
 //	GET  /auth/github
 //	GET  /auth/github/callback
 func (h *Handler) Register(api *echo.Group) {
 	auth := api.Group("/auth")
+	auth.POST("/register", h.PostRegister)
 	auth.POST("/login", h.PostLogin)
 	auth.POST("/oauth/exchange", h.PostOAuthExchange)
 	auth.GET("/google", h.GoogleStart)
@@ -94,6 +97,22 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	api.GET("/me", h.GetMe, jwtMiddleware)
 	api.PATCH("/me", h.PatchMe, jwtMiddleware)
 	api.POST("/me/password", h.PostChangePassword, jwtMiddleware)
+}
+
+// PostRegister 邮箱注册。
+func (h *Handler) PostRegister(c echo.Context) error {
+	var req RegisterRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.Register(c.Request().Context(), &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusCreated, resp)
 }
 
 // PostLogin 邮箱登录。

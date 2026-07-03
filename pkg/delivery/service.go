@@ -120,15 +120,15 @@ type deliveryQueries interface {
 }
 
 func NewService(pool *pgxpool.Pool, cfg ...*config.Config) *Service {
-	s := &Service{
-		queries: db.New(pool),
-		pool:    pool,
-		httpClient: &http.Client{
-			Timeout: httpTimeout,
-		},
-	}
+	allowLocalHTTP := false
 	if len(cfg) > 0 && cfg[0] != nil {
-		s.allowLocalHTTP = cfg[0].AllowLocalHTTPEndpoints
+		allowLocalHTTP = cfg[0].AllowLocalHTTPEndpoints
+	}
+	s := &Service{
+		queries:        db.New(pool),
+		pool:           pool,
+		httpClient:     endpointurl.NewHTTPClient(httpTimeout, allowLocalHTTP),
+		allowLocalHTTP: allowLocalHTTP,
 	}
 	if pool != nil {
 		s.txRunner = pgxDeliveryTxRunner{pool: pool}

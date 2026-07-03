@@ -121,15 +121,15 @@ type webhookQueries interface {
 
 // NewService 构造 Service。
 func NewService(pool *pgxpool.Pool, cfg ...*config.Config) *Service {
-	s := &Service{
-		queries: db.New(pool),
-		pool:    pool,
-		httpClient: &http.Client{
-			Timeout: httpTimeout,
-		},
-	}
+	allowLocalHTTP := false
 	if len(cfg) > 0 && cfg[0] != nil {
-		s.allowLocalHTTP = cfg[0].AllowLocalHTTPEndpoints
+		allowLocalHTTP = cfg[0].AllowLocalHTTPEndpoints
+	}
+	s := &Service{
+		queries:        db.New(pool),
+		pool:           pool,
+		httpClient:     endpointurl.NewHTTPClient(httpTimeout, allowLocalHTTP),
+		allowLocalHTTP: allowLocalHTTP,
 	}
 	return s
 }
@@ -139,10 +139,11 @@ func NewService(pool *pgxpool.Pool, cfg ...*config.Config) *Service {
 // 校验：
 //  1. agent 必须存在
 //  2. agent.creator_id == userID（防越权）
-//  3. URL 必须 https（schema CHECK 兜底，但前置返回友好错误）
+//  3. URL 必须满足共享出网策略（schema CHECK 兜底，但前置返回友好错误）
 func (s *Service) SetWebhook(ctx context.Context, agentID, userID uuid.UUID, url string) (*SetWebhookResponse, error) {
-	if !strings.HasPrefix(url, "https://") {
-		return nil, httpx.BadRequest("webhook_url 必须以 https:// 开头")
+	url = strings.TrimSpace(url)
+	if err := endpointurl.Validate(url, s.allowLocalHTTP); err != nil {
+		return nil, httpx.BadRequest("webhook_url 必须是可访问的公网 HTTPS；本地开发需开启 ALLOW_LOCAL_HTTP_ENDPOINTS 后才允许 loopback")
 	}
 	if len(url) > 500 {
 		return nil, httpx.BadRequest("webhook_url 过长")
