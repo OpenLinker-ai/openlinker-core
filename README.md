@@ -25,7 +25,7 @@ Excluded:
 
 - wallet balances, charges, withdrawals, and Stripe payment flows
 - hosted marketplace ranking and commercial dashboard composition
-- cloud-only API key product surfaces
+- cloud-only User Token product surfaces
 - official recommendation, certification, and abuse policy internals
 
 Those belong in `openlinker-cloud` or hosted product services.

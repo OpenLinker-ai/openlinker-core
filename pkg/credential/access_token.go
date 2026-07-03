@@ -13,7 +13,7 @@ const (
 	RandomBytes      = 32
 	PrefixLen        = len(UserTokenPrefix) + 4
 
-	// BcryptCost matches user passwords and cloud API keys.
+	// BcryptCost matches user passwords and cloud User Tokens.
 	BcryptCost = 12
 )
 
