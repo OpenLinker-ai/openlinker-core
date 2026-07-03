@@ -542,6 +542,58 @@ func TestRuntimeHandlerRuntimeAuthAndResultValidationEdges(t *testing.T) {
 	requireRuntimeHTTPStatus(t, NewHandler(&mockRuntimeService{}).PostRuntimePullResult(badJSONCtx), http.StatusBadRequest)
 }
 
+func TestRuntimeHandlerRuntimeTokenValidationPrecedesBusinessRateLimits(t *testing.T) {
+	revokedErr := httpx.Unauthorized("访问令牌无效或已撤销")
+
+	t.Run("heartbeat", func(t *testing.T) {
+		token := "ol_agent_revoked_heartbeat"
+		mock := &mockRuntimeService{
+			heartbeatResp: &AgentHeartbeatResponse{AgentID: uuid.NewString()},
+		}
+		h := NewHandler(mock)
+
+		firstCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
+			method:  http.MethodPost,
+			target:  "/api/v1/agent-runtime/heartbeat",
+			headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
+		})
+		if err := h.PostAgentHeartbeat(firstCtx); err != nil {
+			t.Fatalf("initial heartbeat error = %v", err)
+		}
+
+		mock.validateRuntimeTokenErr = revokedErr
+		revokedCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
+			method:  http.MethodPost,
+			target:  "/api/v1/agent-runtime/heartbeat",
+			headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
+		})
+		requireRuntimeHTTPStatus(t, h.PostAgentHeartbeat(revokedCtx), http.StatusUnauthorized)
+	})
+
+	t.Run("claim", func(t *testing.T) {
+		token := "ol_agent_revoked_claim"
+		mock := &mockRuntimeService{}
+		h := NewHandler(mock)
+
+		firstCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
+			method:  http.MethodGet,
+			target:  "/api/v1/agent-runtime/runs/claim",
+			headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
+		})
+		if err := h.ClaimRuntimePullRun(firstCtx); err != nil {
+			t.Fatalf("initial claim error = %v", err)
+		}
+
+		mock.validateRuntimeTokenErr = revokedErr
+		revokedCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
+			method:  http.MethodGet,
+			target:  "/api/v1/agent-runtime/runs/claim",
+			headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
+		})
+		requireRuntimeHTTPStatus(t, h.ClaimRuntimePullRun(revokedCtx), http.StatusUnauthorized)
+	})
+}
+
 type mockRuntimeService struct {
 	err error
 
@@ -581,6 +633,10 @@ type mockRuntimeService struct {
 	claimToken string
 	claimWait  time.Duration
 	claimResp  *RuntimePullRunResponse
+
+	validateRuntimeTokenErr       error
+	validateRuntimeTokenPlaintext string
+	validateRuntimeTokenScopes    []string
 
 	heartbeatToken string
 	heartbeatResp  *AgentHeartbeatResponse
@@ -646,6 +702,15 @@ func (m *mockRuntimeService) ClaimRuntimePullRun(_ context.Context, token string
 		m.claimWait = opts[0].Wait
 	}
 	return m.claimResp, m.err
+}
+
+func (m *mockRuntimeService) ValidateRuntimeToken(_ context.Context, token string, scopes ...string) error {
+	m.validateRuntimeTokenPlaintext = token
+	m.validateRuntimeTokenScopes = append([]string(nil), scopes...)
+	if m.validateRuntimeTokenErr != nil {
+		return m.validateRuntimeTokenErr
+	}
+	return m.err
 }
 
 func (m *mockRuntimeService) HeartbeatAgent(_ context.Context, token string) (*AgentHeartbeatResponse, error) {

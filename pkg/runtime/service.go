@@ -1904,6 +1904,11 @@ func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext, requiredSco
 	return s.verifyRuntimeTokenAny(ctx, plaintext, requiredScope)
 }
 
+func (s *Service) ValidateRuntimeToken(ctx context.Context, plaintext string, acceptedScopes ...string) error {
+	_, err := s.verifyRuntimeTokenAny(ctx, plaintext, acceptedScopes...)
+	return err
+}
+
 func (s *Service) verifyRuntimeTokenAny(ctx context.Context, plaintext string, acceptedScopes ...string) (db.AgentRuntimeToken, error) {
 	plaintext = strings.TrimSpace(plaintext)
 	if !credential.HasAnyPrefix(plaintext, credential.AgentTokenPrefix) ||

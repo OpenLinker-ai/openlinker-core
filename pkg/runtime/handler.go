@@ -40,6 +40,7 @@ type runtimeService interface {
 	ListRunMessages(context.Context, uuid.UUID, uuid.UUID) ([]RunMessageResponse, error)
 	ReportRunEvent(context.Context, uuid.UUID, string, *ReportRunEventRequest) (*RunEventResponse, error)
 	ClaimRuntimePullRun(context.Context, string, ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error)
+	ValidateRuntimeToken(context.Context, string, ...string) error
 	HeartbeatAgent(context.Context, string) (*AgentHeartbeatResponse, error)
 	CompleteRuntimePullRun(context.Context, string, uuid.UUID, *RuntimePullResultRequest) (*RunResponse, error)
 	ServeRuntimeWebSocket(http.ResponseWriter, *http.Request, string) error
@@ -350,6 +351,12 @@ func (h *Handler) ClaimRuntimePullRun(c echo.Context) error {
 		}
 		return err
 	}
+	if err := h.svc.ValidateRuntimeToken(c.Request().Context(), token, "agent:pull"); err != nil {
+		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterTokenKey(token)); retry > 0 {
+			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
+		}
+		return err
+	}
 	wait, err := runtimePullClaimWait(c.QueryParam("wait"))
 	if err != nil {
 		return err
@@ -393,6 +400,12 @@ func (h *Handler) PostAgentHeartbeat(c echo.Context) error {
 	token, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
 	if err != nil {
 		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterIPKey(c)); retry > 0 {
+			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
+		}
+		return err
+	}
+	if err := h.svc.ValidateRuntimeToken(c.Request().Context(), token, "agent:pull", "agent:call"); err != nil {
+		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterTokenKey(token)); retry > 0 {
 			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
 		}
 		return err
