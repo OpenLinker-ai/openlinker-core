@@ -150,7 +150,6 @@ SET agent_id = $2,
     scopes = $3,
     status = 'active_runtime',
     redeemed_at = NOW(),
-    last_used_at = NOW(),
     expires_at = NULL
 WHERE id = $1
   AND creator_user_id = $4

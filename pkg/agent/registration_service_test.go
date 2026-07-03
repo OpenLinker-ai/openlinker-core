@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -65,16 +66,18 @@ func TestRegistrationService_RegisterAgentViaToken_HappyPath(t *testing.T) {
 	var status string
 	var agentID uuid.UUID
 	var redeemed bool
+	var lastUsedAt *time.Time
 	err = pool.QueryRow(ctx,
-		`SELECT status, agent_id, redeemed_at IS NOT NULL
+		`SELECT status, agent_id, redeemed_at IS NOT NULL, last_used_at
 		 FROM agent_tokens
 		 WHERE id = $1`,
 		uuid.MustParse(minted.ID),
-	).Scan(&status, &agentID, &redeemed)
+	).Scan(&status, &agentID, &redeemed, &lastUsedAt)
 	require.NoError(t, err)
 	require.Equal(t, "active_runtime", status)
 	require.Equal(t, uuid.MustParse(resp.Agent.ID), agentID)
 	require.True(t, redeemed)
+	require.Nil(t, lastUsedAt, "registration redeems Agent Token but must not mark runtime activity before heartbeat")
 }
 
 func TestRegistrationService_RegisterAgentViaToken_RevokedRejected(t *testing.T) {
