@@ -34,9 +34,10 @@ JOIN users u ON u.id = a.creator_id
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
 LEFT JOIN LATERAL (
     SELECT MAX(last_used_at) AS last_runtime_token_used_at
-    FROM agent_runtime_tokens
+    FROM agent_tokens
     WHERE agent_id = a.id
       AND revoked_at IS NULL
+      AND status = 'active_runtime'
       AND 'agent:pull' = ANY(scopes)
 ) rt ON TRUE
 LEFT JOIN LATERAL (
@@ -194,9 +195,10 @@ FROM agents a
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
 LEFT JOIN LATERAL (
     SELECT MAX(last_used_at) AS last_runtime_token_used_at
-    FROM agent_runtime_tokens
+    FROM agent_tokens
     WHERE agent_id = a.id
       AND revoked_at IS NULL
+      AND status = 'active_runtime'
       AND 'agent:pull' = ANY(scopes)
 ) rt ON TRUE
 WHERE a.visibility = 'public'

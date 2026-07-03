@@ -1,35 +1,39 @@
 package agent
 
-// CreateBootstrapTokenRequest 创作者侧铸造注册用途访问令牌请求体。
+// CreateAgentTokenRequest 创作者侧创建 Agent 接入凭证。
 //
-// expires_in_minutes 默认 30；max_agents 默认 1。label 用于人类侧识别用途。
-type CreateBootstrapTokenRequest struct {
-	Label            string `json:"label" validate:"required,min=1,max=80"`
-	ExpiresInMinutes int32  `json:"expires_in_minutes" validate:"omitempty,min=5,max=1440"`
-	MaxAgents        int32  `json:"max_agents" validate:"omitempty,min=1,max=10"`
+// agent_id 为空时创建 pending_registration token，用于新 Agent 自注册；
+// agent_id 不为空时创建 active_runtime token，用于已有 Agent 轮换接入凭证。
+type CreateAgentTokenRequest struct {
+	Name             string   `json:"name" validate:"required,min=1,max=80"`
+	AgentID          string   `json:"agent_id" validate:"omitempty,uuid"`
+	Scopes           []string `json:"scopes" validate:"omitempty,max=2,dive,oneof=agent:call agent:pull"`
+	ExpiresInMinutes int32    `json:"expires_in_minutes" validate:"omitempty,min=5,max=1440"`
 }
 
-// BootstrapTokenResponse 列表 / 创建共用响应。
+// AgentTokenResponse 列表 / 创建共用响应。
 // PlaintextToken 仅创建时一次性返回，之后调用 List 仅看到 prefix。
-type BootstrapTokenResponse struct {
-	ID             string  `json:"id"`
-	Label          string  `json:"label"`
-	Prefix         string  `json:"prefix"`
-	MaxAgents      int32   `json:"max_agents"`
-	UsedCount      int32   `json:"used_count"`
-	ExpiresAt      string  `json:"expires_at"`
-	RevokedAt      *string `json:"revoked_at,omitempty"`
-	LastUsedAt     *string `json:"last_used_at,omitempty"`
-	CreatedAt      string  `json:"created_at"`
-	PlaintextToken string  `json:"plaintext_token,omitempty"`
+type AgentTokenResponse struct {
+	ID             string   `json:"id"`
+	AgentID        *string  `json:"agent_id,omitempty"`
+	Name           string   `json:"name"`
+	Prefix         string   `json:"prefix"`
+	Status         string   `json:"status"`
+	Scopes         []string `json:"scopes"`
+	ExpiresAt      *string  `json:"expires_at,omitempty"`
+	RedeemedAt     *string  `json:"redeemed_at,omitempty"`
+	RevokedAt      *string  `json:"revoked_at,omitempty"`
+	LastUsedAt     *string  `json:"last_used_at,omitempty"`
+	CreatedAt      string   `json:"created_at"`
+	PlaintextToken string   `json:"plaintext_token,omitempty"`
 }
 
-// RegisterAgentViaBootstrapRequest Agent 侧自注册请求体。
+// RegisterAgentViaTokenRequest Agent 侧自注册请求体。
 //
-// bootstrap_token 必填；slug 可选（未填时由 name 派生）。
+// agent_token 必填；slug 可选（未填时由 name 派生）。
 // 其余字段与 CreateAgentRequest 一致，但不要求 JWT。
-type RegisterAgentViaBootstrapRequest struct {
-	BootstrapToken     string   `json:"bootstrap_token" validate:"required,min=24,max=128"`
+type RegisterAgentViaTokenRequest struct {
+	AgentToken         string   `json:"agent_token" validate:"required,min=24,max=128"`
 	Slug               string   `json:"slug" validate:"omitempty,min=3,max=80"`
 	Name               string   `json:"name" validate:"required,min=3,max=80"`
 	Description        string   `json:"description" validate:"max=500"`
@@ -42,22 +46,11 @@ type RegisterAgentViaBootstrapRequest struct {
 	Visibility         string   `json:"visibility" validate:"omitempty,oneof=public unlisted private"`
 	ConnectionMode     string   `json:"connection_mode" validate:"omitempty,oneof=direct_http mcp_server runtime_pull runtime_ws"`
 	MCPToolName        string   `json:"mcp_tool_name" validate:"omitempty,min=1,max=120"`
-	RuntimeTokenName   string   `json:"runtime_token_name" validate:"omitempty,min=1,max=80"`
 }
 
-// RegisterAgentViaBootstrapResponse 自注册成功响应。
-// AgentID + Slug 给 Agent 后续 self-identify；RuntimeToken 是平台调用 Agent 时的凭证。
-type RegisterAgentViaBootstrapResponse struct {
-	Agent        AgentResponse         `json:"agent"`
-	RuntimeToken BootstrapRuntimeToken `json:"runtime_token"`
-	UsedCount    int32                 `json:"bootstrap_used_count"`
-	MaxAgents    int32                 `json:"bootstrap_max_agents"`
-}
-
-// BootstrapRuntimeToken Agent 绑定用途访问令牌一次性明文返回（仅在自注册响应内）。
-type BootstrapRuntimeToken struct {
-	ID             string `json:"id"`
-	Prefix         string `json:"prefix"`
-	PlaintextToken string `json:"plaintext_token"`
-	CreatedAt      string `json:"created_at"`
+// RegisterAgentViaTokenResponse 自注册成功响应。
+// AgentToken 返回元数据；明文仍是请求里使用的同一枚 OPENLINKER_AGENT_TOKEN。
+type RegisterAgentViaTokenResponse struct {
+	Agent      AgentResponse      `json:"agent"`
+	AgentToken AgentTokenResponse `json:"agent_token"`
 }

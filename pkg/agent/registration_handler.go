@@ -19,10 +19,10 @@ type RegistrationHandler struct {
 }
 
 type registrationService interface {
-	MintBootstrapToken(context.Context, uuid.UUID, *CreateBootstrapTokenRequest) (*BootstrapTokenResponse, error)
-	ListBootstrapTokens(context.Context, uuid.UUID) ([]BootstrapTokenResponse, error)
-	RevokeBootstrapToken(context.Context, uuid.UUID, uuid.UUID) error
-	RegisterAgentViaBootstrap(context.Context, *RegisterAgentViaBootstrapRequest) (*RegisterAgentViaBootstrapResponse, error)
+	CreateAgentToken(context.Context, uuid.UUID, *CreateAgentTokenRequest) (*AgentTokenResponse, error)
+	ListAgentTokens(context.Context, uuid.UUID, *uuid.UUID) ([]AgentTokenResponse, error)
+	RevokeAgentToken(context.Context, uuid.UUID, uuid.UUID) error
+	RegisterAgentViaToken(context.Context, *RegisterAgentViaTokenRequest) (*RegisterAgentViaTokenResponse, error)
 }
 
 func NewRegistrationHandler(svc registrationService) *RegistrationHandler {
@@ -34,59 +34,67 @@ func NewRegistrationHandler(svc registrationService) *RegistrationHandler {
 
 // RegisterProtected 创作者侧（需 JWT）。
 //
-//	POST   /api/v1/creator/agent-registration-tokens
-//	GET    /api/v1/creator/agent-registration-tokens
-//	DELETE /api/v1/creator/agent-registration-tokens/:id
+//	POST   /api/v1/creator/agent-tokens
+//	GET    /api/v1/creator/agent-tokens
+//	DELETE /api/v1/creator/agent-tokens/:id
 func (h *RegistrationHandler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
-	g := api.Group("/creator/agent-registration-tokens", jwtMiddleware)
-	g.POST("", h.MintBootstrapToken)
-	g.GET("", h.ListBootstrapTokens)
-	g.DELETE("/:id", h.RevokeBootstrapToken)
+	g := api.Group("/creator/agent-tokens", jwtMiddleware)
+	g.POST("", h.CreateAgentToken)
+	g.GET("", h.ListAgentTokens)
+	g.DELETE("/:id", h.RevokeAgentToken)
 }
 
-// RegisterPublic Agent 侧（无 JWT，凭 bootstrap token）。
+// RegisterPublic Agent 侧（无 JWT，凭 agent token）。
 //
 //	POST /api/v1/agent-registration/agents
 //	GET  /skill/publish-agent  -> 静态接入说明（HTML/Markdown）
 func (h *RegistrationHandler) RegisterPublic(api *echo.Group) {
-	api.POST("/agent-registration/agents", h.RegisterAgentViaBootstrap)
+	api.POST("/agent-registration/agents", h.RegisterAgentViaToken)
 }
 
-// MintBootstrapToken POST /api/v1/creator/agent-registration-tokens
-func (h *RegistrationHandler) MintBootstrapToken(c echo.Context) error {
+// CreateAgentToken POST /api/v1/creator/agent-tokens
+func (h *RegistrationHandler) CreateAgentToken(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
 	}
-	var req CreateBootstrapTokenRequest
+	var req CreateAgentTokenRequest
 	if err := c.Bind(&req); err != nil {
 		return httpx.BadRequest("请求体格式错误")
 	}
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
 	}
-	resp, err := h.svc.MintBootstrapToken(c.Request().Context(), uid, &req)
+	resp, err := h.svc.CreateAgentToken(c.Request().Context(), uid, &req)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusCreated, resp)
 }
 
-// ListBootstrapTokens GET /api/v1/creator/agent-registration-tokens
-func (h *RegistrationHandler) ListBootstrapTokens(c echo.Context) error {
+// ListAgentTokens GET /api/v1/creator/agent-tokens
+func (h *RegistrationHandler) ListAgentTokens(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
 	}
-	items, err := h.svc.ListBootstrapTokens(c.Request().Context(), uid)
+	var agentID *uuid.UUID
+	if raw := strings.TrimSpace(c.QueryParam("agent_id")); raw != "" {
+		parsed, err := uuid.Parse(raw)
+		if err != nil {
+			return httpx.BadRequest("agent_id 不是合法 uuid")
+		}
+		agentID = &parsed
+	}
+	items, err := h.svc.ListAgentTokens(c.Request().Context(), uid, agentID)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, map[string]any{"items": items})
 }
 
-// RevokeBootstrapToken DELETE /api/v1/creator/agent-registration-tokens/:id
-func (h *RegistrationHandler) RevokeBootstrapToken(c echo.Context) error {
+// RevokeAgentToken DELETE /api/v1/creator/agent-tokens/:id
+func (h *RegistrationHandler) RevokeAgentToken(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -95,22 +103,22 @@ func (h *RegistrationHandler) RevokeBootstrapToken(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := h.svc.RevokeBootstrapToken(c.Request().Context(), uid, tokenID); err != nil {
+	if err := h.svc.RevokeAgentToken(c.Request().Context(), uid, tokenID); err != nil {
 		return err
 	}
 	return c.NoContent(http.StatusNoContent)
 }
 
-// RegisterAgentViaBootstrap POST /api/v1/agent-registration/agents
-func (h *RegistrationHandler) RegisterAgentViaBootstrap(c echo.Context) error {
-	var req RegisterAgentViaBootstrapRequest
+// RegisterAgentViaToken POST /api/v1/agent-registration/agents
+func (h *RegistrationHandler) RegisterAgentViaToken(c echo.Context) error {
+	var req RegisterAgentViaTokenRequest
 	if err := c.Bind(&req); err != nil {
 		return httpx.BadRequest("请求体格式错误")
 	}
-	if req.BootstrapToken == "" {
+	if req.AgentToken == "" {
 		parts := strings.SplitN(c.Request().Header.Get(echo.HeaderAuthorization), " ", 2)
 		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
-			req.BootstrapToken = strings.TrimSpace(parts[1])
+			req.AgentToken = strings.TrimSpace(parts[1])
 		}
 	}
 	if len(req.Tags) == 0 {
@@ -122,7 +130,7 @@ func (h *RegistrationHandler) RegisterAgentViaBootstrap(c echo.Context) error {
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
 	}
-	resp, err := h.svc.RegisterAgentViaBootstrap(c.Request().Context(), &req)
+	resp, err := h.svc.RegisterAgentViaToken(c.Request().Context(), &req)
 	if err != nil {
 		return err
 	}

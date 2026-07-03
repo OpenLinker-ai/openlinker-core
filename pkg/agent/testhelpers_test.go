@@ -21,7 +21,7 @@ import (
 )
 
 // truncateAll 测试间数据隔离：从依赖最多的表先删，CASCADE 兜底。
-// users CASCADE 会带走 cloud 侧 wallets/charges/withdrawals/api_keys（若已应用 cloud migrations）；
+// users CASCADE 会带走 cloud 侧 wallets/charges/withdrawals/user_tokens（若已应用 cloud migrations）；
 // 这里只列 core 自带的表，避免运行 core 测试时强制依赖 cloud schema。
 const truncateAll = "TRUNCATE runs, agents, users RESTART IDENTITY CASCADE"
 

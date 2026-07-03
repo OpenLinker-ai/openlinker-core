@@ -24,7 +24,7 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://dev:dev@localhost/openlinker_test")
 	t.Setenv("JWT_SECRET", "test-secret")
 	t.Setenv("OAUTH_SESSION_SECRET", "oauth-secret")
-	t.Setenv("API_KEY_VERIFY_SECRET", "internal-secret")
+	t.Setenv("OPENLINKER_INTERNAL_TOKEN", "internal-secret")
 	t.Setenv("ENV", "production")
 	t.Setenv("PORT", "9090")
 	t.Setenv("ALLOW_LOCAL_HTTP_ENDPOINTS", "true")
@@ -49,8 +49,8 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	if cfg.OAuthSessionSecret != "oauth-secret" {
 		t.Fatalf("OAuthSessionSecret = %q", cfg.OAuthSessionSecret)
 	}
-	if cfg.APIKeyVerifySecret != "internal-secret" {
-		t.Fatalf("APIKeyVerifySecret = %q", cfg.APIKeyVerifySecret)
+	if cfg.InternalToken != "internal-secret" {
+		t.Fatalf("InternalToken = %q", cfg.InternalToken)
 	}
 	if cfg.DBMaxConns != 20 || cfg.DBMinConns != 2 || cfg.DBMaxConnLifetimeMinutes != 30 ||
 		cfg.DBMaxConnIdleTimeMinutes != 5 || cfg.DBHealthCheckPeriodSeconds != 60 {

@@ -61,15 +61,15 @@ func TestValidateProductionConfig(t *testing.T) {
 	if err := validateProductionConfig(&config.Config{
 		Env:             "production",
 		FrontendURL:     "https://app.example",
-		APIKeyVerifyURL: "https://cloud.example/internal/api-keys/verify",
-	}); err == nil || !strings.Contains(err.Error(), "API_KEY_VERIFY_SECRET") {
+		UserTokenVerifyURL: "https://cloud.example/internal/user-tokens/verify",
+	}); err == nil || !strings.Contains(err.Error(), "OPENLINKER_INTERNAL_TOKEN") {
 		t.Fatalf("missing verify secret error = %v", err)
 	}
 	if err := validateProductionConfig(&config.Config{
 		Env:                "production",
 		FrontendURL:        "https://app.example",
-		APIKeyVerifyURL:    "https://cloud.example/internal/api-keys/verify",
-		APIKeyVerifySecret: "secret",
+		UserTokenVerifyURL: "https://cloud.example/internal/user-tokens/verify",
+		InternalToken:      "secret",
 	}); err != nil {
 		t.Fatalf("valid production config error = %v", err)
 	}

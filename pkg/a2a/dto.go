@@ -142,23 +142,23 @@ type ChildRunResponse struct {
 
 // ParentRunSummary identifies one user-owned run that delegated work to child Agents.
 type ParentRunSummary struct {
-	ParentRunID             string         `json:"parent_run_id"`
-	CallerAgentID           string         `json:"caller_agent_id"`
-	CallerAgentSlug         string         `json:"caller_agent_slug"`
-	CallerAgentName         string         `json:"caller_agent_name"`
-	CallerAgentTags         []string       `json:"caller_agent_tags"`
-	CallerSkills            []SkillRef     `json:"caller_skills"`
-	Source                  string         `json:"source"`
-	Status                  string         `json:"status"`
-	DurationMs              *int32         `json:"duration_ms,omitempty"`
-	StartedAt               string         `json:"started_at"`
-	FinishedAt              *string        `json:"finished_at,omitempty"`
-	ChildCount              int32          `json:"child_count"`
-	SuccessfulChildCount    int32          `json:"successful_child_count"`
-	RunningChildCount       int32          `json:"running_child_count"`
-	ActiveRuntimeTokenCount int32          `json:"active_runtime_token_count"`
-	LastRuntimeTokenUsedAt  *string        `json:"last_runtime_token_used_at,omitempty"`
-	A2AContext              *A2AContextRef `json:"a2a_context,omitempty"`
+	ParentRunID           string         `json:"parent_run_id"`
+	CallerAgentID         string         `json:"caller_agent_id"`
+	CallerAgentSlug       string         `json:"caller_agent_slug"`
+	CallerAgentName       string         `json:"caller_agent_name"`
+	CallerAgentTags       []string       `json:"caller_agent_tags"`
+	CallerSkills          []SkillRef     `json:"caller_skills"`
+	Source                string         `json:"source"`
+	Status                string         `json:"status"`
+	DurationMs            *int32         `json:"duration_ms,omitempty"`
+	StartedAt             string         `json:"started_at"`
+	FinishedAt            *string        `json:"finished_at,omitempty"`
+	ChildCount            int32          `json:"child_count"`
+	SuccessfulChildCount  int32          `json:"successful_child_count"`
+	RunningChildCount     int32          `json:"running_child_count"`
+	ActiveAgentTokenCount int32          `json:"active_agent_token_count"`
+	LastAgentTokenUsedAt  *string        `json:"last_agent_token_used_at,omitempty"`
+	A2AContext            *A2AContextRef `json:"a2a_context,omitempty"`
 }
 
 // ParentRunListResponse is the user's A2A entry directory.

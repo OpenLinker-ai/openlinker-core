@@ -68,11 +68,11 @@ func (s *Service) CreateRuntimeToken(ctx context.Context, userID, agentID uuid.U
 		return nil, httpx.BadRequest("访问令牌数量已达上限（10 个），请先撤销旧令牌")
 	}
 
-	plaintext, prefix, err := credential.GenerateAccessToken()
+	plaintext, prefix, err := credential.GenerateAgentToken()
 	if err != nil {
 		return nil, httpx.Internal("生成访问令牌失败")
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), credential.BcryptCost)
+	hash, err := bcrypt.GenerateFromPassword(credential.BcryptTokenInput(plaintext), credential.BcryptCost)
 	if err != nil {
 		return nil, httpx.Internal("加密访问令牌失败")
 	}
@@ -282,10 +282,10 @@ func runtimeWorkbenchDiagnostics(
 	}
 	if activeRuntimeTokenCount(tokens) == 0 {
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
-			Code:       "no_runtime_token",
+			Code:       "no_agent_token",
 			Severity:   "warning",
 			Message:    "当前没有可用的 Agent runtime token，worker 无法 heartbeat、claim 或 result。",
-			NextAction: "create_runtime_token",
+			NextAction: "create_agent_token",
 		})
 	}
 	if activeRuntimeTokenCount(tokens) > 0 && !hasActiveRuntimePullToken(tokens) {
@@ -293,7 +293,7 @@ func runtimeWorkbenchDiagnostics(
 			Code:       "scope_missing",
 			Severity:   "error",
 			Message:    "当前 active runtime token 缺少 agent:pull scope，worker 无法建立 WebSocket 或领取任务。",
-			NextAction: "create_runtime_token",
+			NextAction: "create_agent_token",
 		})
 	}
 	if lastActivity == nil {
@@ -702,7 +702,7 @@ func (s *Service) ListParentRuns(ctx context.Context, userID uuid.UUID, page, si
 			ParentRunID: row.ParentRunID.String(), CallerAgentID: row.CallerAgentID.String(),
 			CallerAgentSlug: row.CallerAgentSlug, CallerAgentName: row.CallerAgentName,
 			CallerAgentTags: row.CallerAgentTags, CallerSkills: skillRefs(row.CallerSkillIDs, row.CallerSkillNames),
-			Source: row.ParentSource, ActiveRuntimeTokenCount: row.ActiveRuntimeTokenCount,
+			Source: row.ParentSource, ActiveAgentTokenCount: row.ActiveRuntimeTokenCount,
 			Status: row.Status, DurationMs: row.DurationMs, StartedAt: row.StartedAt.UTC().Format(time.RFC3339),
 			ChildCount: row.ChildCount, SuccessfulChildCount: row.SuccessfulChildCount,
 			RunningChildCount: row.RunningChildCount,
@@ -714,7 +714,7 @@ func (s *Service) ListParentRuns(ctx context.Context, userID uuid.UUID, page, si
 		}
 		if row.LastRuntimeTokenUsedAt != nil {
 			formatted := row.LastRuntimeTokenUsedAt.UTC().Format(time.RFC3339)
-			item.LastRuntimeTokenUsedAt = &formatted
+			item.LastAgentTokenUsedAt = &formatted
 		}
 		items = append(items, item)
 	}
@@ -786,8 +786,8 @@ func (s *Service) ownerAgent(ctx context.Context, userID, agentID uuid.UUID) (db
 
 func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext string) (db.AgentRuntimeToken, error) {
 	plaintext = strings.TrimSpace(plaintext)
-	if !credential.HasAnyPrefix(plaintext, credential.AccessTokenPrefix, credential.LegacyAgentPrefix) ||
-		!credential.ValidLength(plaintext) {
+	if !credential.HasAnyPrefix(plaintext, credential.AgentTokenPrefix) ||
+		!credential.ValidLengthForPrefix(plaintext, credential.AgentTokenPrefix) {
 		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
 	}
 	tokens, err := s.queries.ListActiveAgentRuntimeTokensByPrefix(ctx, plaintext[:runtimeTokenPrefixLen])
@@ -795,7 +795,7 @@ func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext string) (db.
 		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
 	}
 	for _, token := range tokens {
-		if bcrypt.CompareHashAndPassword([]byte(token.TokenHash), []byte(plaintext)) == nil &&
+		if bcrypt.CompareHashAndPassword([]byte(token.TokenHash), credential.BcryptTokenInput(plaintext)) == nil &&
 			hasScope(token.Scopes, "agent:call") {
 			return token, nil
 		}

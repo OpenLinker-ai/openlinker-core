@@ -2,50 +2,52 @@
 -- Platform-mediated Agent-to-Agent tokens, policy and run delegation queries.
 
 -- name: CreateAgentRuntimeToken :one
-INSERT INTO agent_runtime_tokens (
-    agent_id, created_by_user_id, name, prefix, token_hash, scopes
+INSERT INTO agent_tokens (
+    agent_id, creator_user_id, name, prefix, token_hash, scopes, status, redeemed_at
 ) VALUES (
-    $1, $2, $3, $4, $5, $6
+    $1, $2, $3, $4, $5, $6, 'active_runtime', NOW()
 )
-RETURNING id, agent_id, created_by_user_id, name, prefix, token_hash, scopes,
+RETURNING id, agent_id, creator_user_id, name, prefix, token_hash, scopes,
           last_used_at, revoked_at, created_at;
 
 -- name: CountActiveAgentRuntimeTokens :one
 SELECT COUNT(*)::int AS total
-FROM agent_runtime_tokens
-WHERE agent_id = $1 AND revoked_at IS NULL;
+FROM agent_tokens
+WHERE agent_id = $1 AND status = 'active_runtime' AND revoked_at IS NULL;
 
 -- name: ListAgentRuntimeTokensForOwner :many
-SELECT t.id, t.agent_id, t.created_by_user_id, t.name, t.prefix, t.token_hash, t.scopes,
+SELECT t.id, t.agent_id, t.creator_user_id, t.name, t.prefix, t.token_hash, t.scopes,
        t.last_used_at, t.revoked_at, t.created_at
-FROM agent_runtime_tokens t
+FROM agent_tokens t
 JOIN agents a ON a.id = t.agent_id
-WHERE t.agent_id = $1 AND a.creator_id = $2
+WHERE t.agent_id = $1 AND a.creator_id = $2 AND t.status = 'active_runtime'
 ORDER BY t.created_at DESC;
 
 -- name: ListActiveAgentRuntimeTokensByPrefix :many
-SELECT id, agent_id, created_by_user_id, name, prefix, token_hash, scopes,
+SELECT id, agent_id, creator_user_id, name, prefix, token_hash, scopes,
        last_used_at, revoked_at, created_at
-FROM agent_runtime_tokens
-WHERE prefix = $1 AND revoked_at IS NULL;
+FROM agent_tokens
+WHERE prefix = $1 AND revoked_at IS NULL AND status = 'active_runtime' AND agent_id IS NOT NULL;
 
 -- name: TouchAgentRuntimeToken :exec
-UPDATE agent_runtime_tokens SET last_used_at = NOW()
+UPDATE agent_tokens SET last_used_at = NOW()
 WHERE id = $1 AND revoked_at IS NULL;
 
 -- name: HasRecentRuntimePullToken :one
 SELECT EXISTS(
     SELECT 1
-    FROM agent_runtime_tokens
+    FROM agent_tokens
     WHERE agent_id = $1
       AND revoked_at IS NULL
+      AND status = 'active_runtime'
       AND 'agent:pull' = ANY(scopes)
       AND last_used_at >= NOW() - INTERVAL '5 minutes'
 )::bool AS has_recent_runtime_pull_token;
 
 -- name: RevokeAgentRuntimeTokenForOwner :execrows
-UPDATE agent_runtime_tokens t
-SET revoked_at = NOW()
+UPDATE agent_tokens t
+SET revoked_at = NOW(),
+    status = 'revoked'
 FROM agents a
 WHERE t.id = $1
   AND t.agent_id = a.id
@@ -225,8 +227,8 @@ LEFT JOIN LATERAL (
 LEFT JOIN LATERAL (
     SELECT COUNT(*)::int AS active_runtime_token_count,
            MAX(last_used_at) AS last_runtime_token_used_at
-    FROM agent_runtime_tokens
-    WHERE agent_id = a.id AND revoked_at IS NULL
+    FROM agent_tokens
+    WHERE agent_id = a.id AND revoked_at IS NULL AND status = 'active_runtime'
 ) token_stats ON TRUE
 WHERE p.user_id = $1
   AND (

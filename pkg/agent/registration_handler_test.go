@@ -19,8 +19,8 @@ func TestRegistrationHandler_AcceptsBearerDesignContract(t *testing.T) {
 	pool := setupTestDB(t)
 	creatorID := insertCreatorUser(t, pool, "Bearer Creator")
 	svc := agent.NewRegistrationService(pool)
-	minted, err := svc.MintBootstrapToken(context.Background(), creatorID, &agent.CreateBootstrapTokenRequest{
-		Label: "bearer-contract",
+	minted, err := svc.CreateAgentToken(context.Background(), creatorID, &agent.CreateAgentTokenRequest{
+		Name: "bearer-contract",
 	})
 	require.NoError(t, err)
 
@@ -43,9 +43,11 @@ func TestRegistrationHandler_AcceptsBearerDesignContract(t *testing.T) {
 	e.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	var resp agent.RegisterAgentViaBootstrapResponse
+	var resp agent.RegisterAgentViaTokenResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, "private", resp.Agent.Visibility)
 	require.Equal(t, int32(0), resp.Agent.PricePerCallCents)
 	require.Equal(t, []string{"research"}, resp.Agent.Tags)
+	require.Equal(t, "active_runtime", resp.AgentToken.Status)
+	require.Empty(t, resp.AgentToken.PlaintextToken)
 }

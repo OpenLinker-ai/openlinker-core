@@ -37,7 +37,7 @@ type ManifestDocs struct {
 	PublishAgent string `json:"publish_agent"`
 	ConsumeAgent string `json:"consume_agent"`
 	Connect      string `json:"connect"`
-	APIKeys      string `json:"api_keys"`
+	UserTokens   string `json:"user_tokens"`
 	MCP          string `json:"mcp"`
 	Tasks        string `json:"tasks"`
 	A2A          string `json:"a2a"`
@@ -60,11 +60,14 @@ type ManifestProtocols struct {
 }
 
 type ManifestAuth struct {
-	AccessTokenHeader   string   `json:"access_token_header"`
-	AccessTokenType     string   `json:"access_token_type"`
-	AccessTokenPurposes []string `json:"access_token_purposes"`
-	APIScopes           []string `json:"api_scopes"`
-	RuntimeScopes       []string `json:"runtime_scopes"`
+	UserTokenHeader    string   `json:"user_token_header"`
+	UserTokenType      string   `json:"user_token_type"`
+	UserTokenPurposes  []string `json:"user_token_purposes"`
+	AgentTokenHeader   string   `json:"agent_token_header"`
+	AgentTokenType     string   `json:"agent_token_type"`
+	AgentTokenPurposes []string `json:"agent_token_purposes"`
+	APIScopes          []string `json:"api_scopes"`
+	AgentScopes        []string `json:"agent_scopes"`
 }
 
 type ManifestWorkflowStatus struct {
@@ -103,7 +106,7 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			PublishAgent: apiBase + "/skill/publish-agent",
 			ConsumeAgent: apiBase + "/skill/consume-agent",
 			Connect:      webBase + "/connect",
-			APIKeys:      webBase + "/settings/api-keys",
+			UserTokens:   webBase + "/settings/user-tokens",
 			MCP:          apiBase + "/api/v1/mcp/tools",
 			Tasks:        webBase + "/tasks",
 			A2A:          webBase + "/a2a",
@@ -129,11 +132,14 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			MCP:           apiBase + "/api/v1/mcp",
 		},
 		Auth: ManifestAuth{
-			AccessTokenHeader:   "Authorization: Bearer ol_live_...",
-			AccessTokenType:     "ol_live_...",
-			AccessTokenPurposes: []string{"api_mcp", "agent_registration", "agent_runtime_a2a"},
-			APIScopes:           []string{"agents:read", "agents:run", "runs:read", "tasks:write"},
-			RuntimeScopes:       []string{"agent:call", "agent:pull"},
+			UserTokenHeader:    "Authorization: Bearer ol_user_...",
+			UserTokenType:      "ol_user_...",
+			UserTokenPurposes:  []string{"platform_api", "mcp", "external_scripts"},
+			AgentTokenHeader:   "Authorization: Bearer ol_agent_...",
+			AgentTokenType:     "ol_agent_...",
+			AgentTokenPurposes: []string{"agent_registration", "agent_runtime", "a2a_delegation"},
+			APIScopes:          []string{"agents:read", "agents:run", "runs:read", "tasks:write"},
+			AgentScopes:        []string{"agent:call", "agent:pull"},
 		},
 		TokenScopes: map[string]string{
 			"agents:read":    "search and inspect public agents through REST or MCP",
@@ -152,7 +158,7 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			"agent_autonomous_purchase": "not_enabled",
 			"public_artifacts":          "explicit_only",
 			"human_session":             "jwt_only",
-			"agent_tokens":              "single_ol_live_token_scoped_by_purpose_binding_and_expiry",
+			"agent_tokens":              "single_ol_agent_token_scoped_by_purpose_binding_and_expiry",
 		},
 		States: ManifestStates{
 			Run:      []string{"pending", "running", "success", "failed", "timeout", "canceled"},

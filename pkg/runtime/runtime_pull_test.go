@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/credential"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
@@ -54,13 +55,13 @@ func insertRuntimeToken(t *testing.T, pool *pgxpool.Pool, agentID, creatorID uui
 	raw := make([]byte, 32)
 	_, err := rand.Read(raw)
 	require.NoError(t, err)
-	plaintext := "rt_live_" + hex.EncodeToString(raw)
-	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
+	plaintext := "ol_agent_" + hex.EncodeToString(raw)
+	hash, err := bcrypt.GenerateFromPassword([]byte(credential.BcryptTokenInput(plaintext)), bcrypt.DefaultCost)
 	require.NoError(t, err)
 	_, err = pool.Exec(context.Background(),
-		`INSERT INTO agent_runtime_tokens (
-			agent_id, created_by_user_id, name, prefix, token_hash, scopes
-		) VALUES ($1, $2, 'test-runtime', $3, $4, $5)`,
+		`INSERT INTO agent_tokens (
+			agent_id, creator_user_id, name, prefix, token_hash, scopes, status, redeemed_at
+		) VALUES ($1, $2, 'test-runtime', $3, $4, $5, 'active_runtime', NOW())`,
 		agentID,
 		creatorID,
 		plaintext[:12],
@@ -75,7 +76,7 @@ func readRuntimeTokenLastUsed(t *testing.T, pool *pgxpool.Pool, plaintext string
 	t.Helper()
 	var lastUsed sql.NullTime
 	err := pool.QueryRow(context.Background(),
-		`SELECT last_used_at FROM agent_runtime_tokens WHERE prefix=$1`,
+		`SELECT last_used_at FROM agent_tokens WHERE prefix=$1`,
 		plaintext[:12],
 	).Scan(&lastUsed)
 	require.NoError(t, err)
@@ -127,7 +128,7 @@ func TestRuntimePull_ClaimAndCompleteSuccess(t *testing.T) {
 	require.NotNil(t, claimed.A2A)
 	assert.Equal(t, started.RunID, claimed.A2A.CurrentRunID)
 	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", claimed.A2A.CallAgentEndpoint)
-	assert.Contains(t, claimed.A2A.RuntimeScopes, "agent:call")
+	assert.Contains(t, claimed.A2A.AgentScopes, "agent:call")
 
 	completed, err := svc.CompleteRuntimePullRun(ctx, token, runID, &runtime.RuntimePullResultRequest{
 		Status: "success",
@@ -309,7 +310,7 @@ func TestRuntimePull_RunDelegatedQueuesFreeChildAndCompletesParent(t *testing.T)
 	assert.Equal(t, "trace-runtime-pull", claimed.A2A.TraceID)
 	assert.Equal(t, []string{"task-runtime-parent"}, claimed.A2A.ReferenceTaskIDs)
 	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", claimed.A2A.CallAgentEndpoint)
-	assert.Contains(t, claimed.A2A.RuntimeScopes, "agent:call")
+	assert.Contains(t, claimed.A2A.AgentScopes, "agent:call")
 
 	completed, err := svc.CompleteRuntimePullRun(ctx, token, childRunID, &runtime.RuntimePullResultRequest{
 		Status: "success",
@@ -850,7 +851,7 @@ func TestRuntimePull_EmptyClaimDoesNotRefreshToken(t *testing.T) {
 	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:pull"})
 	baseline := time.Now().Add(-2 * time.Minute).UTC().Truncate(time.Microsecond)
 	_, err := pool.Exec(ctx,
-		`UPDATE agent_runtime_tokens SET last_used_at=$2 WHERE prefix=$1`,
+		`UPDATE agent_tokens SET last_used_at=$2 WHERE prefix=$1`,
 		token[:12],
 		baseline,
 	)

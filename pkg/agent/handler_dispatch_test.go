@@ -261,28 +261,28 @@ func TestRegistrationApprovalAndMetricHandlersDispatchServices(t *testing.T) {
 
 	c, rec := newAgentDispatchContext(agentDispatchRequest{
 		method: http.MethodPost,
-		target: "/creator/agent-registration-tokens",
+		target: "/creator/agent-tokens",
 		userID: userID.String(),
-		body:   `{"label":"local dev","expires_in_minutes":30,"max_agents":2}`,
+		body:   `{"name":"local dev","expires_in_minutes":30}`,
 	})
-	requireNoDispatchError(t, reg.MintBootstrapToken(c))
+	requireNoDispatchError(t, reg.CreateAgentToken(c))
 	requireDispatchStatus(t, rec, http.StatusCreated)
 
 	c, rec = newAgentDispatchContext(agentDispatchRequest{
 		method: http.MethodGet,
-		target: "/creator/agent-registration-tokens",
+		target: "/creator/agent-tokens",
 		userID: userID.String(),
 	})
-	requireNoDispatchError(t, reg.ListBootstrapTokens(c))
+	requireNoDispatchError(t, reg.ListAgentTokens(c))
 	requireDispatchStatus(t, rec, http.StatusOK)
 
 	c, rec = newAgentDispatchContext(agentDispatchRequest{
 		method: http.MethodDelete,
-		target: "/creator/agent-registration-tokens/" + tokenID.String(),
+		target: "/creator/agent-tokens/" + tokenID.String(),
 		userID: userID.String(),
 		params: map[string]string{"id": tokenID.String()},
 	})
-	requireNoDispatchError(t, reg.RevokeBootstrapToken(c))
+	requireNoDispatchError(t, reg.RevokeAgentToken(c))
 	requireDispatchStatus(t, rec, http.StatusNoContent)
 
 	bearer := strings.Repeat("t", 24)
@@ -292,10 +292,10 @@ func TestRegistrationApprovalAndMetricHandlersDispatchServices(t *testing.T) {
 		headers: map[string]string{echo.HeaderAuthorization: "Bearer " + bearer},
 		body:    `{"name":"Bootstrap Agent","endpoint_url":"https://example.com/boot","ability_tags":["ai"]}`,
 	})
-	requireNoDispatchError(t, reg.RegisterAgentViaBootstrap(c))
+	requireNoDispatchError(t, reg.RegisterAgentViaToken(c))
 	requireDispatchStatus(t, rec, http.StatusCreated)
-	if regSvc.lastRegisterReq == nil || regSvc.lastRegisterReq.BootstrapToken != bearer {
-		t.Fatalf("bootstrap token was not pulled from Authorization header: %#v", regSvc.lastRegisterReq)
+	if regSvc.lastRegisterReq == nil || regSvc.lastRegisterReq.AgentToken != bearer {
+		t.Fatalf("agent token was not pulled from Authorization header: %#v", regSvc.lastRegisterReq)
 	}
 	if !reflect.DeepEqual(regSvc.lastRegisterReq.Tags, []string{"ai"}) || regSvc.lastRegisterReq.Visibility != "public" {
 		t.Fatalf("registration defaults were not normalized before dispatch: %#v", regSvc.lastRegisterReq)
@@ -427,11 +427,11 @@ func TestAgentHandlersPropagateServiceErrors(t *testing.T) {
 		},
 		{
 			name:   "registration",
-			method: NewRegistrationHandler(&mockRegistrationService{err: sentinel}).RegisterAgentViaBootstrap,
+			method: NewRegistrationHandler(&mockRegistrationService{err: sentinel}).RegisterAgentViaToken,
 			req: agentDispatchRequest{
 				method: http.MethodPost,
 				target: "/agent-registration/agents",
-				body:   `{"bootstrap_token":"` + strings.Repeat("t", 24) + `","name":"Bootstrap Agent","endpoint_url":"https://example.com/boot","tags":["ai"]}`,
+				body:   `{"agent_token":"` + strings.Repeat("t", 24) + `","name":"Bootstrap Agent","endpoint_url":"https://example.com/boot","tags":["ai"]}`,
 			},
 		},
 		{
@@ -649,45 +649,45 @@ type mockRegistrationService struct {
 	calls           []string
 	lastUserID      uuid.UUID
 	lastTokenID     uuid.UUID
-	lastRegisterReq *RegisterAgentViaBootstrapRequest
+	lastRegisterReq *RegisterAgentViaTokenRequest
 }
 
 func (m *mockRegistrationService) record(call string) {
 	m.calls = append(m.calls, call)
 }
 
-func (m *mockRegistrationService) MintBootstrapToken(_ context.Context, userID uuid.UUID, req *CreateBootstrapTokenRequest) (*BootstrapTokenResponse, error) {
-	m.record("MintBootstrapToken")
+func (m *mockRegistrationService) CreateAgentToken(_ context.Context, userID uuid.UUID, req *CreateAgentTokenRequest) (*AgentTokenResponse, error) {
+	m.record("CreateAgentToken")
 	m.lastUserID = userID
 	if m.err != nil {
 		return nil, m.err
 	}
-	return &BootstrapTokenResponse{ID: uuid.NewString(), Label: req.Label, Prefix: "sk_test", MaxAgents: req.MaxAgents}, nil
+	return &AgentTokenResponse{ID: uuid.NewString(), Name: req.Name, Prefix: "ol_agent_test", Status: "pending_registration"}, nil
 }
 
-func (m *mockRegistrationService) ListBootstrapTokens(_ context.Context, userID uuid.UUID) ([]BootstrapTokenResponse, error) {
-	m.record("ListBootstrapTokens")
+func (m *mockRegistrationService) ListAgentTokens(_ context.Context, userID uuid.UUID, _ *uuid.UUID) ([]AgentTokenResponse, error) {
+	m.record("ListAgentTokens")
 	m.lastUserID = userID
 	if m.err != nil {
 		return nil, m.err
 	}
-	return []BootstrapTokenResponse{{ID: uuid.NewString(), Label: "local", Prefix: "sk_test"}}, nil
+	return []AgentTokenResponse{{ID: uuid.NewString(), Name: "local", Prefix: "ol_agent_test", Status: "pending_registration"}}, nil
 }
 
-func (m *mockRegistrationService) RevokeBootstrapToken(_ context.Context, userID, tokenID uuid.UUID) error {
-	m.record("RevokeBootstrapToken")
+func (m *mockRegistrationService) RevokeAgentToken(_ context.Context, userID, tokenID uuid.UUID) error {
+	m.record("RevokeAgentToken")
 	m.lastUserID = userID
 	m.lastTokenID = tokenID
 	return m.err
 }
 
-func (m *mockRegistrationService) RegisterAgentViaBootstrap(_ context.Context, req *RegisterAgentViaBootstrapRequest) (*RegisterAgentViaBootstrapResponse, error) {
-	m.record("RegisterAgentViaBootstrap")
+func (m *mockRegistrationService) RegisterAgentViaToken(_ context.Context, req *RegisterAgentViaTokenRequest) (*RegisterAgentViaTokenResponse, error) {
+	m.record("RegisterAgentViaToken")
 	m.lastRegisterReq = req
 	if m.err != nil {
 		return nil, m.err
 	}
-	return &RegisterAgentViaBootstrapResponse{
+	return &RegisterAgentViaTokenResponse{
 		Agent: AgentResponse{
 			ID:         uuid.NewString(),
 			Slug:       "bootstrap-agent",
@@ -695,9 +695,7 @@ func (m *mockRegistrationService) RegisterAgentViaBootstrap(_ context.Context, r
 			Tags:       req.Tags,
 			Visibility: req.Visibility,
 		},
-		RuntimeToken: BootstrapRuntimeToken{ID: uuid.NewString(), Prefix: "rt_test", PlaintextToken: "runtime"},
-		UsedCount:    1,
-		MaxAgents:    2,
+		AgentToken: AgentTokenResponse{ID: uuid.NewString(), Prefix: "ol_agent_test", Status: "active_runtime"},
 	}, nil
 }
 

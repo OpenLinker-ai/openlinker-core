@@ -2,7 +2,7 @@
 //
 // Pulls in only modules that live under openlinker-core/pkg/:
 // auth, agent, runtime, skill, task, mcp, delivery, webhook, user. wallet /
-// payment / dashboard / cloud API-key storage live in openlinker-cloud and
+// payment / dashboard / cloud user-token storage live in openlinker-cloud and
 // are not wired here -- core is meant to be self-host-able without billing
 // or operator tooling.
 package main
@@ -103,9 +103,9 @@ func main() {
 	if opts.LLMClient != nil {
 		log.Info().Msg("anthropic llm client configured")
 	}
-	if verifier := auth.NewRemoteAPIKeyVerifier(cfg.APIKeyVerifyURL, cfg.APIKeyVerifySecret); verifier != nil {
+	if verifier := auth.NewRemoteAPIKeyVerifier(cfg.UserTokenVerifyURL, cfg.InternalToken); verifier != nil {
 		opts.APIKeyVerifier = verifier
-		log.Info().Str("endpoint", cfg.APIKeyVerifyURL).Msg("remote api key verifier configured")
+		log.Info().Str("endpoint", cfg.UserTokenVerifyURL).Msg("remote user token verifier configured")
 	}
 	services := coreapi.Register(rootCtx, e, pool, cfg, opts)
 	shutdownA2AGRPC, err := coreapi.StartA2AGRPCServer(rootCtx, cfg, services, opts)
@@ -245,8 +245,8 @@ func validateProductionConfig(cfg *config.Config) error {
 	if strings.TrimSpace(cfg.FrontendURL) == "" {
 		return fmt.Errorf("FRONTEND_URL is required in production")
 	}
-	if strings.TrimSpace(cfg.APIKeyVerifyURL) != "" && strings.TrimSpace(cfg.APIKeyVerifySecret) == "" {
-		return fmt.Errorf("API_KEY_VERIFY_SECRET is required in production when API_KEY_VERIFY_URL is configured")
+	if strings.TrimSpace(cfg.UserTokenVerifyURL) != "" && strings.TrimSpace(cfg.InternalToken) == "" {
+		return fmt.Errorf("OPENLINKER_INTERNAL_TOKEN is required in production when USER_TOKEN_VERIFY_URL is configured")
 	}
 	return nil
 }

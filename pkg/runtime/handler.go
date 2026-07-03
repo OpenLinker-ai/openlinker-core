@@ -461,11 +461,11 @@ func userIDFromCtx(c echo.Context) (uuid.UUID, error) {
 }
 
 // sourceFromCtx 把鉴权方式映射到 runs.source。
-// jwt → 'web'（浏览器 / 仪表盘）；apikey → 'api'（访问令牌 / SDK）；
+// jwt → 'web'（浏览器 / 仪表盘）；user_token → 'api'（访问令牌 / SDK）；
 // MCP 路径的 handler 会显式传 "mcp"，绕过本函数。
 func sourceFromCtx(c echo.Context) string {
 	switch httpx.AuthMethodFrom(c) {
-	case "apikey":
+	case "user_token":
 		return "api"
 	case "jwt":
 		return "web"
@@ -476,8 +476,8 @@ func sourceFromCtx(c echo.Context) string {
 
 func requireAPIKeyScope(c echo.Context, scope string) error {
 	// Runtime endpoints are intentionally dual-use: browser JWT sessions act as
-	// the first-party user, while API-key callers must prove the narrower scope.
-	if httpx.AuthMethodFrom(c) == "apikey" && !httpx.HasScope(c, scope) {
+	// the first-party user, while User Token callers must prove the narrower scope.
+	if httpx.AuthMethodFrom(c) == "user_token" && !httpx.HasScope(c, scope) {
 		return httpx.Forbidden("访问令牌缺少 scope: " + scope)
 	}
 	return nil

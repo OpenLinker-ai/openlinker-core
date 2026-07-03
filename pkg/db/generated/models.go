@@ -363,20 +363,21 @@ type ProxyRunArtifact struct {
 	CreatedAt        time.Time `db:"created_at" json:"created_at"`
 }
 
-// AgentRegistrationToken 是创作者侧短期 Bootstrap Token，供 Agent 自注册流程使用。
-// max_agents 控制同一枚 token 可换取多少个 Agent，used_count 原子递增。
-// 明文 token 仅创建时返回，数据库只保存 hash 与显示用 prefix。
-type AgentRegistrationToken struct {
+// AgentToken 是统一 Agent 接入凭证。pending_registration 阶段 agent_id 为空；
+// 注册成功后同一 token 转为 active_runtime 并绑定单个 Agent。
+type AgentToken struct {
 	ID            uuid.UUID  `db:"id" json:"id"`
+	AgentID       *uuid.UUID `db:"agent_id" json:"agent_id"`
 	CreatorUserID uuid.UUID  `db:"creator_user_id" json:"creator_user_id"`
-	Label         string     `db:"label" json:"label"`
+	Name          string     `db:"name" json:"name"`
 	Prefix        string     `db:"prefix" json:"prefix"`
 	TokenHash     string     `db:"token_hash" json:"-"`
-	MaxAgents     int32      `db:"max_agents" json:"max_agents"`
-	UsedCount     int32      `db:"used_count" json:"used_count"`
-	ExpiresAt     time.Time  `db:"expires_at" json:"expires_at"`
-	RevokedAt     *time.Time `db:"revoked_at" json:"revoked_at"`
+	Scopes        []string   `db:"scopes" json:"scopes"`
+	Status        string     `db:"status" json:"status"`
+	ExpiresAt     *time.Time `db:"expires_at" json:"expires_at"`
+	RedeemedAt    *time.Time `db:"redeemed_at" json:"redeemed_at"`
 	LastUsedAt    *time.Time `db:"last_used_at" json:"last_used_at"`
+	RevokedAt     *time.Time `db:"revoked_at" json:"revoked_at"`
 	CreatedAt     time.Time  `db:"created_at" json:"created_at"`
 }
 

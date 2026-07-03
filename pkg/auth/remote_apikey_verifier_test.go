@@ -15,14 +15,14 @@ func TestNewRemoteAPIKeyVerifier(t *testing.T) {
 	if NewRemoteAPIKeyVerifier(" \t\n ") != nil {
 		t.Fatalf("blank endpoint should return nil verifier")
 	}
-	if NewRemoteAPIKeyVerifier(" https://cloud.example/internal/api-keys/verify ") == nil {
+	if NewRemoteAPIKeyVerifier(" https://cloud.example/internal/user-tokens/verify ") == nil {
 		t.Fatalf("non-blank endpoint should return verifier")
 	}
 }
 
 func TestRemoteAPIKeyVerifierVerifySuccess(t *testing.T) {
 	userID := uuid.New()
-	var seenKey string
+	var seenToken string
 	var seenContentType string
 	var seenAccept string
 	var seenSecret string
@@ -38,7 +38,7 @@ func TestRemoteAPIKeyVerifierVerifySuccess(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		seenKey = body.Key
+		seenToken = body.Token
 		_ = json.NewEncoder(w).Encode(remoteAPIKeyVerifyResponse{
 			UserID: userID.String(),
 			Scopes: []string{
@@ -50,15 +50,15 @@ func TestRemoteAPIKeyVerifierVerifySuccess(t *testing.T) {
 	defer server.Close()
 
 	verifier := NewRemoteAPIKeyVerifier(" "+server.URL+" ", " shared-secret ")
-	gotUserID, scopes, err := verifier.Verify(context.Background(), "ol_live_test")
+	gotUserID, scopes, err := verifier.Verify(context.Background(), "ol_user_test")
 	if err != nil {
 		t.Fatalf("Verify error = %v", err)
 	}
 	if gotUserID != userID || len(scopes) != 2 || scopes[0] != "agents:run" {
 		t.Fatalf("Verify = %s %#v", gotUserID, scopes)
 	}
-	if seenKey != "ol_live_test" || seenContentType != "application/json" || seenAccept != "application/json" || seenSecret != "shared-secret" {
-		t.Fatalf("request key=%q content-type=%q accept=%q secret=%q", seenKey, seenContentType, seenAccept, seenSecret)
+	if seenToken != "ol_user_test" || seenContentType != "application/json" || seenAccept != "application/json" || seenSecret != "shared-secret" {
+		t.Fatalf("request token=%q content-type=%q accept=%q secret=%q", seenToken, seenContentType, seenAccept, seenSecret)
 	}
 }
 

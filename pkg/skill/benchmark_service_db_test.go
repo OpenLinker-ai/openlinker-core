@@ -15,7 +15,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
-const truncateBenchmarkSkillTables = "TRUNCATE agent_skill_benchmark_runs, agent_skill_scores, webhook_deliveries, api_keys, wallets, runs, charges, withdrawals, task_queries, agent_runtime_tokens, agent_availability_snapshots, agent_skills, agents, users RESTART IDENTITY CASCADE"
+const truncateBenchmarkSkillTables = "TRUNCATE agent_skill_benchmark_runs, agent_skill_scores, webhook_deliveries, user_tokens, wallets, runs, charges, withdrawals, task_queries, agent_tokens, agent_availability_snapshots, agent_skills, agents, users RESTART IDENTITY CASCADE"
 
 func setupBenchmarkSkillDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()

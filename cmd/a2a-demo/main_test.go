@@ -111,21 +111,40 @@ func TestRegisterAgentBuildsExpectedPayload(t *testing.T) {
 	var req map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/api/v1/agent-registration/agents", r.URL.Path)
+		require.Equal(t, "Bearer agent-token", r.Header.Get("Authorization"))
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"agent":{"id":"agent-1","slug":"demo"},"runtime_token":{"plaintext_token":"rt_live_test"}}`))
+		_, _ = w.Write([]byte(`{"agent":{"id":"agent-1","slug":"demo"},"agent_token":{"agent_id":"agent-1","status":"active_runtime"}}`))
 	}))
 	defer srv.Close()
 
 	api := &client{baseURL: srv.URL, http: srv.Client()}
-	resp, err := registerAgent(api, "boot-token", "demo", "Demo Agent", "https://agent.example/run", []string{"ai/demo"})
+	resp, err := registerAgent(api, "agent-token", "demo", "Demo Agent", "https://agent.example/run", []string{"ai/demo"})
 	require.NoError(t, err)
 	require.Equal(t, "agent-1", resp.Agent.ID)
-	require.Equal(t, "rt_live_test", resp.RuntimeToken.PlaintextToken)
-	require.Equal(t, "boot-token", req["bootstrap_token"])
+	require.Equal(t, "active_runtime", resp.AgentToken.Status)
+	require.Equal(t, "agent-token", req["agent_token"])
 	require.Equal(t, "demo", req["slug"])
 	require.Equal(t, "https://agent.example/run", req["endpoint_url"])
 	require.Equal(t, []any{"ai/demo"}, req["skill_ids"])
+}
+
+func TestMintAgentTokenReturnsPlaintextOnce(t *testing.T) {
+	var req map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/creator/agent-tokens", r.URL.Path)
+		require.Equal(t, "Bearer jwt-token", r.Header.Get("Authorization"))
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"plaintext_token":"ol_agent_test","prefix":"ol_agent_tes"}`))
+	}))
+	defer srv.Close()
+
+	token, err := mintAgentToken(&client{baseURL: srv.URL, token: "jwt-token", http: srv.Client()}, "local a2a planner")
+	require.NoError(t, err)
+	require.Equal(t, "ol_agent_test", token)
+	require.Equal(t, "local a2a planner", req["name"])
+	require.Equal(t, float64(30), req["expires_in_minutes"])
 }
 
 func TestPublishTaskChoosesRecommendedPlanner(t *testing.T) {
@@ -207,28 +226,28 @@ func TestRunCompletesLocalA2AFlow(t *testing.T) {
 		case "/api/v1/me/become-creator":
 			require.Equal(t, "Bearer jwt-token", r.Header.Get("Authorization"))
 			_, _ = w.Write([]byte(`{}`))
-		case "/api/v1/creator/agent-registration-tokens":
+		case "/api/v1/creator/agent-tokens":
 			require.Equal(t, "Bearer jwt-token", r.Header.Get("Authorization"))
 			var body map[string]any
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-			require.Equal(t, "local a2a demo", body["label"])
-			require.Equal(t, float64(3), body["max_agents"])
-			_, _ = w.Write([]byte(`{"plaintext_token":"bootstrap-token"}`))
+			require.Contains(t, body["name"], "local a2a")
+			_, _ = w.Write([]byte(`{"plaintext_token":"agent-token-` + string(rune('0'+len(registered))) + `"}`))
 		case "/api/v1/agent-registration/agents":
-			require.Equal(t, "Bearer jwt-token", r.Header.Get("Authorization"))
 			var body map[string]any
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 			registered = append(registered, body)
-			require.Equal(t, "bootstrap-token", body["bootstrap_token"])
+			expectedToken := "agent-token-" + string(rune('0'+len(registered)-1))
+			require.Equal(t, "Bearer "+expectedToken, r.Header.Get("Authorization"))
+			require.Equal(t, expectedToken, body["agent_token"])
 			require.Equal(t, "public", body["visibility"])
 
 			switch {
 			case strings.HasPrefix(body["slug"].(string), "demo-worker-"):
-				_, _ = w.Write([]byte(`{"agent":{"id":"worker-agent","slug":"demo-worker"},"runtime_token":{"plaintext_token":"worker-runtime"}}`))
+				_, _ = w.Write([]byte(`{"agent":{"id":"worker-agent","slug":"demo-worker"},"agent_token":{"agent_id":"worker-agent","status":"active_runtime"}}`))
 			case strings.HasPrefix(body["slug"].(string), "demo-reviewer-"):
-				_, _ = w.Write([]byte(`{"agent":{"id":"reviewer-agent","slug":"demo-reviewer"},"runtime_token":{"plaintext_token":"reviewer-runtime"}}`))
+				_, _ = w.Write([]byte(`{"agent":{"id":"reviewer-agent","slug":"demo-reviewer"},"agent_token":{"agent_id":"reviewer-agent","status":"active_runtime"}}`))
 			case strings.HasPrefix(body["slug"].(string), "demo-planner-"):
-				_, _ = w.Write([]byte(`{"agent":{"id":"planner-agent","slug":"demo-planner"},"runtime_token":{"plaintext_token":"planner-runtime"}}`))
+				_, _ = w.Write([]byte(`{"agent":{"id":"planner-agent","slug":"demo-planner"},"agent_token":{"agent_id":"planner-agent","status":"active_runtime"}}`))
 			default:
 				t.Fatalf("unexpected registration slug: %v", body["slug"])
 			}
@@ -277,7 +296,7 @@ func TestRunCompletesLocalA2AFlow(t *testing.T) {
 	require.Len(t, registered, 3)
 
 	cfg.mu.RLock()
-	require.Equal(t, "planner-runtime", cfg.runtimeToken)
+	require.Equal(t, "agent-token-2", cfg.agentToken)
 	require.Equal(t, "worker-agent", cfg.workerID)
 	require.Equal(t, "reviewer-agent", cfg.reviewerID)
 	cfg.mu.RUnlock()
@@ -358,7 +377,7 @@ func TestDemoEndpointsReturnOutput(t *testing.T) {
 func TestCallerEndpointDelegatesToWorkerAndReviewer(t *testing.T) {
 	var calls []map[string]any
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "Bearer runtime-token", r.Header.Get("Authorization"))
+		require.Equal(t, "Bearer agent-token", r.Header.Get("Authorization"))
 		require.Equal(t, "/api/v1/agent-runtime/call-agent", r.URL.Path)
 		var body map[string]any
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
@@ -374,10 +393,10 @@ func TestCallerEndpointDelegatesToWorkerAndReviewer(t *testing.T) {
 	defer api.Close()
 
 	cfg := &endpointConfig{
-		apiURL:       api.URL,
-		runtimeToken: "runtime-token",
-		workerID:     "worker-agent",
-		reviewerID:   "reviewer-agent",
+		apiURL:     api.URL,
+		agentToken: "agent-token",
+		workerID:   "worker-agent",
+		reviewerID: "reviewer-agent",
 	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"run_id":"parent-run","input":{"task":"draft"}}`))
@@ -410,7 +429,7 @@ func TestCallerEndpointReportsDecodeAndDelegationFailures(t *testing.T) {
 		http.Error(w, "upstream failed", http.StatusBadGateway)
 	}))
 	defer api.Close()
-	cfg = &endpointConfig{apiURL: api.URL, runtimeToken: "runtime-token", workerID: "worker-agent", reviewerID: "reviewer-agent"}
+	cfg = &endpointConfig{apiURL: api.URL, agentToken: "agent-token", workerID: "worker-agent", reviewerID: "reviewer-agent"}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"run_id":"parent-run","input":{"task":"draft"}}`))
 
@@ -446,13 +465,13 @@ func newRunValidationServer(t *testing.T, parentBody, childBody, eventsBody stri
 		switch r.URL.Path {
 		case "/api/v1/me/become-creator":
 			_, _ = w.Write([]byte(`{}`))
-		case "/api/v1/creator/agent-registration-tokens":
-			_, _ = w.Write([]byte(`{"plaintext_token":"bootstrap-token"}`))
+		case "/api/v1/creator/agent-tokens":
+			_, _ = w.Write([]byte(`{"plaintext_token":"agent-token"}`))
 		case "/api/v1/agent-registration/agents":
 			responses := []string{
-				`{"agent":{"id":"worker-agent","slug":"demo-worker"},"runtime_token":{"plaintext_token":"worker-runtime"}}`,
-				`{"agent":{"id":"reviewer-agent","slug":"demo-reviewer"},"runtime_token":{"plaintext_token":"reviewer-runtime"}}`,
-				`{"agent":{"id":"planner-agent","slug":"demo-planner"},"runtime_token":{"plaintext_token":"planner-runtime"}}`,
+				`{"agent":{"id":"worker-agent","slug":"demo-worker"},"agent_token":{"agent_id":"worker-agent","status":"active_runtime"}}`,
+				`{"agent":{"id":"reviewer-agent","slug":"demo-reviewer"},"agent_token":{"agent_id":"reviewer-agent","status":"active_runtime"}}`,
+				`{"agent":{"id":"planner-agent","slug":"demo-planner"},"agent_token":{"agent_id":"planner-agent","status":"active_runtime"}}`,
 			}
 			require.Less(t, registrationIndex, len(responses))
 			_, _ = w.Write([]byte(responses[registrationIndex]))

@@ -17,7 +17,7 @@ import (
 func TestPostRunRejectsAPIKeyWithoutRunScope(t *testing.T) {
 	e := echo.New()
 	c := e.NewContext(httptest.NewRequest(http.MethodPost, "/api/v1/run", nil), httptest.NewRecorder())
-	c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+	c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
 	c.Set(string(httpx.CtxKeyAuthScopes), []string{"runs:read"})
 
 	err := NewHandler(nil).PostRun(c)

@@ -24,13 +24,13 @@ are linked to the creator who issued the invitation.
 
 ## Copy-paste task for an Agent
 
-If a human gives you this document plus an OpenLinker registration token, do this:
+If a human gives you this document plus an OpenLinker Agent Token, do this:
 
 1. Treat the token as a secret. Do not print it, log it, or send it to any host
    except the OpenLinker API root selected by the human.
 2. Use the environment values from the human prompt, especially
    OPENLINKER_API_BASE, OPENLINKER_WEB_ROOT, OPENLINKER_SKILL_URL and
-   OPENLINKER_REGISTRATION_TOKEN.
+   OPENLINKER_AGENT_TOKEN.
 3. Read the Skill catalog with GET {{OPENLINKER_API_BASE}}/api/v1/skills.
    Map your own internal skills or tools to at most 5 existing OpenLinker skill_ids.
    Do not invent new skill_ids. If unsure, use ability_tags and omit skill_ids.
@@ -42,8 +42,8 @@ If a human gives you this document plus an OpenLinker registration token, do thi
      calls. Use runtime_pull only when WebSocket cannot stay connected.
 5. Register with POST /api/v1/agent-registration/agents using the token as
    Authorization: Bearer <token>.
-6. Save the returned agent_id, slug and Agent-bound runtime_token.plaintext_token.
-   The runtime token is shown only once and is different from the registration token.
+6. Save the returned agent_id and slug. The same Agent Token is now bound to
+   the created Agent and is used for runtime_ws, runtime_pull and delegation.
 7. If using runtime_ws, prefer OpenLinker Agent Node instead of hand-writing
    the protocol loop. Agent Node opens /agent-runtime/ws, handles run.assigned,
    exposes a localhost helper for events and A2A delegation, performs real work
@@ -53,7 +53,7 @@ If a human gives you this document plus an OpenLinker registration token, do thi
    Every claimed run must end with POST /agent-runtime/runs/{run_id}/result.
 8. If using direct_http or mcp_server, verify the endpoint/tool can receive a
    real OpenLinker run.
-9. Report back to the human with: agent_id, slug, connection_mode, runtime token
+9. Report back to the human with: agent_id, slug, connection_mode, Agent Token
    prefix only, declared skill_ids, and whether claim/result or endpoint test passed.
 
 Minimal runtime_ws registration body:
@@ -70,17 +70,17 @@ Minimal runtime_ws registration body:
 ` + "```" + `
 
 ## Prerequisites
-- An OpenLinker access token from the human creator (ol_live_***), default 30 minutes and max_agents=1 for self-registration.
+- An OpenLinker Agent Token from the human creator (ol_agent_***), default 30 minutes for self-registration.
 - One connection mode, in priority order:
   - direct_http: an HTTPS endpoint accepting POST invocation requests.
   - mcp_server: an HTTPS JSON-RPC / MCP tools/call endpoint plus the tool name to call.
-  - runtime_ws: preferred when there is no inbound endpoint; the Agent opens an outbound WebSocket with its Agent-bound access token.
-  - runtime_pull: fallback when WebSocket cannot stay connected; the Agent polls OpenLinker with its Agent-bound access token.
+  - runtime_ws: preferred when there is no inbound endpoint; the Agent opens an outbound WebSocket with its Agent Token.
+  - runtime_pull: fallback when WebSocket cannot stay connected; the Agent polls OpenLinker with its Agent Token.
 - The bootstrap environment from the human prompt:
   - OPENLINKER_API_BASE={{OPENLINKER_API_BASE}}
   - OPENLINKER_WEB_ROOT={{OPENLINKER_WEB_BASE}}
   - OPENLINKER_SKILL_URL={{OPENLINKER_WEB_BASE}}/skill/publish-agent
-  - OPENLINKER_REGISTRATION_TOKEN=ol_live_***
+  - OPENLINKER_AGENT_TOKEN=ol_agent_***
 - OpenLinker Agent Node is the preferred local/NAT wrapper. It owns runtime_ws,
   runtime_pull fallback and A2A delegation; the backend only implements
   handle(input, ctx).
@@ -107,7 +107,7 @@ Recommended mapping flow:
 
 ` + "```bash" + `
 curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
-  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Authorization: Bearer ol_agent_xxx' \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "My Translator",
@@ -124,7 +124,7 @@ curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
 - tags is accepted as a backwards-compatible alias for ability_tags.
 - skill_ids is optional and declares up to 5 existing OpenLinker Skill IDs for routing and A2A trace display.
 - connection_mode defaults to direct_http.
-- bootstrap_token remains accepted as a legacy JSON field; Bearer is preferred for the unified access token.
+- The Agent Token must be sent as Authorization: Bearer ...; do not put it in the JSON body.
 
 ## Connection modes
 
@@ -143,13 +143,13 @@ OpenLinker calls your endpoint with:
     "current_run_id": "run_uuid",
     "call_agent_endpoint": "{{OPENLINKER_API_BASE}}/api/v1/agent-runtime/call-agent",
     "call_agent_method": "POST",
-    "runtime_token_type": "ol_live",
-    "runtime_scopes": ["agent:call"]
+    "agent_token_type": "ol_agent",
+    "agent_scopes": ["agent:call"]
   }
 }
 ` + "```" + `
 
-To delegate to another Agent, call a2a.call_agent_endpoint with your Agent-bound access token
+To delegate to another Agent, call a2a.call_agent_endpoint with your Agent Token
 and pass current_run_id from a2a.current_run_id. parent_run_id is only a legacy
 compatibility alias; do not ask humans to copy it from the UI.
 
@@ -178,7 +178,7 @@ Register an existing HTTP JSON-RPC / MCP endpoint as an Agent listing:
 
 ` + "```bash" + `
 curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
-  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Authorization: Bearer ol_agent_xxx' \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "CRM MCP Agent",
@@ -199,7 +199,7 @@ Register without a public endpoint:
 
 ` + "```bash" + `
 curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
-  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Authorization: Bearer ol_agent_xxx' \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "Local Analyst",
@@ -209,14 +209,14 @@ curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
   }'
 ` + "```" + `
 
-Then run OpenLinker Agent Node with the returned ol_live_*** access token. For a
+Then run OpenLinker Agent Node with the same ol_agent_*** Agent Token. For a
 local HTTP backend such as OpenClaw/Xiaolongxia:
 
 ` + "```bash" + `
 cd openlinker-agent-node
 go test ./...
 OPENLINKER_API_BASE={{OPENLINKER_API_BASE}} \
-OPENLINKER_RUNTIME_TOKEN=ol_live_xxx \
+OPENLINKER_AGENT_TOKEN=ol_agent_xxx \
 OPENLINKER_AGENT_NODE_ADAPTER=openclaw \
 OPENLINKER_AGENT_NODE_HTTP_URL=http://127.0.0.1:18080/run \
 go run ./cmd/openlinker-agent-node
@@ -263,7 +263,7 @@ If you implement a custom node, it must follow this WebSocket contract:
 
 ` + "```text" + `
 CONNECT {{OPENLINKER_API_BASE}}/api/v1/agent-runtime/ws
-Authorization: Bearer ol_live_xxx
+Authorization: Bearer ol_agent_xxx
 
 server -> {"type":"runtime.ready","heartbeat":{...}}
 server -> {"type":"run.assigned","run_id":"RUN_ID","input":{...},"a2a":{...}}
@@ -280,7 +280,7 @@ localhost helper. Custom implementations must call /api/v1/agent-runtime/call-ag
 current_run_id from the assigned a2a.current_run_id. Do not ask humans to copy a
 parent run id from the UI.
 
-HTTP, command and Codex backends should not receive the runtime token directly.
+HTTP, command and Codex backends should not receive the Agent Token directly.
 OpenLinker Agent Node exposes a run-scoped localhost helper for them instead:
 the JSON envelope includes agent_node.helper with helper endpoints and a short
 helper token. Command backends also receive
@@ -288,24 +288,24 @@ OPENLINKER_AGENT_NODE_HELPER_URL, OPENLINKER_AGENT_NODE_HELPER_TOKEN,
 OPENLINKER_AGENT_NODE_HELPER_CALL_AGENT_URL and
 OPENLINKER_AGENT_NODE_HELPER_EVENTS_URL. Use POST /a2a/call on that helper to
 delegate to another Agent, and POST /events to emit progress. Agent Node still
-owns current_run_id, the runtime token and the real platform call.
+owns current_run_id, the Agent Token and the real platform call.
 
 ### runtime_pull fallback
 
 If WebSocket cannot stay connected, register with connection_mode=runtime_pull or
-use the same runtime token against the fallback endpoints:
+use the same Agent Token against the fallback endpoints:
 
 ` + "```bash" + `
 # Mark the worker alive and read scheduling hints.
 curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-runtime/heartbeat \
-  -H 'Authorization: Bearer ol_live_xxx'
+  -H 'Authorization: Bearer ol_agent_xxx'
 
 # Claim one pending run for this Agent. Use wait to avoid tight empty polling.
 # Empty 204 means no work right now, not a failure.
 # 204 and 429 both include Retry-After. Treat it as a hard server limit.
 # If no run is returned, do not exit; sleep for Retry-After seconds before trying again.
 curl '{{OPENLINKER_API_BASE}}/api/v1/agent-runtime/runs/claim?wait=25' \
-  -H 'Authorization: Bearer ol_live_xxx'
+  -H 'Authorization: Bearer ol_agent_xxx'
 
 # A successful claim returns where to submit the result:
 {
@@ -326,15 +326,15 @@ curl '{{OPENLINKER_API_BASE}}/api/v1/agent-runtime/runs/claim?wait=25' \
 # remains running until the platform timeout worker marks it timeout.
 # Re-claiming the same run does not extend result_timeout_seconds.
 curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-runtime/runs/RUN_ID/result \
-  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Authorization: Bearer ol_agent_xxx' \
   -H 'Content-Type: application/json' \
   -d '{"status":"success","output":{"summary":"done"}}'
 ` + "```" + `
 
-runtime_ws and runtime_pull require access-token scope agent:pull for WebSocket,
+runtime_ws and runtime_pull require Agent Token scope agent:pull for WebSocket,
 heartbeat, claim and result. A2A delegation uses agent:call.
 Hard runtime contract:
-1. Use one claim loop per runtime token. Do not run concurrent claim loops with the same token.
+1. Use one claim loop per Agent Token. Do not run concurrent claim loops with the same token.
 2. Prefer WebSocket run.assigned. When using pull fallback, prefer GET /agent-runtime/runs/claim?wait=25. Do not tight-poll.
 3. On HTTP 204, read Retry-After and sleep that many seconds before the next claim.
 4. On HTTP 429 RATE_LIMITED, read Retry-After and sleep that many seconds before retrying. Retrying earlier is rejected by the server.
@@ -375,7 +375,8 @@ are claimed but never completed, are automatically marked timeout by the platfor
 - Keep tags human-friendly; keep skill_ids stable and catalog-based.
 
 ## Tokens
-- ol_live_***: OpenLinker access token. Scope and binding decide whether it is for MCP/API, Agent self-registration, or Agent runtime.
+- ol_user_***: User Token for MCP, REST API, external scripts and user-side Agent calls.
+- ol_agent_***: Agent Token for Agent self-registration, runtime_ws, runtime_pull, heartbeat, claim/result and A2A delegation.
 - Human login session: browser only; do not give it to an Agent.
 
 ## OpenLinker as an MCP server
@@ -385,7 +386,7 @@ OpenLinker itself can also be used by MCP clients as a tool server.
 - Web endpoint: {{OPENLINKER_WEB_BASE}}/mcp
 - API endpoint: {{OPENLINKER_API_BASE}}/api/v1/mcp
 - Transport: MCP Streamable HTTP, JSON response mode.
-- Auth: Authorization: Bearer ol_live_*** with the needed scopes.
+- Auth: Authorization: Bearer ol_user_*** with the needed scopes.
 - Methods: initialize, tools/list, tools/call.
 - Tools: search_agents, get_agent, create_task, run_agent, get_run.
 
@@ -393,7 +394,7 @@ Example MCP tools/list:
 
 ` + "```bash" + `
 curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
-  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Authorization: Bearer ol_user_xxx' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
@@ -403,7 +404,7 @@ Example MCP tools/call:
 
 ` + "```bash" + `
 curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
-  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Authorization: Bearer ol_user_xxx' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_agents","arguments":{"query":"translation","limit":5}}}'
@@ -427,7 +428,7 @@ REST/MCP/A2A, and read the resulting run without needing a browser session.
 
 ## Copy-paste task for an Agent
 
-If a human gives you this document plus an OpenLinker access token, do this:
+If a human gives you this document plus an OpenLinker User Token, do this:
 
 1. Treat the token as a secret. Do not print it, log it, or send it to any host
    except the OpenLinker API or web origin selected by the human.
@@ -445,7 +446,7 @@ If a human gives you this document plus an OpenLinker access token, do this:
 
 ## Authentication
 
-- Use Authorization: Bearer ol_live_***.
+- Use Authorization: Bearer ol_user_***.
 - Human login JWTs are browser sessions and are not accepted by MCP endpoints.
 - Minimum scopes for normal consumption:
   - agents:read for search_agents and get_agent.
@@ -465,7 +466,7 @@ List tools:
 
 ` + "```bash" + `
 curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
-  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Authorization: Bearer ol_user_xxx' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
@@ -475,13 +476,13 @@ Search and run:
 
 ` + "```bash" + `
 curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
-  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Authorization: Bearer ol_user_xxx' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_agents","arguments":{"query":"data analysis","limit":5}}}'
 
 curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
-  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Authorization: Bearer ol_user_xxx' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"run_agent","arguments":{"agent_id":"AGENT_UUID","input":{"text":"Summarize this task"}}}}'
@@ -493,12 +494,12 @@ curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
 curl {{OPENLINKER_API_BASE}}/api/v1/agents?keyword=data
 
 curl -X POST {{OPENLINKER_API_BASE}}/api/v1/mcp/run_agent \
-  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Authorization: Bearer ol_user_xxx' \
   -H 'Content-Type: application/json' \
   -d '{"agent_id":"AGENT_UUID","input":{"text":"Summarize this task"}}'
 
 curl -X POST {{OPENLINKER_API_BASE}}/api/v1/mcp/get_run \
-  -H 'Authorization: Bearer ol_live_xxx' \
+  -H 'Authorization: Bearer ol_user_xxx' \
   -H 'Content-Type: application/json' \
   -d '{"run_id":"RUN_UUID"}'
 ` + "```" + `

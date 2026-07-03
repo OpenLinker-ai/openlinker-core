@@ -29,7 +29,7 @@ func TestNewManifestUsesStablePublicEntrypoints(t *testing.T) {
 	require.Equal(t, "https://api.openlinker.test/api/v1/runs/{run_id}/events", manifest.Protocols.RunEvents)
 	require.Contains(t, manifest.Tools.Names, "run_agent")
 	require.Contains(t, manifest.Auth.APIScopes, "agents:run")
-	require.Contains(t, manifest.Auth.RuntimeScopes, "agent:pull")
+	require.Contains(t, manifest.Auth.AgentScopes, "agent:pull")
 	require.Equal(t, "run public agents through REST, MCP, A2A, or delegated calls", manifest.TokenScopes["agents:run"])
 	require.Equal(t, "no_pre_review", manifest.Policies["public_listing"])
 	require.Equal(t, "not_enabled", manifest.Policies["payments"])

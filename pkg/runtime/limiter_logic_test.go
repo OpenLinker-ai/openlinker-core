@@ -64,7 +64,7 @@ func TestRuntimeEndpointLimiterStateMachine(t *testing.T) {
 	}
 
 	limiter.markEmptyClaim("token:custom-empty", 7*time.Second)
-	if retry, release := limiter.beginClaim("token:custom-empty", time.Second); retry != 7*time.Second {
+	if retry, release := limiter.beginClaim("token:custom-empty", time.Second); retry != runtimePullEmptyClaimRetryAfter {
 		t.Fatalf("custom empty claim cooldown retry = %v", retry)
 	} else {
 		release()

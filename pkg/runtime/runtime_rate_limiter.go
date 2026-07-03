@@ -80,15 +80,12 @@ func (l *runtimeEndpointLimiter) beginClaim(key string, wait time.Duration) (tim
 }
 
 func (l *runtimeEndpointLimiter) markEmptyClaim(key string, wait time.Duration) {
-	if wait <= 0 {
-		wait = runtimePullEmptyClaimRetryAfter
-	}
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.purgeLocked(now)
 	state := l.stateForLocked(key, now)
-	state.emptyClaimAllowedAt = now.Add(wait)
+	state.emptyClaimAllowedAt = now.Add(runtimePullEmptyClaimRetryAfter)
 }
 
 func (l *runtimeEndpointLimiter) allowAfter(key string, interval time.Duration, field func(*runtimeEndpointLimitState) *time.Time) time.Duration {

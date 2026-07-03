@@ -389,14 +389,16 @@ func TestSkillQueriesScanRowsAndMatches(t *testing.T) {
 	}
 }
 
-func TestAgentRegistrationTokenQueriesScanRowsAndAffectedRows(t *testing.T) {
+func TestAgentTokenQueriesScanRowsAndAffectedRows(t *testing.T) {
 	creatorID := uuid.New()
+	agentID := uuid.New()
 	tokenID := uuid.New()
 	expiresAt := time.Date(2026, 6, 20, 13, 0, 0, 0, time.UTC)
+	redeemedAt := expiresAt.Add(30 * time.Minute)
 	revokedAt := expiresAt.Add(time.Minute)
 	lastUsedAt := expiresAt.Add(2 * time.Minute)
 	createdAt := expiresAt.Add(-time.Hour)
-	tokenValues := registrationTokenRow(tokenID, creatorID, expiresAt, &revokedAt, &lastUsedAt, createdAt)
+	tokenValues := agentTokenRow(tokenID, &agentID, creatorID, "active_runtime", &expiresAt, &redeemedAt, &revokedAt, &lastUsedAt, createdAt)
 	rows := &fakeRows{rows: [][]any{tokenValues}}
 	dbtx := &fakeDBTX{
 		row:       fakeRow{values: tokenValues},
@@ -405,61 +407,86 @@ func TestAgentRegistrationTokenQueriesScanRowsAndAffectedRows(t *testing.T) {
 	}
 	q := New(dbtx)
 
-	token, err := q.CreateAgentRegistrationToken(context.Background(), CreateAgentRegistrationTokenParams{
+	token, err := q.CreateAgentToken(context.Background(), CreateAgentTokenParams{
+		AgentID:       &agentID,
 		CreatorUserID: creatorID,
-		Label:         "bootstrap",
-		Prefix:        "rt_live_abcd",
+		Name:          "worker",
+		Prefix:        "ol_agent_abcd",
 		TokenHash:     "hash",
-		MaxAgents:     3,
-		ExpiresAt:     expiresAt,
+		Scopes:        []string{"agent:call", "agent:pull"},
+		Status:        "active_runtime",
+		ExpiresAt:     &expiresAt,
+		RedeemedAt:    &redeemedAt,
 	})
 	if err != nil {
-		t.Fatalf("CreateAgentRegistrationToken error = %v", err)
+		t.Fatalf("CreateAgentToken error = %v", err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "CreateAgentRegistrationToken")
-	if token.ID != tokenID || token.RevokedAt == nil || token.LastUsedAt == nil {
-		t.Fatalf("CreateAgentRegistrationToken scan = %#v", token)
+	requireSQLName(t, dbtx.queryRowSQL, "CreateAgentToken")
+	if token.ID != tokenID || token.AgentID == nil || token.RevokedAt == nil || token.LastUsedAt == nil {
+		t.Fatalf("CreateAgentToken scan = %#v", token)
 	}
 
-	listed, err := q.ListAgentRegistrationTokensByCreator(context.Background(), creatorID)
+	listed, err := q.ListAgentTokensByCreator(context.Background(), creatorID)
 	if err != nil {
-		t.Fatalf("ListAgentRegistrationTokensByCreator error = %v", err)
+		t.Fatalf("ListAgentTokensByCreator error = %v", err)
 	}
-	requireSQLName(t, dbtx.querySQL, "ListAgentRegistrationTokensByCreator")
+	requireSQLName(t, dbtx.querySQL, "ListAgentTokensByCreator")
 	if len(listed) != 1 || listed[0].TokenHash != "hash" {
-		t.Fatalf("ListAgentRegistrationTokensByCreator scan = %#v", listed)
+		t.Fatalf("ListAgentTokensByCreator scan = %#v", listed)
+	}
+
+	dbtx.queryRows = &fakeRows{rows: [][]any{tokenValues}}
+	filtered, err := q.ListAgentTokensByCreatorAndAgent(context.Background(), ListAgentTokensByCreatorAndAgentParams{CreatorUserID: creatorID, AgentID: agentID})
+	if err != nil {
+		t.Fatalf("ListAgentTokensByCreatorAndAgent error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentTokensByCreatorAndAgent")
+	if len(filtered) != 1 || filtered[0].AgentID == nil || *filtered[0].AgentID != agentID {
+		t.Fatalf("ListAgentTokensByCreatorAndAgent scan = %#v", filtered)
 	}
 
 	activeTokenValues := append([]any{}, tokenValues...)
-	activeTokenValues[8] = nil
+	activeTokenValues[11] = nil
 	activeRows := &fakeRows{rows: [][]any{activeTokenValues}}
 	dbtx.queryRows = activeRows
-	activeTokens, err := q.ListActiveAgentRegistrationTokensByPrefix(context.Background(), "rt_live_abcd")
+	activeTokens, err := q.ListActiveAgentTokensByPrefix(context.Background(), "ol_agent_abcd")
 	if err != nil {
-		t.Fatalf("ListActiveAgentRegistrationTokensByPrefix error = %v", err)
+		t.Fatalf("ListActiveAgentTokensByPrefix error = %v", err)
 	}
-	requireSQLName(t, dbtx.querySQL, "ListActiveAgentRegistrationTokensByPrefix")
+	requireSQLName(t, dbtx.querySQL, "ListActiveAgentTokensByPrefix")
 	if !activeRows.closed || len(activeTokens) != 1 || activeTokens[0].RevokedAt != nil {
-		t.Fatalf("ListActiveAgentRegistrationTokensByPrefix scan = %#v closed=%v", activeTokens, activeRows.closed)
+		t.Fatalf("ListActiveAgentTokensByPrefix scan = %#v closed=%v", activeTokens, activeRows.closed)
 	}
-	if !reflect.DeepEqual(dbtx.queryArgs, []any{"rt_live_abcd"}) {
-		t.Fatalf("ListActiveAgentRegistrationTokensByPrefix args = %#v", dbtx.queryArgs)
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{"ol_agent_abcd"}) {
+		t.Fatalf("ListActiveAgentTokensByPrefix args = %#v", dbtx.queryArgs)
 	}
 
-	affected, err := q.RevokeAgentRegistrationTokenForCreator(context.Background(), RevokeAgentRegistrationTokenForCreatorParams{ID: tokenID, CreatorUserID: creatorID})
+	affected, err := q.RevokeAgentTokenForCreator(context.Background(), RevokeAgentTokenForCreatorParams{ID: tokenID, CreatorUserID: creatorID})
 	if err != nil || affected != 1 {
-		t.Fatalf("RevokeAgentRegistrationTokenForCreator = %d, %v", affected, err)
+		t.Fatalf("RevokeAgentTokenForCreator = %d, %v", affected, err)
 	}
-	requireSQLName(t, dbtx.execSQL, "RevokeAgentRegistrationTokenForCreator")
+	requireSQLName(t, dbtx.execSQL, "RevokeAgentTokenForCreator")
 
-	consumed, err := q.ConsumeAgentRegistrationToken(context.Background(), tokenID)
+	redeemed, err := q.RedeemPendingAgentToken(context.Background(), RedeemPendingAgentTokenParams{
+		ID:            tokenID,
+		AgentID:       agentID,
+		Scopes:        []string{"agent:call"},
+		CreatorUserID: creatorID,
+	})
 	if err != nil {
-		t.Fatalf("ConsumeAgentRegistrationToken error = %v", err)
+		t.Fatalf("RedeemPendingAgentToken error = %v", err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "ConsumeAgentRegistrationToken")
-	if consumed.ID != tokenID || consumed.UsedCount != 1 {
-		t.Fatalf("ConsumeAgentRegistrationToken scan = %#v", consumed)
+	requireSQLName(t, dbtx.queryRowSQL, "RedeemPendingAgentToken")
+	if redeemed.ID != tokenID || redeemed.AgentID == nil {
+		t.Fatalf("RedeemPendingAgentToken scan = %#v", redeemed)
 	}
+
+	dbtx.row = fakeRow{values: []any{int32(2)}}
+	count, err := q.CountActiveAgentTokensByAgent(context.Background(), agentID)
+	if err != nil || count != 2 {
+		t.Fatalf("CountActiveAgentTokensByAgent = %d, %v", count, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountActiveAgentTokensByAgent")
 }
 
 func TestRunEventQueriesScanRows(t *testing.T) {
@@ -1526,7 +1553,7 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 		AgentID:         agentID,
 		CreatedByUserID: userID,
 		Name:            "runtime",
-		Prefix:          "rt_live_abcd",
+		Prefix:          "ol_agent_abcd",
 		TokenHash:       "hash",
 		Scopes:          []string{"agent:pull"},
 	})
@@ -1537,7 +1564,7 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	if token.ID != tokenID || token.LastUsedAt == nil || token.Scopes[0] != "agent:pull" {
 		t.Fatalf("CreateAgentRuntimeToken scan = %#v", token)
 	}
-	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, userID, "runtime", "rt_live_abcd", "hash", []string{"agent:pull"}}) {
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, userID, "runtime", "ol_agent_abcd", "hash", []string{"agent:pull"}}) {
 		t.Fatalf("CreateAgentRuntimeToken args = %#v", dbtx.queryRowArgs)
 	}
 
@@ -1552,7 +1579,7 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 
 	activeTokenRows := &fakeRows{rows: [][]any{tokenValues}}
 	dbtx.queryRows = activeTokenRows
-	activeTokens, err := q.ListActiveAgentRuntimeTokensByPrefix(context.Background(), "rt_live_abcd")
+	activeTokens, err := q.ListActiveAgentRuntimeTokensByPrefix(context.Background(), "ol_agent_abcd")
 	if err != nil {
 		t.Fatalf("ListActiveAgentRuntimeTokensByPrefix error = %v", err)
 	}
@@ -1560,7 +1587,7 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	if !activeTokenRows.closed || len(activeTokens) != 1 || activeTokens[0].ID != tokenID {
 		t.Fatalf("ListActiveAgentRuntimeTokensByPrefix scan = %#v closed=%v", activeTokens, activeTokenRows.closed)
 	}
-	if !reflect.DeepEqual(dbtx.queryArgs, []any{"rt_live_abcd"}) {
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{"ol_agent_abcd"}) {
 		t.Fatalf("ListActiveAgentRuntimeTokensByPrefix args = %#v", dbtx.queryArgs)
 	}
 
@@ -1831,7 +1858,7 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			return err
 		}},
 		{name: "ListActiveAgentRuntimeTokensByPrefix", run: func() error {
-			_, err := q.ListActiveAgentRuntimeTokensByPrefix(ctx, "rt_live_abcd")
+			_, err := q.ListActiveAgentRuntimeTokensByPrefix(ctx, "ol_agent_abcd")
 			return err
 		}},
 		{name: "ListChildRunsByParentAndUser", run: func() error {
@@ -1862,12 +1889,12 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			_, err := q.AggregateAgentRunsForWindow(ctx, "24 hours")
 			return err
 		}},
-		{name: "ListAgentRegistrationTokensByCreator", run: func() error {
-			_, err := q.ListAgentRegistrationTokensByCreator(ctx, id)
+		{name: "ListAgentTokensByCreator", run: func() error {
+			_, err := q.ListAgentTokensByCreator(ctx, id)
 			return err
 		}},
-		{name: "ListActiveAgentRegistrationTokensByPrefix", run: func() error {
-			_, err := q.ListActiveAgentRegistrationTokensByPrefix(ctx, "rt_live_abcd")
+		{name: "ListActiveAgentTokensByPrefix", run: func() error {
+			_, err := q.ListActiveAgentTokensByPrefix(ctx, "ol_agent_abcd")
 			return err
 		}},
 		{name: "ListAgentsByCreator", run: func() error {
@@ -2118,8 +2145,8 @@ func TestGeneratedExecQueriesPropagateExecErrors(t *testing.T) {
 			_, err := q.ExpireAgentApprovals(ctx)
 			return err
 		}},
-		{name: "RevokeAgentRegistrationTokenForCreator", run: func() error {
-			_, err := q.RevokeAgentRegistrationTokenForCreator(ctx, RevokeAgentRegistrationTokenForCreatorParams{ID: id, CreatorUserID: id})
+		{name: "RevokeAgentTokenForCreator", run: func() error {
+			_, err := q.RevokeAgentTokenForCreator(ctx, RevokeAgentTokenForCreatorParams{ID: id, CreatorUserID: id})
 			return err
 		}},
 		{name: "DisableAgent", run: func() error {
@@ -3888,8 +3915,22 @@ func skillRow(id, category, name, description string, sortOrder int32, createdAt
 	return []any{id, category, name, description, sortOrder, createdAt}
 }
 
-func registrationTokenRow(id, creatorID uuid.UUID, expiresAt time.Time, revokedAt, lastUsedAt *time.Time, createdAt time.Time) []any {
-	return []any{id, creatorID, "bootstrap", "rt_live_abcd", "hash", int32(3), int32(1), expiresAt, revokedAt, lastUsedAt, createdAt}
+func agentTokenRow(id uuid.UUID, agentID *uuid.UUID, creatorID uuid.UUID, status string, expiresAt, redeemedAt, revokedAt, lastUsedAt *time.Time, createdAt time.Time) []any {
+	return []any{
+		id,
+		agentID,
+		creatorID,
+		"worker",
+		"ol_agent_abcd",
+		"hash",
+		[]string{"agent:call", "agent:pull"},
+		status,
+		expiresAt,
+		redeemedAt,
+		lastUsedAt,
+		revokedAt,
+		createdAt,
+	}
 }
 
 func runEventRow(id, runID uuid.UUID, parentRunID *uuid.UUID, sequence int32, eventType string, payload []byte, createdAt time.Time) []any {
@@ -4141,7 +4182,7 @@ func taskCallbackDeliveryRow(
 }
 
 func agentRuntimeTokenRow(id, agentID, userID uuid.UUID, now time.Time, lastUsedAt, revokedAt *time.Time) []any {
-	return []any{id, agentID, userID, "runtime", "rt_live_abcd", "hash", []string{"agent:pull"}, lastUsedAt, revokedAt, now}
+	return []any{id, agentID, userID, "runtime", "ol_agent_abcd", "hash", []string{"agent:pull"}, lastUsedAt, revokedAt, now}
 }
 
 func runDelegationRow(childRunID, parentRunID, callerAgentID uuid.UUID, createdAt time.Time) []any {

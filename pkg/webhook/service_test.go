@@ -15,10 +15,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
-const truncateWebhookTables = "TRUNCATE task_callback_deliveries, task_callback_subscriptions, webhook_deliveries, api_keys, wallets, runs, charges, withdrawals, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"
+const truncateWebhookTables = "TRUNCATE task_callback_deliveries, task_callback_subscriptions, webhook_deliveries, user_tokens, wallets, runs, charges, withdrawals, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"
 
 func setupWebhookTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -40,6 +41,10 @@ func setupWebhookTestDB(t *testing.T) *pgxpool.Pool {
 		pool.Close()
 	})
 	return pool
+}
+
+func newWebhookTestService(pool *pgxpool.Pool) *Service {
+	return NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true})
 }
 
 func insertWebhookUser(t *testing.T, pool *pgxpool.Pool, isCreator bool) uuid.UUID {
@@ -106,7 +111,7 @@ func insertWebhookRun(t *testing.T, pool *pgxpool.Pool, userID, agentID uuid.UUI
 
 func TestSetRotateClearWebhook(t *testing.T) {
 	pool := setupWebhookTestDB(t)
-	svc := NewService(pool)
+	svc := newWebhookTestService(pool)
 	creatorID := insertWebhookUser(t, pool, true)
 	otherID := insertWebhookUser(t, pool, true)
 	agentID := insertWebhookAgent(t, pool, creatorID, "webhook-config-"+uuid.NewString()[:8])
@@ -137,7 +142,7 @@ func TestSetRotateClearWebhook(t *testing.T) {
 
 func TestEnqueueDeliveryPostsSignedPayload(t *testing.T) {
 	pool := setupWebhookTestDB(t)
-	svc := NewService(pool)
+	svc := newWebhookTestService(pool)
 	userID := insertWebhookUser(t, pool, false)
 	creatorID := insertWebhookUser(t, pool, true)
 	agentID := insertWebhookAgent(t, pool, creatorID, "webhook-deliver-"+uuid.NewString()[:8])
@@ -192,7 +197,7 @@ func TestEnqueueDeliveryPostsSignedPayload(t *testing.T) {
 
 func TestTaskCallbackSubscriptionDeliversSignedRunEvent(t *testing.T) {
 	pool := setupWebhookTestDB(t)
-	svc := NewService(pool)
+	svc := newWebhookTestService(pool)
 	userID := insertWebhookUser(t, pool, false)
 	creatorID := insertWebhookUser(t, pool, true)
 	agentID := insertWebhookAgent(t, pool, creatorID, "task-callback-"+uuid.NewString()[:8])
@@ -262,7 +267,7 @@ func TestTaskCallbackSubscriptionDeliversSignedRunEvent(t *testing.T) {
 
 func TestTaskCallbackSubscriptionCanPauseAndResumeNonTerminalEvents(t *testing.T) {
 	pool := setupWebhookTestDB(t)
-	svc := NewService(pool)
+	svc := newWebhookTestService(pool)
 	userID := insertWebhookUser(t, pool, false)
 	creatorID := insertWebhookUser(t, pool, true)
 	agentID := insertWebhookAgent(t, pool, creatorID, "task-callback-pause-"+uuid.NewString()[:8])
@@ -323,7 +328,7 @@ func TestTaskCallbackSubscriptionCanPauseAndResumeNonTerminalEvents(t *testing.T
 
 func TestTaskCallbackBatchManagementAcrossRuns(t *testing.T) {
 	pool := setupWebhookTestDB(t)
-	svc := NewService(pool)
+	svc := newWebhookTestService(pool)
 	userID := insertWebhookUser(t, pool, false)
 	otherUserID := insertWebhookUser(t, pool, false)
 	creatorID := insertWebhookUser(t, pool, true)
@@ -404,7 +409,7 @@ func TestTaskCallbackBatchManagementAcrossRuns(t *testing.T) {
 
 func TestAttemptDeliveryRetriesAndThenFailsFinal(t *testing.T) {
 	pool := setupWebhookTestDB(t)
-	svc := NewService(pool)
+	svc := newWebhookTestService(pool)
 	userID := insertWebhookUser(t, pool, false)
 	creatorID := insertWebhookUser(t, pool, true)
 	agentID := insertWebhookAgent(t, pool, creatorID, "webhook-retry-"+uuid.NewString()[:8])

@@ -2,34 +2,40 @@ package credential
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 )
 
 const (
-	AccessTokenPrefix = "ol_live_"
-	RandomBytes       = 32
-	PrefixLen         = len(AccessTokenPrefix) + 4
-
-	LegacyAPIKeyPrefix       = "sk_live_"
-	LegacyRegistrationPrefix = "br_live_"
-	LegacyAgentPrefix        = "rt_live_"
+	UserTokenPrefix  = "ol_user_"
+	AgentTokenPrefix = "ol_agent_"
+	RandomBytes      = 32
+	PrefixLen        = len(UserTokenPrefix) + 4
 
 	// BcryptCost matches user passwords and cloud API keys.
 	BcryptCost = 12
 )
 
-func GenerateAccessToken() (plaintext, prefix string, err error) {
+func GenerateUserToken() (plaintext, prefix string, err error) {
+	return generateToken(UserTokenPrefix)
+}
+
+func GenerateAgentToken() (plaintext, prefix string, err error) {
+	return generateToken(AgentTokenPrefix)
+}
+
+func generateToken(tokenPrefix string) (plaintext, prefix string, err error) {
 	raw := make([]byte, RandomBytes)
 	if _, err = rand.Read(raw); err != nil {
 		return "", "", err
 	}
-	plaintext = AccessTokenPrefix + hex.EncodeToString(raw)
+	plaintext = tokenPrefix + hex.EncodeToString(raw)
 	return plaintext, plaintext[:PrefixLen], nil
 }
 
-func ValidLength(token string) bool {
-	return len(strings.TrimSpace(token)) == len(AccessTokenPrefix)+RandomBytes*2
+func ValidLengthForPrefix(token, tokenPrefix string) bool {
+	return len(strings.TrimSpace(token)) == len(tokenPrefix)+RandomBytes*2
 }
 
 func HasAnyPrefix(token string, prefixes ...string) bool {
@@ -40,4 +46,11 @@ func HasAnyPrefix(token string, prefixes ...string) bool {
 		}
 	}
 	return false
+}
+
+func BcryptTokenInput(token string) []byte {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	encoded := make([]byte, hex.EncodedLen(len(sum)))
+	hex.Encode(encoded, sum[:])
+	return encoded
 }

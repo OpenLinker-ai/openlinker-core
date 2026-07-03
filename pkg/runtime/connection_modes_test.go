@@ -76,8 +76,8 @@ func TestCallAgentEndpointSendsDirectHTTPEnvelope(t *testing.T) {
 	assert.Equal(t, runID.String(), captured.A2A.CurrentRunID)
 	assert.Equal(t, "https://api.example.test/api/v1/agent-runtime/call-agent", captured.A2A.CallAgentEndpoint)
 	assert.Equal(t, http.MethodPost, captured.A2A.CallAgentMethod)
-	assert.Equal(t, "ol_live", captured.A2A.RuntimeTokenType)
-	assert.Equal(t, []string{"agent:call"}, captured.A2A.RuntimeScopes)
+	assert.Equal(t, "ol_agent", captured.A2A.AgentTokenType)
+	assert.Equal(t, []string{"agent:call"}, captured.A2A.AgentScopes)
 }
 
 func TestCallAgentEndpointPreservesTopLevelJSONResponse(t *testing.T) {

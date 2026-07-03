@@ -65,12 +65,9 @@ func (l *redisRuntimeEndpointLimiter) beginClaim(key string, wait time.Duration)
 }
 
 func (l *redisRuntimeEndpointLimiter) markEmptyClaim(key string, wait time.Duration) {
-	if wait <= 0 {
-		wait = runtimePullEmptyClaimRetryAfter
-	}
 	ctx, cancel := l.context()
 	defer cancel()
-	if err := l.client.Set(ctx, l.key("empty", key), "1", wait).Err(); err != nil {
+	if err := l.client.Set(ctx, l.key("empty", key), "1", runtimePullEmptyClaimRetryAfter).Err(); err != nil {
 		log.Error().Err(err).Msg("runtime redis limiter: mark empty claim")
 	}
 }

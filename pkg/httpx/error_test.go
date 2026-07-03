@@ -105,9 +105,9 @@ func TestHelpersAndContextAccessors(t *testing.T) {
 	c, _ := newTestContext()
 	c.Set(string(CtxKeyUserID), "u_1")
 	c.Set(string(CtxKeyAdmin), true)
-	c.Set(string(CtxKeyAuthMethod), "apikey")
+	c.Set(string(CtxKeyAuthMethod), "user_token")
 	c.Set(string(CtxKeyAuthScopes), []string{"tasks:write", "agent:pull"})
-	if UserIDFrom(c) != "u_1" || !IsAdmin(c) || AuthMethodFrom(c) != "apikey" {
+	if UserIDFrom(c) != "u_1" || !IsAdmin(c) || AuthMethodFrom(c) != "user_token" {
 		t.Fatalf("context accessors returned unexpected values")
 	}
 	if !HasScope(c, "agent:pull") || HasScope(c, "missing") {

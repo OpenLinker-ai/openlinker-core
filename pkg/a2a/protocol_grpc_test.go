@@ -215,7 +215,7 @@ func TestGRPCServerPushAndExtendedCardMethods(t *testing.T) {
 
 func TestGRPCServerErrorsMapToGRPCStatus(t *testing.T) {
 	userID := uuid.New()
-	srv := NewGRPCServer(newFakeA2AService(uuid.NewString()), nil, staticGRPCAuth{info: &GRPCAuthInfo{UserID: userID, AuthMethod: "apikey", Scopes: []string{"runs:read"}}})
+	srv := NewGRPCServer(newFakeA2AService(uuid.NewString()), nil, staticGRPCAuth{info: &GRPCAuthInfo{UserID: userID, AuthMethod: "user_token", Scopes: []string{"runs:read"}}})
 	_, err := srv.SendMessage(context.Background(), &a2apb.SendMessageRequest{Tenant: "agent"})
 	require.Error(t, err)
 	require.Equal(t, codes.PermissionDenied, status.Code(err))

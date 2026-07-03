@@ -210,8 +210,8 @@ func (s *Service) agentA2AContext(runID uuid.UUID, delegation *Delegation) *Agen
 		CurrentRunID:      runID.String(),
 		CallAgentEndpoint: s.callAgentEndpointURL(),
 		CallAgentMethod:   "POST",
-		RuntimeTokenType:  "ol_live",
-		RuntimeScopes:     []string{"agent:call"},
+		AgentTokenType:    "ol_agent",
+		AgentScopes:       []string{"agent:call"},
 	}
 	if delegation != nil {
 		ctx.ParentRunID = delegation.ParentRunID.String()
@@ -279,8 +279,8 @@ func agentA2AContextMap(ctx *AgentA2AContext) map[string]interface{} {
 		"current_run_id":      ctx.CurrentRunID,
 		"call_agent_endpoint": ctx.CallAgentEndpoint,
 		"call_agent_method":   ctx.CallAgentMethod,
-		"runtime_token_type":  ctx.RuntimeTokenType,
-		"runtime_scopes":      ctx.RuntimeScopes,
+		"agent_token_type":    ctx.AgentTokenType,
+		"agent_scopes":        ctx.AgentScopes,
 	}
 	if ctx.ParentRunID != "" {
 		value["parent_run_id"] = ctx.ParentRunID
@@ -1636,10 +1636,11 @@ func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken str
 		}
 		resp = s.handleFailure(ctx, runID, state.UserID, token.AgentID, state.CostCents, duration, nil, agentErr, settle, triggerExternalDelivery)
 	case "timeout":
-		agentErr := req.Error
-		if agentErr == nil {
-			agentErr = &AgentError{Code: "TIMEOUT", Message: "Agent runtime reported timeout"}
+		message := "Agent runtime reported timeout"
+		if req.Error != nil && strings.TrimSpace(req.Error.Message) != "" {
+			message = req.Error.Message
 		}
+		agentErr := &AgentError{Code: "TIMEOUT", Message: message}
 		resp = s.handleFailure(ctx, runID, state.UserID, token.AgentID, state.CostCents, duration, nil, agentErr, settle, triggerExternalDelivery)
 	default:
 		return nil, httpx.BadRequest("status 取值非法")
@@ -1905,8 +1906,8 @@ func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext, requiredSco
 
 func (s *Service) verifyRuntimeTokenAny(ctx context.Context, plaintext string, acceptedScopes ...string) (db.AgentRuntimeToken, error) {
 	plaintext = strings.TrimSpace(plaintext)
-	if !credential.HasAnyPrefix(plaintext, credential.AccessTokenPrefix, credential.LegacyAgentPrefix) ||
-		!credential.ValidLength(plaintext) {
+	if !credential.HasAnyPrefix(plaintext, credential.AgentTokenPrefix) ||
+		!credential.ValidLengthForPrefix(plaintext, credential.AgentTokenPrefix) {
 		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
 	}
 	tokens, err := s.queries.ListActiveAgentRuntimeTokensByPrefix(ctx, plaintext[:runtimeTokenPrefixLen])
@@ -1917,7 +1918,7 @@ func (s *Service) verifyRuntimeTokenAny(ctx context.Context, plaintext string, a
 		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
 	}
 	for _, token := range tokens {
-		if bcrypt.CompareHashAndPassword([]byte(token.TokenHash), []byte(plaintext)) == nil &&
+		if bcrypt.CompareHashAndPassword([]byte(token.TokenHash), credential.BcryptTokenInput(plaintext)) == nil &&
 			hasAnyRuntimeScope(token.Scopes, acceptedScopes...) {
 			return token, nil
 		}

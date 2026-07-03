@@ -241,8 +241,8 @@ type AgentA2AContext struct {
 	ReferenceTaskIDs  []string `json:"reference_task_ids,omitempty"`
 	CallAgentEndpoint string   `json:"call_agent_endpoint"`
 	CallAgentMethod   string   `json:"call_agent_method"`
-	RuntimeTokenType  string   `json:"runtime_token_type"`
-	RuntimeScopes     []string `json:"runtime_scopes"`
+	AgentTokenType    string   `json:"agent_token_type"`
+	AgentScopes       []string `json:"agent_scopes"`
 }
 
 // AgentResponse 创作者 endpoint → 平台的响应体。

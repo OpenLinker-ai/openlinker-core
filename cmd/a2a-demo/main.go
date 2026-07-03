@@ -1,7 +1,7 @@
 // Command a2a-demo verifies a real local Agent-to-Agent completion path through a running API.
 //
 // Start the API with ALLOW_LOCAL_HTTP_ENDPOINTS=true before running this command. It uses
-// an existing user JWT, self-registers three loopback demo Agents with a registration-purpose access token,
+// an existing user JWT, self-registers three loopback demo Agents with one Agent Token per Agent,
 // publishes a task recommendation, invokes the parent Agent, and fails unless both delegated child runs
 // reach success.
 package main
@@ -33,7 +33,7 @@ type authResponse struct {
 	JWT string `json:"jwt"`
 }
 
-type bootstrapResponse struct {
+type agentTokenMintResponse struct {
 	PlaintextToken string `json:"plaintext_token"`
 }
 
@@ -43,10 +43,11 @@ type agentResponse struct {
 }
 
 type registrationResponse struct {
-	Agent        agentResponse `json:"agent"`
-	RuntimeToken struct {
-		PlaintextToken string `json:"plaintext_token"`
-	} `json:"runtime_token"`
+	Agent      agentResponse `json:"agent"`
+	AgentToken struct {
+		AgentID string `json:"agent_id"`
+		Status  string `json:"status"`
+	} `json:"agent_token"`
 }
 
 type runResponse struct {
@@ -100,7 +101,7 @@ type demoResult struct {
 type endpointConfig struct {
 	mu           sync.RWMutex
 	apiURL       string
-	runtimeToken string
+	agentToken   string
 	workerID     string
 	reviewerID   string
 }
@@ -163,23 +164,28 @@ func run(api *client, cfg *endpointConfig, callerURL, workerURL, reviewerURL str
 		return nil, fmt.Errorf("become creator: %w", err)
 	}
 
-	var bootstrap bootstrapResponse
-	if err := api.do(http.MethodPost, "/api/v1/creator/agent-registration-tokens", map[string]any{
-		"label": "local a2a demo", "expires_in_minutes": 30, "max_agents": 3,
-	}, &bootstrap); err != nil {
-		return nil, fmt.Errorf("mint bootstrap token: %w", err)
-	}
-
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	workerAgent, err := registerAgent(api, bootstrap.PlaintextToken, "demo-worker-"+suffix, "Local Worker Agent", workerURL, []string{"ops/document-generate"})
+	workerToken, err := mintAgentToken(api, "local a2a worker")
+	if err != nil {
+		return nil, fmt.Errorf("mint worker Agent Token: %w", err)
+	}
+	workerAgent, err := registerAgent(api, workerToken, "demo-worker-"+suffix, "Local Worker Agent", workerURL, []string{"ops/document-generate"})
 	if err != nil {
 		return nil, fmt.Errorf("self-register worker: %w", err)
 	}
-	reviewerAgent, err := registerAgent(api, bootstrap.PlaintextToken, "demo-reviewer-"+suffix, "Local Reviewer Agent", reviewerURL, []string{"content/summarization"})
+	reviewerToken, err := mintAgentToken(api, "local a2a reviewer")
+	if err != nil {
+		return nil, fmt.Errorf("mint reviewer Agent Token: %w", err)
+	}
+	reviewerAgent, err := registerAgent(api, reviewerToken, "demo-reviewer-"+suffix, "Local Reviewer Agent", reviewerURL, []string{"content/summarization"})
 	if err != nil {
 		return nil, fmt.Errorf("self-register reviewer: %w", err)
 	}
-	callerAgent, err := registerAgent(api, bootstrap.PlaintextToken, "demo-planner-"+suffix, "Local Planner Agent", callerURL, []string{
+	callerToken, err := mintAgentToken(api, "local a2a planner")
+	if err != nil {
+		return nil, fmt.Errorf("mint planner Agent Token: %w", err)
+	}
+	callerAgent, err := registerAgent(api, callerToken, "demo-planner-"+suffix, "Local Planner Agent", callerURL, []string{
 		"ai/agent-orchestration",
 		"ai/prompt-engineering",
 		"ops/document-generate",
@@ -191,7 +197,7 @@ func run(api *client, cfg *endpointConfig, callerURL, workerURL, reviewerURL str
 	}
 
 	cfg.mu.Lock()
-	cfg.runtimeToken = callerAgent.RuntimeToken.PlaintextToken
+	cfg.agentToken = callerToken
 	cfg.workerID = workerAgent.Agent.ID
 	cfg.reviewerID = reviewerAgent.Agent.ID
 	cfg.mu.Unlock()
@@ -297,10 +303,27 @@ func publishTask(api *client, plannerID string) (*taskDemoResult, error) {
 	return &taskDemoResult{TaskID: task.TaskID, PlannerChosen: true}, nil
 }
 
-func registerAgent(api *client, bootstrap, slug, name, endpoint string, skillIDs []string) (*registrationResponse, error) {
+func mintAgentToken(api *client, name string) (string, error) {
+	var minted agentTokenMintResponse
+	err := api.do(http.MethodPost, "/api/v1/creator/agent-tokens", map[string]any{
+		"name":               name,
+		"expires_in_minutes": 30,
+	}, &minted)
+	if err != nil {
+		return "", err
+	}
+	if minted.PlaintextToken == "" {
+		return "", errors.New("Agent Token response did not include plaintext_token")
+	}
+	return minted.PlaintextToken, nil
+}
+
+func registerAgent(api *client, agentToken, slug, name, endpoint string, skillIDs []string) (*registrationResponse, error) {
 	var registered registrationResponse
-	err := api.do(http.MethodPost, "/api/v1/agent-registration/agents", map[string]any{
-		"bootstrap_token":      bootstrap,
+	agentClient := *api
+	agentClient.token = agentToken
+	err := agentClient.do(http.MethodPost, "/api/v1/agent-registration/agents", map[string]any{
+		"agent_token":          agentToken,
 		"slug":                 slug,
 		"name":                 name,
 		"description":          "Local endpoint used to verify a real Agent-to-Agent completion flow.",
@@ -339,7 +362,7 @@ func (cfg *endpointConfig) callerEndpoint(w http.ResponseWriter, r *http.Request
 	}
 
 	cfg.mu.RLock()
-	token := cfg.runtimeToken
+	token := cfg.agentToken
 	workerID := cfg.workerID
 	reviewerID := cfg.reviewerID
 	cfg.mu.RUnlock()

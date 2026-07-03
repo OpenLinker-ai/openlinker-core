@@ -46,8 +46,8 @@ type Config struct {
 	FrontendURL          string `envconfig:"FRONTEND_URL"`
 	APIURL               string `envconfig:"API_URL" default:"http://localhost:8080"`
 	OAuthCallbackBaseURL string `envconfig:"OAUTH_CALLBACK_BASE_URL"`
-	APIKeyVerifyURL      string `envconfig:"API_KEY_VERIFY_URL"`
-	APIKeyVerifySecret   string `envconfig:"API_KEY_VERIFY_SECRET"`
+	UserTokenVerifyURL   string `envconfig:"USER_TOKEN_VERIFY_URL"`
+	InternalToken        string `envconfig:"OPENLINKER_INTERNAL_TOKEN"`
 
 	// A2A gRPC binding. Disabled by default so existing HTTP deployments do not
 	// need to expose an additional HTTP/2 port.

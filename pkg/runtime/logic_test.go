@@ -50,16 +50,16 @@ func TestRuntimeAuthScopeAndParsingHelpers(t *testing.T) {
 	c.Set(string(httpx.CtxKeyAuthMethod), "unknown")
 	require.Equal(t, "web", sourceFromCtx(c))
 
-	c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+	c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
 	c.Set(string(httpx.CtxKeyAuthScopes), []string{"runs:read"})
 	require.Equal(t, "api", sourceFromCtx(c))
 	err = requireAPIKeyScope(c, "agents:run")
 	require.True(t, errors.As(err, &httpErr))
 	require.Equal(t, http.StatusForbidden, httpErr.Status)
 
-	token, err := runtimeBearerToken(" Bearer  ol_live_test  ")
+	token, err := runtimeBearerToken(" Bearer  ol_user_test  ")
 	require.NoError(t, err)
-	require.Equal(t, "ol_live_test", token)
+	require.Equal(t, "ol_user_test", token)
 	token, err = runtimeBearerToken("bearer rt_lower")
 	require.NoError(t, err)
 	require.Equal(t, "rt_lower", token)
@@ -415,7 +415,7 @@ func TestA2AContextAndRequirementEvidenceHelpers(t *testing.T) {
 	require.Equal(t, parentRunID.String(), ctx.ParentRunID)
 	require.Equal(t, callerAgentID.String(), ctx.CallerAgentID)
 	require.Equal(t, "https://api.example.com/api/v1/agent-runtime/call-agent", ctx.CallAgentEndpoint)
-	require.Equal(t, []string{"agent:call"}, ctx.RuntimeScopes)
+	require.Equal(t, []string{"agent:call"}, ctx.AgentScopes)
 
 	m := agentA2AContextMap(ctx)
 	require.Equal(t, runID.String(), m["current_run_id"])
@@ -1128,7 +1128,7 @@ func TestRuntimeSSEAndHandlerValidation(t *testing.T) {
 	}{
 		{name: "post run invalid json", call: (*Handler).PostRun, method: http.MethodPost, path: "/api/v1/run", body: `{`, userID: validUser, auth: "jwt", wantHTTP: http.StatusBadRequest, wantError: "请求体格式错误"},
 		{name: "post run validation", call: (*Handler).PostRun, method: http.MethodPost, path: "/api/v1/run", body: `{}`, userID: validUser, auth: "jwt", wantHTTP: http.StatusUnprocessableEntity, wantError: "AgentID"},
-		{name: "post async missing scope", call: (*Handler).PostRunAsync, method: http.MethodPost, path: "/api/v1/runs", body: `{"agent_id":"` + validAgent + `","input":{"x":1}}`, userID: validUser, auth: "apikey", scopes: []string{"runs:read"}, wantHTTP: http.StatusForbidden, wantError: "agents:run"},
+		{name: "post async missing scope", call: (*Handler).PostRunAsync, method: http.MethodPost, path: "/api/v1/runs", body: `{"agent_id":"` + validAgent + `","input":{"x":1}}`, userID: validUser, auth: "user_token", scopes: []string{"runs:read"}, wantHTTP: http.StatusForbidden, wantError: "agents:run"},
 		{name: "get run invalid id", call: (*Handler).GetRun, method: http.MethodGet, path: "/api/v1/runs/bad", userID: validUser, auth: "jwt", paramID: "bad", wantHTTP: http.StatusBadRequest, wantError: "id 不是合法 uuid"},
 		{name: "events bad after sequence", call: (*Handler).GetRunEvents, method: http.MethodGet, path: "/api/v1/runs/" + validRun + "/events", userID: validUser, auth: "jwt", paramID: validRun, query: "after_sequence=bad", wantHTTP: http.StatusBadRequest, wantError: "after_sequence"},
 		{name: "events bad limit", call: (*Handler).GetRunEvents, method: http.MethodGet, path: "/api/v1/runs/" + validRun + "/events", userID: validUser, auth: "jwt", paramID: validRun, query: "limit=bad", wantHTTP: http.StatusBadRequest, wantError: "limit"},
@@ -1154,11 +1154,11 @@ func TestRuntimeSSEAndHandlerValidation(t *testing.T) {
 			switch tt.auth {
 			case "jwt":
 				c.Set(string(httpx.CtxKeyAuthMethod), "jwt")
-			case "apikey":
-				c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+			case "user_token":
+				c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
 				c.Set(string(httpx.CtxKeyAuthScopes), tt.scopes)
 			case "runtime":
-				c.Request().Header.Set(echo.HeaderAuthorization, "Bearer rt_live_validtoken")
+				c.Request().Header.Set(echo.HeaderAuthorization, "Bearer ol_agent_validtoken")
 			}
 			if tt.paramID != "" {
 				c.SetParamNames("id")

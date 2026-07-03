@@ -136,14 +136,14 @@ func UserIDFrom(c echo.Context) string {
 	return v
 }
 
-// AuthMethodFrom 返回当前请求的鉴权方式：'jwt' / 'apikey' / ”（未鉴权）。
+// AuthMethodFrom 返回当前请求的鉴权方式：'jwt' / 'user_token' / ”（未鉴权）。
 // HybridAuthMiddleware 命中后设置。
 func AuthMethodFrom(c echo.Context) string {
 	v, _ := c.Get(string(CtxKeyAuthMethod)).(string)
 	return v
 }
 
-// HasScope reports whether the authenticated API key carries a required permission.
+// HasScope reports whether the authenticated User Token carries a required permission.
 func HasScope(c echo.Context, expected string) bool {
 	scopes, _ := c.Get(string(CtxKeyAuthScopes)).([]string)
 	for _, scope := range scopes {

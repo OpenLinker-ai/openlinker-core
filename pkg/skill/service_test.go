@@ -17,7 +17,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/skill"
 )
 
-const truncateSkillTables = "TRUNCATE webhook_deliveries, api_keys, wallets, runs, charges, withdrawals, task_queries, agent_runtime_tokens, agent_availability_snapshots, agent_skills, agents, users RESTART IDENTITY CASCADE"
+const truncateSkillTables = "TRUNCATE webhook_deliveries, user_tokens, wallets, runs, charges, withdrawals, task_queries, agent_tokens, agent_availability_snapshots, agent_skills, agents, users RESTART IDENTITY CASCADE"
 
 func setupSkillTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -90,10 +90,10 @@ func insertSkillRuntimePullAgent(t *testing.T, pool *pgxpool.Pool, creatorID uui
 		id, creatorID, slug, "Skill Runtime "+slug, "openlinker-runtime-pull://"+slug, totalCalls)
 	require.NoError(t, err)
 	_, err = pool.Exec(context.Background(),
-		`INSERT INTO agent_runtime_tokens (
-			id, agent_id, created_by_user_id, name, prefix, token_hash, scopes, last_used_at
-		) VALUES ($1, $2, $3, 'Runtime token', $4, 'hash', ARRAY['agent:pull']::text[], $5)`,
-		uuid.New(), id, creatorID, "rt_live_"+uuid.NewString()[:8], lastUsedAt)
+		`INSERT INTO agent_tokens (
+			id, agent_id, creator_user_id, name, prefix, token_hash, scopes, last_used_at, status, redeemed_at
+		) VALUES ($1, $2, $3, 'Agent Token', $4, 'hash', ARRAY['agent:pull']::text[], $5, 'active_runtime', NOW())`,
+		uuid.New(), id, creatorID, "ol_agent_"+uuid.NewString()[:8], lastUsedAt)
 	require.NoError(t, err)
 	return id
 }

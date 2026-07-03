@@ -19,6 +19,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/credential"
 	runtimemod "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/workflow"
 )
@@ -1170,13 +1171,13 @@ func insertWorkflowRuntimeToken(t *testing.T, pool *pgxpool.Pool, agentID, creat
 	raw := make([]byte, 32)
 	_, err := rand.Read(raw)
 	require.NoError(t, err)
-	plaintext := "rt_live_" + hex.EncodeToString(raw)
-	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
+	plaintext := "ol_agent_" + hex.EncodeToString(raw)
+	hash, err := bcrypt.GenerateFromPassword([]byte(credential.BcryptTokenInput(plaintext)), bcrypt.DefaultCost)
 	require.NoError(t, err)
 	_, err = pool.Exec(context.Background(),
-		`INSERT INTO agent_runtime_tokens (
-			agent_id, created_by_user_id, name, prefix, token_hash, scopes
-		) VALUES ($1, $2, 'workflow-runtime', $3, $4, $5)`,
+		`INSERT INTO agent_tokens (
+			agent_id, creator_user_id, name, prefix, token_hash, scopes, status, redeemed_at
+		) VALUES ($1, $2, 'workflow-agent', $3, $4, $5, 'active_runtime', NOW())`,
 		agentID,
 		creatorID,
 		plaintext[:12],

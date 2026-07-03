@@ -177,7 +177,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 		})
 	}
 
-	registrySvc := registry.NewService(pool)
+	registrySvc := registry.NewService(pool, cfg)
 	registryHandler := registry.NewHandler(registrySvc)
 	registryHandler.RegisterProtected(api, jwtMiddleware)
 	if cfg.RegistryProxyRunWorkerEnabled {

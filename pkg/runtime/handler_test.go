@@ -335,10 +335,11 @@ func TestGetRunEvents_Handler_HappyPath(t *testing.T) {
 
 	var got runEventsRespBody
 	require.NoError(t, json.Unmarshal(raw, &got))
-	require.Len(t, got.Events, 2)
+	require.Len(t, got.Events, 3)
 	assert.Equal(t, int32(2), got.Events[0].Sequence)
 	assert.Equal(t, "run.started", got.Events[0].EventType)
-	assert.Equal(t, "run.completed", got.Events[1].EventType)
+	assert.Equal(t, "run.status.changed", got.Events[1].EventType)
+	assert.Equal(t, "run.completed", got.Events[2].EventType)
 }
 
 func TestPostRunEvent_Handler_UsesAgentTokenNoJWT(t *testing.T) {

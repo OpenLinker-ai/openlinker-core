@@ -379,8 +379,8 @@ JOIN agents a ON a.id = ag.agent_id
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
 LEFT JOIN LATERAL (
     SELECT MAX(last_used_at) AS last_runtime_token_used_at
-    FROM agent_runtime_tokens
-    WHERE agent_id = a.id AND revoked_at IS NULL
+    FROM agent_tokens
+    WHERE agent_id = a.id AND revoked_at IS NULL AND status = 'active_runtime'
 ) rt ON TRUE
 LEFT JOIN agent_skill_scores s
        ON s.agent_id = ag.agent_id

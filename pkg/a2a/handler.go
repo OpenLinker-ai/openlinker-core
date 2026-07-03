@@ -60,13 +60,10 @@ func (h *Handler) SetAgentCardProvider(provider AgentCardProvider) {
 // Register mounts creator controls, runtime-token invocation and user-visible trace lookup.
 func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.MiddlewareFunc) {
 	creator := api.Group("/creator/agents/:id", jwtMiddleware)
-	creator.POST("/runtime-tokens", h.CreateRuntimeToken)
-	creator.GET("/runtime-tokens", h.ListRuntimeTokens)
 	creator.GET("/runtime-workbench", h.GetRuntimeWorkbench)
 	creator.GET("/a2a-policy", h.GetCallPolicy)
 	creator.PUT("/a2a-policy", h.UpdateCallPolicy)
 
-	api.DELETE("/creator/runtime-tokens/:tokenID", h.RevokeRuntimeToken, jwtMiddleware)
 	api.POST("/agent-runtime/call-agent", h.CallAgent)
 	api.GET("/a2a/parents", h.ListParentRuns, queryMiddleware)
 	publicProtocol := api.Group("/a2a/agents/:slug")

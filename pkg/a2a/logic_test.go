@@ -225,9 +225,9 @@ func TestA2AHandlerUtilityHelpers(t *testing.T) {
 	if err := requireScope(c, "agents:run"); err != nil {
 		t.Fatalf("non-api-key auth should not require scopes: %v", err)
 	}
-	c = newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", authMethod: "apikey"})
+	c = newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", authMethod: "user_token"})
 	requireA2AHTTPStatus(t, requireScope(c, "agents:run"), http.StatusForbidden)
-	c = newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", authMethod: "apikey", scopes: []string{"agents:run"}})
+	c = newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", authMethod: "user_token", scopes: []string{"agents:run"}})
 	if err := requireScope(c, "agents:run"); err != nil {
 		t.Fatalf("api key with required scope should pass: %v", err)
 	}
@@ -905,7 +905,7 @@ func TestA2ARuntimeWorkbenchTokenAndPushHelpers(t *testing.T) {
 		ID:         uuid.New(),
 		AgentID:    uuid.New(),
 		Name:       "worker",
-		Prefix:     "ol_live_test",
+		Prefix:     "ol_user_test",
 		Scopes:     []string{"agent:call"},
 		LastUsedAt: &last,
 		RevokedAt:  &revoked,
@@ -1106,21 +1106,21 @@ func TestA2AHTTPHandlersValidateBeforeServiceDispatch(t *testing.T) {
 		{name: "list children invalid id", method: h.ListChildren, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
 		{name: "list parents missing user", method: h.ListParentRuns, req: &a2aHandlerRequest{method: http.MethodGet, target: "/"}, want: http.StatusUnauthorized},
 		{name: "extended card bad version", method: h.GetExtendedAgentCardHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/?version=2"}, want: http.StatusBadRequest},
-		{name: "extended card missing scope", method: h.GetExtendedAgentCardHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", authMethod: "apikey", userID: userID}, want: http.StatusForbidden},
+		{name: "extended card missing scope", method: h.GetExtendedAgentCardHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", authMethod: "user_token", userID: userID}, want: http.StatusForbidden},
 		{name: "send message invalid json", method: h.SendMessageHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: "{"}, want: http.StatusBadRequest},
 		{name: "stream message invalid json", method: h.StreamMessageHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: "{"}, want: http.StatusBadRequest},
 		{name: "list tasks missing user", method: h.ListTasksHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/"}, want: http.StatusUnauthorized},
 		{name: "list tasks invalid include artifacts", method: h.ListTasksHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/?includeArtifacts=maybe", userID: userID}, want: http.StatusBadRequest},
-		{name: "get task missing scope", method: h.GetTaskHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, authMethod: "apikey", params: map[string]string{"taskID": runID}}, want: http.StatusForbidden},
+		{name: "get task missing scope", method: h.GetTaskHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, authMethod: "user_token", params: map[string]string{"taskID": runID}}, want: http.StatusForbidden},
 		{name: "get task bad history", method: h.GetTaskHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/?historyLength=-1", userID: userID, params: map[string]string{"taskID": runID}}, want: http.StatusBadRequest},
-		{name: "subscribe missing scope", method: h.SubscribeTaskHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, authMethod: "apikey", params: map[string]string{"taskID": runID}}, want: http.StatusForbidden},
+		{name: "subscribe missing scope", method: h.SubscribeTaskHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, authMethod: "user_token", params: map[string]string{"taskID": runID}}, want: http.StatusForbidden},
 		{name: "subscribe missing task", method: h.SubscribeTaskHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID}, want: http.StatusBadRequest},
-		{name: "cancel missing scope", method: h.CancelTaskHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, authMethod: "apikey", params: map[string]string{"taskID": runID}}, want: http.StatusForbidden},
+		{name: "cancel missing scope", method: h.CancelTaskHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, authMethod: "user_token", params: map[string]string{"taskID": runID}}, want: http.StatusForbidden},
 		{name: "cancel missing task", method: h.CancelTaskHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID}, want: http.StatusBadRequest},
-		{name: "set push missing scope", method: h.SetTaskPushNotificationHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, authMethod: "apikey", body: `{}`, params: map[string]string{"taskID": runID}}, want: http.StatusForbidden},
+		{name: "set push missing scope", method: h.SetTaskPushNotificationHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, authMethod: "user_token", body: `{}`, params: map[string]string{"taskID": runID}}, want: http.StatusForbidden},
 		{name: "set push invalid json", method: h.SetTaskPushNotificationHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: "{", params: map[string]string{"taskID": runID}}, want: http.StatusBadRequest},
 		{name: "list push missing user", method: h.ListTaskPushNotificationsHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", params: map[string]string{"taskID": runID}}, want: http.StatusUnauthorized},
-		{name: "get push missing scope", method: h.GetTaskPushNotificationHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, authMethod: "apikey", params: map[string]string{"taskID": runID, "configID": uuid.NewString()}}, want: http.StatusForbidden},
+		{name: "get push missing scope", method: h.GetTaskPushNotificationHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, authMethod: "user_token", params: map[string]string{"taskID": runID, "configID": uuid.NewString()}}, want: http.StatusForbidden},
 		{name: "delete push missing user", method: h.DeleteTaskPushNotificationHTTP, req: &a2aHandlerRequest{method: http.MethodDelete, target: "/", params: map[string]string{"taskID": runID, "configID": uuid.NewString()}}, want: http.StatusUnauthorized},
 		{name: "message unknown action", method: h.MessageHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/message:bad", params: map[string]string{"action": ":bad"}}, want: http.StatusNotFound},
 		{name: "task action unknown", method: h.TaskActionHTTP, req: &a2aHandlerRequest{method: http.MethodPost, target: "/tasks/x:bad", params: map[string]string{"*": "x:bad"}}, want: http.StatusNotFound},
@@ -1159,7 +1159,6 @@ func TestA2AHTTPHandlersValidateBeforeServiceDispatch(t *testing.T) {
 		routes[route.Method+" "+route.Path] = true
 	}
 	for _, route := range []string{
-		"POST /api/v1/creator/agents/:id/runtime-tokens",
 		"GET /api/v1/creator/agents/:id/runtime-workbench",
 		"POST /api/v1/agent-runtime/call-agent",
 		"POST /api/v1/a2a/agents/:slug",
@@ -1198,7 +1197,7 @@ func TestA2AControlHTTPHandlersDispatchService(t *testing.T) {
 		assert.Equal(t, userID, svc.userID)
 		assert.Equal(t, agentID, svc.agentID)
 		assert.Equal(t, "worker", svc.createReq.Name)
-		assert.Contains(t, c.(*a2ATestContext).rec.Body.String(), "rt_live_test")
+		assert.Contains(t, c.(*a2ATestContext).rec.Body.String(), "ol_agent_test")
 	})
 
 	t.Run("list runtime tokens", func(t *testing.T) {
@@ -1278,14 +1277,14 @@ func TestA2AControlHTTPHandlersDispatchService(t *testing.T) {
 			target: "/agent-runtime/call-agent",
 			body:   `{"target_agent_id":"` + targetAgentID.String() + `","reason":"need data","input":{"q":"hi"},"task_callback":{"url":"https://caller.example.com/a2a/events","token":"caller-token","event_types":["run.completed","run.failed"]}}`,
 			headers: map[string]string{
-				echo.HeaderAuthorization: "Bearer rt_live_test",
+				echo.HeaderAuthorization: "Bearer ol_agent_test",
 				"X-OpenLinker-Run-Id":    parentRunID.String(),
 			},
 		})
 
 		require.NoError(t, NewHandler(svc).CallAgent(c))
 		assert.Equal(t, http.StatusOK, c.(*a2ATestContext).rec.Code)
-		assert.Equal(t, "rt_live_test", svc.callToken)
+		assert.Equal(t, "ol_agent_test", svc.callToken)
 		assert.Equal(t, parentRunID.String(), svc.callReq.CurrentRunID)
 		assert.Equal(t, targetAgentID.String(), svc.callReq.TargetAgentID)
 		require.NotNil(t, svc.callReq.TaskCallback)
@@ -1376,7 +1375,7 @@ func TestA2AControlHTTPHandlersPropagateServiceErrors(t *testing.T) {
 			key:  "call-agent",
 			call: (*Handler).CallAgent,
 			req: &a2aHandlerRequest{method: http.MethodPost, target: "/", body: `{"target_agent_id":"` + agentID.String() + `","current_run_id":"` + parentRunID.String() + `","input":{"q":"hi"}}`, headers: map[string]string{
-				echo.HeaderAuthorization: "Bearer rt_live_test",
+				echo.HeaderAuthorization: "Bearer ol_agent_test",
 			}},
 		},
 		{
@@ -1428,7 +1427,7 @@ func TestA2AJSONRPCHandlerValidationBeforeServiceDispatch(t *testing.T) {
 		t.Fatalf("unsupported version JSONRPC body = %s", c.(*a2ATestContext).rec.Body.String())
 	}
 
-	c = newA2ATestContext(&a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, authMethod: "apikey", body: `{"jsonrpc":"2.0","id":1,"method":"message/send","params":{}}`})
+	c = newA2ATestContext(&a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, authMethod: "user_token", body: `{"jsonrpc":"2.0","id":1,"method":"message/send","params":{}}`})
 	if err := h.JSONRPC(c); err != nil {
 		t.Fatalf("JSONRPC missing scope returned error: %v", err)
 	}
@@ -1457,7 +1456,7 @@ func TestA2AJSONRPCHandlerAdditionalErrorAndNullParamEdges(t *testing.T) {
 		target:     "/?version=1.0",
 		body:       `{"jsonrpc":"2.0","id":"ext","method":"SendMessage","params":{"message":{"role":"user","parts":[{"text":"hi"}]}}}`,
 		userID:     userID.String(),
-		authMethod: "apikey",
+		authMethod: "user_token",
 		scopes:     []string{"agents:run"},
 		headers:    map[string]string{a2aExtensionsHeader: "https://example.com/ext/a, https://example.com/ext/b"},
 		params:     map[string]string{"slug": slug},
@@ -1486,7 +1485,7 @@ func TestA2AJSONRPCHandlerAdditionalErrorAndNullParamEdges(t *testing.T) {
 		target:     "/?version=1.0",
 		body:       `{"jsonrpc":"2.0","id":"list-null","method":"tasks/list","params":null}`,
 		userID:     userID.String(),
-		authMethod: "apikey",
+		authMethod: "user_token",
 		scopes:     []string{"runs:read"},
 		params:     map[string]string{"slug": slug},
 	})
@@ -1501,7 +1500,7 @@ func TestA2AJSONRPCHandlerAdditionalErrorAndNullParamEdges(t *testing.T) {
 		target:     "/",
 		body:       `{"jsonrpc":"2.0","id":"card","method":"agent/getExtendedCard","params":{}}`,
 		userID:     userID.String(),
-		authMethod: "apikey",
+		authMethod: "user_token",
 		scopes:     []string{"runs:read"},
 		params:     map[string]string{"slug": slug},
 	})
@@ -1530,7 +1529,7 @@ func TestA2AJSONRPCHandlerAdditionalErrorAndNullParamEdges(t *testing.T) {
 				target:     "/",
 				body:       `{"jsonrpc":"2.0","id":"bad-params","method":"` + tc.method + `","params":[]}`,
 				userID:     userID.String(),
-				authMethod: "apikey",
+				authMethod: "user_token",
 				scopes:     []string{tc.scope},
 				params:     map[string]string{"slug": slug},
 			})
@@ -1685,7 +1684,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 				target:     "/?version=1.0",
 				body:       tt.body,
 				userID:     userID.String(),
-				authMethod: "apikey",
+				authMethod: "user_token",
 				scopes:     tt.scopes,
 				params:     map[string]string{"slug": slug},
 			})
@@ -1731,7 +1730,7 @@ func TestA2AJSONRPCCurrentProtocolShapes(t *testing.T) {
 			target:     "/?version=1.0",
 			body:       body,
 			userID:     userID.String(),
-			authMethod: "apikey",
+			authMethod: "user_token",
 			scopes:     []string{"agents:run", "runs:read"},
 			params:     map[string]string{"slug": slug},
 		})
@@ -1805,7 +1804,7 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 			method: func(h *Handler, c echo.Context) error {
 				return h.GetExtendedAgentCardHTTP(c)
 			},
-			req:  &a2aHandlerRequest{method: http.MethodGet, target: "/?version=v1", userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug}},
+			req:  &a2aHandlerRequest{method: http.MethodGet, target: "/?version=v1", userID: userID.String(), authMethod: "user_token", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug}},
 			want: http.StatusOK,
 			assert: func(t *testing.T, c echo.Context, _ *fakeA2AService, cards *fakeA2ACardProvider) {
 				if cards.extendedSlug != slug {
@@ -1826,7 +1825,7 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 				target:     "/message:send?version=1.0",
 				body:       `{"message":{"messageId":"msg-http","contextId":"ctx-http","role":"user","parts":[{"kind":"text","text":"hello http"}]}}`,
 				userID:     userID.String(),
-				authMethod: "apikey",
+				authMethod: "user_token",
 				scopes:     []string{"agents:run"},
 				params:     map[string]string{"slug": slug, "action": ":send"},
 			},
@@ -1855,7 +1854,7 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 				method:     http.MethodGet,
 				target:     "/tasks?page_size=5&history_length=2&include_artifacts=yes&context_id=ctx-http&status=completed&page_token=next&version=1.0",
 				userID:     userID.String(),
-				authMethod: "apikey",
+				authMethod: "user_token",
 				scopes:     []string{"runs:read"},
 				params:     map[string]string{"slug": slug},
 			},
@@ -1878,7 +1877,7 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 				method:     http.MethodGet,
 				target:     "/tasks/" + taskID + "?historyLength=3&version=1.0",
 				userID:     userID.String(),
-				authMethod: "apikey",
+				authMethod: "user_token",
 				scopes:     []string{"runs:read"},
 				params:     map[string]string{"slug": slug, "taskID": taskID},
 			},
@@ -1898,7 +1897,7 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 				method:     http.MethodPost,
 				target:     "/tasks/" + taskID + ":cancel?version=1.0",
 				userID:     userID.String(),
-				authMethod: "apikey",
+				authMethod: "user_token",
 				scopes:     []string{"agents:run"},
 				params:     map[string]string{"slug": slug, "*": "tasks/" + taskID + ":cancel"},
 			},
@@ -1919,7 +1918,7 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 				target:     "/tasks/" + taskID + "/pushNotificationConfig?version=1.0",
 				body:       `{"pushNotificationConfig":{"url":"https://hooks.example/a2a","token":"secret","eventTypes":["run.completed"]}}`,
 				userID:     userID.String(),
-				authMethod: "apikey",
+				authMethod: "user_token",
 				scopes:     []string{"runs:read"},
 				params:     map[string]string{"slug": slug, "taskID": taskID},
 			},
@@ -1939,7 +1938,7 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 				method:     http.MethodGet,
 				target:     "/tasks/" + taskID + "/pushNotificationConfig?version=1.0",
 				userID:     userID.String(),
-				authMethod: "apikey",
+				authMethod: "user_token",
 				scopes:     []string{"runs:read"},
 				params:     map[string]string{"slug": slug, "taskID": taskID},
 			},
@@ -1959,7 +1958,7 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 				method:     http.MethodGet,
 				target:     "/tasks/" + taskID + "/pushNotificationConfig/" + configID + "?version=1.0",
 				userID:     userID.String(),
-				authMethod: "apikey",
+				authMethod: "user_token",
 				scopes:     []string{"runs:read"},
 				params:     map[string]string{"slug": slug, "taskID": taskID, "configID": configID},
 			},
@@ -1979,7 +1978,7 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 				method:     http.MethodDelete,
 				target:     "/tasks/" + taskID + "/pushNotificationConfig/" + configID + "?version=1.0",
 				userID:     userID.String(),
-				authMethod: "apikey",
+				authMethod: "user_token",
 				scopes:     []string{"runs:read"},
 				params:     map[string]string{"slug": slug, "taskID": taskID, "configID": configID},
 			},
@@ -2033,7 +2032,7 @@ func TestA2AHTTPJSONStreamingAliasesDispatch(t *testing.T) {
 				target:     "/message:stream?version=1.0",
 				body:       `{"message":{"messageId":"msg-http-stream","role":"user","parts":[{"kind":"text","text":"stream"}]}}`,
 				userID:     userID.String(),
-				authMethod: "apikey",
+				authMethod: "user_token",
 				scopes:     []string{"agents:run"},
 				params:     map[string]string{"slug": slug},
 			},
@@ -2048,7 +2047,7 @@ func TestA2AHTTPJSONStreamingAliasesDispatch(t *testing.T) {
 				method:     http.MethodGet,
 				target:     "/tasks/" + taskID + ":subscribe?version=1.0",
 				userID:     userID.String(),
-				authMethod: "apikey",
+				authMethod: "user_token",
 				scopes:     []string{"runs:read"},
 				params:     map[string]string{"slug": slug, "taskID": taskID + ":subscribe"},
 			},
@@ -2063,7 +2062,7 @@ func TestA2AHTTPJSONStreamingAliasesDispatch(t *testing.T) {
 				method:     http.MethodGet,
 				target:     "/tasks/" + taskID + "/subscribe?version=1.0",
 				userID:     userID.String(),
-				authMethod: "apikey",
+				authMethod: "user_token",
 				scopes:     []string{"runs:read"},
 				params:     map[string]string{"slug": slug, "*": "tasks/" + taskID + "/subscribe"},
 			},
@@ -2109,7 +2108,7 @@ func TestA2AHTTPJSONStreamingWritesSSEErrorsAndResumesAfterLastEventID(t *testin
 		method:     http.MethodGet,
 		target:     "/tasks/" + taskID + "/subscribe?version=1.0",
 		userID:     userID.String(),
-		authMethod: "apikey",
+		authMethod: "user_token",
 		scopes:     []string{"runs:read"},
 		params:     map[string]string{"slug": slug, "taskID": taskID},
 		headers:    map[string]string{"Last-Event-ID": "41"},
@@ -2144,7 +2143,7 @@ func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 			method: func(h *Handler, c echo.Context) error {
 				return h.SendMessageHTTP(c)
 			},
-			req: &a2aHandlerRequest{method: http.MethodPost, target: "/message:send", body: `{"message":{"messageId":"msg","role":"user","parts":[{"kind":"text","text":"hi"}]}}`, userID: userID.String(), authMethod: "apikey", scopes: []string{"agents:run"}, params: map[string]string{"slug": slug}},
+			req: &a2aHandlerRequest{method: http.MethodPost, target: "/message:send", body: `{"message":{"messageId":"msg","role":"user","parts":[{"kind":"text","text":"hi"}]}}`, userID: userID.String(), authMethod: "user_token", scopes: []string{"agents:run"}, params: map[string]string{"slug": slug}},
 		},
 		{
 			name: "stream message before SSE",
@@ -2152,7 +2151,7 @@ func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 			method: func(h *Handler, c echo.Context) error {
 				return h.StreamMessageHTTP(c)
 			},
-			req: &a2aHandlerRequest{method: http.MethodPost, target: "/message:stream", body: `{"message":{"messageId":"msg","role":"user","parts":[{"kind":"text","text":"hi"}]}}`, userID: userID.String(), authMethod: "apikey", scopes: []string{"agents:run"}, params: map[string]string{"slug": slug}},
+			req: &a2aHandlerRequest{method: http.MethodPost, target: "/message:stream", body: `{"message":{"messageId":"msg","role":"user","parts":[{"kind":"text","text":"hi"}]}}`, userID: userID.String(), authMethod: "user_token", scopes: []string{"agents:run"}, params: map[string]string{"slug": slug}},
 		},
 		{
 			name: "list tasks",
@@ -2160,7 +2159,7 @@ func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 			method: func(h *Handler, c echo.Context) error {
 				return h.ListTasksHTTP(c)
 			},
-			req: &a2aHandlerRequest{method: http.MethodGet, target: "/tasks", userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug}},
+			req: &a2aHandlerRequest{method: http.MethodGet, target: "/tasks", userID: userID.String(), authMethod: "user_token", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug}},
 		},
 		{
 			name: "get task",
@@ -2168,7 +2167,7 @@ func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 			method: func(h *Handler, c echo.Context) error {
 				return h.GetTaskHTTP(c)
 			},
-			req: &a2aHandlerRequest{method: http.MethodGet, target: "/tasks/" + taskID, userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID}},
+			req: &a2aHandlerRequest{method: http.MethodGet, target: "/tasks/" + taskID, userID: userID.String(), authMethod: "user_token", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID}},
 		},
 		{
 			name: "cancel task",
@@ -2176,7 +2175,7 @@ func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 			method: func(h *Handler, c echo.Context) error {
 				return h.CancelTaskHTTP(c)
 			},
-			req: &a2aHandlerRequest{method: http.MethodPost, target: "/tasks/" + taskID + ":cancel", userID: userID.String(), authMethod: "apikey", scopes: []string{"agents:run"}, params: map[string]string{"slug": slug, "taskID": taskID}},
+			req: &a2aHandlerRequest{method: http.MethodPost, target: "/tasks/" + taskID + ":cancel", userID: userID.String(), authMethod: "user_token", scopes: []string{"agents:run"}, params: map[string]string{"slug": slug, "taskID": taskID}},
 		},
 		{
 			name: "set push",
@@ -2184,7 +2183,7 @@ func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 			method: func(h *Handler, c echo.Context) error {
 				return h.SetTaskPushNotificationHTTP(c)
 			},
-			req: &a2aHandlerRequest{method: http.MethodPost, target: "/tasks/" + taskID + "/pushNotificationConfig", body: `{"pushNotificationConfig":{"url":"https://hooks.example/a2a"}}`, userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID}},
+			req: &a2aHandlerRequest{method: http.MethodPost, target: "/tasks/" + taskID + "/pushNotificationConfig", body: `{"pushNotificationConfig":{"url":"https://hooks.example/a2a"}}`, userID: userID.String(), authMethod: "user_token", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID}},
 		},
 		{
 			name: "list push",
@@ -2192,7 +2191,7 @@ func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 			method: func(h *Handler, c echo.Context) error {
 				return h.ListTaskPushNotificationsHTTP(c)
 			},
-			req: &a2aHandlerRequest{method: http.MethodGet, target: "/tasks/" + taskID + "/pushNotificationConfig", userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID}},
+			req: &a2aHandlerRequest{method: http.MethodGet, target: "/tasks/" + taskID + "/pushNotificationConfig", userID: userID.String(), authMethod: "user_token", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID}},
 		},
 		{
 			name: "get push",
@@ -2200,7 +2199,7 @@ func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 			method: func(h *Handler, c echo.Context) error {
 				return h.GetTaskPushNotificationHTTP(c)
 			},
-			req: &a2aHandlerRequest{method: http.MethodGet, target: "/tasks/" + taskID + "/pushNotificationConfig/" + configID, userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID, "configID": configID}},
+			req: &a2aHandlerRequest{method: http.MethodGet, target: "/tasks/" + taskID + "/pushNotificationConfig/" + configID, userID: userID.String(), authMethod: "user_token", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID, "configID": configID}},
 		},
 		{
 			name: "delete push",
@@ -2208,7 +2207,7 @@ func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 			method: func(h *Handler, c echo.Context) error {
 				return h.DeleteTaskPushNotificationHTTP(c)
 			},
-			req: &a2aHandlerRequest{method: http.MethodDelete, target: "/tasks/" + taskID + "/pushNotificationConfig/" + configID, userID: userID.String(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID, "configID": configID}},
+			req: &a2aHandlerRequest{method: http.MethodDelete, target: "/tasks/" + taskID + "/pushNotificationConfig/" + configID, userID: userID.String(), authMethod: "user_token", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug, "taskID": taskID, "configID": configID}},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2222,7 +2221,7 @@ func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 func TestA2AAgentCardHandlersUnavailableWithoutProvider(t *testing.T) {
 	h := NewHandler(newFakeA2AService(uuid.NewString()))
 	requireA2AHTTPStatus(t, h.GetPublicAgentCardHTTP(newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", params: map[string]string{"slug": "agent-one"}})), http.StatusServiceUnavailable)
-	requireA2AHTTPStatus(t, h.GetExtendedAgentCardHTTP(newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", userID: uuid.NewString(), authMethod: "apikey", scopes: []string{"runs:read"}, params: map[string]string{"slug": "agent-one"}})), http.StatusBadRequest)
+	requireA2AHTTPStatus(t, h.GetExtendedAgentCardHTTP(newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", userID: uuid.NewString(), authMethod: "user_token", scopes: []string{"runs:read"}, params: map[string]string{"slug": "agent-one"}})), http.StatusBadRequest)
 }
 
 type noopTaskCallbackManager struct{}
@@ -2516,8 +2515,8 @@ func (f *controlA2AService) CreateRuntimeToken(_ context.Context, userID, agentI
 		ID:             uuid.NewString(),
 		AgentID:        agentID.String(),
 		Name:           f.createReq.Name,
-		Prefix:         "rt_live_abcd",
-		PlaintextToken: "rt_live_test",
+		Prefix:         "ol_agent_abcd",
+		PlaintextToken: "ol_agent_test",
 		Scopes:         []string{"agents:run"},
 		CreatedAt:      "2026-06-21T00:00:00Z",
 	}, nil
@@ -2532,7 +2531,7 @@ func (f *controlA2AService) ListRuntimeTokens(_ context.Context, userID, agentID
 		ID:        uuid.NewString(),
 		AgentID:   agentID.String(),
 		Name:      "worker",
-		Prefix:    "rt_live_abcd",
+		Prefix:    "ol_agent_abcd",
 		Scopes:    []string{"agents:run"},
 		CreatedAt: "2026-06-21T00:00:00Z",
 	}}, nil
@@ -2556,7 +2555,7 @@ func (f *controlA2AService) GetRuntimeWorkbench(_ context.Context, userID, agent
 			ConnectionMode: "runtime_pull",
 		},
 		Runtime: RuntimeWorkbenchRuntime{ActiveTokenCount: 1, PendingRunCount: 2, ClaimNow: true},
-		Tokens:  []RuntimeTokenResponse{{ID: uuid.NewString(), AgentID: agentID.String(), Name: "worker", Prefix: "rt_live_abcd", CreatedAt: "2026-06-21T00:00:00Z"}},
+		Tokens:  []RuntimeTokenResponse{{ID: uuid.NewString(), AgentID: agentID.String(), Name: "worker", Prefix: "ol_agent_abcd", CreatedAt: "2026-06-21T00:00:00Z"}},
 		RecentRuns: []RuntimeWorkbenchRun{{
 			RunID:     uuid.NewString(),
 			Status:    "running",

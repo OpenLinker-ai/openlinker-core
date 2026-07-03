@@ -11,18 +11,18 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
-// ApiKeyVerifier 抽象访问令牌鉴权能力，避免 internal/auth import internal/apikey 形成循环。
+// ApiKeyVerifier 抽象 User Token 鉴权能力，避免 auth import cloud token service 形成循环。
 //
 // 实现方（internal/apikey.Service）应在命中后异步刷新 last_used_at，
 // 失败时返回固定错误（不暴露内部细节）。
 type ApiKeyVerifier interface {
-	Verify(ctx context.Context, plaintextKey string) (uuid.UUID, []string, error)
+	Verify(ctx context.Context, plaintextToken string) (uuid.UUID, []string, error)
 }
 
 // HybridAuthMiddleware 同时接受网页登录会话与访问令牌。
 //
 // 判定规则：
-//   - Authorization: Bearer ol_live_xxx / sk_live_xxx → 走 ApiKeyVerifier
+//   - Authorization: Bearer ol_user_xxx → 走 ApiKeyVerifier
 //   - Authorization: Bearer eyJ... 或其他 → 走 JWT
 //
 // 命中后写入 c.Set(httpx.CtxKeyUserID, userID)，与 JWTMiddleware 行为一致；
@@ -42,7 +42,7 @@ func HybridAuthMiddleware(jwtSecret string, verifier ApiKeyVerifier) echo.Middle
 
 			var userID string
 			var authMethod string
-			if credential.HasAnyPrefix(token, credential.AccessTokenPrefix, credential.LegacyAPIKeyPrefix) {
+			if credential.HasAnyPrefix(token, credential.UserTokenPrefix) {
 				if verifier == nil {
 					// 配置错误：访问令牌验证器未注入
 					return httpx.Unauthorized("访问令牌鉴权未启用")
@@ -52,7 +52,7 @@ func HybridAuthMiddleware(jwtSecret string, verifier ApiKeyVerifier) echo.Middle
 					return httpx.Unauthorized("访问令牌无效或已撤销")
 				}
 				userID = uid.String()
-				authMethod = "apikey"
+				authMethod = "user_token"
 				c.Set(string(httpx.CtxKeyAuthScopes), scopes)
 			} else {
 				uid, err := ParseToken(token, jwtSecret)

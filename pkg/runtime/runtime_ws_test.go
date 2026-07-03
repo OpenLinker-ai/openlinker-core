@@ -83,8 +83,8 @@ func TestRuntimeQueuedModeAndAssignmentMessage(t *testing.T) {
 		CurrentRunID:      runID,
 		CallAgentEndpoint: "https://api.example.com/api/v1/agent-runtime/call-agent",
 		CallAgentMethod:   http.MethodPost,
-		RuntimeTokenType:  "ol_live",
-		RuntimeScopes:     []string{"agent:call"},
+		AgentTokenType:    "ol_agent",
+		AgentScopes:       []string{"agent:call"},
 	}
 	msg := runtimeWSAssignmentMessage(&RuntimePullRunResponse{
 		RunID:          runID,

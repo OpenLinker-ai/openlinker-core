@@ -257,10 +257,10 @@ func TestHybridAuthMiddlewareBranches(t *testing.T) {
 
 	apiUID := uuid.New()
 	verifier := &fakeAPIKeyVerifier{userID: apiUID, scopes: []string{"runs:read", "agents:write"}}
-	for _, token := range []string{"ol_live_abc", "sk_live_legacy"} {
+	for _, token := range []string{"ol_user_abc", "ol_user_test"} {
 		t.Run(token, func(t *testing.T) {
 			rec, got := invokeHybridAuth(t, pureAuthSecret, verifier, "Bearer "+token)
-			if rec.Code != http.StatusOK || got.userID != apiUID.String() || got.authMethod != "apikey" {
+			if rec.Code != http.StatusOK || got.userID != apiUID.String() || got.authMethod != "user_token" {
 				t.Fatalf("apikey branch code=%d got=%+v", rec.Code, got)
 			}
 			if verifier.seenToken != token {
@@ -279,8 +279,8 @@ func TestHybridAuthMiddlewareBranches(t *testing.T) {
 	}{
 		{name: "missing header"},
 		{name: "bad format", header: "Bearer"},
-		{name: "api key verifier missing", header: "Bearer ol_live_abc"},
-		{name: "api key verifier rejects", header: "Bearer ol_live_abc", verifier: &fakeAPIKeyVerifier{err: errors.New("revoked")}},
+		{name: "user token verifier missing", header: "Bearer ol_user_abc"},
+		{name: "user token verifier rejects", header: "Bearer ol_user_abc", verifier: &fakeAPIKeyVerifier{err: errors.New("revoked")}},
 		{name: "jwt invalid", header: "Bearer not.a.jwt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

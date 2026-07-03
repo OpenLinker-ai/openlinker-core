@@ -266,9 +266,9 @@ func TestListMarket_RuntimePullWithoutRecentWorkerShownUnreachable(t *testing.T)
 	assert.Equal(t, "runtime-offline", resp.Items[len(resp.Items)-1].Slug)
 
 	_, err = pool.Exec(ctx,
-		`INSERT INTO agent_runtime_tokens (
-			agent_id, created_by_user_id, name, prefix, token_hash, scopes, last_used_at
-		) VALUES ($1, $2, 'worker', 'rt_live_aabbccdd', 'hash', ARRAY['agent:pull']::text[], NOW())`,
+		`INSERT INTO agent_tokens (
+			agent_id, creator_user_id, name, prefix, token_hash, scopes, status, redeemed_at, last_used_at
+		) VALUES ($1, $2, 'worker', 'ol_agent_aabbccdd', 'hash', ARRAY['agent:pull']::text[], 'active_runtime', NOW(), NOW())`,
 		agentID,
 		creatorID,
 	)

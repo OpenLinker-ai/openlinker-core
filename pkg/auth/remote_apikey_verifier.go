@@ -14,9 +14,9 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-var errRemoteAPIKeyInvalid = errors.New("remote api key invalid")
+var errRemoteAPIKeyInvalid = errors.New("remote user token invalid")
 
-const internalSecretHeader = "X-Internal-Secret"
+const internalSecretHeader = "X-OpenLinker-Internal-Token"
 
 type RemoteAPIKeyVerifier struct {
 	endpoint string
@@ -25,7 +25,7 @@ type RemoteAPIKeyVerifier struct {
 }
 
 type remoteAPIKeyVerifyRequest struct {
-	Key string `json:"key"`
+	Token string `json:"token"`
 }
 
 type remoteAPIKeyVerifyResponse struct {
@@ -53,7 +53,7 @@ func (v *RemoteAPIKeyVerifier) Verify(ctx context.Context, plaintextKey string) 
 	if v == nil || v.endpoint == "" {
 		return uuid.Nil, nil, errRemoteAPIKeyInvalid
 	}
-	payload, err := json.Marshal(remoteAPIKeyVerifyRequest{Key: plaintextKey})
+	payload, err := json.Marshal(remoteAPIKeyVerifyRequest{Token: plaintextKey})
 	if err != nil {
 		return uuid.Nil, nil, errRemoteAPIKeyInvalid
 	}

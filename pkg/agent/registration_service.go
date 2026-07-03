@@ -22,23 +22,17 @@ import (
 )
 
 const (
-	bootstrapTokenPrefixLen = credential.PrefixLen
+	agentTokenPrefixLen = credential.PrefixLen
 
-	bootstrapDefaultMinutes   = 30
-	bootstrapDefaultMaxAgents = 1
-	maxRegistrationSkills     = 5
-
-	runtimeDefaultTokenName = "bootstrap-issued"
+	agentTokenDefaultMinutes = 30
+	maxRegistrationSkills    = 5
+	maxAgentTokens           = 10
 )
 
 // 非字母数字字符在 slug 派生时统一替换成 '-'。
 var slugDeriveSanitize = regexp.MustCompile(`[^a-z0-9]+`)
 
-// RegistrationService 处理 Agent 自注册访问令牌全流程。
-//
-// 与 agent.Service 拆开是因为：
-//   - Bootstrap 验证不走 JWT，不复用 ownerAgent 等创作者侧检查
-//   - 消费注册用途 token + 建 Agent + 发 Agent 绑定访问令牌必须在同一个事务
+// RegistrationService 处理 Agent token 创建、自注册兑换和撤销。
 type RegistrationService struct {
 	queries                 *db.Queries
 	pool                    *pgxpool.Pool
@@ -57,91 +51,141 @@ func NewRegistrationService(pool *pgxpool.Pool, cfg ...*config.Config) *Registra
 	}
 }
 
-// MintBootstrapToken 创作者侧铸新注册用途访问令牌。明文 token 仅本次返回。
-func (s *RegistrationService) MintBootstrapToken(ctx context.Context, creatorID uuid.UUID, req *CreateBootstrapTokenRequest) (*BootstrapTokenResponse, error) {
-	user, err := s.queries.GetUserByID(ctx, creatorID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.NotFound("用户不存在")
-		}
-		log.Error().Err(err).Str("user_id", creatorID.String()).Msg("registration.MintBootstrapToken: GetUserByID")
-		return nil, httpx.Internal("查询用户失败")
+// CreateAgentToken 创建统一 Agent 接入凭证。明文 token 仅本次返回。
+func (s *RegistrationService) CreateAgentToken(ctx context.Context, creatorID uuid.UUID, req *CreateAgentTokenRequest) (*AgentTokenResponse, error) {
+	if err := s.ensureCreator(ctx, creatorID); err != nil {
+		return nil, err
 	}
-	if !user.IsCreator {
-		return nil, httpx.Forbidden("仅创作者可生成访问令牌")
+	name := strings.TrimSpace(req.Name)
+	if name == "" || len(name) > 80 {
+		return nil, httpx.Unprocessable("name 长度需在 1-80 字符之间")
 	}
 
-	minutes := req.ExpiresInMinutes
-	if minutes == 0 {
-		minutes = bootstrapDefaultMinutes
+	var agent *db.Agent
+	var agentID *uuid.UUID
+	status := "pending_registration"
+	var expiresAt *time.Time
+	var redeemedAt *time.Time
+
+	if strings.TrimSpace(req.AgentID) != "" {
+		parsed, err := uuid.Parse(strings.TrimSpace(req.AgentID))
+		if err != nil {
+			return nil, httpx.BadRequest("agent_id 不是合法 uuid")
+		}
+		owned, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{ID: parsed, CreatorID: creatorID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("Agent 不存在")
+		}
+		if err != nil {
+			log.Error().Err(err).Str("agent_id", parsed.String()).Msg("registration.CreateAgentToken: GetAgentByIDForOwner")
+			return nil, httpx.Internal("查询 Agent 失败")
+		}
+		count, err := s.queries.CountActiveAgentTokensByAgent(ctx, parsed)
+		if err != nil {
+			log.Error().Err(err).Str("agent_id", parsed.String()).Msg("registration.CreateAgentToken: CountActiveAgentTokensByAgent")
+			return nil, httpx.Internal("查询 Agent Token 失败")
+		}
+		if count >= maxAgentTokens {
+			return nil, httpx.BadRequest("Agent Token 数量已达上限（10 个），请先撤销旧 token")
+		}
+		agent = &owned
+		agentID = &parsed
+		status = "active_runtime"
+		now := time.Now()
+		redeemedAt = &now
+	} else {
+		minutes := req.ExpiresInMinutes
+		if minutes == 0 {
+			minutes = agentTokenDefaultMinutes
+		}
+		expiry := time.Now().Add(time.Duration(minutes) * time.Minute)
+		expiresAt = &expiry
 	}
-	maxAgents := req.MaxAgents
-	if maxAgents == 0 {
-		maxAgents = bootstrapDefaultMaxAgents
-	}
-	plaintext, prefix, err := credential.GenerateAccessToken()
+
+	scopes, err := normalizeAgentTokenScopes(req.Scopes, agent)
 	if err != nil {
-		return nil, httpx.Internal("生成访问令牌失败")
+		return nil, err
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), credential.BcryptCost)
+	plaintext, prefix, err := credential.GenerateAgentToken()
 	if err != nil {
-		return nil, httpx.Internal("加密访问令牌失败")
+		return nil, httpx.Internal("生成 Agent Token 失败")
 	}
-	token, err := s.queries.CreateAgentRegistrationToken(ctx, db.CreateAgentRegistrationTokenParams{
+	hash, err := bcrypt.GenerateFromPassword(credential.BcryptTokenInput(plaintext), credential.BcryptCost)
+	if err != nil {
+		return nil, httpx.Internal("加密 Agent Token 失败")
+	}
+	token, err := s.queries.CreateAgentToken(ctx, db.CreateAgentTokenParams{
+		AgentID:       agentID,
 		CreatorUserID: creatorID,
-		Label:         strings.TrimSpace(req.Label),
+		Name:          name,
 		Prefix:        prefix,
 		TokenHash:     string(hash),
-		MaxAgents:     maxAgents,
-		ExpiresAt:     time.Now().Add(time.Duration(minutes) * time.Minute),
+		Scopes:        scopes,
+		Status:        status,
+		ExpiresAt:     expiresAt,
+		RedeemedAt:    redeemedAt,
 	})
 	if err != nil {
-		log.Error().Err(err).Msg("registration.MintBootstrapToken: insert")
-		return nil, httpx.Internal("创建访问令牌失败")
+		log.Error().Err(err).Msg("registration.CreateAgentToken: insert")
+		return nil, httpx.Internal("创建 Agent Token 失败")
 	}
-	resp := bootstrapTokenResponse(token)
+	resp := agentTokenResponse(token)
 	resp.PlaintextToken = plaintext
 	return &resp, nil
 }
 
-// ListBootstrapTokens 列出创作者可见的所有注册用途访问令牌（不含明文）。
-func (s *RegistrationService) ListBootstrapTokens(ctx context.Context, creatorID uuid.UUID) ([]BootstrapTokenResponse, error) {
-	tokens, err := s.queries.ListAgentRegistrationTokensByCreator(ctx, creatorID)
-	if err != nil {
-		return nil, httpx.Internal("查询访问令牌失败")
+func (s *RegistrationService) ListAgentTokens(ctx context.Context, creatorID uuid.UUID, agentID *uuid.UUID) ([]AgentTokenResponse, error) {
+	if err := s.ensureCreator(ctx, creatorID); err != nil {
+		return nil, err
 	}
-	items := make([]BootstrapTokenResponse, 0, len(tokens))
+	var (
+		tokens []db.AgentToken
+		err    error
+	)
+	if agentID != nil {
+		if _, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{ID: *agentID, CreatorID: creatorID}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, httpx.NotFound("Agent 不存在")
+			}
+			log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registration.ListAgentTokens: GetAgentByIDForOwner")
+			return nil, httpx.Internal("查询 Agent 失败")
+		}
+		tokens, err = s.queries.ListAgentTokensByCreatorAndAgent(ctx, db.ListAgentTokensByCreatorAndAgentParams{
+			CreatorUserID: creatorID,
+			AgentID:       *agentID,
+		})
+	} else {
+		tokens, err = s.queries.ListAgentTokensByCreator(ctx, creatorID)
+	}
+	if err != nil {
+		log.Error().Err(err).Str("user_id", creatorID.String()).Msg("registration.ListAgentTokens")
+		return nil, httpx.Internal("查询 Agent Token 失败")
+	}
+	items := make([]AgentTokenResponse, 0, len(tokens))
 	for _, t := range tokens {
-		items = append(items, bootstrapTokenResponse(t))
+		items = append(items, agentTokenResponse(t))
 	}
 	return items, nil
 }
 
-// RevokeBootstrapToken 创作者主动撤销。已撤销 / 不归我所有都视为 404。
-func (s *RegistrationService) RevokeBootstrapToken(ctx context.Context, creatorID, tokenID uuid.UUID) error {
-	affected, err := s.queries.RevokeAgentRegistrationTokenForCreator(ctx, db.RevokeAgentRegistrationTokenForCreatorParams{
+func (s *RegistrationService) RevokeAgentToken(ctx context.Context, creatorID, tokenID uuid.UUID) error {
+	affected, err := s.queries.RevokeAgentTokenForCreator(ctx, db.RevokeAgentTokenForCreatorParams{
 		ID:            tokenID,
 		CreatorUserID: creatorID,
 	})
 	if err != nil {
-		return httpx.Internal("撤销访问令牌失败")
+		log.Error().Err(err).Str("token_id", tokenID.String()).Msg("registration.RevokeAgentToken")
+		return httpx.Internal("撤销 Agent Token 失败")
 	}
 	if affected == 0 {
-		return httpx.NotFound("访问令牌不存在或已撤销")
+		return httpx.NotFound("Agent Token 不存在或已撤销")
 	}
 	return nil
 }
 
-// RegisterAgentViaBootstrap 用注册用途访问令牌一次性完成 Agent 注册 + Agent 绑定访问令牌颁发。
-//
-// 事务内原子完成：
-//  1. ConsumeAgentRegistrationToken 在 used_count < max_agents 时 +1，否则 0 行
-//  2. CreateAgent
-//  3. CreateAgentRuntimeToken
-//
-// 任一步骤失败回滚，Bootstrap 计数不会泄漏。
-func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req *RegisterAgentViaBootstrapRequest) (*RegisterAgentViaBootstrapResponse, error) {
-	matched, err := s.verifyBootstrapToken(ctx, req.BootstrapToken)
+// RegisterAgentViaToken 用 pending Agent Token 完成 Agent 注册。
+func (s *RegistrationService) RegisterAgentViaToken(ctx context.Context, req *RegisterAgentViaTokenRequest) (*RegisterAgentViaTokenResponse, error) {
+	matched, err := s.verifyPendingAgentToken(ctx, req.AgentToken)
 	if err != nil {
 		return nil, err
 	}
@@ -170,20 +214,11 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		log.Error().Err(err).Msg("registration.RegisterAgentViaBootstrap: begin tx")
+		log.Error().Err(err).Msg("registration.RegisterAgentViaToken: begin tx")
 		return nil, httpx.Internal("数据库事务失败")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := s.queries.WithTx(tx)
-
-	consumed, err := q.ConsumeAgentRegistrationToken(ctx, matched.ID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.Unauthorized("访问令牌已用尽 / 过期 / 撤销")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("token_id", matched.ID.String()).Msg("registration.RegisterAgentViaBootstrap: consume")
-		return nil, httpx.Internal("消费访问令牌失败")
-	}
 
 	authHeader := normalizeAuthHeader(req.EndpointAuthHeader)
 	visibility := strings.TrimSpace(req.Visibility)
@@ -191,7 +226,7 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 		visibility = "public"
 	}
 	created, err := q.CreateAgent(ctx, db.CreateAgentParams{
-		CreatorID:          consumed.CreatorUserID,
+		CreatorID:          matched.CreatorUserID,
 		Slug:               slug,
 		Name:               strings.TrimSpace(req.Name),
 		Description:        strings.TrimSpace(req.Description),
@@ -210,84 +245,113 @@ func (s *RegistrationService) RegisterAgentViaBootstrap(ctx context.Context, req
 		if isCheckViolation(err) {
 			return nil, httpx.Unprocessable("Agent 字段不符合约束")
 		}
-		log.Error().Err(err).Msg("registration.RegisterAgentViaBootstrap: insert agent")
+		log.Error().Err(err).Msg("registration.RegisterAgentViaToken: insert agent")
 		return nil, httpx.Internal("创建 Agent 失败")
 	}
 	if len(skillIDs) > 0 {
 		if err := db.ReplaceAgentSkills(ctx, tx, created.ID, skillIDs); err != nil {
-			log.Error().Err(err).Str("agent_id", created.ID.String()).Msg("registration.RegisterAgentViaBootstrap: replace skills")
+			log.Error().Err(err).Str("agent_id", created.ID.String()).Msg("registration.RegisterAgentViaToken: replace skills")
 			return nil, httpx.Internal("绑定 Agent skill 失败")
 		}
 	}
-
-	tokenName := strings.TrimSpace(req.RuntimeTokenName)
-	if tokenName == "" {
-		tokenName = runtimeDefaultTokenName
-	}
-	rtPlain, rtPrefix, err := credential.GenerateAccessToken()
-	if err != nil {
-		return nil, httpx.Internal("生成访问令牌失败")
-	}
-	rtHash, err := bcrypt.GenerateFromPassword([]byte(rtPlain), credential.BcryptCost)
-	if err != nil {
-		return nil, httpx.Internal("加密访问令牌失败")
-	}
-	rtToken, err := q.CreateAgentRuntimeToken(ctx, db.CreateAgentRuntimeTokenParams{
-		AgentID:         created.ID,
-		CreatedByUserID: consumed.CreatorUserID,
-		Name:            tokenName,
-		Prefix:          rtPrefix,
-		TokenHash:       string(rtHash),
-		Scopes:          []string{"agent:call", "agent:pull"},
+	redeemed, err := q.RedeemPendingAgentToken(ctx, db.RedeemPendingAgentTokenParams{
+		ID:            matched.ID,
+		AgentID:       created.ID,
+		Scopes:        runtimeScopesForConnection(created.ConnectionMode),
+		CreatorUserID: matched.CreatorUserID,
 	})
-	if err != nil {
-		log.Error().Err(err).Msg("registration.RegisterAgentViaBootstrap: insert runtime token")
-		return nil, httpx.Internal("创建访问令牌失败")
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.Unauthorized("Agent Token 已过期 / 已撤销 / 已被使用")
 	}
-
+	if err != nil {
+		log.Error().Err(err).Str("token_id", matched.ID.String()).Msg("registration.RegisterAgentViaToken: redeem")
+		return nil, httpx.Internal("兑换 Agent Token 失败")
+	}
 	if err := tx.Commit(ctx); err != nil {
-		log.Error().Err(err).Msg("registration.RegisterAgentViaBootstrap: commit")
+		log.Error().Err(err).Msg("registration.RegisterAgentViaToken: commit")
 		return nil, httpx.Internal("提交注册事务失败")
 	}
 
-	return &RegisterAgentViaBootstrapResponse{
-		Agent: toAgentResponse(&created),
-		RuntimeToken: BootstrapRuntimeToken{
-			ID:             rtToken.ID.String(),
-			Prefix:         rtToken.Prefix,
-			PlaintextToken: rtPlain,
-			CreatedAt:      rtToken.CreatedAt.UTC().Format(time.RFC3339),
-		},
-		UsedCount: consumed.UsedCount,
-		MaxAgents: consumed.MaxAgents,
+	return &RegisterAgentViaTokenResponse{
+		Agent:      toAgentResponse(&created),
+		AgentToken: agentTokenResponse(redeemed),
 	}, nil
 }
 
-// verifyBootstrapToken 解析明文 token，按 prefix 拉所有未撤销行后 bcrypt 校验。
-// 不增加 used_count；调用方在事务里走 ConsumeAgentRegistrationToken 原子消费。
-func (s *RegistrationService) verifyBootstrapToken(ctx context.Context, plaintext string) (db.AgentRegistrationToken, error) {
-	plaintext = strings.TrimSpace(plaintext)
-	if !credential.HasAnyPrefix(plaintext, credential.AccessTokenPrefix, credential.LegacyRegistrationPrefix) ||
-		!credential.ValidLength(plaintext) {
-		return db.AgentRegistrationToken{}, httpx.Unauthorized("访问令牌无效")
-	}
-	tokens, err := s.queries.ListActiveAgentRegistrationTokensByPrefix(ctx, plaintext[:bootstrapTokenPrefixLen])
+func (s *RegistrationService) ensureCreator(ctx context.Context, userID uuid.UUID) error {
+	user, err := s.queries.GetUserByID(ctx, userID)
 	if err != nil {
-		return db.AgentRegistrationToken{}, httpx.Unauthorized("访问令牌无效")
+		if errors.Is(err, pgx.ErrNoRows) {
+			return httpx.NotFound("用户不存在")
+		}
+		log.Error().Err(err).Str("user_id", userID.String()).Msg("registration.ensureCreator: GetUserByID")
+		return httpx.Internal("查询用户失败")
+	}
+	if !user.IsCreator {
+		return httpx.Forbidden("仅创作者可生成 Agent Token")
+	}
+	return nil
+}
+
+// verifyPendingAgentToken 解析明文 token，按 prefix 拉候选后 bcrypt 校验。
+// 不修改状态；调用方在事务里走 RedeemPendingAgentToken 原子兑换。
+func (s *RegistrationService) verifyPendingAgentToken(ctx context.Context, plaintext string) (db.AgentToken, error) {
+	plaintext = strings.TrimSpace(plaintext)
+	if !credential.HasAnyPrefix(plaintext, credential.AgentTokenPrefix) ||
+		!credential.ValidLengthForPrefix(plaintext, credential.AgentTokenPrefix) {
+		return db.AgentToken{}, httpx.Unauthorized("Agent Token 无效")
+	}
+	tokens, err := s.queries.ListActiveAgentTokensByPrefix(ctx, plaintext[:agentTokenPrefixLen])
+	if err != nil {
+		return db.AgentToken{}, httpx.Unauthorized("Agent Token 无效")
 	}
 	now := time.Now()
 	for _, t := range tokens {
-		if t.ExpiresAt.Before(now) {
+		if t.Status != "pending_registration" || t.AgentID != nil {
 			continue
 		}
-		if t.UsedCount >= t.MaxAgents {
+		if t.ExpiresAt != nil && t.ExpiresAt.Before(now) {
 			continue
 		}
-		if bcrypt.CompareHashAndPassword([]byte(t.TokenHash), []byte(plaintext)) == nil {
+		if bcrypt.CompareHashAndPassword([]byte(t.TokenHash), credential.BcryptTokenInput(plaintext)) == nil {
 			return t, nil
 		}
 	}
-	return db.AgentRegistrationToken{}, httpx.Unauthorized("访问令牌无效或已失效")
+	return db.AgentToken{}, httpx.Unauthorized("Agent Token 无效或已失效")
+}
+
+func normalizeAgentTokenScopes(scopes []string, agent *db.Agent) ([]string, error) {
+	if len(scopes) == 0 {
+		if agent == nil {
+			return []string{"agent:call", "agent:pull"}, nil
+		}
+		return runtimeScopesForConnection(agent.ConnectionMode), nil
+	}
+	seen := make(map[string]struct{}, len(scopes))
+	out := make([]string, 0, len(scopes))
+	for _, raw := range scopes {
+		scope := strings.TrimSpace(raw)
+		if scope != "agent:call" && scope != "agent:pull" {
+			return nil, httpx.Unprocessable("未知 Agent Token scope: " + scope)
+		}
+		if _, ok := seen[scope]; ok {
+			continue
+		}
+		seen[scope] = struct{}{}
+		out = append(out, scope)
+	}
+	if len(out) == 0 {
+		return nil, httpx.Unprocessable("至少选择一个 Agent Token scope")
+	}
+	return out, nil
+}
+
+func runtimeScopesForConnection(connectionMode string) []string {
+	scopes := []string{"agent:call"}
+	if connectionMode == "runtime_pull" || connectionMode == "runtime_ws" {
+		scopes = append(scopes, "agent:pull")
+	}
+	return scopes
 }
 
 func (s *RegistrationService) normalizeRegistrationSkillIDs(ctx context.Context, in []string) ([]string, error) {
@@ -315,7 +379,7 @@ func (s *RegistrationService) normalizeRegistrationSkillIDs(ctx context.Context,
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, httpx.BadRequest("skill_id 不存在: " + skillID)
 			}
-			log.Error().Err(err).Str("skill_id", skillID).Msg("registration.RegisterAgentViaBootstrap: GetSkill")
+			log.Error().Err(err).Str("skill_id", skillID).Msg("registration.RegisterAgentViaToken: GetSkill")
 			return nil, httpx.Internal("校验 skill 失败")
 		}
 	}
@@ -323,8 +387,6 @@ func (s *RegistrationService) normalizeRegistrationSkillIDs(ctx context.Context,
 }
 
 // deriveSlug 把 name 转成合法 slug，并尾巴拼 6 hex 字符避免与已有 slug 撞车。
-//
-// 失败兜底（name 全是非 ASCII 字符等）：用 6 hex 加 "agent" 前缀。
 func deriveSlug(name string) string {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	cleaned := slugDeriveSanitize.ReplaceAllString(lower, "-")
@@ -333,7 +395,6 @@ func deriveSlug(name string) string {
 	if cleaned == "" {
 		return "agent-" + suffix
 	}
-	// max 80, 留 7 字符给 "-xxxxxx"
 	if len(cleaned) > 73 {
 		cleaned = cleaned[:73]
 		cleaned = strings.TrimRight(cleaned, "-")
@@ -344,29 +405,39 @@ func deriveSlug(name string) string {
 func randomHex6() string {
 	raw := make([]byte, 3)
 	if _, err := rand.Read(raw); err != nil {
-		// 极端兜底：用纳秒后 6 位
 		return time.Now().Format("150405")
 	}
 	return hex.EncodeToString(raw)
 }
 
-func bootstrapTokenResponse(t db.AgentRegistrationToken) BootstrapTokenResponse {
-	resp := BootstrapTokenResponse{
+func agentTokenResponse(t db.AgentToken) AgentTokenResponse {
+	resp := AgentTokenResponse{
 		ID:        t.ID.String(),
-		Label:     t.Label,
+		Name:      t.Name,
 		Prefix:    t.Prefix,
-		MaxAgents: t.MaxAgents,
-		UsedCount: t.UsedCount,
-		ExpiresAt: t.ExpiresAt.UTC().Format(time.RFC3339),
+		Status:    t.Status,
+		Scopes:    t.Scopes,
 		CreatedAt: t.CreatedAt.UTC().Format(time.RFC3339),
 	}
+	if t.AgentID != nil {
+		value := t.AgentID.String()
+		resp.AgentID = &value
+	}
+	if t.ExpiresAt != nil {
+		value := t.ExpiresAt.UTC().Format(time.RFC3339)
+		resp.ExpiresAt = &value
+	}
+	if t.RedeemedAt != nil {
+		value := t.RedeemedAt.UTC().Format(time.RFC3339)
+		resp.RedeemedAt = &value
+	}
 	if t.RevokedAt != nil {
-		v := t.RevokedAt.UTC().Format(time.RFC3339)
-		resp.RevokedAt = &v
+		value := t.RevokedAt.UTC().Format(time.RFC3339)
+		resp.RevokedAt = &value
 	}
 	if t.LastUsedAt != nil {
-		v := t.LastUsedAt.UTC().Format(time.RFC3339)
-		resp.LastUsedAt = &v
+		value := t.LastUsedAt.UTC().Format(time.RFC3339)
+		resp.LastUsedAt = &value
 	}
 	return resp
 }

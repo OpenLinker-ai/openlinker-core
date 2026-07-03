@@ -36,7 +36,7 @@ func (a *BearerGRPCAuthenticator) AuthenticateA2AGRPC(ctx context.Context) (*GRP
 	if err != nil {
 		return nil, err
 	}
-	if credential.HasAnyPrefix(token, credential.AccessTokenPrefix, credential.LegacyAPIKeyPrefix) {
+	if credential.HasAnyPrefix(token, credential.UserTokenPrefix) {
 		if a.verifier == nil {
 			return nil, httpx.Unauthorized("访问令牌鉴权未启用")
 		}
@@ -44,7 +44,7 @@ func (a *BearerGRPCAuthenticator) AuthenticateA2AGRPC(ctx context.Context) (*GRP
 		if err != nil {
 			return nil, httpx.Unauthorized("访问令牌无效或已撤销")
 		}
-		return &GRPCAuthInfo{UserID: uid, AuthMethod: "apikey", Scopes: scopes}, nil
+		return &GRPCAuthInfo{UserID: uid, AuthMethod: "user_token", Scopes: scopes}, nil
 	}
 	uid, err := auth.ParseToken(token, a.jwtSecret)
 	if err != nil {
@@ -72,7 +72,7 @@ func bearerTokenFromGRPCMetadata(ctx context.Context) (string, error) {
 }
 
 func grpcAuthHasScope(info *GRPCAuthInfo, scope string) bool {
-	if info == nil || info.AuthMethod != "apikey" {
+	if info == nil || info.AuthMethod != "user_token" {
 		return true
 	}
 	for _, item := range info.Scopes {

@@ -102,10 +102,12 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 // 关键字段：
 //   - PlatformFeeRate=0.25：平台抽 25%
 //   - RunTimeoutSeconds=2：测试用短 timeout，避免单测跑太久
+//   - AllowLocalHTTPEndpoints=true：允许 httptest loopback endpoint
 func newTestConfig() *config.Config {
 	return &config.Config{
-		PlatformFeeRate:   0.25,
-		RunTimeoutSeconds: 2,
+		PlatformFeeRate:         0.25,
+		RunTimeoutSeconds:       2,
+		AllowLocalHTTPEndpoints: true,
 	}
 }
 
@@ -598,7 +600,7 @@ func TestRun_HappyPath(t *testing.T) {
 	assert.Equal(t, int32(0), run.CreatorRevenueCents)
 
 	events := readRunEvents(t, pool, mustParseUUID(t, resp.RunID))
-	require.Len(t, events, 3)
+	require.Len(t, events, 4)
 	assert.Equal(t, int32(1), events[0].Sequence)
 	assert.Equal(t, "run.created", events[0].EventType)
 	assert.Equal(t, "running", events[0].Payload["status"])
@@ -607,8 +609,10 @@ func TestRun_HappyPath(t *testing.T) {
 	assert.Equal(t, "http_endpoint", events[1].Payload["transport"])
 	assert.NotEmpty(t, events[1].Payload["endpoint_host"])
 	assert.Equal(t, int32(3), events[2].Sequence)
-	assert.Equal(t, "run.completed", events[2].EventType)
-	assert.Equal(t, "success", events[2].Payload["status"])
+	assert.Equal(t, "run.status.changed", events[2].EventType)
+	assert.Equal(t, "endpoint_response_received", events[2].Payload["status"])
+	assert.Equal(t, "run.completed", events[3].EventType)
+	assert.Equal(t, "success", events[3].Payload["status"])
 
 	artifacts, err := svc.ListRunArtifacts(ctx, userID, mustParseUUID(t, resp.RunID))
 	require.NoError(t, err)
@@ -670,12 +674,17 @@ func TestRun_CreatesCallerOwnedTaskCallbackSubscription(t *testing.T) {
 	require.NoError(t, json.Unmarshal(subs[0].Metadata, &metadata))
 	assert.Equal(t, "integration", metadata["client"])
 
-	select {
-	case event := <-taskCallbackEvents.events:
-		assert.Equal(t, runID, event.RunID)
-		assert.Equal(t, "run.completed", event.EventType)
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected run.completed task callback trigger")
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case event := <-taskCallbackEvents.events:
+			assert.Equal(t, runID, event.RunID)
+			if event.EventType == "run.completed" {
+				return
+			}
+		case <-deadline:
+			t.Fatal("expected run.completed task callback trigger")
+		}
 	}
 }
 
@@ -720,11 +729,12 @@ func TestRun_WithTaskRequirementEvidence(t *testing.T) {
 	assert.Equal(t, resp.RequirementEvidence.CoverageStatus, got.RequirementEvidence.CoverageStatus)
 
 	events := readRunEvents(t, pool, mustParseUUID(t, resp.RunID))
-	require.Len(t, events, 4)
+	require.Len(t, events, 5)
 	assert.Equal(t, "run.requirements.snapshotted", events[2].EventType)
 	assert.Equal(t, taskID.String(), events[2].Payload["task_id"])
 	assert.Equal(t, "partial", events[2].Payload["coverage_status"])
-	assert.Equal(t, "run.completed", events[3].EventType)
+	assert.Equal(t, "run.status.changed", events[3].EventType)
+	assert.Equal(t, "run.completed", events[4].EventType)
 }
 
 func TestRun_PersistsDeclaredArtifacts(t *testing.T) {
@@ -890,7 +900,7 @@ func TestRun_RecordsAgentReturnedEventsBeforeCompleted(t *testing.T) {
 	assert.Equal(t, "art_1", chunks[0].SourceArtifactID)
 	assert.Equal(t, int32(0), chunks[0].ChunkIndex)
 	require.NotNil(t, chunks[0].EventSequence)
-	assert.Equal(t, int32(4), *chunks[0].EventSequence)
+	assert.Equal(t, int32(5), *chunks[0].EventSequence)
 
 	messages, err := svc.ListRunMessages(ctx, userID, mustParseUUID(t, resp.RunID))
 	require.NoError(t, err)
@@ -970,11 +980,12 @@ func TestStartRun_ReturnsRunningAndCompletesInBackground(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		got := readRunEvents(t, pool, runID)
-		return len(got) >= 3 && got[2].EventType == "run.completed"
+		return len(got) >= 4 && got[3].EventType == "run.completed"
 	}, 3*time.Second, 20*time.Millisecond)
 	events = readRunEvents(t, pool, runID)
-	require.Len(t, events, 3)
-	assert.Equal(t, "run.completed", events[2].EventType)
+	require.Len(t, events, 4)
+	assert.Equal(t, "run.status.changed", events[2].EventType)
+	assert.Equal(t, "run.completed", events[3].EventType)
 
 	assertNoLostMoney(t, pool)
 }
@@ -1338,11 +1349,12 @@ func TestListRunEvents_HappyPath(t *testing.T) {
 
 	events, err := svc.ListRunEvents(ctx, userID, runID, 1, 10)
 	require.NoError(t, err)
-	require.Len(t, events, 2)
+	require.Len(t, events, 3)
 	assert.Equal(t, int32(2), events[0].Sequence)
 	assert.Equal(t, "run.started", events[0].EventType)
 	assert.Equal(t, "direct_http", events[0].Payload["connection_mode"])
-	assert.Equal(t, "run.completed", events[1].EventType)
+	assert.Equal(t, "run.status.changed", events[1].EventType)
+	assert.Equal(t, "run.completed", events[2].EventType)
 }
 
 func TestCancelRun_MarksRunningRunCanceledAndEmitsEvent(t *testing.T) {
@@ -1459,12 +1471,13 @@ func TestRunDelegated_RecordsFreeChildRunAndParentEvents(t *testing.T) {
 	assert.Equal(t, "success", parentEvents[1].Payload["status"])
 
 	childEvents := readRunEvents(t, pool, childRunID)
-	require.Len(t, childEvents, 3)
+	require.Len(t, childEvents, 4)
 	assert.Equal(t, "run.created", childEvents[0].EventType)
 	require.NotNil(t, childEvents[0].ParentRunID)
 	assert.Equal(t, parentRunID, *childEvents[0].ParentRunID)
 	assert.Equal(t, "free_delegation", childEvents[0].Payload["billing_mode"])
-	assert.Equal(t, "run.completed", childEvents[2].EventType)
+	assert.Equal(t, "run.status.changed", childEvents[2].EventType)
+	assert.Equal(t, "run.completed", childEvents[3].EventType)
 }
 
 func TestReportRunEvent_HappyPath(t *testing.T) {

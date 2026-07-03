@@ -22,7 +22,7 @@ import (
 func TestPostRunAgentRejectsAPIKeyWithoutRunScope(t *testing.T) {
 	e := echo.New()
 	c := e.NewContext(httptest.NewRequest(http.MethodPost, "/api/v1/mcp/run_agent", nil), httptest.NewRecorder())
-	c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+	c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
 	c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read"})
 
 	err := NewHandler(nil).PostRunAgent(c)
@@ -36,7 +36,7 @@ func TestPostRPCListToolsUsesMCPToolShape(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(httptest.NewRequest(http.MethodPost, "/api/v1/mcp", bytes.NewReader(body)), rec)
-	c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+	c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
 	c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read"})
 
 	err := NewHandler(NewService(nil, nil, nil)).PostRPC(c)
@@ -62,7 +62,7 @@ func TestPostRPCToolCallReportsMissingScopeAsToolError(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"run_agent","arguments":{"agent_id":"8582c7a4-0f02-4895-8570-7c7cce357e5f","input":{"text":"hi"}}}}`)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(httptest.NewRequest(http.MethodPost, "/api/v1/mcp", bytes.NewReader(body)), rec)
-	c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+	c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
 	c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read"})
 
 	err := NewHandler(nil).PostRPC(c)
@@ -149,7 +149,7 @@ func TestPostRPCErrorsForMalformedAndUnsupportedRequests(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			c := newRPCContext(tt.body, rec)
-			c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+			c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
 
 			require.NoError(t, NewHandler(nil).PostRPC(c))
 			require.Equal(t, tt.wantHTTP, rec.Code)
@@ -166,7 +166,7 @@ func TestPostRPCErrorsForMalformedAndUnsupportedRequests(t *testing.T) {
 func TestPostRPCAcceptsNotificationsWithoutServiceWork(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := newRPCContext(`{"jsonrpc":"2.0","method":"tools/list"}`, rec)
-	c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+	c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
 
 	require.NoError(t, NewHandler(nil).PostRPC(c))
 	require.Equal(t, http.StatusAccepted, rec.Code)
@@ -189,7 +189,7 @@ func TestPostRPCInitializeRequiresAPIKeyAndReturnsCapabilities(t *testing.T) {
 
 	rec = httptest.NewRecorder()
 	c = newRPCContext(`{"jsonrpc":"2.0","id":"ok","method":"initialize"}`, rec)
-	c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+	c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
 	require.NoError(t, NewHandler(nil).PostRPC(c))
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -264,7 +264,7 @@ func TestPostRPCToolCallValidatesParamsBeforeServiceDispatch(t *testing.T) {
 
 			rec := httptest.NewRecorder()
 			c := newRPCContext(body, rec)
-			c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+			c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
 			c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read", "agents:run", "runs:read", "tasks:write"})
 			c.Set(string(httpx.CtxKeyUserID), "8582c7a4-0f02-4895-8570-7c7cce357e5f")
 
@@ -295,7 +295,7 @@ func TestPostRPCToolCallReportsUserContextErrorsAsToolErrors(t *testing.T) {
 			body := `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_run","arguments":{"run_id":"8582c7a4-0f02-4895-8570-7c7cce357e5f"}}}`
 			rec := httptest.NewRecorder()
 			c := newRPCContext(body, rec)
-			c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+			c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
 			c.Set(string(httpx.CtxKeyAuthScopes), []string{"runs:read"})
 			if tt.userID != "" {
 				c.Set(string(httpx.CtxKeyUserID), tt.userID)
@@ -560,7 +560,7 @@ func TestPostRPCToolCallDispatchesAllTools(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			c := newRPCContext(`{"jsonrpc":"2.0","id":"ok","method":"tools/call","params":`+tt.params+`}`, rec)
-			c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+			c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
 			c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read", "agents:run", "runs:read", "tasks:write"})
 			c.Set(string(httpx.CtxKeyUserID), userID.String())
 
@@ -644,7 +644,7 @@ func newJSONRequest(method, target, body string) *http.Request {
 }
 
 func setAPIKeyScopes(c echo.Context, scopes ...string) {
-	c.Set(string(httpx.CtxKeyAuthMethod), "apikey")
+	c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
 	c.Set(string(httpx.CtxKeyAuthScopes), scopes)
 }
 

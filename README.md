@@ -78,8 +78,8 @@ Common optional values:
 - `GOOGLE_OAUTH_CLIENT_SECRET`
 - `GITHUB_OAUTH_CLIENT_ID`
 - `GITHUB_OAUTH_CLIENT_SECRET`
-- `API_KEY_VERIFY_URL`
-- `API_KEY_VERIFY_SECRET` (required in production when `API_KEY_VERIFY_URL` is set)
+- `USER_TOKEN_VERIFY_URL`
+- `OPENLINKER_INTERNAL_TOKEN` (required in production when `USER_TOKEN_VERIFY_URL` is set)
 - `RUNTIME_ENDPOINT_RUN_*` (stale direct HTTP / MCP run recovery worker)
 - `ALLOW_LOCAL_HTTP_ENDPOINTS`
 

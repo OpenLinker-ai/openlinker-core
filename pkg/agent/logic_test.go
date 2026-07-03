@@ -540,8 +540,8 @@ func TestRegistrationApprovalAndMetricHelpers(t *testing.T) {
 	}
 
 	regSvc := &RegistrationService{}
-	if _, err := regSvc.verifyBootstrapToken(context.Background(), "bad-token"); err == nil {
-		t.Fatalf("verifyBootstrapToken should reject malformed token before database lookup")
+	if _, err := regSvc.verifyPendingAgentToken(context.Background(), "bad-token"); err == nil {
+		t.Fatalf("verifyPendingAgentToken should reject malformed token before database lookup")
 	} else {
 		requireHTTPStatus(t, err, http.StatusUnauthorized)
 	}
@@ -561,19 +561,21 @@ func TestRegistrationApprovalAndMetricHelpers(t *testing.T) {
 	now := time.Date(2026, 6, 20, 8, 9, 10, 0, time.UTC)
 	revokedAt := now.Add(time.Minute)
 	lastUsedAt := now.Add(2 * time.Minute)
-	tokenResp := bootstrapTokenResponse(db.AgentRegistrationToken{
+	agentID := uuid.New()
+	tokenResp := agentTokenResponse(db.AgentToken{
 		ID:         uuid.New(),
-		Label:      "bootstrap",
-		Prefix:     "sk_live_test",
-		MaxAgents:  2,
-		UsedCount:  1,
-		ExpiresAt:  now,
+		AgentID:    &agentID,
+		Name:       "worker",
+		Prefix:     "ol_agent_test",
+		Status:     "active_runtime",
+		Scopes:     []string{"agent:call"},
+		ExpiresAt:  &now,
 		RevokedAt:  &revokedAt,
 		LastUsedAt: &lastUsedAt,
 		CreatedAt:  now.Add(-time.Hour),
 	})
-	if tokenResp.RevokedAt == nil || tokenResp.LastUsedAt == nil || tokenResp.ExpiresAt != "2026-06-20T08:09:10Z" {
-		t.Fatalf("unexpected bootstrapTokenResponse: %#v", tokenResp)
+	if tokenResp.RevokedAt == nil || tokenResp.LastUsedAt == nil || tokenResp.ExpiresAt == nil || *tokenResp.ExpiresAt != "2026-06-20T08:09:10Z" {
+		t.Fatalf("unexpected agentTokenResponse: %#v", tokenResp)
 	}
 
 	if got := normalizeNote("  approved  "); got == nil || *got != "approved" {
@@ -712,7 +714,7 @@ func TestMarketQueryParsingAndRouteRegistration(t *testing.T) {
 		"POST /api/v1/creator/agents/:id/dry-run",
 		"POST /api/v1/admin/agents/:id/certify",
 		"POST /api/v1/agent-registration/agents",
-		"DELETE /api/v1/creator/agent-registration-tokens/:id",
+		"DELETE /api/v1/creator/agent-tokens/:id",
 		"POST /api/v1/creator/approvals/:id/confirm",
 		"GET /api/v1/agents/:slug/agent-card.json",
 		"GET /api/v1/agents/:slug/agent-card.extended.json",
@@ -793,13 +795,13 @@ func TestRegistrationApprovalAndMetricHandlersValidateBeforeServiceDispatch(t *t
 		req    *handlerRequest
 		want   int
 	}{
-		{name: "mint missing user", method: reg.MintBootstrapToken, req: &handlerRequest{method: http.MethodPost, target: "/"}, want: http.StatusUnauthorized},
-		{name: "mint invalid json", method: reg.MintBootstrapToken, req: &handlerRequest{method: http.MethodPost, target: "/", body: "{", userID: userID}, want: http.StatusBadRequest},
-		{name: "mint validation", method: reg.MintBootstrapToken, req: &handlerRequest{method: http.MethodPost, target: "/", body: `{}`, userID: userID}, want: http.StatusUnprocessableEntity},
-		{name: "revoke invalid id", method: reg.RevokeBootstrapToken, req: &handlerRequest{method: http.MethodDelete, target: "/bad", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
-		{name: "register invalid json", method: reg.RegisterAgentViaBootstrap, req: &handlerRequest{method: http.MethodPost, target: "/", body: "{"}, want: http.StatusBadRequest},
-		{name: "register validation", method: reg.RegisterAgentViaBootstrap, req: &handlerRequest{method: http.MethodPost, target: "/", body: `{"name":"Agent Name","ability_tags":["ai"]}`}, want: http.StatusUnprocessableEntity},
-		{name: "register negative price validation", method: reg.RegisterAgentViaBootstrap, req: &handlerRequest{method: http.MethodPost, target: "/", body: `{"bootstrap_token":"ol_live_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"Agent Name","price_per_call_cents":-1,"tags":["ai"]}`}, want: http.StatusUnprocessableEntity},
+		{name: "create token missing user", method: reg.CreateAgentToken, req: &handlerRequest{method: http.MethodPost, target: "/"}, want: http.StatusUnauthorized},
+		{name: "create token invalid json", method: reg.CreateAgentToken, req: &handlerRequest{method: http.MethodPost, target: "/", body: "{", userID: userID}, want: http.StatusBadRequest},
+		{name: "create token validation", method: reg.CreateAgentToken, req: &handlerRequest{method: http.MethodPost, target: "/", body: `{}`, userID: userID}, want: http.StatusUnprocessableEntity},
+		{name: "revoke token invalid id", method: reg.RevokeAgentToken, req: &handlerRequest{method: http.MethodDelete, target: "/bad", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
+		{name: "register invalid json", method: reg.RegisterAgentViaToken, req: &handlerRequest{method: http.MethodPost, target: "/", body: "{"}, want: http.StatusBadRequest},
+		{name: "register validation", method: reg.RegisterAgentViaToken, req: &handlerRequest{method: http.MethodPost, target: "/", body: `{"name":"Agent Name","ability_tags":["ai"]}`}, want: http.StatusUnprocessableEntity},
+		{name: "register negative price validation", method: reg.RegisterAgentViaToken, req: &handlerRequest{method: http.MethodPost, target: "/", body: `{"agent_token":"ol_agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"Agent Name","price_per_call_cents":-1,"tags":["ai"]}`}, want: http.StatusUnprocessableEntity},
 		{name: "create approval missing user", method: approval.CreateApproval, req: &handlerRequest{method: http.MethodPost, target: "/"}, want: http.StatusUnauthorized},
 		{name: "create approval invalid json", method: approval.CreateApproval, req: &handlerRequest{method: http.MethodPost, target: "/", body: "{", userID: userID}, want: http.StatusBadRequest},
 		{name: "create approval validation", method: approval.CreateApproval, req: &handlerRequest{method: http.MethodPost, target: "/", body: `{}`, userID: userID}, want: http.StatusUnprocessableEntity},

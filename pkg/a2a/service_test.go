@@ -23,7 +23,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/webhook"
 )
 
-const truncateA2ATables = "TRUNCATE task_callback_deliveries, task_callback_subscriptions, run_artifact_chunks, run_artifacts, run_messages, run_delegations, agent_runtime_tokens, agent_call_policies, run_events, runs, agents, users RESTART IDENTITY CASCADE"
+const truncateA2ATables = "TRUNCATE task_callback_deliveries, task_callback_subscriptions, run_artifact_chunks, run_artifacts, run_messages, run_delegations, agent_tokens, agent_call_policies, run_events, runs, agents, users RESTART IDENTITY CASCADE"
 
 func setupService(t *testing.T) (*pgxpool.Pool, *a2a.Service, *runtime.Service) {
 	t.Helper()
@@ -193,12 +193,12 @@ func TestRuntimeWorkbenchFlagsRuntimePullTokenScopeMissing(t *testing.T) {
 	makeRuntimePullAgent(t, pool, agentID)
 
 	_, err := pool.Exec(context.Background(),
-		`INSERT INTO agent_runtime_tokens (
-			agent_id, created_by_user_id, name, prefix, token_hash, scopes
-		) VALUES ($1, $2, 'call-only', $3, 'hash', $4)`,
+		`INSERT INTO agent_tokens (
+			agent_id, creator_user_id, name, prefix, token_hash, scopes, status, redeemed_at
+		) VALUES ($1, $2, 'call-only', $3, 'hash', $4, 'active_runtime', NOW())`,
 		agentID,
 		ownerID,
-		"ol_live_abcd",
+		"ol_agent_abcd",
 		[]string{"agent:call"},
 	)
 	require.NoError(t, err)
@@ -238,8 +238,7 @@ func TestRuntimeTokenRevokeAndCallPolicyReadback(t *testing.T) {
 	require.NoError(t, err)
 	tokens, err := svc.ListRuntimeTokens(context.Background(), ownerID, agentID)
 	require.NoError(t, err)
-	require.Len(t, tokens, 1)
-	require.NotNil(t, tokens[0].RevokedAt)
+	require.Empty(t, tokens)
 
 	err = svc.RevokeRuntimeToken(context.Background(), ownerID, uuid.MustParse(token.ID))
 	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
@@ -267,9 +266,9 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 		TraceID           string   `json:"trace_id"`
 		ReferenceTaskIDs  []string `json:"reference_task_ids"`
 		CallAgentEndpoint string   `json:"call_agent_endpoint"`
-		RuntimeScopes     []string `json:"runtime_scopes"`
+		AgentScopes       []string `json:"agent_scopes"`
 	}
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedHeader = r.Header.Get("X-OpenLinker-User-Id")
 		raw, _ := io.ReadAll(r.Body)
 		var body map[string]any
@@ -285,9 +284,6 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer pushServer.Close()
-	defaultTransport := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
 
 	callerID := insertAgent(t, pool, callerOwner, "https://example.com/caller")
 	targetID := insertAgent(t, pool, targetOwner, server.URL)
@@ -335,7 +331,7 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	assert.Equal(t, "trace-delegation", receivedA2A.TraceID)
 	assert.ElementsMatch(t, []string{"task-explicit", parentRunID.String()}, receivedA2A.ReferenceTaskIDs)
 	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", receivedA2A.CallAgentEndpoint)
-	assert.Contains(t, receivedA2A.RuntimeScopes, "agent:call")
+	assert.Contains(t, receivedA2A.AgentScopes, "agent:call")
 
 	reloaded, err := runtimeSvc.GetRun(context.Background(), callerOwner, uuid.MustParse(child.RunID))
 	require.NoError(t, err)
@@ -378,15 +374,12 @@ func TestCallAgent_InvalidTaskCallbackDoesNotCreateChildRun(t *testing.T) {
 	svc.SetTaskCallbackManager(webhook.NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true}))
 
 	var targetHits int
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		targetHits++
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"output":{"text":"child ok"}}`))
 	}))
 	defer server.Close()
-	defaultTransport := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
 
 	callerID := insertAgent(t, pool, callerOwner, "https://example.com/caller")
 	targetID := insertAgent(t, pool, targetOwner, server.URL)
@@ -469,7 +462,7 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 	var callerID uuid.UUID
 	var targetID uuid.UUID
 	var runtimeToken string
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Input map[string]any `json:"input"`
 			RunID string         `json:"run_id"`
@@ -504,10 +497,6 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-
-	defaultTransport := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
 
 	callerID = insertAgent(t, pool, owner, server.URL+"/caller", "orchestration")
 	targetID = insertAgent(t, pool, owner, server.URL+"/worker", "worker")
@@ -548,8 +537,8 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 	require.Len(t, parents.Items[0].CallerSkills, 1)
 	assert.Equal(t, "ai/agent-orchestration", parents.Items[0].CallerSkills[0].ID)
 	assert.Equal(t, "web", parents.Items[0].Source)
-	assert.Equal(t, int32(1), parents.Items[0].ActiveRuntimeTokenCount)
-	require.NotNil(t, parents.Items[0].LastRuntimeTokenUsedAt)
+	assert.Equal(t, int32(1), parents.Items[0].ActiveAgentTokenCount)
+	require.NotNil(t, parents.Items[0].LastAgentTokenUsedAt)
 	assert.Equal(t, int32(1), parents.Items[0].ChildCount)
 	assert.Equal(t, int32(1), parents.Items[0].SuccessfulChildCount)
 
@@ -584,7 +573,7 @@ func TestProtocolMessageSendAndGetTask(t *testing.T) {
 	owner := insertCreator(t, pool)
 
 	var receivedInput map[string]any
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Input map[string]any `json:"input"`
 		}
@@ -615,9 +604,6 @@ func TestProtocolMessageSendAndGetTask(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	defaultTransport := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
 
 	agentID := insertAgent(t, pool, owner, server.URL)
 	slug := "a2a-" + agentID.String()[:8]
@@ -685,7 +671,7 @@ func TestProtocolMessageAcceptsCurrentPartShapes(t *testing.T) {
 	owner := insertCreator(t, pool)
 
 	var receivedInput map[string]any
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Input map[string]any `json:"input"`
 		}
@@ -695,9 +681,6 @@ func TestProtocolMessageAcceptsCurrentPartShapes(t *testing.T) {
 		_, _ = w.Write([]byte(`{"output":{"summary":"current parts ok"}}`))
 	}))
 	defer server.Close()
-	defaultTransport := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
 
 	agentID := insertAgent(t, pool, owner, server.URL)
 	slug := "a2a-" + agentID.String()[:8]
@@ -740,23 +723,20 @@ func TestProtocolMessageReusesProtocolTaskIDForContinuation(t *testing.T) {
 	owner := insertCreator(t, pool)
 
 	var calls []map[string]any
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Input map[string]any `json:"input"`
 		}
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 		calls = append(calls, request.Input)
 		w.Header().Set("Content-Type", "application/json")
-		if _, ok := request.Input["a2a_task_id"]; !ok {
+		if messageID, _ := request.Input["a2a_message_id"].(string); strings.HasPrefix(messageID, "input-required-") {
 			_, _ = w.Write([]byte(`{"output":{"summary":"need input","a2a":{"task_state":"input_required","status_message":"Need a follow-up"}}}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"output":{"summary":"follow-up complete","a2a":{"task_state":"completed","artifacts":[{"artifactId":"followup","parts":[{"kind":"text","text":"done"}]}]}}}`))
 	}))
 	defer server.Close()
-	defaultTransport := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
 
 	agentID := insertAgent(t, pool, owner, server.URL)
 	slug := "a2a-" + agentID.String()[:8]
@@ -868,7 +848,7 @@ func TestProtocolServiceValidationAndOwnershipEdges(t *testing.T) {
 	_, err = svc.GetProtocolTask(context.Background(), owner, "", task.ID, nil)
 	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
 	_, err = svc.GetProtocolTask(context.Background(), owner, slug, "not-a-uuid", nil)
-	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
 	_, err = svc.GetProtocolTask(context.Background(), other, slug, task.ID, nil)
 	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
 	_, err = svc.GetProtocolTask(context.Background(), owner, otherSlug, task.ID, nil)
@@ -886,7 +866,7 @@ func TestProtocolServiceValidationAndOwnershipEdges(t *testing.T) {
 		PushNotificationConfig: a2a.A2APushNotificationConfig{URL: server.URL + "/push"},
 	}
 	_, err = svc.SetPushNotificationConfig(context.Background(), owner, slug, &pushParams)
-	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
 
 	missingRunID := uuid.NewString()
 	_, err = svc.ListPushNotificationConfigs(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{ID: missingRunID})
@@ -909,7 +889,7 @@ func TestProtocolStreamEventsExposeStatusAndArtifactUpdates(t *testing.T) {
 
 	release := make(chan struct{})
 	called := make(chan struct{}, 1)
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case called <- struct{}{}:
 		default:
@@ -941,9 +921,6 @@ func TestProtocolStreamEventsExposeStatusAndArtifactUpdates(t *testing.T) {
 			close(release)
 		}
 	})
-	defaultTransport := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
 
 	agentID := insertAgent(t, pool, owner, server.URL)
 	slug := "a2a-" + agentID.String()[:8]
@@ -1004,7 +981,7 @@ func TestProtocolMessageReturnImmediatelyStartsAsyncTask(t *testing.T) {
 
 	called := make(chan struct{})
 	release := make(chan struct{})
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-called:
 		default:
@@ -1022,9 +999,6 @@ func TestProtocolMessageReturnImmediatelyStartsAsyncTask(t *testing.T) {
 			close(release)
 		}
 	})
-	defaultTransport := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
 
 	agentID := insertAgent(t, pool, owner, server.URL)
 	slug := "a2a-" + agentID.String()[:8]
@@ -1076,7 +1050,7 @@ func TestProtocolListTasksSupportsPagingFiltersAndArtifacts(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	owner := insertCreator(t, pool)
 
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Input map[string]any `json:"input"`
 		}
@@ -1100,9 +1074,6 @@ func TestProtocolListTasksSupportsPagingFiltersAndArtifacts(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	defaultTransport := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
 
 	agentID := insertAgent(t, pool, owner, server.URL)
 	slug := "a2a-" + agentID.String()[:8]
@@ -1185,7 +1156,7 @@ func TestProtocolCancelTaskMapsRunCancellation(t *testing.T) {
 			close(release)
 		}
 	}
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case called <- struct{}{}:
 		default:
@@ -1200,9 +1171,6 @@ func TestProtocolCancelTaskMapsRunCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 	t.Cleanup(releaseServer)
-	defaultTransport := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
 
 	agentID := insertAgent(t, pool, owner, server.URL)
 	slug := "a2a-" + agentID.String()[:8]
@@ -1233,7 +1201,7 @@ func TestProtocolCancelTaskMapsRunCancellation(t *testing.T) {
 	releaseServer()
 
 	_, err = svc.CancelProtocolTask(context.Background(), owner, slug, "not-a-uuid")
-	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
 	_, err = svc.CancelProtocolTask(context.Background(), owner, slug, uuid.NewString())
 	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
 }
@@ -1291,9 +1259,6 @@ func TestPushNotificationConfigMapsToTaskCallback(t *testing.T) {
 		_, _ = w.Write([]byte(`{"output":{"summary":"push config task done"}}`))
 	}))
 	defer server.Close()
-	defaultTransport := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	t.Cleanup(func() { http.DefaultTransport = defaultTransport })
 
 	agentID := insertAgent(t, pool, owner, server.URL)
 	slug := "a2a-" + agentID.String()[:8]
@@ -1427,7 +1392,7 @@ func TestPushNotificationConfigLookupAndValidationEdges(t *testing.T) {
 		ID:                       task.ID,
 		PushNotificationConfigID: "bad",
 	})
-	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
+	require.NoError(t, err)
 
 	err = svc.DeletePushNotificationConfig(context.Background(), owner, slug, &a2a.A2ATaskPushConfigParams{
 		ID: task.ID,

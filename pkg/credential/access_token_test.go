@@ -5,40 +5,55 @@ import (
 	"testing"
 )
 
-func TestGenerateAccessTokenShape(t *testing.T) {
-	plaintext, prefix, err := GenerateAccessToken()
-	if err != nil {
-		t.Fatalf("GenerateAccessToken returned error: %v", err)
+func TestGenerateUserAndAgentTokenShape(t *testing.T) {
+	tests := []struct {
+		name       string
+		prefix     string
+		generate   func() (string, string, error)
+	}{
+		{name: "user", prefix: UserTokenPrefix, generate: GenerateUserToken},
+		{name: "agent", prefix: AgentTokenPrefix, generate: GenerateAgentToken},
 	}
-	if !strings.HasPrefix(plaintext, AccessTokenPrefix) {
-		t.Fatalf("token prefix = %q, want %q", plaintext[:len(AccessTokenPrefix)], AccessTokenPrefix)
-	}
-	if len(plaintext) != len(AccessTokenPrefix)+RandomBytes*2 {
-		t.Fatalf("token length = %d", len(plaintext))
-	}
-	if prefix != plaintext[:PrefixLen] {
-		t.Fatalf("prefix = %q, want plaintext[:PrefixLen]", prefix)
-	}
-	if !ValidLength(plaintext) {
-		t.Fatalf("generated token should have valid length")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plaintext, prefix, err := tt.generate()
+			if err != nil {
+				t.Fatalf("generate returned error: %v", err)
+			}
+			if !strings.HasPrefix(plaintext, tt.prefix) {
+				t.Fatalf("token prefix = %q, want %q", plaintext[:len(tt.prefix)], tt.prefix)
+			}
+			if len(plaintext) != len(tt.prefix)+RandomBytes*2 {
+				t.Fatalf("token length = %d", len(plaintext))
+			}
+			if prefix != plaintext[:PrefixLen] {
+				t.Fatalf("prefix = %q, want plaintext[:PrefixLen]", prefix)
+			}
+			if !ValidLengthForPrefix(plaintext, tt.prefix) {
+				t.Fatalf("generated token should have valid length")
+			}
+		})
 	}
 }
 
-func TestValidLengthTrimsWhitespace(t *testing.T) {
-	token := AccessTokenPrefix + strings.Repeat("a", RandomBytes*2)
-	if !ValidLength(" \t" + token + "\n") {
+func TestValidLengthForPrefixTrimsWhitespace(t *testing.T) {
+	token := UserTokenPrefix + strings.Repeat("a", RandomBytes*2)
+	if !ValidLengthForPrefix(" \t"+token+"\n", UserTokenPrefix) {
 		t.Fatalf("trimmed token should have valid length")
 	}
-	if ValidLength(token + "a") {
+	if ValidLengthForPrefix(token+"a", UserTokenPrefix) {
 		t.Fatalf("overlong token should be invalid")
+	}
+	if ValidLengthForPrefix(token, AgentTokenPrefix) {
+		t.Fatalf("user token must not validate as agent token")
 	}
 }
 
 func TestHasAnyPrefixTrimsAndMatchesKnownPrefixes(t *testing.T) {
-	if !HasAnyPrefix("  "+LegacyAgentPrefix+"abc", LegacyAPIKeyPrefix, LegacyAgentPrefix) {
-		t.Fatalf("expected legacy agent prefix match")
+	if !HasAnyPrefix("  "+AgentTokenPrefix+"abc", UserTokenPrefix, AgentTokenPrefix) {
+		t.Fatalf("expected agent prefix match")
 	}
-	if HasAnyPrefix("unknown_live_abc", LegacyAPIKeyPrefix, LegacyAgentPrefix) {
+	if HasAnyPrefix("unknown_live_abc", UserTokenPrefix, AgentTokenPrefix) {
 		t.Fatalf("unexpected prefix match")
 	}
 }

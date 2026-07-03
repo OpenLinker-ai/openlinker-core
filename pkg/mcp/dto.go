@@ -5,10 +5,10 @@ package mcp
 //   - POST /api/v1/mcp      MCP Streamable HTTP JSON-RPC 入口（JSON response mode）
 //   - /api/v1/mcp/*         兼容旧脚本的 REST JSON 工具入口
 //
-// 鉴权：仅访问令牌（ol_live_xxx；兼容历史 sk_live_xxx）。
+// 鉴权：仅访问令牌（ol_user_xxx；兼容历史 ol_user_xxx）。
 //
 // 不引入 mark3labs/mcp-go SDK —— 5 个工具直接转发到既有 service，
-// 鉴权直接复用 HybridAuthMiddleware + apikey.Service。
+// 鉴权直接复用 HybridAuthMiddleware + User Token verifier。
 
 // ToolDescriptor 暴露给 MCP 客户端的工具元信息。
 //
