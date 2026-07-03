@@ -86,6 +86,18 @@ func readRuntimeTokenLastUsed(t *testing.T, pool *pgxpool.Pool, plaintext string
 	return &lastUsed.Time
 }
 
+func revokeRuntimeToken(t *testing.T, pool *pgxpool.Pool, plaintext string) {
+	t.Helper()
+	tag, err := pool.Exec(context.Background(),
+		`UPDATE agent_tokens
+		 SET revoked_at = NOW(), status = 'revoked'
+		 WHERE prefix = $1 AND revoked_at IS NULL`,
+		plaintext[:12],
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), tag.RowsAffected())
+}
+
 func markRuntimePullAvailable(t *testing.T, svc *runtime.Service, token string) {
 	t.Helper()
 	_, err := svc.HeartbeatAgent(context.Background(), token)
@@ -864,6 +876,43 @@ func TestRuntimePull_EmptyClaimDoesNotRefreshToken(t *testing.T) {
 	lastUsed := readRuntimeTokenLastUsed(t, pool, token)
 	require.NotNil(t, lastUsed)
 	assert.WithinDuration(t, baseline, *lastUsed, time.Millisecond)
+}
+
+func TestRuntimePull_RevokedAgentTokenRejectsRuntimeEndpoints(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertUserWithBalance(t, pool, 1000)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
+	markRuntimePullAvailable(t, svc, token)
+
+	started, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "revoke"}), "")
+	require.NoError(t, err)
+	runID := mustParseUUID(t, started.RunID)
+
+	claimed, err := svc.ClaimRuntimePullRun(ctx, token)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	assert.Equal(t, started.RunID, claimed.RunID)
+
+	revokeRuntimeToken(t, pool, token)
+
+	_, err = svc.HeartbeatAgent(ctx, token)
+	assertHTTPStatus(t, err, http.StatusUnauthorized)
+
+	claimed, err = svc.ClaimRuntimePullRun(ctx, token)
+	assert.Nil(t, claimed)
+	assertHTTPStatus(t, err, http.StatusUnauthorized)
+
+	_, err = svc.CompleteRuntimePullRun(ctx, token, runID, &runtime.RuntimePullResultRequest{
+		Status: "success",
+		Output: map[string]interface{}{"summary": "must not complete with a revoked Agent Token"},
+	})
+	assertHTTPStatus(t, err, http.StatusUnauthorized)
 }
 
 func TestRuntimePull_HeartbeatReturnsClaimHints(t *testing.T) {
