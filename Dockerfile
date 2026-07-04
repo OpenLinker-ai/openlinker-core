@@ -12,6 +12,12 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o api ./cmd/api
 
 FROM alpine:3.19
+ARG OPENLINKER_GIT_SHA=unknown
+ARG OPENLINKER_RELEASE_ID=local
+ARG OPENLINKER_DEPLOYED_AT=
+LABEL org.opencontainers.image.revision="${OPENLINKER_GIT_SHA}" \
+      openlinker.release="${OPENLINKER_RELEASE_ID}" \
+      openlinker.deployed_at="${OPENLINKER_DEPLOYED_AT}"
 RUN apk add --no-cache ca-certificates tzdata wget
 WORKDIR /app
 COPY --from=builder /app/api .
