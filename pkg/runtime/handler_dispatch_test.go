@@ -594,6 +594,34 @@ func TestRuntimeHandlerRuntimeTokenValidationPrecedesBusinessRateLimits(t *testi
 	})
 }
 
+func TestRuntimeHandlerInvalidRuntimeTokenLimitIsPerEndpoint(t *testing.T) {
+	token := "ol_agent_revoked_shared"
+	revokedErr := httpx.Unauthorized("访问令牌无效或已撤销")
+	mock := &mockRuntimeService{validateRuntimeTokenErr: revokedErr}
+	h := NewHandler(mock)
+
+	heartbeatCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
+		method:  http.MethodPost,
+		target:  "/api/v1/agent-runtime/heartbeat",
+		headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
+	})
+	requireRuntimeHTTPStatus(t, h.PostAgentHeartbeat(heartbeatCtx), http.StatusUnauthorized)
+
+	claimCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
+		method:  http.MethodGet,
+		target:  "/api/v1/agent-runtime/runs/claim",
+		headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
+	})
+	requireRuntimeHTTPStatus(t, h.ClaimRuntimePullRun(claimCtx), http.StatusUnauthorized)
+
+	repeatedClaimCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
+		method:  http.MethodGet,
+		target:  "/api/v1/agent-runtime/runs/claim",
+		headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
+	})
+	requireRuntimeHTTPStatus(t, h.ClaimRuntimePullRun(repeatedClaimCtx), http.StatusTooManyRequests)
+}
+
 type mockRuntimeService struct {
 	err error
 

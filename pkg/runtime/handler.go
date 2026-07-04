@@ -352,7 +352,7 @@ func (h *Handler) ClaimRuntimePullRun(c echo.Context) error {
 		return err
 	}
 	if err := h.svc.ValidateRuntimeToken(c.Request().Context(), token, "agent:pull"); err != nil {
-		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterTokenKey(token)); retry > 0 {
+		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterEndpointTokenKey(token, "claim")); retry > 0 {
 			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
 		}
 		return err
@@ -405,7 +405,7 @@ func (h *Handler) PostAgentHeartbeat(c echo.Context) error {
 		return err
 	}
 	if err := h.svc.ValidateRuntimeToken(c.Request().Context(), token, "agent:pull", "agent:call"); err != nil {
-		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterTokenKey(token)); retry > 0 {
+		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterEndpointTokenKey(token, "heartbeat")); retry > 0 {
 			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
 		}
 		return err
@@ -507,6 +507,11 @@ func runtimeBearerToken(header string) (string, error) {
 func runtimeLimiterTokenKey(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return "rt:" + hex.EncodeToString(sum[:8])
+}
+
+func runtimeLimiterEndpointTokenKey(token, endpoint string) string {
+	sum := sha256.Sum256([]byte(token + ":" + endpoint))
+	return "rt:" + endpoint + ":" + hex.EncodeToString(sum[:8])
 }
 
 func runtimeLimiterIPKey(c echo.Context) string {

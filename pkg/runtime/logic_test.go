@@ -68,6 +68,9 @@ func TestRuntimeAuthScopeAndParsingHelpers(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, httpErr.Status)
 	require.Equal(t, runtimeLimiterTokenKey("secret"), runtimeLimiterTokenKey("secret"))
 	require.NotEqual(t, runtimeLimiterTokenKey("secret"), runtimeLimiterTokenKey("other"))
+	require.Equal(t, runtimeLimiterEndpointTokenKey("secret", "claim"), runtimeLimiterEndpointTokenKey("secret", "claim"))
+	require.NotEqual(t, runtimeLimiterEndpointTokenKey("secret", "claim"), runtimeLimiterEndpointTokenKey("secret", "heartbeat"))
+	require.NotEqual(t, runtimeLimiterEndpointTokenKey("secret", "claim"), runtimeLimiterEndpointTokenKey("other", "claim"))
 	require.True(t, strings.HasPrefix(runtimeLimiterIPKey(c), "ip:"))
 	require.Equal(t, "ip:unknown", runtimeLimiterIPKey(blankIPContext{Context: c}))
 
