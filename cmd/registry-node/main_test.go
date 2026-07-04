@@ -15,23 +15,23 @@ import (
 
 func TestRunCycleClaimsLocalAgentAndCompletesProxyRun(t *testing.T) {
 	const (
-		nodeSecret     = "rn_live_test"
-		localAgentID   = "local-agent-1"
-		proxyRunID     = "proxy-run-1"
-		cloudRunID     = "cloud-run-1"
-		cloudListingID = "cloud-listing-1"
-		registryNodeID = "registry-node-1"
+		nodeSecret        = "rn_live_test"
+		localAgentID      = "local-agent-1"
+		proxyRunID        = "proxy-run-1"
+		registryRunID     = "registry-run-1"
+		registryListingID = "registry-listing-1"
+		registryNodeID    = "registry-node-1"
 	)
 
 	localAgentCalled := false
 	localAgent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, cloudRunID, r.Header.Get("X-OpenLinker-Run-Id"))
+		require.Equal(t, registryRunID, r.Header.Get("X-OpenLinker-Run-Id"))
 		require.Equal(t, proxyRunID, r.Header.Get("X-OpenLinker-Proxy-Run-Id"))
 
 		var req agentRequest
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-		require.Equal(t, cloudRunID, req.RunID)
+		require.Equal(t, registryRunID, req.RunID)
 		require.Equal(t, "hello", req.Input["text"])
 		require.Equal(t, proxyRunID, req.Metadata["proxy_run_id"])
 		require.Equal(t, localAgentID, req.Metadata["local_agent_id"])
@@ -48,10 +48,10 @@ func TestRunCycleClaimsLocalAgentAndCompletesProxyRun(t *testing.T) {
 		require.Equal(t, "Bearer "+nodeSecret, r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/api/v1/registry-node/heartbeat":
+		case "/api/v1/registry/nodes/heartbeat":
 			require.Equal(t, http.MethodPost, r.Method)
 			_, _ = w.Write([]byte(`{"node_id":"registry-node-1","heartbeat_status":"healthy","linked_listing_count":1,"pending_run_count":1}`))
-		case "/api/v1/registry-node/metadata-sync":
+		case "/api/v1/registry/nodes/metadata-sync":
 			require.Equal(t, http.MethodPost, r.Method)
 			_, _ = w.Write([]byte(`{"registry_node_id":"registry-node-1","synced_listing_count":1}`))
 		case "/api/v1/proxy/runs/claim":
@@ -62,25 +62,25 @@ func TestRunCycleClaimsLocalAgentAndCompletesProxyRun(t *testing.T) {
 			}
 			claimCount++
 			_ = json.NewEncoder(w).Encode(proxyRun{
-				ID:             proxyRunID,
-				CloudRunID:     cloudRunID,
-				CloudListingID: cloudListingID,
-				RegistryNodeID: registryNodeID,
-				LocalAgentID:   localAgentID,
-				Status:         "claimed",
-				PayloadPolicy:  "metadata_only",
-				Input:          map[string]any{"text": "hello"},
+				ID:                proxyRunID,
+				RegistryRunID:     registryRunID,
+				RegistryListingID: registryListingID,
+				RegistryNodeID:    registryNodeID,
+				LocalAgentID:      localAgentID,
+				Status:            "claimed",
+				PayloadPolicy:     "metadata_only",
+				Input:             map[string]any{"text": "hello"},
 			})
 		case "/api/v1/proxy/runs/proxy-run-1/result":
 			require.Equal(t, http.MethodPost, r.Method)
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&completed))
 			_ = json.NewEncoder(w).Encode(proxyRun{
-				ID:             proxyRunID,
-				CloudRunID:     cloudRunID,
-				CloudListingID: cloudListingID,
-				RegistryNodeID: registryNodeID,
-				LocalAgentID:   localAgentID,
-				Status:         completed.Status,
+				ID:                proxyRunID,
+				RegistryRunID:     registryRunID,
+				RegistryListingID: registryListingID,
+				RegistryNodeID:    registryNodeID,
+				LocalAgentID:      localAgentID,
+				Status:            completed.Status,
 			})
 		default:
 			http.NotFound(w, r)
@@ -113,10 +113,10 @@ func TestInvokeLocalAgentFailsWhenMappingMissing(t *testing.T) {
 		HTTPTimeout: time.Second,
 	}, log.New(testWriter{t}, "", 0))
 	result := d.invokeLocalAgent(context.Background(), &proxyRun{
-		ID:           "proxy-run-1",
-		CloudRunID:   "cloud-run-1",
-		LocalAgentID: "unknown-agent",
-		Input:        map[string]any{"text": "hello"},
+		ID:            "proxy-run-1",
+		RegistryRunID: "registry-run-1",
+		LocalAgentID:  "unknown-agent",
+		Input:         map[string]any{"text": "hello"},
 	})
 	require.Equal(t, "failed", result.Status)
 	require.Equal(t, "LOCAL_AGENT_ENDPOINT_NOT_CONFIGURED", result.ErrorCode)
@@ -231,7 +231,7 @@ func TestParseConfigMergesEnvFlagsAndValidates(t *testing.T) {
 	}
 }
 
-func TestCloudClientClaimHandlesNoContentAndErrors(t *testing.T) {
+func TestRegistryClientClaimHandlesNoContentAndErrors(t *testing.T) {
 	claimCount := 0
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "Bearer rn_live_test", r.Header.Get("Authorization"))
@@ -245,7 +245,7 @@ func TestCloudClientClaimHandlesNoContentAndErrors(t *testing.T) {
 	}))
 	defer api.Close()
 
-	client := &cloudClient{base: api.URL + "/api/v1", secret: "rn_live_test", httpClient: api.Client()}
+	client := &registryClient{base: api.URL + "/api/v1", secret: "rn_live_test", httpClient: api.Client()}
 	run, ok, err := client.claim(context.Background())
 	require.NoError(t, err)
 	require.False(t, ok)
@@ -323,13 +323,13 @@ func TestInvokeLocalAgentResponseBoundaries(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			localAgent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				require.Equal(t, "cloud-run-1", r.Header.Get("X-OpenLinker-Run-Id"))
+				require.Equal(t, "registry-run-1", r.Header.Get("X-OpenLinker-Run-Id"))
 				require.Equal(t, "proxy-run-1", r.Header.Get("X-OpenLinker-Proxy-Run-Id"))
 				require.Equal(t, "registry-node-1", r.Header.Get("X-OpenLinker-Registry-Node-Id"))
 
 				var req agentRequest
 				require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-				require.Equal(t, "cloud-run-1", req.RunID)
+				require.Equal(t, "registry-run-1", req.RunID)
 				require.Equal(t, "hello", req.Input["text"])
 				require.Equal(t, "metadata_only", req.Metadata["payload_policy"])
 
@@ -345,13 +345,13 @@ func TestInvokeLocalAgentResponseBoundaries(t *testing.T) {
 				HTTPTimeout: time.Second,
 			}, log.New(testWriter{t}, "", 0))
 			result := d.invokeLocalAgent(context.Background(), &proxyRun{
-				ID:             "proxy-run-1",
-				CloudRunID:     "cloud-run-1",
-				CloudListingID: "listing-1",
-				RegistryNodeID: "registry-node-1",
-				LocalAgentID:   "local-agent-1",
-				PayloadPolicy:  "metadata_only",
-				Input:          map[string]any{"text": "hello"},
+				ID:                "proxy-run-1",
+				RegistryRunID:     "registry-run-1",
+				RegistryListingID: "listing-1",
+				RegistryNodeID:    "registry-node-1",
+				LocalAgentID:      "local-agent-1",
+				PayloadPolicy:     "metadata_only",
+				Input:             map[string]any{"text": "hello"},
 			})
 
 			require.Equal(t, tt.wantStatus, result.Status)

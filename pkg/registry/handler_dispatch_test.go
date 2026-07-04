@@ -65,7 +65,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 		Status:          "active",
 		TokenPrefix:     "rf_live_abcd",
 		FederationToken: "rf_live_secret",
-		ExchangeURL:     "https://peer.example/api/v1/registry-peers/federation-invitations/exchange",
+		ExchangeURL:     "https://peer.example/api/v1/registry/peers/federation-invitations/exchange",
 		ExpiresAt:       now,
 		CreatedAt:       now,
 		UpdatedAt:       now,
@@ -77,10 +77,9 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 		CredentialHint: "sha256:def",
 		ExpiresAt:      now,
 	}
-	listingResp := &CloudListingLinkResponse{
+	listingResp := &RegistryListingLinkResponse{
 		ID:                 linkID.String(),
-		RegistryListingID:  uuid.NewString(),
-		CloudListingID:     linkID.String(),
+		RegistryListingID:  linkID.String(),
 		RegistryNodeID:     nodeID.String(),
 		NodeName:           "Node",
 		AgentID:            agentID.String(),
@@ -95,20 +94,20 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 		UpdatedAt:          now,
 	}
 	proxyResp := &ProxyRunResponse{
-		ID:                 runID.String(),
-		CloudRunID:         uuid.NewString(),
-		CloudListingLinkID: linkID.String(),
-		CloudListingID:     linkID.String(),
-		RegistryNodeID:     nodeID.String(),
-		LocalAgentID:       agentID.String(),
-		RequestingUserID:   userID.String(),
-		IdempotencyKey:     "idem-12345",
-		Status:             "pending",
-		PayloadPolicy:      "metadata_only",
-		AttemptCount:       1,
-		MaxAttempts:        3,
-		CreatedAt:          now,
-		UpdatedAt:          now,
+		ID:                    runID.String(),
+		RegistryRunID:         uuid.NewString(),
+		RegistryListingLinkID: linkID.String(),
+		RegistryListingID:     linkID.String(),
+		RegistryNodeID:        nodeID.String(),
+		LocalAgentID:          agentID.String(),
+		RequestingUserID:      userID.String(),
+		IdempotencyKey:        "idem-12345",
+		Status:                "pending",
+		PayloadPolicy:         "metadata_only",
+		AttemptCount:          1,
+		MaxAttempts:           3,
+		CreatedAt:             now,
+		UpdatedAt:             now,
 	}
 	remoteProxyResp := &RemoteProxyRunResponse{
 		RemoteAPIBaseURL: "https://peer.example/api/v1",
@@ -119,7 +118,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 	artifactResp := ProxyRunArtifactResponse{
 		ID:               artifactID.String(),
 		ProxyRunID:       runID.String(),
-		CloudRunID:       proxyResp.CloudRunID,
+		RegistryRunID:    proxyResp.RegistryRunID,
 		SourceArtifactID: "orders",
 		ArtifactType:     "file",
 		Title:            "Orders",
@@ -137,7 +136,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		createCtx, createRec := newRegistryDispatchContext(&registryDispatchRequest{
 			method: http.MethodPost,
-			target: "/registry-node/link",
+			target: "/registry/nodes",
 			userID: userID.String(),
 			body:   `{"node_name":"Node","base_url":"https://node.example","scopes":["heartbeat"]}`,
 		})
@@ -150,7 +149,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		listCtx, listRec := newRegistryDispatchContext(&registryDispatchRequest{
 			method: http.MethodGet,
-			target: "/registry-node/nodes",
+			target: "/registry/nodes",
 			userID: userID.String(),
 		})
 		if err := h.ListNodes(listCtx); err != nil {
@@ -167,7 +166,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		revokeCtx, revokeRec := newRegistryDispatchContext(&registryDispatchRequest{
 			method: http.MethodPost,
-			target: "/registry-node/nodes/" + nodeID.String() + "/revoke",
+			target: "/registry/nodes/" + nodeID.String() + "/revoke",
 			userID: userID.String(),
 			params: map[string]string{"id": nodeID.String()},
 		})
@@ -180,7 +179,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		rotateCtx, rotateRec := newRegistryDispatchContext(&registryDispatchRequest{
 			method: http.MethodPost,
-			target: "/registry-node/nodes/" + nodeID.String() + "/rotate-secret",
+			target: "/registry/nodes/" + nodeID.String() + "/rotate-secret",
 			userID: userID.String(),
 			params: map[string]string{"id": nodeID.String()},
 		})
@@ -193,7 +192,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		heartbeatCtx, heartbeatRec := newRegistryDispatchContext(&registryDispatchRequest{
 			method:  http.MethodPost,
-			target:  "/registry-node/heartbeat",
+			target:  "/registry/nodes/heartbeat",
 			headers: map[string]string{echo.HeaderAuthorization: "Bearer rn_live_secret"},
 		})
 		if err := h.Heartbeat(heartbeatCtx); err != nil {
@@ -205,7 +204,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		syncCtx, syncRec := newRegistryDispatchContext(&registryDispatchRequest{
 			method:  http.MethodPost,
-			target:  "/registry-node/metadata-sync",
+			target:  "/registry/nodes/metadata-sync",
 			headers: map[string]string{echo.HeaderAuthorization: "Bearer rn_live_secret"},
 		})
 		if err := h.SyncNodeMetadata(syncCtx); err != nil {
@@ -232,7 +231,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		createPeerCtx, createPeerRec := newRegistryDispatchContext(&registryDispatchRequest{
 			method: http.MethodPost,
-			target: "/registry-peers",
+			target: "/registry/peers",
 			userID: userID.String(),
 			body:   `{"name":"Peer","api_base_url":"https://peer.example/api/v1","bearer_token":"token-123","initial_status":"active"}`,
 		})
@@ -245,7 +244,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		listPeerCtx, listPeerRec := newRegistryDispatchContext(&registryDispatchRequest{
 			method: http.MethodGet,
-			target: "/registry-peers",
+			target: "/registry/peers",
 			userID: userID.String(),
 		})
 		if err := h.ListRegistryPeers(listPeerCtx); err != nil {
@@ -257,7 +256,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		deletePeerCtx, deletePeerRec := newRegistryDispatchContext(&registryDispatchRequest{
 			method: http.MethodDelete,
-			target: "/registry-peers/" + peerID.String(),
+			target: "/registry/peers/" + peerID.String(),
 			userID: userID.String(),
 			params: map[string]string{"id": peerID.String()},
 		})
@@ -270,7 +269,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		inviteCtx, inviteRec := newRegistryDispatchContext(&registryDispatchRequest{
 			method:  http.MethodPost,
-			target:  "/registry-peers/federation-invitations",
+			target:  "/registry/peers/federation-invitations",
 			userID:  userID.String(),
 			body:    `{"name":"Peer","api_base_url":"https://peer.example/api/v1"}`,
 			headers: map[string]string{echo.HeaderAuthorization: "Bearer fallback-token"},
@@ -284,7 +283,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		consumeCtx, consumeRec := newRegistryDispatchContext(&registryDispatchRequest{
 			method: http.MethodPost,
-			target: "/registry-peers/federation-invitations/exchange",
+			target: "/registry/peers/federation-invitations/exchange",
 			body:   `{"federation_token":"rf_live_secret"}`,
 		})
 		if err := h.ConsumeRegistryFederationInvite(consumeCtx); err != nil {
@@ -296,9 +295,9 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		exchangeCtx, exchangeRec := newRegistryDispatchContext(&registryDispatchRequest{
 			method: http.MethodPost,
-			target: "/registry-peers/federation-exchanges",
+			target: "/registry/peers/federation-exchanges",
 			userID: userID.String(),
-			body:   `{"exchange_url":"https://peer.example/api/v1/registry-peers/federation-invitations/exchange","federation_token":"rf_live_secret","name":"Peer"}`,
+			body:   `{"exchange_url":"https://peer.example/api/v1/registry/peers/federation-invitations/exchange","federation_token":"rf_live_secret","name":"Peer"}`,
 		})
 		if err := h.ExchangeRegistryFederationInvite(exchangeCtx); err != nil {
 			t.Fatalf("ExchangeRegistryFederationInvite error = %v", err)
@@ -311,7 +310,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 	t.Run("listings and proxy runs", func(t *testing.T) {
 		mock := &mockRegistryService{
 			listingResp:      listingResp,
-			listListingsOut:  []CloudListingLinkResponse{*listingResp},
+			listListingsOut:  []RegistryListingLinkResponse{*listingResp},
 			proxyResp:        proxyResp,
 			claimResp:        proxyResp,
 			remoteProxyResp:  remoteProxyResp,
@@ -332,8 +331,8 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 			userID: userID.String(),
 			body:   `{"registry_node_id":"` + nodeID.String() + `","agent_id":"` + agentID.String() + `","routing_mode":"pull_proxy","payload_policy":"metadata_only"}`,
 		})
-		if err := h.CreateCloudListing(createListingCtx); err != nil {
-			t.Fatalf("CreateCloudListing error = %v", err)
+		if err := h.CreateRegistryListing(createListingCtx); err != nil {
+			t.Fatalf("CreateRegistryListing error = %v", err)
 		}
 		if createListingRec.Code != http.StatusCreated || mock.createListingOwnerID != userID || mock.createListingReq.AgentID != agentID.String() {
 			t.Fatalf("create listing code=%d owner=%s req=%#v", createListingRec.Code, mock.createListingOwnerID, mock.createListingReq)
@@ -344,8 +343,8 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 			target: "/registry/listings",
 			userID: userID.String(),
 		})
-		if err := h.ListCloudListings(listListingCtx); err != nil {
-			t.Fatalf("ListCloudListings error = %v", err)
+		if err := h.ListRegistryListings(listListingCtx); err != nil {
+			t.Fatalf("ListRegistryListings error = %v", err)
 		}
 		if listListingRec.Code != http.StatusOK || mock.listListingsOwnerID != userID {
 			t.Fatalf("list listings code=%d owner=%s", listListingRec.Code, mock.listListingsOwnerID)
@@ -358,8 +357,8 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 			body:   `{"sync_status":"paused"}`,
 			params: map[string]string{"id": linkID.String()},
 		})
-		if err := h.UpdateCloudListingStatus(updateListingCtx); err != nil {
-			t.Fatalf("UpdateCloudListingStatus error = %v", err)
+		if err := h.UpdateRegistryListingStatus(updateListingCtx); err != nil {
+			t.Fatalf("UpdateRegistryListingStatus error = %v", err)
 		}
 		if updateListingRec.Code != http.StatusOK || mock.updateListingID != linkID || mock.updateListingReq.SyncStatus != "paused" {
 			t.Fatalf("update listing code=%d id=%s req=%#v", updateListingRec.Code, mock.updateListingID, mock.updateListingReq)
@@ -371,8 +370,8 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 			userID: userID.String(),
 			params: map[string]string{"id": linkID.String()},
 		})
-		if err := h.SyncCloudListingMetadata(syncListingCtx); err != nil {
-			t.Fatalf("SyncCloudListingMetadata error = %v", err)
+		if err := h.SyncRegistryListingMetadata(syncListingCtx); err != nil {
+			t.Fatalf("SyncRegistryListingMetadata error = %v", err)
 		}
 		if syncListingRec.Code != http.StatusOK || mock.syncListingID != linkID || mock.syncListingOwnerID != userID {
 			t.Fatalf("sync listing code=%d id=%s owner=%s", syncListingRec.Code, mock.syncListingID, mock.syncListingOwnerID)
@@ -382,12 +381,12 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 			method: http.MethodPost,
 			target: "/proxy/runs",
 			userID: userID.String(),
-			body:   `{"cloud_listing_id":"` + linkID.String() + `","idempotency_key":"idem-12345","input":{"task":"run"}}`,
+			body:   `{"registry_listing_id":"` + linkID.String() + `","idempotency_key":"idem-12345","input":{"task":"run"}}`,
 		})
 		if err := h.CreateProxyRun(createProxyCtx); err != nil {
 			t.Fatalf("CreateProxyRun error = %v", err)
 		}
-		if createProxyRec.Code != http.StatusCreated || mock.createProxyOwnerID != userID || mock.createProxyReq.CloudListingID != linkID.String() {
+		if createProxyRec.Code != http.StatusCreated || mock.createProxyOwnerID != userID || mock.createProxyReq.RegistryListingID != linkID.String() {
 			t.Fatalf("create proxy code=%d owner=%s req=%#v", createProxyRec.Code, mock.createProxyOwnerID, mock.createProxyReq)
 		}
 
@@ -395,7 +394,7 @@ func TestRegistryHandlerDispatchesServiceSuccess(t *testing.T) {
 			method: http.MethodPost,
 			target: "/proxy/remote-runs",
 			userID: userID.String(),
-			body:   `{"registry_peer_id":"` + peerID.String() + `","remote_cloud_listing_id":"` + linkID.String() + `","idempotency_key":"idem-remote"}`,
+			body:   `{"registry_peer_id":"` + peerID.String() + `","remote_registry_listing_id":"` + linkID.String() + `","idempotency_key":"idem-remote"}`,
 		})
 		if err := h.CreateRemoteProxyRun(createRemoteCtx); err != nil {
 			t.Fatalf("CreateRemoteProxyRun error = %v", err)
@@ -507,7 +506,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 			call: (*Handler).CreateNode,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method: http.MethodPost,
-				target: "/registry-node/link",
+				target: "/registry/nodes",
 				userID: userID.String(),
 				body:   `{"node_name":"Node"}`,
 			}),
@@ -517,7 +516,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 			call: (*Handler).ListNodes,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method: http.MethodGet,
-				target: "/registry-node/nodes",
+				target: "/registry/nodes",
 				userID: userID.String(),
 			}),
 		},
@@ -526,7 +525,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 			call: (*Handler).RevokeNode,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method: http.MethodPost,
-				target: "/registry-node/nodes/" + nodeID.String() + "/revoke",
+				target: "/registry/nodes/" + nodeID.String() + "/revoke",
 				userID: userID.String(),
 				params: map[string]string{"id": nodeID.String()},
 			}),
@@ -536,7 +535,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 			call: (*Handler).RotateNodeSecret,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method: http.MethodPost,
-				target: "/registry-node/nodes/" + nodeID.String() + "/rotate-secret",
+				target: "/registry/nodes/" + nodeID.String() + "/rotate-secret",
 				userID: userID.String(),
 				params: map[string]string{"id": nodeID.String()},
 			}),
@@ -546,7 +545,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 			call: (*Handler).Heartbeat,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method:  http.MethodPost,
-				target:  "/registry-node/heartbeat",
+				target:  "/registry/nodes/heartbeat",
 				headers: map[string]string{echo.HeaderAuthorization: "Bearer rn_live_secret"},
 			}),
 		},
@@ -555,7 +554,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 			call: (*Handler).SyncNodeMetadata,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method:  http.MethodPost,
-				target:  "/registry-node/metadata-sync",
+				target:  "/registry/nodes/metadata-sync",
 				headers: map[string]string{echo.HeaderAuthorization: "Bearer rn_live_secret"},
 			}),
 		},
@@ -564,7 +563,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 			call: (*Handler).CreateRegistryPeer,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method: http.MethodPost,
-				target: "/registry-peers",
+				target: "/registry/peers",
 				userID: userID.String(),
 				body:   `{"name":"Peer","api_base_url":"https://peer.example/api/v1","bearer_token":"token-123"}`,
 			}),
@@ -574,7 +573,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 			call: (*Handler).ListRegistryPeers,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method: http.MethodGet,
-				target: "/registry-peers",
+				target: "/registry/peers",
 				userID: userID.String(),
 			}),
 		},
@@ -583,7 +582,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 			call: (*Handler).DeleteRegistryPeer,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method: http.MethodDelete,
-				target: "/registry-peers/" + peerID.String(),
+				target: "/registry/peers/" + peerID.String(),
 				userID: userID.String(),
 				params: map[string]string{"id": peerID.String()},
 			}),
@@ -593,7 +592,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 			call: (*Handler).CreateRegistryFederationInvite,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method:  http.MethodPost,
-				target:  "/registry-peers/federation-invitations",
+				target:  "/registry/peers/federation-invitations",
 				userID:  userID.String(),
 				body:    `{"name":"Peer","api_base_url":"https://peer.example/api/v1"}`,
 				headers: map[string]string{echo.HeaderAuthorization: "Bearer fallback-token"},
@@ -604,7 +603,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 			call: (*Handler).ConsumeRegistryFederationInvite,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method: http.MethodPost,
-				target: "/registry-peers/federation-invitations/exchange",
+				target: "/registry/peers/federation-invitations/exchange",
 				body:   `{"federation_token":"rf_live_secret"}`,
 			}),
 		},
@@ -613,14 +612,14 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 			call: (*Handler).ExchangeRegistryFederationInvite,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method: http.MethodPost,
-				target: "/registry-peers/federation-exchanges",
+				target: "/registry/peers/federation-exchanges",
 				userID: userID.String(),
-				body:   `{"exchange_url":"https://peer.example/api/v1/registry-peers/federation-invitations/exchange","federation_token":"rf_live_secret"}`,
+				body:   `{"exchange_url":"https://peer.example/api/v1/registry/peers/federation-invitations/exchange","federation_token":"rf_live_secret"}`,
 			}),
 		},
 		{
 			name: "create listing",
-			call: (*Handler).CreateCloudListing,
+			call: (*Handler).CreateRegistryListing,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method: http.MethodPost,
 				target: "/registry/listings",
@@ -630,7 +629,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 		},
 		{
 			name: "list listings",
-			call: (*Handler).ListCloudListings,
+			call: (*Handler).ListRegistryListings,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method: http.MethodGet,
 				target: "/registry/listings",
@@ -639,7 +638,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 		},
 		{
 			name: "update listing",
-			call: (*Handler).UpdateCloudListingStatus,
+			call: (*Handler).UpdateRegistryListingStatus,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method: http.MethodPatch,
 				target: "/registry/listings/" + linkID.String() + "/status",
@@ -650,7 +649,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 		},
 		{
 			name: "sync listing",
-			call: (*Handler).SyncCloudListingMetadata,
+			call: (*Handler).SyncRegistryListingMetadata,
 			ctx: mustRegistryDispatchContext(&registryDispatchRequest{
 				method: http.MethodPost,
 				target: "/registry/listings/" + linkID.String() + "/sync",
@@ -665,7 +664,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 				method: http.MethodPost,
 				target: "/proxy/runs",
 				userID: userID.String(),
-				body:   `{"cloud_listing_id":"` + linkID.String() + `"}`,
+				body:   `{"registry_listing_id":"` + linkID.String() + `"}`,
 			}),
 		},
 		{
@@ -675,7 +674,7 @@ func TestRegistryHandlerPropagatesServiceErrors(t *testing.T) {
 				method: http.MethodPost,
 				target: "/proxy/remote-runs",
 				userID: userID.String(),
-				body:   `{"remote_cloud_listing_id":"` + linkID.String() + `"}`,
+				body:   `{"remote_registry_listing_id":"` + linkID.String() + `"}`,
 			}),
 		},
 		{
@@ -770,14 +769,14 @@ type mockRegistryService struct {
 	exchangeInviteReq     *ExchangeRegistryFederationInviteRequest
 	exchangeResp          *RegistryFederationExchangeResponse
 
-	listingResp          *CloudListingLinkResponse
+	listingResp          *RegistryListingLinkResponse
 	createListingOwnerID uuid.UUID
-	createListingReq     *CreateCloudListingRequest
+	createListingReq     *CreateRegistryListingRequest
 	listListingsOwnerID  uuid.UUID
-	listListingsOut      []CloudListingLinkResponse
+	listListingsOut      []RegistryListingLinkResponse
 	updateListingOwnerID uuid.UUID
 	updateListingID      uuid.UUID
-	updateListingReq     *UpdateCloudListingStatusRequest
+	updateListingReq     *UpdateRegistryListingStatusRequest
 	syncListingOwnerID   uuid.UUID
 	syncListingID        uuid.UUID
 
@@ -870,27 +869,27 @@ func (m *mockRegistryService) ExchangeRegistryFederationInvite(_ context.Context
 	return m.exchangeResp, m.err
 }
 
-func (m *mockRegistryService) CreateCloudListing(_ context.Context, ownerID uuid.UUID, req *CreateCloudListingRequest) (*CloudListingLinkResponse, error) {
+func (m *mockRegistryService) CreateRegistryListing(_ context.Context, ownerID uuid.UUID, req *CreateRegistryListingRequest) (*RegistryListingLinkResponse, error) {
 	m.createListingOwnerID = ownerID
 	m.createListingReq = req
 	return m.listingResp, m.err
 }
 
-func (m *mockRegistryService) ListCloudListings(_ context.Context, ownerID uuid.UUID) ([]CloudListingLinkResponse, error) {
+func (m *mockRegistryService) ListRegistryListings(_ context.Context, ownerID uuid.UUID) ([]RegistryListingLinkResponse, error) {
 	m.listListingsOwnerID = ownerID
 	return m.listListingsOut, m.err
 }
 
-func (m *mockRegistryService) UpdateCloudListingStatus(_ context.Context, ownerID, cloudListingID uuid.UUID, req *UpdateCloudListingStatusRequest) (*CloudListingLinkResponse, error) {
+func (m *mockRegistryService) UpdateRegistryListingStatus(_ context.Context, ownerID, registryListingID uuid.UUID, req *UpdateRegistryListingStatusRequest) (*RegistryListingLinkResponse, error) {
 	m.updateListingOwnerID = ownerID
-	m.updateListingID = cloudListingID
+	m.updateListingID = registryListingID
 	m.updateListingReq = req
 	return m.listingResp, m.err
 }
 
-func (m *mockRegistryService) SyncCloudListingMetadata(_ context.Context, ownerID, cloudListingID uuid.UUID) (*CloudListingLinkResponse, error) {
+func (m *mockRegistryService) SyncRegistryListingMetadata(_ context.Context, ownerID, registryListingID uuid.UUID) (*RegistryListingLinkResponse, error) {
 	m.syncListingOwnerID = ownerID
-	m.syncListingID = cloudListingID
+	m.syncListingID = registryListingID
 	return m.listingResp, m.err
 }
 

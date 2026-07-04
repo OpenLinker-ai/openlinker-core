@@ -44,7 +44,7 @@ func TestRegistryURLScopeAndCredentialHelpers(t *testing.T) {
 	if got, err := normalizeRemoteAPIBaseURL("https://peer.example/api/v1/"); err != nil || got != "https://peer.example/api/v1" {
 		t.Fatalf("normalizeRemoteAPIBaseURL api = %q, %v", got, err)
 	}
-	if got, err := normalizeFederationExchangeURL("https://peer.example/api/v1/registry-peers/federation-invitations/exchange?token=secret#frag"); err != nil || got != "https://peer.example/api/v1/registry-peers/federation-invitations/exchange" {
+	if got, err := normalizeFederationExchangeURL("https://peer.example/api/v1/registry/peers/federation-invitations/exchange?token=secret#frag"); err != nil || got != "https://peer.example/api/v1/registry/peers/federation-invitations/exchange" {
 		t.Fatalf("normalizeFederationExchangeURL = %q, %v", got, err)
 	}
 	if _, err := normalizeRemoteAPIBaseURL("https://peer.example/" + strings.Repeat("a", 501)); err == nil {
@@ -345,13 +345,13 @@ func TestRegistryDTOAndJSONHelpers(t *testing.T) {
 		CreatedAt:      now,
 		UpdatedAt:      later,
 	}, true)
-	if inviteResp.ExchangeURL != "https://peer.example/api/v1/registry-peers/federation-invitations/exchange" || inviteResp.TokenPrefix != "rf_live_abcd" {
+	if inviteResp.ExchangeURL != "https://peer.example/api/v1/registry/peers/federation-invitations/exchange" || inviteResp.TokenPrefix != "rf_live_abcd" {
 		t.Fatalf("registryFederationInviteToResponse = %#v", inviteResp)
 	}
 
-	link := db.CloudListingLink{
+	link := db.RegistryListingLink{
 		ID:                       uuid.New(),
-		CloudListingID:           uuid.New(),
+		RegistryListingID:        uuid.New(),
 		RegistryNodeID:           uuid.New(),
 		LocalAgentID:             uuid.New(),
 		RoutingMode:              "pull_proxy",
@@ -368,14 +368,14 @@ func TestRegistryDTOAndJSONHelpers(t *testing.T) {
 		CreatedAt:                now,
 		UpdatedAt:                later,
 	}
-	linkResp := cloudListingLinkToResponse(link, "Node", "fallback", "Fallback")
+	linkResp := registryListingLinkToResponse(link, "Node", "fallback", "Fallback")
 	if linkResp.AgentSlug != "synced-slug" || linkResp.AgentName != "Synced Agent" || linkResp.MetadataSyncedAt != "2026-06-20T01:02:03Z" {
-		t.Fatalf("cloudListingLinkToResponse = %#v", linkResp)
+		t.Fatalf("registryListingLinkToResponse = %#v", linkResp)
 	}
 	metadataErr := "sync failed"
-	rowResp := cloudListingRowToResponse(db.ListCloudListingLinksByOwnerRow{
+	rowResp := registryListingRowToResponse(db.ListRegistryListingLinksByOwnerRow{
 		ID:                   uuid.New(),
-		CloudListingID:       uuid.New(),
+		RegistryListingID:    uuid.New(),
 		RegistryNodeID:       uuid.New(),
 		NodeName:             "Row Node",
 		LocalAgentID:         uuid.New(),
@@ -395,7 +395,7 @@ func TestRegistryDTOAndJSONHelpers(t *testing.T) {
 		UpdatedAt:            later,
 	})
 	if rowResp.NodeName != "Row Node" || rowResp.AgentSlug != "row-agent" || rowResp.MetadataSyncError != metadataErr || rowResp.PayloadRedactionKeys[0] != "token" || rowResp.UpdatedAt != "2026-06-20T01:03:03Z" {
-		t.Fatalf("cloudListingRowToResponse = %#v", rowResp)
+		t.Fatalf("registryListingRowToResponse = %#v", rowResp)
 	}
 
 	inputSummary := "input summary"
@@ -403,26 +403,26 @@ func TestRegistryDTOAndJSONHelpers(t *testing.T) {
 	errorCode := "ERR"
 	claimedAt := now.Add(2 * time.Minute)
 	proxyResp := proxyRunToResponse(db.ProxyRun{
-		ID:                 uuid.New(),
-		CloudRunID:         uuid.New(),
-		CloudListingLinkID: uuid.New(),
-		CloudListingID:     uuid.New(),
-		RegistryNodeID:     uuid.New(),
-		LocalAgentID:       uuid.New(),
-		RequestingUserID:   uuid.New(),
-		IdempotencyKey:     "idem",
-		Status:             "failed",
-		PayloadPolicy:      payloadPolicyStoreFullPayload,
-		Input:              []byte(`{"q":"hi"}`),
-		InputSummary:       &inputSummary,
-		Output:             []byte(`{"ok":false}`),
-		OutputSummary:      &outputSummary,
-		ErrorCode:          &errorCode,
-		ClaimedAt:          &claimedAt,
-		AttemptCount:       2,
-		MaxAttempts:        3,
-		CreatedAt:          now,
-		UpdatedAt:          later,
+		ID:                    uuid.New(),
+		RegistryRunID:         uuid.New(),
+		RegistryListingLinkID: uuid.New(),
+		RegistryListingID:     uuid.New(),
+		RegistryNodeID:        uuid.New(),
+		LocalAgentID:          uuid.New(),
+		RequestingUserID:      uuid.New(),
+		IdempotencyKey:        "idem",
+		Status:                "failed",
+		PayloadPolicy:         payloadPolicyStoreFullPayload,
+		Input:                 []byte(`{"q":"hi"}`),
+		InputSummary:          &inputSummary,
+		Output:                []byte(`{"ok":false}`),
+		OutputSummary:         &outputSummary,
+		ErrorCode:             &errorCode,
+		ClaimedAt:             &claimedAt,
+		AttemptCount:          2,
+		MaxAttempts:           3,
+		CreatedAt:             now,
+		UpdatedAt:             later,
 	})
 	if proxyResp.Input["q"] != "hi" || proxyResp.Output["ok"] != false || proxyResp.InputSummary != inputSummary || proxyResp.ErrorCode != errorCode || proxyResp.ClaimedAt != "2026-06-20T01:04:03Z" {
 		t.Fatalf("proxyRunToResponse = %#v", proxyResp)
@@ -436,7 +436,7 @@ func TestRegistryDTOAndJSONHelpers(t *testing.T) {
 	artifactResp := proxyRunArtifactToResponse(db.ProxyRunArtifact{
 		ID:               uuid.New(),
 		ProxyRunID:       uuid.New(),
-		CloudRunID:       uuid.New(),
+		RegistryRunID:    uuid.New(),
 		SourceArtifactID: "source",
 		ArtifactType:     "file",
 		Title:            "A",
@@ -506,10 +506,10 @@ func TestRegistryHandlersValidateBeforeServiceDispatch(t *testing.T) {
 		{name: "create invite bearer missing", method: h.CreateRegistryFederationInvite, req: &registryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: `{"name":"Peer","api_base_url":"https://peer.example/api/v1"}`}, want: http.StatusBadRequest},
 		{name: "consume invite validation", method: h.ConsumeRegistryFederationInvite, req: &registryHandlerRequest{method: http.MethodPost, target: "/", body: `{}`}, want: http.StatusUnprocessableEntity},
 		{name: "exchange invite validation", method: h.ExchangeRegistryFederationInvite, req: &registryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: `{}`}, want: http.StatusUnprocessableEntity},
-		{name: "create listing validation", method: h.CreateCloudListing, req: &registryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: `{}`}, want: http.StatusUnprocessableEntity},
-		{name: "update listing invalid id", method: h.UpdateCloudListingStatus, req: &registryHandlerRequest{method: http.MethodPatch, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
-		{name: "update listing validation", method: h.UpdateCloudListingStatus, req: &registryHandlerRequest{method: http.MethodPatch, target: "/", userID: userID, body: `{}`, params: map[string]string{"id": id}}, want: http.StatusUnprocessableEntity},
-		{name: "sync listing invalid id", method: h.SyncCloudListingMetadata, req: &registryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
+		{name: "create listing validation", method: h.CreateRegistryListing, req: &registryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: `{}`}, want: http.StatusUnprocessableEntity},
+		{name: "update listing invalid id", method: h.UpdateRegistryListingStatus, req: &registryHandlerRequest{method: http.MethodPatch, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
+		{name: "update listing validation", method: h.UpdateRegistryListingStatus, req: &registryHandlerRequest{method: http.MethodPatch, target: "/", userID: userID, body: `{}`, params: map[string]string{"id": id}}, want: http.StatusUnprocessableEntity},
+		{name: "sync listing invalid id", method: h.SyncRegistryListingMetadata, req: &registryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
 		{name: "create proxy validation", method: h.CreateProxyRun, req: &registryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: `{}`}, want: http.StatusUnprocessableEntity},
 		{name: "create remote proxy validation", method: h.CreateRemoteProxyRun, req: &registryHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: `{}`}, want: http.StatusUnprocessableEntity},
 		{name: "get proxy invalid id", method: h.GetProxyRun, req: &registryHandlerRequest{method: http.MethodGet, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
@@ -552,12 +552,12 @@ func TestRegistryHandlersValidateBeforeServiceDispatch(t *testing.T) {
 		routes[route.Method+" "+route.Path] = true
 	}
 	for _, route := range []string{
-		"POST /api/v1/registry-node/link",
-		"POST /api/v1/registry-node/heartbeat",
-		"POST /api/v1/registry-peers/federation-invitations",
-		"POST /api/v1/registry-peers/federation-invitations/exchange",
+		"POST /api/v1/registry/nodes",
+		"POST /api/v1/registry/nodes/heartbeat",
+		"POST /api/v1/registry/peers/federation-invitations",
+		"POST /api/v1/registry/peers/federation-invitations/exchange",
 		"POST /api/v1/registry/listings",
-		"POST /api/v1/cloud/listings",
+		"POST /api/v1/registry/listings",
 		"GET /api/v1/proxy/runs/claim",
 		"GET /api/v1/proxy/runs/:id/artifacts/:artifactID/download",
 	} {
@@ -683,101 +683,101 @@ func TestRegistryListingServiceErrorEdges(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		req  *CreateCloudListingRequest
+		req  *CreateRegistryListingRequest
 		rows []registryFakeRow
 		want int
 	}{
 		{
 			name: "existing listing not found",
-			req: &CreateCloudListingRequest{
-				RegistryNodeID: nodeID.String(),
-				AgentID:        agentID.String(),
-				CloudListingID: listingID.String(),
+			req: &CreateRegistryListingRequest{
+				RegistryNodeID:    nodeID.String(),
+				AgentID:           agentID.String(),
+				RegistryListingID: listingID.String(),
 			},
 			rows: []registryFakeRow{{err: pgx.ErrNoRows}},
 			want: http.StatusNotFound,
 		},
 		{
 			name: "existing listing db error",
-			req: &CreateCloudListingRequest{
-				RegistryNodeID: nodeID.String(),
-				AgentID:        agentID.String(),
-				CloudListingID: listingID.String(),
+			req: &CreateRegistryListingRequest{
+				RegistryNodeID:    nodeID.String(),
+				AgentID:           agentID.String(),
+				RegistryListingID: listingID.String(),
 			},
 			rows: []registryFakeRow{{err: errors.New("listing lookup failed")}},
 			want: http.StatusInternalServerError,
 		},
 		{
 			name: "existing listing belongs to other agent",
-			req: &CreateCloudListingRequest{
-				RegistryNodeID: nodeID.String(),
-				AgentID:        agentID.String(),
-				CloudListingID: listingID.String(),
+			req: &CreateRegistryListingRequest{
+				RegistryNodeID:    nodeID.String(),
+				AgentID:           agentID.String(),
+				RegistryListingID: listingID.String(),
 			},
-			rows: []registryFakeRow{{values: registryFakeCloudListingValues(linkID, listingID, nodeID, uuid.New())}},
+			rows: []registryFakeRow{{values: registryFakeRegistryListingValues(linkID, listingID, nodeID, uuid.New())}},
 			want: http.StatusConflict,
 		},
 		{
 			name: "node missing",
-			req:  &CreateCloudListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
+			req:  &CreateRegistryListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
 			rows: []registryFakeRow{{err: pgx.ErrNoRows}},
 			want: http.StatusNotFound,
 		},
 		{
 			name: "node db error",
-			req:  &CreateCloudListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
+			req:  &CreateRegistryListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
 			rows: []registryFakeRow{{err: errors.New("node lookup failed")}},
 			want: http.StatusInternalServerError,
 		},
 		{
 			name: "node revoked",
-			req:  &CreateCloudListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
+			req:  &CreateRegistryListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
 			rows: []registryFakeRow{{values: revokedNode}},
 			want: http.StatusConflict,
 		},
 		{
 			name: "agent missing",
-			req:  &CreateCloudListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
+			req:  &CreateRegistryListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
 			rows: []registryFakeRow{{values: node}, {err: pgx.ErrNoRows}},
 			want: http.StatusNotFound,
 		},
 		{
 			name: "agent db error",
-			req:  &CreateCloudListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
+			req:  &CreateRegistryListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
 			rows: []registryFakeRow{{values: node}, {err: errors.New("agent lookup failed")}},
 			want: http.StatusInternalServerError,
 		},
 		{
 			name: "agent inactive",
-			req:  &CreateCloudListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
+			req:  &CreateRegistryListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
 			rows: []registryFakeRow{{values: node}, {values: registryFakeAgentValues(agentID, ownerID, "disabled")}},
 			want: http.StatusConflict,
 		},
 		{
 			name: "upsert fails",
-			req:  &CreateCloudListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
+			req:  &CreateRegistryListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
 			rows: []registryFakeRow{{values: node}, {values: agent}, {err: errors.New("upsert failed")}},
 			want: http.StatusInternalServerError,
 		},
 		{
 			name: "metadata sync fails",
-			req:  &CreateCloudListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
+			req:  &CreateRegistryListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
 			rows: []registryFakeRow{
 				{values: node},
 				{values: agent},
-				{values: registryFakeCloudListingValues(linkID, listingID, nodeID, agentID)},
+				{values: registryFakeRegistryListingValues(linkID, listingID, nodeID, agentID)},
 				{err: errors.New("sync failed")},
 			},
 			want: http.StatusInternalServerError,
 		},
 		{
 			name: "get row fails",
-			req:  &CreateCloudListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
+			req:  &CreateRegistryListingRequest{RegistryNodeID: nodeID.String(), AgentID: agentID.String()},
 			rows: []registryFakeRow{
 				{values: node},
 				{values: agent},
-				{values: registryFakeCloudListingValues(linkID, listingID, nodeID, agentID)},
-				{values: registryFakeCloudListingRowValues(linkID, listingID, nodeID, agentID)},
+				{values: registryFakeRegistryListingValues(linkID, listingID, nodeID, agentID)},
+				{values: registryFakeRegistryListingRowValues(linkID, listingID, nodeID, agentID)},
 				{err: errors.New("get row failed")},
 			},
 			want: http.StatusInternalServerError,
@@ -785,49 +785,49 @@ func TestRegistryListingServiceErrorEdges(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := &Service{q: db.New(&registryFakeDBTX{queryRowRows: tc.rows})}
-			_, err := svc.CreateCloudListing(context.Background(), ownerID, tc.req)
+			_, err := svc.CreateRegistryListing(context.Background(), ownerID, tc.req)
 			requireRegistryHTTPStatus(t, err, tc.want)
 		})
 	}
 
 	listErrSvc := &Service{q: db.New(&registryFakeDBTX{queryResults: []registryFakeQueryResult{{err: errors.New("list failed")}}})}
-	_, err := listErrSvc.ListCloudListings(context.Background(), ownerID)
+	_, err := listErrSvc.ListRegistryListings(context.Background(), ownerID)
 	requireRegistryHTTPStatus(t, err, http.StatusInternalServerError)
 
 	for _, tc := range []struct {
 		name string
-		call func(*Service) (*CloudListingLinkResponse, error)
+		call func(*Service) (*RegistryListingLinkResponse, error)
 		row  registryFakeRow
 		want int
 	}{
 		{
 			name: "update missing",
-			call: func(s *Service) (*CloudListingLinkResponse, error) {
-				return s.UpdateCloudListingStatus(context.Background(), ownerID, listingID, &UpdateCloudListingStatusRequest{SyncStatus: "linked"})
+			call: func(s *Service) (*RegistryListingLinkResponse, error) {
+				return s.UpdateRegistryListingStatus(context.Background(), ownerID, listingID, &UpdateRegistryListingStatusRequest{SyncStatus: "linked"})
 			},
 			row:  registryFakeRow{err: pgx.ErrNoRows},
 			want: http.StatusNotFound,
 		},
 		{
 			name: "update db error",
-			call: func(s *Service) (*CloudListingLinkResponse, error) {
-				return s.UpdateCloudListingStatus(context.Background(), ownerID, listingID, &UpdateCloudListingStatusRequest{SyncStatus: "paused"})
+			call: func(s *Service) (*RegistryListingLinkResponse, error) {
+				return s.UpdateRegistryListingStatus(context.Background(), ownerID, listingID, &UpdateRegistryListingStatusRequest{SyncStatus: "paused"})
 			},
 			row:  registryFakeRow{err: errors.New("update failed")},
 			want: http.StatusInternalServerError,
 		},
 		{
 			name: "sync missing",
-			call: func(s *Service) (*CloudListingLinkResponse, error) {
-				return s.SyncCloudListingMetadata(context.Background(), ownerID, listingID)
+			call: func(s *Service) (*RegistryListingLinkResponse, error) {
+				return s.SyncRegistryListingMetadata(context.Background(), ownerID, listingID)
 			},
 			row:  registryFakeRow{err: pgx.ErrNoRows},
 			want: http.StatusNotFound,
 		},
 		{
 			name: "sync db error",
-			call: func(s *Service) (*CloudListingLinkResponse, error) {
-				return s.SyncCloudListingMetadata(context.Background(), ownerID, listingID)
+			call: func(s *Service) (*RegistryListingLinkResponse, error) {
+				return s.SyncRegistryListingMetadata(context.Background(), ownerID, listingID)
 			},
 			row:  registryFakeRow{err: errors.New("sync failed")},
 			want: http.StatusInternalServerError,
@@ -849,7 +849,7 @@ func TestRegistryProxyRunServiceErrorEdges(t *testing.T) {
 	linkID := uuid.New()
 	runID := uuid.New()
 	artifactID := uuid.New()
-	link := registryFakeCloudListingValues(linkID, listingID, nodeID, agentID)
+	link := registryFakeRegistryListingValues(linkID, listingID, nodeID, agentID)
 	run := registryFakeProxyRunValues(runID, linkID, listingID, nodeID, agentID, ownerID)
 
 	proxyRunCases := []struct {
@@ -1058,7 +1058,7 @@ func TestRegistryRemoteHTTPServiceEdges(t *testing.T) {
 	remoteRunID := uuid.NewString()
 	remoteRegistryHTTPClient = registryHTTPClient(func(req *http.Request) (*http.Response, error) {
 		capturedAuth = req.Header.Get("Authorization")
-		body := `{"id":"` + remoteRunID + `","registry_listing_id":"` + listingID.String() + `","cloud_listing_id":"` + listingID.String() + `"}`
+		body := `{"id":"` + remoteRunID + `","registry_listing_id":"` + listingID.String() + `","registry_listing_id":"` + listingID.String() + `"}`
 		return registryHTTPResponse(http.StatusCreated, body), nil
 	})
 	got, err := svc.CreateRemoteProxyRun(context.Background(), ownerID, baseReq())
@@ -1066,7 +1066,7 @@ func TestRegistryRemoteHTTPServiceEdges(t *testing.T) {
 		t.Fatalf("CreateRemoteProxyRun success = %#v auth=%q err=%v", got, capturedAuth, err)
 	}
 
-	exchangeURL := "https://remote.example/api/v1/registry-peers/federation-invitations/exchange"
+	exchangeURL := "https://remote.example/api/v1/registry/peers/federation-invitations/exchange"
 	remoteRegistryHTTPClient = registryHTTPClient(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("exchange failed")
 	})
@@ -1112,7 +1112,7 @@ func TestRegistryArtifactDownloadHTTPEdges(t *testing.T) {
 	ownerID := uuid.New()
 	runID := uuid.New()
 	artifactID := uuid.New()
-	cloudRunID := uuid.New()
+	registryRunID := uuid.New()
 	fileURI := "https://files.example/out.txt"
 	newSvc := func(values []any) *Service {
 		return &Service{q: db.New(&registryFakeDBTX{queryRowRows: []registryFakeRow{{values: values}}})}
@@ -1126,7 +1126,7 @@ func TestRegistryArtifactDownloadHTTPEdges(t *testing.T) {
 	}{
 		{
 			name:     "fetch fails",
-			artifact: registryFakeArtifactValues(artifactID, runID, cloudRunID, &fileURI, nil),
+			artifact: registryFakeArtifactValues(artifactID, runID, registryRunID, &fileURI, nil),
 			transport: func(*http.Request) (*http.Response, error) {
 				return nil, errors.New("fetch failed")
 			},
@@ -1134,7 +1134,7 @@ func TestRegistryArtifactDownloadHTTPEdges(t *testing.T) {
 		},
 		{
 			name:     "upstream non success",
-			artifact: registryFakeArtifactValues(artifactID, runID, cloudRunID, &fileURI, nil),
+			artifact: registryFakeArtifactValues(artifactID, runID, registryRunID, &fileURI, nil),
 			transport: func(*http.Request) (*http.Response, error) {
 				return registryHTTPResponse(http.StatusNotFound, "missing"), nil
 			},
@@ -1142,7 +1142,7 @@ func TestRegistryArtifactDownloadHTTPEdges(t *testing.T) {
 		},
 		{
 			name:     "declared content length too large",
-			artifact: registryFakeArtifactValues(artifactID, runID, cloudRunID, &fileURI, nil),
+			artifact: registryFakeArtifactValues(artifactID, runID, registryRunID, &fileURI, nil),
 			transport: func(*http.Request) (*http.Response, error) {
 				resp := registryHTTPResponse(http.StatusOK, "")
 				resp.ContentLength = maxProxyArtifactDownloadBytes + 1
@@ -1152,7 +1152,7 @@ func TestRegistryArtifactDownloadHTTPEdges(t *testing.T) {
 		},
 		{
 			name:     "read fails",
-			artifact: registryFakeArtifactValues(artifactID, runID, cloudRunID, &fileURI, nil),
+			artifact: registryFakeArtifactValues(artifactID, runID, registryRunID, &fileURI, nil),
 			transport: func(*http.Request) (*http.Response, error) {
 				return &http.Response{
 					StatusCode:    http.StatusOK,
@@ -1165,7 +1165,7 @@ func TestRegistryArtifactDownloadHTTPEdges(t *testing.T) {
 		},
 		{
 			name:     "size mismatch",
-			artifact: registryFakeArtifactValues(artifactID, runID, cloudRunID, &fileURI, registryInt64Ptr(4)),
+			artifact: registryFakeArtifactValues(artifactID, runID, registryRunID, &fileURI, registryInt64Ptr(4)),
 			transport: func(*http.Request) (*http.Response, error) {
 				return registryHTTPResponse(http.StatusOK, "abc"), nil
 			},
@@ -1173,7 +1173,7 @@ func TestRegistryArtifactDownloadHTTPEdges(t *testing.T) {
 		},
 		{
 			name:     "sha mismatch",
-			artifact: registryFakeArtifactValuesWithMetadata(artifactID, runID, cloudRunID, &fileURI, registryStringPtr("text/plain"), registryStringPtr("out.txt"), registryStringPtr(strings.Repeat("b", 64)), registryInt64Ptr(3)),
+			artifact: registryFakeArtifactValuesWithMetadata(artifactID, runID, registryRunID, &fileURI, registryStringPtr("text/plain"), registryStringPtr("out.txt"), registryStringPtr(strings.Repeat("b", 64)), registryInt64Ptr(3)),
 			transport: func(*http.Request) (*http.Response, error) {
 				return registryHTTPResponse(http.StatusOK, "abc"), nil
 			},
@@ -1192,7 +1192,7 @@ func TestRegistryArtifactDownloadHTTPEdges(t *testing.T) {
 		resp.Header.Set("Content-Type", "text/custom")
 		return resp, nil
 	})
-	got, err := newSvc(registryFakeArtifactValuesWithMetadata(artifactID, runID, cloudRunID, &fileURI, nil, nil, nil, registryInt64Ptr(3))).
+	got, err := newSvc(registryFakeArtifactValuesWithMetadata(artifactID, runID, registryRunID, &fileURI, nil, nil, nil, registryInt64Ptr(3))).
 		DownloadProxyRunArtifact(context.Background(), ownerID, runID, artifactID)
 	if err != nil || got.FileName != "artifact-1" || got.ContentType != "text/custom" || got.SizeBytes != 3 || string(got.Body) != "abc" {
 		t.Fatalf("DownloadProxyRunArtifact success = %#v, %v", got, err)
@@ -1450,7 +1450,7 @@ func registryFakeNodeValues(nodeID, ownerID uuid.UUID, secretHash string, revoke
 	}
 }
 
-func registryFakeCloudListingValues(linkID, listingID, nodeID, agentID uuid.UUID) []any {
+func registryFakeRegistryListingValues(linkID, listingID, nodeID, agentID uuid.UUID) []any {
 	now := time.Date(2026, 6, 22, 10, 0, 0, 0, time.UTC)
 	return []any{
 		linkID,
@@ -1474,7 +1474,7 @@ func registryFakeCloudListingValues(linkID, listingID, nodeID, agentID uuid.UUID
 	}
 }
 
-func registryFakeCloudListingRowValues(linkID, listingID, nodeID, agentID uuid.UUID) []any {
+func registryFakeRegistryListingRowValues(linkID, listingID, nodeID, agentID uuid.UUID) []any {
 	now := time.Date(2026, 6, 22, 10, 0, 0, 0, time.UTC)
 	return []any{
 		linkID,
@@ -1556,11 +1556,11 @@ func registryFakeProxyRunValues(runID, linkID, listingID, nodeID, agentID, reque
 	}
 }
 
-func registryFakeArtifactValues(artifactID, runID, cloudRunID uuid.UUID, fileURI *string, fileSize *int64) []any {
+func registryFakeArtifactValues(artifactID, runID, registryRunID uuid.UUID, fileURI *string, fileSize *int64) []any {
 	return registryFakeArtifactValuesWithMetadata(
 		artifactID,
 		runID,
-		cloudRunID,
+		registryRunID,
 		fileURI,
 		registryStringPtr("text/plain"),
 		registryStringPtr("out.txt"),
@@ -1572,7 +1572,7 @@ func registryFakeArtifactValues(artifactID, runID, cloudRunID uuid.UUID, fileURI
 func registryFakeArtifactValuesWithMetadata(
 	artifactID,
 	runID,
-	cloudRunID uuid.UUID,
+	registryRunID uuid.UUID,
 	fileURI,
 	mimeType,
 	fileName,
@@ -1583,7 +1583,7 @@ func registryFakeArtifactValuesWithMetadata(
 	return []any{
 		artifactID,
 		runID,
-		cloudRunID,
+		registryRunID,
 		"artifact-1",
 		"file",
 		"Output",

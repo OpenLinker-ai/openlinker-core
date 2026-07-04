@@ -27,6 +27,8 @@ type skillService interface {
 	ListAll(context.Context) ([]db.Skill, error)
 	SetAgentSkills(context.Context, uuid.UUID, []string) error
 	ListForAgent(context.Context, uuid.UUID) ([]db.Skill, error)
+	CreateProposal(context.Context, uuid.UUID, *CreateSkillProposalRequest) (*SkillProposalItem, error)
+	ListProposals(context.Context, uuid.UUID) ([]SkillProposalItem, error)
 }
 
 type skillAgentReader interface {
@@ -52,9 +54,14 @@ func (h *Handler) Register(api *echo.Group) {
 // RegisterProtected 创作者侧端点（需 JWT）。
 //
 //	PATCH /creator/agents/:id/skills    覆盖某 Agent 的 skill 列表（最多 5 个）
+//	POST /skills/proposals              提交缺失 Skill / 导入声明提案
+//	GET /creator/skill-proposals        查看当前用户提案
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
+	api.POST("/skills/proposals", h.CreateProposal, jwtMiddleware)
+
 	g := api.Group("/creator", jwtMiddleware)
 	g.PATCH("/agents/:id/skills", h.SetAgentSkills)
+	g.GET("/skill-proposals", h.ListProposals)
 }
 
 // ListAll GET /skills。
@@ -122,6 +129,39 @@ func (h *Handler) SetAgentSkills(c echo.Context) error {
 		AgentID: agentID.String(),
 		Items:   items,
 	})
+}
+
+// CreateProposal POST /skills/proposals。
+func (h *Handler) CreateProposal(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	var req CreateSkillProposalRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	item, err := h.svc.CreateProposal(c.Request().Context(), uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusCreated, item)
+}
+
+// ListProposals GET /creator/skill-proposals。
+func (h *Handler) ListProposals(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	items, err := h.svc.ListProposals(c.Request().Context(), uid)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, SkillProposalListResponse{Items: items})
 }
 
 // toSkillItem db.Skill → API DTO。

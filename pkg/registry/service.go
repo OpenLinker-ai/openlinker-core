@@ -218,9 +218,9 @@ func (s *Service) Heartbeat(ctx context.Context, plaintextSecret string) (*Heart
 		log.Error().Err(err).Str("node_id", node.ID.String()).Msg("registry.Heartbeat")
 		return nil, httpx.Internal("记录 Registry Node 心跳失败")
 	}
-	count, err := s.q.CountCloudListingLinksByNode(ctx, updated.ID)
+	count, err := s.q.CountRegistryListingLinksByNode(ctx, updated.ID)
 	if err != nil {
-		log.Warn().Err(err).Str("node_id", updated.ID.String()).Msg("registry.Heartbeat: CountCloudListingLinksByNode")
+		log.Warn().Err(err).Str("node_id", updated.ID.String()).Msg("registry.Heartbeat: CountRegistryListingLinksByNode")
 	}
 	pendingRuns, err := s.q.CountPendingProxyRunsByNode(ctx, updated.ID)
 	if err != nil {
@@ -235,7 +235,7 @@ func (s *Service) Heartbeat(ctx context.Context, plaintextSecret string) (*Heart
 	}, nil
 }
 
-func (s *Service) CreateCloudListing(ctx context.Context, ownerID uuid.UUID, req *CreateCloudListingRequest) (*CloudListingLinkResponse, error) {
+func (s *Service) CreateRegistryListing(ctx context.Context, ownerID uuid.UUID, req *CreateRegistryListingRequest) (*RegistryListingLinkResponse, error) {
 	nodeID, err := uuid.Parse(strings.TrimSpace(req.RegistryNodeID))
 	if err != nil {
 		return nil, httpx.BadRequest("registry_node_id 不是合法 uuid")
@@ -244,25 +244,22 @@ func (s *Service) CreateCloudListing(ctx context.Context, ownerID uuid.UUID, req
 	if err != nil {
 		return nil, httpx.BadRequest("agent_id 不是合法 uuid")
 	}
-	cloudListingID := uuid.New()
-	rawListingID, err := resolveRegistryListingID(req.RegistryListingID, req.CloudListingID, false)
-	if err != nil {
-		return nil, err
-	}
+	registryListingID := uuid.New()
+	rawListingID := strings.TrimSpace(req.RegistryListingID)
 	if rawListingID != "" {
-		cloudListingID, err = uuid.Parse(rawListingID)
+		registryListingID, err = uuid.Parse(rawListingID)
 		if err != nil {
 			return nil, httpx.BadRequest("registry_listing_id 不是合法 uuid")
 		}
-		existing, err := s.q.GetCloudListingLinkForOwner(ctx, db.GetCloudListingLinkForOwnerParams{
-			CloudListingID: cloudListingID,
-			OwnerUserID:    ownerID,
+		existing, err := s.q.GetRegistryListingLinkForOwner(ctx, db.GetRegistryListingLinkForOwnerParams{
+			RegistryListingID: registryListingID,
+			OwnerUserID:       ownerID,
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, httpx.NotFound("Registry Listing 不存在")
 		}
 		if err != nil {
-			log.Error().Err(err).Str("cloud_listing_id", cloudListingID.String()).Msg("registry.CreateCloudListing: existing listing")
+			log.Error().Err(err).Str("registry_listing_id", registryListingID.String()).Msg("registry.CreateRegistryListing: existing listing")
 			return nil, httpx.Internal("查询 Registry Listing 失败")
 		}
 		if existing.LocalAgentID != agentID {
@@ -277,7 +274,7 @@ func (s *Service) CreateCloudListing(ctx context.Context, ownerID uuid.UUID, req
 		return nil, httpx.NotFound("Registry Node 不存在")
 	}
 	if err != nil {
-		log.Error().Err(err).Str("node_id", nodeID.String()).Msg("registry.CreateCloudListing: node")
+		log.Error().Err(err).Str("node_id", nodeID.String()).Msg("registry.CreateRegistryListing: node")
 		return nil, httpx.Internal("查询 Registry Node 失败")
 	}
 	if node.RevokedAt != nil {
@@ -291,7 +288,7 @@ func (s *Service) CreateCloudListing(ctx context.Context, ownerID uuid.UUID, req
 		return nil, httpx.NotFound("Agent 不存在")
 	}
 	if err != nil {
-		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registry.CreateCloudListing: agent")
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registry.CreateRegistryListing: agent")
 		return nil, httpx.Internal("查询 Agent 失败")
 	}
 	if agent.LifecycleStatus != "active" {
@@ -315,8 +312,8 @@ func (s *Service) CreateCloudListing(ctx context.Context, ownerID uuid.UUID, req
 	if err != nil {
 		return nil, err
 	}
-	link, err := s.q.UpsertCloudListingLink(ctx, db.UpsertCloudListingLinkParams{
-		CloudListingID:       cloudListingID,
+	link, err := s.q.UpsertRegistryListingLink(ctx, db.UpsertRegistryListingLinkParams{
+		RegistryListingID:    registryListingID,
 		RegistryNodeID:       nodeID,
 		LocalAgentID:         agentID,
 		RoutingMode:          routingMode,
@@ -325,93 +322,75 @@ func (s *Service) CreateCloudListing(ctx context.Context, ownerID uuid.UUID, req
 	})
 	if err != nil {
 		log.Error().Err(err).Str("node_id", nodeID.String()).Str("agent_id", agentID.String()).
-			Msg("registry.CreateCloudListing: upsert")
+			Msg("registry.CreateRegistryListing: upsert")
 		return nil, httpx.Internal("创建 Registry Listing 失败")
 	}
-	if _, err := s.q.SyncCloudListingMetadataForOwner(ctx, db.SyncCloudListingMetadataForOwnerParams{
-		CloudListingID: link.CloudListingID,
-		OwnerUserID:    ownerID,
+	if _, err := s.q.SyncRegistryListingMetadataForOwner(ctx, db.SyncRegistryListingMetadataForOwnerParams{
+		RegistryListingID: link.RegistryListingID,
+		OwnerUserID:       ownerID,
 	}); err != nil {
-		log.Error().Err(err).Str("cloud_listing_id", link.CloudListingID.String()).Msg("registry.CreateCloudListing: sync metadata")
+		log.Error().Err(err).Str("registry_listing_id", link.RegistryListingID.String()).Msg("registry.CreateRegistryListing: sync metadata")
 		return nil, httpx.Internal("同步 Registry Listing 元数据失败")
 	}
-	row, err := s.q.GetCloudListingLinkRowForOwner(ctx, db.GetCloudListingLinkRowForOwnerParams{
+	row, err := s.q.GetRegistryListingLinkRowForOwner(ctx, db.GetRegistryListingLinkRowForOwnerParams{
 		ID:          link.ID,
 		OwnerUserID: ownerID,
 	})
 	if err != nil {
-		log.Error().Err(err).Str("cloud_listing_link_id", link.ID.String()).Msg("registry.CreateCloudListing: get row")
+		log.Error().Err(err).Str("registry_listing_link_id", link.ID.String()).Msg("registry.CreateRegistryListing: get row")
 		return nil, httpx.Internal("查询 Registry Listing 失败")
 	}
-	resp := cloudListingRowToResponse(row)
+	resp := registryListingRowToResponse(row)
 	return &resp, nil
 }
 
-func resolveRegistryListingID(canonical, legacy string, required bool) (string, error) {
-	canonical = strings.TrimSpace(canonical)
-	legacy = strings.TrimSpace(legacy)
-	if canonical != "" && legacy != "" && canonical != legacy {
-		return "", httpx.BadRequest("registry_listing_id 与 cloud_listing_id 不一致")
-	}
-	if canonical != "" {
-		return canonical, nil
-	}
-	if legacy != "" {
-		return legacy, nil
-	}
-	if required {
-		return "", httpx.BadRequest("registry_listing_id 不能为空")
-	}
-	return "", nil
-}
-
-func (s *Service) ListCloudListings(ctx context.Context, ownerID uuid.UUID) ([]CloudListingLinkResponse, error) {
-	rows, err := s.q.ListCloudListingLinksByOwner(ctx, ownerID)
+func (s *Service) ListRegistryListings(ctx context.Context, ownerID uuid.UUID) ([]RegistryListingLinkResponse, error) {
+	rows, err := s.q.ListRegistryListingLinksByOwner(ctx, ownerID)
 	if err != nil {
-		log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.ListCloudListings")
+		log.Error().Err(err).Str("owner_id", ownerID.String()).Msg("registry.ListRegistryListings")
 		return nil, httpx.Internal("查询 Registry Listing 失败")
 	}
-	out := make([]CloudListingLinkResponse, 0, len(rows))
+	out := make([]RegistryListingLinkResponse, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, cloudListingRowToResponse(row))
+		out = append(out, registryListingRowToResponse(row))
 	}
 	return out, nil
 }
 
-func (s *Service) UpdateCloudListingStatus(ctx context.Context, ownerID, cloudListingID uuid.UUID, req *UpdateCloudListingStatusRequest) (*CloudListingLinkResponse, error) {
+func (s *Service) UpdateRegistryListingStatus(ctx context.Context, ownerID, registryListingID uuid.UUID, req *UpdateRegistryListingStatusRequest) (*RegistryListingLinkResponse, error) {
 	status := strings.TrimSpace(req.SyncStatus)
 	if status != "linked" && status != "paused" {
 		return nil, httpx.Unprocessable("sync_status 只能是 linked 或 paused")
 	}
-	row, err := s.q.UpdateCloudListingLinkStatusForOwner(ctx, db.UpdateCloudListingLinkStatusForOwnerParams{
-		CloudListingID: cloudListingID,
-		OwnerUserID:    ownerID,
-		SyncStatus:     status,
+	row, err := s.q.UpdateRegistryListingLinkStatusForOwner(ctx, db.UpdateRegistryListingLinkStatusForOwnerParams{
+		RegistryListingID: registryListingID,
+		OwnerUserID:       ownerID,
+		SyncStatus:        status,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, httpx.NotFound("Registry Listing 不存在或对应 Registry Node 已撤销")
 	}
 	if err != nil {
-		log.Error().Err(err).Str("cloud_listing_id", cloudListingID.String()).Msg("registry.UpdateCloudListingStatus")
+		log.Error().Err(err).Str("registry_listing_id", registryListingID.String()).Msg("registry.UpdateRegistryListingStatus")
 		return nil, httpx.Internal("更新 Registry Listing 状态失败")
 	}
-	resp := cloudListingRowToResponse(row)
+	resp := registryListingRowToResponse(row)
 	return &resp, nil
 }
 
-func (s *Service) SyncCloudListingMetadata(ctx context.Context, ownerID, cloudListingID uuid.UUID) (*CloudListingLinkResponse, error) {
-	row, err := s.q.SyncCloudListingMetadataForOwner(ctx, db.SyncCloudListingMetadataForOwnerParams{
-		CloudListingID: cloudListingID,
-		OwnerUserID:    ownerID,
+func (s *Service) SyncRegistryListingMetadata(ctx context.Context, ownerID, registryListingID uuid.UUID) (*RegistryListingLinkResponse, error) {
+	row, err := s.q.SyncRegistryListingMetadataForOwner(ctx, db.SyncRegistryListingMetadataForOwnerParams{
+		RegistryListingID: registryListingID,
+		OwnerUserID:       ownerID,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, httpx.NotFound("Registry Listing 不存在或对应 Registry Node 已撤销")
 	}
 	if err != nil {
-		log.Error().Err(err).Str("cloud_listing_id", cloudListingID.String()).Msg("registry.SyncCloudListingMetadata")
+		log.Error().Err(err).Str("registry_listing_id", registryListingID.String()).Msg("registry.SyncRegistryListingMetadata")
 		return nil, httpx.Internal("同步 Registry Listing 元数据失败")
 	}
-	resp := cloudListingRowToResponse(row)
+	resp := registryListingRowToResponse(row)
 	return &resp, nil
 }
 
@@ -420,7 +399,7 @@ func (s *Service) SyncNodeMetadata(ctx context.Context, plaintextSecret string) 
 	if err != nil {
 		return nil, err
 	}
-	count, err := s.q.SyncCloudListingMetadataByNode(ctx, node.ID)
+	count, err := s.q.SyncRegistryListingMetadataByNode(ctx, node.ID)
 	if err != nil {
 		log.Error().Err(err).Str("node_id", node.ID.String()).Msg("registry.SyncNodeMetadata")
 		return nil, httpx.Internal("同步 Registry Node 元数据失败")
@@ -669,11 +648,7 @@ func (s *Service) ExchangeRegistryFederationInvite(ctx context.Context, ownerID 
 }
 
 func (s *Service) CreateProxyRun(ctx context.Context, requestingUserID uuid.UUID, req *CreateProxyRunRequest) (*ProxyRunResponse, error) {
-	rawListingID, err := resolveRegistryListingID(req.RegistryListingID, req.CloudListingID, true)
-	if err != nil {
-		return nil, err
-	}
-	cloudListingID, err := uuid.Parse(rawListingID)
+	registryListingID, err := uuid.Parse(strings.TrimSpace(req.RegistryListingID))
 	if err != nil {
 		return nil, httpx.BadRequest("registry_listing_id 不是合法 uuid")
 	}
@@ -692,29 +667,29 @@ func (s *Service) CreateProxyRun(ctx context.Context, requestingUserID uuid.UUID
 	if err != nil {
 		return nil, err
 	}
-	link, err := s.q.GetCloudListingLinkForProxyRun(ctx, cloudListingID)
+	link, err := s.q.GetRegistryListingLinkForProxyRun(ctx, registryListingID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, httpx.NotFound("Registry Listing 不存在、未 linked 或对应 Registry Node 已撤销")
 	}
 	if err != nil {
-		log.Error().Err(err).Str("cloud_listing_id", cloudListingID.String()).Msg("registry.CreateProxyRun: link")
+		log.Error().Err(err).Str("registry_listing_id", registryListingID.String()).Msg("registry.CreateProxyRun: link")
 		return nil, httpx.Internal("查询 Registry Listing 失败")
 	}
 	storedInput, storedInputSummary := applyInputPayloadPolicy(link.PayloadPolicy, input, inputSummary, link.PayloadRedactionKeys)
 	run, err := s.q.CreateProxyRun(ctx, db.CreateProxyRunParams{
-		CloudListingID:     cloudListingID,
-		CloudListingLinkID: link.ID,
-		RequestingUserID:   requestingUserID,
-		IdempotencyKey:     idempotencyKey,
-		Input:              storedInput,
-		InputSummary:       storedInputSummary,
-		NodeInput:          input,
+		RegistryListingID:     registryListingID,
+		RegistryListingLinkID: link.ID,
+		RequestingUserID:      requestingUserID,
+		IdempotencyKey:        idempotencyKey,
+		Input:                 storedInput,
+		InputSummary:          storedInputSummary,
+		NodeInput:             input,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, httpx.NotFound("Registry Listing 不存在、未 linked 或对应 Registry Node 已撤销")
 	}
 	if err != nil {
-		log.Error().Err(err).Str("cloud_listing_id", cloudListingID.String()).Msg("registry.CreateProxyRun")
+		log.Error().Err(err).Str("registry_listing_id", registryListingID.String()).Msg("registry.CreateProxyRun")
 		return nil, httpx.Internal("创建 Proxy Run 失败")
 	}
 	resp := proxyRunToResponse(run)
@@ -726,11 +701,7 @@ func (s *Service) CreateRemoteProxyRun(ctx context.Context, requestingUserID uui
 	if err != nil {
 		return nil, err
 	}
-	rawRemoteListingID, err := resolveRegistryListingID(req.RemoteRegistryListingID, req.RemoteCloudListingID, true)
-	if err != nil {
-		return nil, err
-	}
-	remoteCloudListingID, err := uuid.Parse(rawRemoteListingID)
+	remoteRegistryListingID, err := uuid.Parse(strings.TrimSpace(req.RemoteRegistryListingID))
 	if err != nil {
 		return nil, httpx.BadRequest("remote_registry_listing_id 不是合法 uuid")
 	}
@@ -747,8 +718,7 @@ func (s *Service) CreateRemoteProxyRun(ctx context.Context, requestingUserID uui
 	}
 
 	payload := map[string]any{
-		"registry_listing_id": remoteCloudListingID.String(),
-		"cloud_listing_id":    remoteCloudListingID.String(),
+		"registry_listing_id": remoteRegistryListingID.String(),
 		"idempotency_key":     idempotencyKey,
 		"input":               req.Input,
 	}
@@ -794,11 +764,7 @@ func (s *Service) CreateRemoteProxyRun(ctx context.Context, requestingUserID uui
 		log.Warn().Err(err).Str("remote_api_base_url", remoteRoot).Msg("registry.CreateRemoteProxyRun: decode")
 		return nil, httpx.ServiceUnavailable("远端 Registry 响应格式无法识别")
 	}
-	remoteListingID := remoteRun.RegistryListingID
-	if remoteListingID == "" {
-		remoteListingID = remoteRun.CloudListingID
-	}
-	if remoteRun.ID == "" || remoteListingID == "" {
+	if remoteRun.ID == "" || remoteRun.RegistryListingID == "" {
 		return nil, httpx.ServiceUnavailable("远端 Registry 响应缺少 Proxy Run 标识")
 	}
 	return &RemoteProxyRunResponse{
@@ -1010,7 +976,7 @@ func (s *Service) CompleteProxyRun(ctx context.Context, plaintextSecret string, 
 		for _, artifact := range extractProxyRunArtifacts(output, run.PayloadPolicy) {
 			if _, err := q.CreateProxyRunArtifact(ctx, db.CreateProxyRunArtifactParams{
 				ProxyRunID:       run.ID,
-				CloudRunID:       run.CloudRunID,
+				RegistryRunID:    run.RegistryRunID,
 				SourceArtifactID: artifact.SourceArtifactID,
 				ArtifactType:     artifact.ArtifactType,
 				Title:            artifact.Title,
@@ -1434,7 +1400,7 @@ func registryFederationInviteToResponse(row registryFederationInviteRow, include
 		APIBaseURL:     row.APIBaseURL,
 		CredentialHint: row.CredentialHint,
 		Status:         row.Status,
-		ExchangeURL:    row.APIBaseURL + "/registry-peers/federation-invitations/exchange",
+		ExchangeURL:    row.APIBaseURL + "/registry/peers/federation-invitations/exchange",
 		ExpiresAt:      row.ExpiresAt.UTC().Format(time.RFC3339),
 		ConsumedAt:     timePtrString(row.ConsumedAt),
 		CreatedAt:      row.CreatedAt.UTC().Format(time.RFC3339),
@@ -1465,17 +1431,16 @@ func registryNodeToResponse(node db.RegistryNode) RegistryNodeResponse {
 	return resp
 }
 
-func cloudListingLinkToResponse(link db.CloudListingLink, nodeName, agentSlug, agentName string) *CloudListingLinkResponse {
+func registryListingLinkToResponse(link db.RegistryListingLink, nodeName, agentSlug, agentName string) *RegistryListingLinkResponse {
 	if link.SyncedAgentSlug != "" {
 		agentSlug = link.SyncedAgentSlug
 	}
 	if link.SyncedAgentName != "" {
 		agentName = link.SyncedAgentName
 	}
-	return &CloudListingLinkResponse{
+	return &RegistryListingLinkResponse{
 		ID:                   link.ID.String(),
-		RegistryListingID:    link.CloudListingID.String(),
-		CloudListingID:       link.CloudListingID.String(),
+		RegistryListingID:    link.RegistryListingID.String(),
 		RegistryNodeID:       link.RegistryNodeID.String(),
 		NodeName:             nodeName,
 		AgentID:              link.LocalAgentID.String(),
@@ -1496,11 +1461,10 @@ func cloudListingLinkToResponse(link db.CloudListingLink, nodeName, agentSlug, a
 	}
 }
 
-func cloudListingRowToResponse(row db.ListCloudListingLinksByOwnerRow) CloudListingLinkResponse {
-	return CloudListingLinkResponse{
+func registryListingRowToResponse(row db.ListRegistryListingLinksByOwnerRow) RegistryListingLinkResponse {
+	return RegistryListingLinkResponse{
 		ID:                   row.ID.String(),
-		RegistryListingID:    row.CloudListingID.String(),
-		CloudListingID:       row.CloudListingID.String(),
+		RegistryListingID:    row.RegistryListingID.String(),
 		RegistryNodeID:       row.RegistryNodeID.String(),
 		NodeName:             row.NodeName,
 		AgentID:              row.LocalAgentID.String(),
@@ -1524,11 +1488,9 @@ func cloudListingRowToResponse(row db.ListCloudListingLinksByOwnerRow) CloudList
 func proxyRunToResponse(run db.ProxyRun) ProxyRunResponse {
 	resp := ProxyRunResponse{
 		ID:                    run.ID.String(),
-		CloudRunID:            run.CloudRunID.String(),
-		RegistryListingLinkID: run.CloudListingLinkID.String(),
-		CloudListingLinkID:    run.CloudListingLinkID.String(),
-		RegistryListingID:     run.CloudListingID.String(),
-		CloudListingID:        run.CloudListingID.String(),
+		RegistryRunID:         run.RegistryRunID.String(),
+		RegistryListingLinkID: run.RegistryListingLinkID.String(),
+		RegistryListingID:     run.RegistryListingID.String(),
 		RegistryNodeID:        run.RegistryNodeID.String(),
 		LocalAgentID:          run.LocalAgentID.String(),
 		RequestingUserID:      run.RequestingUserID.String(),
@@ -1758,7 +1720,7 @@ func proxyRunArtifactToResponse(artifact db.ProxyRunArtifact) ProxyRunArtifactRe
 	resp := ProxyRunArtifactResponse{
 		ID:               artifact.ID.String(),
 		ProxyRunID:       artifact.ProxyRunID.String(),
-		CloudRunID:       artifact.CloudRunID.String(),
+		RegistryRunID:    artifact.RegistryRunID.String(),
 		SourceArtifactID: artifact.SourceArtifactID,
 		ArtifactType:     artifact.ArtifactType,
 		Title:            artifact.Title,

@@ -1,6 +1,6 @@
 -- registry_bridge.sql
 --
--- Registry Node + Cloud Listing Link first slice.
+-- Registry Node + Registry Listing Link first slice.
 
 -- name: CreateRegistryNode :one
 INSERT INTO registry_nodes (
@@ -56,7 +56,7 @@ WITH revoked AS (
               rn.last_heartbeat_at, rn.revoked_at, rn.created_at, rn.updated_at
 ),
 paused_links AS (
-    UPDATE cloud_listing_links l
+    UPDATE registry_listing_links l
     SET sync_status = 'paused',
         last_sync_at = NOW()
     FROM revoked r
@@ -80,9 +80,9 @@ RETURNING id, owner_user_id, node_name, node_type, base_url,
           secret_prefix, secret_hash, scopes, heartbeat_status,
           last_heartbeat_at, revoked_at, created_at, updated_at;
 
--- name: CountCloudListingLinksByNode :one
+-- name: CountRegistryListingLinksByNode :one
 SELECT COUNT(*)::int AS total
-FROM cloud_listing_links
+FROM registry_listing_links
 WHERE registry_node_id = $1;
 
 -- name: CountPendingProxyRunsByNode :one
@@ -91,9 +91,9 @@ FROM proxy_runs
 WHERE registry_node_id = $1
   AND status = 'pending';
 
--- name: UpsertCloudListingLink :one
-INSERT INTO cloud_listing_links (
-    cloud_listing_id, registry_node_id, local_agent_id, routing_mode, payload_policy, payload_redaction_keys,
+-- name: UpsertRegistryListingLink :one
+INSERT INTO registry_listing_links (
+    registry_listing_id, registry_node_id, local_agent_id, routing_mode, payload_policy, payload_redaction_keys,
     sync_status, last_sync_at
 ) VALUES (
     $1, $2, $3, $4, $5, $6,
@@ -105,28 +105,28 @@ SET routing_mode = EXCLUDED.routing_mode,
     payload_redaction_keys = EXCLUDED.payload_redaction_keys,
     sync_status = 'linked',
     last_sync_at = NOW()
-RETURNING id, cloud_listing_id, registry_node_id, local_agent_id,
+RETURNING id, registry_listing_id, registry_node_id, local_agent_id,
           routing_mode, payload_policy, payload_redaction_keys, sync_status,
           synced_agent_slug, synced_agent_name, synced_agent_description,
           synced_agent_tags, synced_availability_status,
           metadata_synced_at, metadata_sync_error,
           last_sync_at, created_at, updated_at;
 
--- name: GetCloudListingLinkForOwner :one
-SELECT l.id, l.cloud_listing_id, l.registry_node_id, l.local_agent_id,
+-- name: GetRegistryListingLinkForOwner :one
+SELECT l.id, l.registry_listing_id, l.registry_node_id, l.local_agent_id,
        l.routing_mode, l.payload_policy, l.payload_redaction_keys, l.sync_status,
        l.synced_agent_slug, l.synced_agent_name, l.synced_agent_description,
        l.synced_agent_tags, l.synced_availability_status,
        l.metadata_synced_at, l.metadata_sync_error,
        l.last_sync_at, l.created_at, l.updated_at
-FROM cloud_listing_links l
+FROM registry_listing_links l
 JOIN registry_nodes n ON n.id = l.registry_node_id
-WHERE l.cloud_listing_id = $1
+WHERE l.registry_listing_id = $1
   AND n.owner_user_id = $2
 LIMIT 1;
 
--- name: ListCloudListingLinksByOwner :many
-SELECT l.id, l.cloud_listing_id, l.registry_node_id, n.node_name,
+-- name: ListRegistryListingLinksByOwner :many
+SELECT l.id, l.registry_listing_id, l.registry_node_id, n.node_name,
        l.local_agent_id,
        COALESCE(NULLIF(l.synced_agent_slug, ''), a.slug) AS agent_slug,
        COALESCE(NULLIF(l.synced_agent_name, ''), a.name) AS agent_name,
@@ -136,14 +136,14 @@ SELECT l.id, l.cloud_listing_id, l.registry_node_id, n.node_name,
        l.synced_availability_status AS availability_status,
        l.metadata_synced_at, l.metadata_sync_error,
        l.last_sync_at, l.created_at, l.updated_at
-FROM cloud_listing_links l
+FROM registry_listing_links l
 JOIN registry_nodes n ON n.id = l.registry_node_id
 JOIN agents a ON a.id = l.local_agent_id
 WHERE n.owner_user_id = $1
 ORDER BY l.created_at DESC;
 
--- name: GetCloudListingLinkRowForOwner :one
-SELECT l.id, l.cloud_listing_id, l.registry_node_id, n.node_name,
+-- name: GetRegistryListingLinkRowForOwner :one
+SELECT l.id, l.registry_listing_id, l.registry_node_id, n.node_name,
        l.local_agent_id,
        COALESCE(NULLIF(l.synced_agent_slug, ''), a.slug) AS agent_slug,
        COALESCE(NULLIF(l.synced_agent_name, ''), a.name) AS agent_name,
@@ -153,23 +153,23 @@ SELECT l.id, l.cloud_listing_id, l.registry_node_id, n.node_name,
        l.synced_availability_status AS availability_status,
        l.metadata_synced_at, l.metadata_sync_error,
        l.last_sync_at, l.created_at, l.updated_at
-FROM cloud_listing_links l
+FROM registry_listing_links l
 JOIN registry_nodes n ON n.id = l.registry_node_id
 JOIN agents a ON a.id = l.local_agent_id
 WHERE l.id = $1
   AND n.owner_user_id = $2;
 
--- name: UpdateCloudListingLinkStatusForOwner :one
-UPDATE cloud_listing_links l
+-- name: UpdateRegistryListingLinkStatusForOwner :one
+UPDATE registry_listing_links l
 SET sync_status = $3,
     last_sync_at = NOW()
 FROM registry_nodes n, agents a
-WHERE l.cloud_listing_id = $1
+WHERE l.registry_listing_id = $1
   AND l.registry_node_id = n.id
   AND a.id = l.local_agent_id
   AND n.owner_user_id = $2
   AND ($3 <> 'linked' OR n.revoked_at IS NULL)
-RETURNING l.id, l.cloud_listing_id, l.registry_node_id, n.node_name,
+RETURNING l.id, l.registry_listing_id, l.registry_node_id, n.node_name,
           l.local_agent_id,
           COALESCE(NULLIF(l.synced_agent_slug, ''), a.slug) AS agent_slug,
           COALESCE(NULLIF(l.synced_agent_name, ''), a.name) AS agent_name,
@@ -180,8 +180,8 @@ RETURNING l.id, l.cloud_listing_id, l.registry_node_id, n.node_name,
           l.metadata_synced_at, l.metadata_sync_error,
           l.last_sync_at, l.created_at, l.updated_at;
 
--- name: SyncCloudListingMetadataForOwner :one
-UPDATE cloud_listing_links l
+-- name: SyncRegistryListingMetadataForOwner :one
+UPDATE registry_listing_links l
 SET synced_agent_slug = a.slug,
     synced_agent_name = a.name,
     synced_agent_description = a.description,
@@ -192,12 +192,12 @@ SET synced_agent_slug = a.slug,
     last_sync_at = NOW()
 FROM registry_nodes n, agents a
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
-WHERE l.cloud_listing_id = $1
+WHERE l.registry_listing_id = $1
   AND l.registry_node_id = n.id
   AND a.id = l.local_agent_id
   AND n.owner_user_id = $2
   AND n.revoked_at IS NULL
-RETURNING l.id, l.cloud_listing_id, l.registry_node_id, n.node_name,
+RETURNING l.id, l.registry_listing_id, l.registry_node_id, n.node_name,
           l.local_agent_id,
           l.synced_agent_slug AS agent_slug,
           l.synced_agent_name AS agent_name,
@@ -208,9 +208,9 @@ RETURNING l.id, l.cloud_listing_id, l.registry_node_id, n.node_name,
           l.metadata_synced_at, l.metadata_sync_error,
           l.last_sync_at, l.created_at, l.updated_at;
 
--- name: SyncCloudListingMetadataByNode :one
+-- name: SyncRegistryListingMetadataByNode :one
 WITH synced AS (
-    UPDATE cloud_listing_links l
+    UPDATE registry_listing_links l
     SET synced_agent_slug = a.slug,
         synced_agent_name = a.name,
         synced_agent_description = a.description,
@@ -229,14 +229,14 @@ WITH synced AS (
 SELECT COUNT(*)::int AS total
 FROM synced;
 
--- name: GetCloudListingLinkForProxyRun :one
-SELECT l.id, l.cloud_listing_id, l.registry_node_id, l.local_agent_id,
+-- name: GetRegistryListingLinkForProxyRun :one
+SELECT l.id, l.registry_listing_id, l.registry_node_id, l.local_agent_id,
        l.routing_mode, l.payload_policy, l.payload_redaction_keys, l.sync_status,
        l.synced_agent_slug, l.synced_agent_name, l.synced_agent_description,
        l.synced_agent_tags, l.synced_availability_status,
        l.metadata_synced_at, l.metadata_sync_error,
        l.last_sync_at, l.created_at, l.updated_at
-FROM cloud_listing_links l
+FROM registry_listing_links l
 JOIN registry_nodes n ON n.id = l.registry_node_id
 LEFT JOIN LATERAL (
     SELECT COUNT(*)::int AS active_run_count
@@ -244,7 +244,7 @@ LEFT JOIN LATERAL (
     WHERE p.registry_node_id = n.id
       AND p.status IN ('pending', 'claimed')
 ) load ON TRUE
-WHERE l.cloud_listing_id = $1
+WHERE l.registry_listing_id = $1
   AND l.sync_status = 'linked'
   AND l.routing_mode = 'pull_proxy'
   AND n.revoked_at IS NULL
@@ -261,11 +261,11 @@ LIMIT 1;
 
 -- name: CreateProxyRun :one
 WITH link AS (
-    SELECT l.id, l.cloud_listing_id, l.registry_node_id, l.local_agent_id, l.payload_policy,
+    SELECT l.id, l.registry_listing_id, l.registry_node_id, l.local_agent_id, l.payload_policy,
            l.payload_redaction_keys
-    FROM cloud_listing_links l
+    FROM registry_listing_links l
     JOIN registry_nodes n ON n.id = l.registry_node_id
-    WHERE l.cloud_listing_id = $1
+    WHERE l.registry_listing_id = $1
       AND l.id = $2
       AND l.sync_status = 'linked'
       AND l.routing_mode = 'pull_proxy'
@@ -273,15 +273,15 @@ WITH link AS (
 ),
 inserted AS (
     INSERT INTO proxy_runs (
-        cloud_listing_link_id, cloud_listing_id, registry_node_id, local_agent_id,
+        registry_listing_link_id, registry_listing_id, registry_node_id, local_agent_id,
         requesting_user_id, idempotency_key, payload_policy, payload_redaction_keys,
         input, input_summary, node_input
     )
-    SELECT id, cloud_listing_id, registry_node_id, local_agent_id,
+    SELECT id, registry_listing_id, registry_node_id, local_agent_id,
            $3, $4, payload_policy, payload_redaction_keys, $5::jsonb, $6, $7::jsonb
     FROM link
-    ON CONFLICT (cloud_listing_id, idempotency_key) DO NOTHING
-    RETURNING id, cloud_run_id, cloud_listing_link_id, cloud_listing_id,
+    ON CONFLICT (registry_listing_id, idempotency_key) DO NOTHING
+    RETURNING id, registry_run_id, registry_listing_link_id, registry_listing_id,
               registry_node_id, local_agent_id, requesting_user_id,
               idempotency_key, status, payload_policy, payload_redaction_keys,
               input, input_summary,
@@ -289,7 +289,7 @@ inserted AS (
               attempt_count, max_attempts, next_retry_at,
               claimed_at, finished_at, created_at, updated_at
 )
-SELECT id, cloud_run_id, cloud_listing_link_id, cloud_listing_id,
+SELECT id, registry_run_id, registry_listing_link_id, registry_listing_id,
        registry_node_id, local_agent_id, requesting_user_id,
        idempotency_key, status, payload_policy, payload_redaction_keys,
        input, input_summary,
@@ -298,7 +298,7 @@ SELECT id, cloud_run_id, cloud_listing_link_id, cloud_listing_id,
        claimed_at, finished_at, created_at, updated_at
 FROM inserted
 UNION ALL
-SELECT p.id, p.cloud_run_id, p.cloud_listing_link_id, p.cloud_listing_id,
+SELECT p.id, p.registry_run_id, p.registry_listing_link_id, p.registry_listing_id,
        p.registry_node_id, p.local_agent_id, p.requesting_user_id,
        p.idempotency_key, p.status, p.payload_policy, p.payload_redaction_keys,
        p.input, p.input_summary,
@@ -306,13 +306,13 @@ SELECT p.id, p.cloud_run_id, p.cloud_listing_link_id, p.cloud_listing_id,
        p.attempt_count, p.max_attempts, p.next_retry_at,
        p.claimed_at, p.finished_at, p.created_at, p.updated_at
 FROM proxy_runs p
-WHERE p.cloud_listing_id = $1
+WHERE p.registry_listing_id = $1
   AND p.idempotency_key = $4
   AND NOT EXISTS (SELECT 1 FROM inserted)
 LIMIT 1;
 
 -- name: GetProxyRunForRequester :one
-SELECT id, cloud_run_id, cloud_listing_link_id, cloud_listing_id,
+SELECT id, registry_run_id, registry_listing_link_id, registry_listing_id,
        registry_node_id, local_agent_id, requesting_user_id,
        idempotency_key, status, payload_policy, payload_redaction_keys,
        input, input_summary,
@@ -323,7 +323,7 @@ FROM proxy_runs
 WHERE id = $1 AND requesting_user_id = $2;
 
 -- name: GetProxyRunForNode :one
-SELECT id, cloud_run_id, cloud_listing_link_id, cloud_listing_id,
+SELECT id, registry_run_id, registry_listing_link_id, registry_listing_id,
        registry_node_id, local_agent_id, requesting_user_id,
        idempotency_key, status, payload_policy, payload_redaction_keys,
        input, input_summary,
@@ -351,7 +351,7 @@ SET status = 'claimed',
     attempt_count = p.attempt_count + 1
 FROM candidate
 WHERE p.id = candidate.id
-RETURNING p.id, p.cloud_run_id, p.cloud_listing_link_id, p.cloud_listing_id,
+RETURNING p.id, p.registry_run_id, p.registry_listing_link_id, p.registry_listing_id,
           p.registry_node_id, p.local_agent_id, p.requesting_user_id,
           p.idempotency_key, p.status, p.payload_policy, p.payload_redaction_keys,
           candidate.claim_input AS input, p.input_summary,
@@ -391,7 +391,7 @@ SET status = CASE
 WHERE id = $1
   AND registry_node_id = $2
   AND status IN ('pending', 'claimed')
-RETURNING id, cloud_run_id, cloud_listing_link_id, cloud_listing_id,
+RETURNING id, registry_run_id, registry_listing_link_id, registry_listing_id,
           registry_node_id, local_agent_id, requesting_user_id,
           idempotency_key, status, payload_policy, payload_redaction_keys,
           input, input_summary,
@@ -405,7 +405,7 @@ WHERE proxy_run_id = $1;
 
 -- name: CreateProxyRunArtifact :one
 INSERT INTO proxy_run_artifacts (
-    proxy_run_id, cloud_run_id, source_artifact_id, artifact_type, title, content,
+    proxy_run_id, registry_run_id, source_artifact_id, artifact_type, title, content,
     mime_type, file_uri, file_name, file_sha256, file_size_bytes
 ) VALUES (
     $1, $2, $3, $4, $5, $6::jsonb,
@@ -420,11 +420,11 @@ SET artifact_type = EXCLUDED.artifact_type,
     file_name = EXCLUDED.file_name,
     file_sha256 = EXCLUDED.file_sha256,
     file_size_bytes = EXCLUDED.file_size_bytes
-RETURNING id, proxy_run_id, cloud_run_id, source_artifact_id, artifact_type, title, content,
+RETURNING id, proxy_run_id, registry_run_id, source_artifact_id, artifact_type, title, content,
           mime_type, file_uri, file_name, file_sha256, file_size_bytes, created_at;
 
 -- name: ListProxyRunArtifactsForRequester :many
-SELECT a.id, a.proxy_run_id, a.cloud_run_id, a.source_artifact_id, a.artifact_type,
+SELECT a.id, a.proxy_run_id, a.registry_run_id, a.source_artifact_id, a.artifact_type,
        a.title, a.content, a.mime_type, a.file_uri, a.file_name, a.file_sha256,
        a.file_size_bytes, a.created_at
 FROM proxy_run_artifacts a
@@ -434,7 +434,7 @@ WHERE a.proxy_run_id = $1
 ORDER BY a.created_at ASC, a.id ASC;
 
 -- name: GetProxyRunArtifactForRequester :one
-SELECT a.id, a.proxy_run_id, a.cloud_run_id, a.source_artifact_id, a.artifact_type,
+SELECT a.id, a.proxy_run_id, a.registry_run_id, a.source_artifact_id, a.artifact_type,
        a.title, a.content, a.mime_type, a.file_uri, a.file_name, a.file_sha256,
        a.file_size_bytes, a.created_at
 FROM proxy_run_artifacts a

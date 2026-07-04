@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -17,6 +19,11 @@ import (
 
 // MaxSkillsPerAgent 单个 Agent 最多可声明的 skill 数量（PRD：5 个上限）。
 const MaxSkillsPerAgent = 5
+
+var (
+	proposedSkillIDPattern  = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[/_-][a-z0-9]+)*$`)
+	proposalCategoryPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,79}$`)
+)
 
 // Service Skill 业务逻辑层。
 type Service struct {
@@ -48,6 +55,76 @@ func (s *Service) ListForAgent(ctx context.Context, agentID uuid.UUID) ([]db.Ski
 	if err != nil {
 		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("skill.ListForAgent: ListAgentSkills")
 		return nil, httpx.Internal("查询 Agent skill 失败")
+	}
+	return items, nil
+}
+
+// CreateProposal 创建或更新当前用户的 Skill Proposal。
+func (s *Service) CreateProposal(ctx context.Context, ownerID uuid.UUID, req *CreateSkillProposalRequest) (*SkillProposalItem, error) {
+	clean, err := normalizeSkillProposalRequest(req)
+	if err != nil {
+		return nil, err
+	}
+
+	var agentID *uuid.UUID
+	if clean.AgentID != nil && strings.TrimSpace(*clean.AgentID) != "" {
+		parsed, err := uuid.Parse(strings.TrimSpace(*clean.AgentID))
+		if err != nil {
+			return nil, httpx.BadRequest("agent_id 不是合法 uuid")
+		}
+		agent, err := s.q.GetAgentByID(ctx, parsed)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, httpx.NotFound("Agent 不存在")
+			}
+			log.Error().Err(err).Str("agent_id", parsed.String()).Msg("skill.CreateProposal: GetAgentByID")
+			return nil, httpx.Internal("查询 Agent 失败")
+		}
+		if agent.CreatorID != ownerID {
+			return nil, httpx.Forbidden("无权为该 Agent 提交 Skill Proposal")
+		}
+		agentID = &parsed
+	}
+
+	status := "pending"
+	var matchedSkillID *string
+	if existing, err := s.q.GetSkill(ctx, clean.ProposedSkillID); err == nil {
+		status = "merged"
+		matchedSkillID = &existing.ID
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		log.Error().Err(err).Str("skill_id", clean.ProposedSkillID).Msg("skill.CreateProposal: GetSkill")
+		return nil, httpx.Internal("校验 Skill 失败")
+	}
+
+	row, err := s.q.CreateSkillProposal(ctx, db.CreateSkillProposalParams{
+		OwnerUserID:     ownerID,
+		AgentID:         agentID,
+		ProposedSkillID: clean.ProposedSkillID,
+		Category:        clean.Category,
+		Name:            clean.Name,
+		Description:     clean.Description,
+		Source:          clean.Source,
+		Status:          status,
+		MatchedSkillID:  matchedSkillID,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("owner_user_id", ownerID.String()).Msg("skill.CreateProposal: CreateSkillProposal")
+		return nil, httpx.Internal("提交 Skill Proposal 失败")
+	}
+	item := toSkillProposalItem(&row)
+	return &item, nil
+}
+
+// ListProposals 返回当前用户提交或导入生成的 Skill Proposal。
+func (s *Service) ListProposals(ctx context.Context, ownerID uuid.UUID) ([]SkillProposalItem, error) {
+	rows, err := s.q.ListSkillProposalsByOwner(ctx, ownerID)
+	if err != nil {
+		log.Error().Err(err).Str("owner_user_id", ownerID.String()).Msg("skill.ListProposals: ListSkillProposalsByOwner")
+		return nil, httpx.Internal("查询 Skill Proposal 失败")
+	}
+	items := make([]SkillProposalItem, 0, len(rows))
+	for i := range rows {
+		items = append(items, toSkillProposalItem(&rows[i]))
 	}
 	return items, nil
 }
@@ -131,6 +208,51 @@ func normalizeSkillIDs(in []string) ([]string, error) {
 	return cleaned, nil
 }
 
+func normalizeSkillProposalRequest(req *CreateSkillProposalRequest) (*CreateSkillProposalRequest, error) {
+	if req == nil {
+		return nil, httpx.BadRequest("请求体不能为空")
+	}
+	out := *req
+	out.ProposedSkillID = strings.ToLower(strings.TrimSpace(out.ProposedSkillID))
+	out.Category = strings.ToLower(strings.TrimSpace(out.Category))
+	out.Name = strings.TrimSpace(out.Name)
+	out.Description = strings.TrimSpace(out.Description)
+	out.Source = strings.TrimSpace(out.Source)
+	if out.Source == "" {
+		out.Source = "manual"
+	}
+	if !proposedSkillIDPattern.MatchString(out.ProposedSkillID) {
+		return nil, httpx.BadRequest("proposed_skill_id 只能使用小写字母、数字、/、_、-，并且不能以分隔符开头或结尾")
+	}
+	if !proposalCategoryPattern.MatchString(out.Category) {
+		return nil, httpx.BadRequest("category 只能使用小写字母、数字、_、-，长度 2-80")
+	}
+	if out.Source != "manual" && out.Source != "imported_text" && out.Source != "imported_json" {
+		return nil, httpx.BadRequest("source 不支持")
+	}
+	return &out, nil
+}
+
+func toSkillProposalItem(p *db.SkillProposal) SkillProposalItem {
+	var agentID *string
+	if p.AgentID != nil {
+		agentID = stringPtr(p.AgentID.String())
+	}
+	return SkillProposalItem{
+		ID:              p.ID.String(),
+		AgentID:         agentID,
+		ProposedSkillID: p.ProposedSkillID,
+		Category:        p.Category,
+		Name:            p.Name,
+		Description:     p.Description,
+		Source:          p.Source,
+		Status:          p.Status,
+		MatchedSkillID:  p.MatchedSkillID,
+		CreatedAt:       p.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:       p.UpdatedAt.Format(time.RFC3339),
+	}
+}
+
 // dedupNonEmpty trim 空白 + 去空串 + 去重，保持原顺序。
 func dedupNonEmpty(in []string) []string {
 	if len(in) == 0 {
@@ -150,4 +272,8 @@ func dedupNonEmpty(in []string) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+func stringPtr(v string) *string {
+	return &v
 }

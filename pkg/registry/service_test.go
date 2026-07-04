@@ -21,7 +21,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/registry"
 )
 
-const truncateRegistryBridgeTables = "TRUNCATE proxy_runs, registry_peers, registry_federation_invites, cloud_listing_links, registry_nodes, agent_skills, agents, wallets, users RESTART IDENTITY CASCADE"
+const truncateRegistryBridgeTables = "TRUNCATE proxy_runs, registry_peers, registry_federation_invites, registry_listing_links, registry_nodes, agent_skills, agents, wallets, users RESTART IDENTITY CASCADE"
 const registryTestDBTimeout = 30 * time.Second
 
 func newLocalRegistryService(pool *pgxpool.Pool) *registry.Service {
@@ -88,7 +88,7 @@ func requireHTTPStatus(t *testing.T, err error, status int) {
 	assert.Equal(t, status, httpErr.Status)
 }
 
-func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
+func TestRegistryNodeHeartbeatAndRegistryListing(t *testing.T) {
 	pool := setupRegistryBridgeDB(t)
 	svc := newLocalRegistryService(pool)
 	ctx := context.Background()
@@ -115,7 +115,7 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	assert.Equal(t, "healthy", heartbeat.HeartbeatStatus)
 	assert.Equal(t, int32(0), heartbeat.LinkedListingCount)
 
-	listing, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+	listing, err := svc.CreateRegistryListing(ctx, ownerID, &registry.CreateRegistryListingRequest{
 		RegistryNodeID: node.ID,
 		AgentID:        agentID.String(),
 		RoutingMode:    "pull_proxy",
@@ -134,7 +134,7 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	assert.Equal(t, "metadata_only", listing.PayloadPolicy)
 	nodeID, err := uuid.Parse(node.ID)
 	require.NoError(t, err)
-	cloudListingID, err := uuid.Parse(listing.CloudListingID)
+	registryListingID, err := uuid.Parse(listing.RegistryListingID)
 	require.NoError(t, err)
 
 	heartbeat, err = svc.Heartbeat(ctx, node.NodeSecret)
@@ -148,10 +148,10 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	assert.Empty(t, nodes[0].NodeSecret, "node secret must only be returned on create")
 	assert.Equal(t, "healthy", nodes[0].HeartbeatStatus)
 
-	listings, err := svc.ListCloudListings(ctx, ownerID)
+	listings, err := svc.ListRegistryListings(ctx, ownerID)
 	require.NoError(t, err)
 	require.Len(t, listings, 1)
-	assert.Equal(t, listing.CloudListingID, listings[0].CloudListingID)
+	assert.Equal(t, listing.RegistryListingID, listings[0].RegistryListingID)
 	assert.Equal(t, "Bridge Agent", listings[0].AgentName)
 	assert.Equal(t, "private node agent", listings[0].AgentDescription)
 	assert.Equal(t, "unknown", listings[0].AvailabilityStatus)
@@ -168,12 +168,12 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 		agentID)
 	require.NoError(t, err)
 
-	listings, err = svc.ListCloudListings(ctx, ownerID)
+	listings, err = svc.ListRegistryListings(ctx, ownerID)
 	require.NoError(t, err)
 	require.Len(t, listings, 1)
 	assert.Equal(t, "Bridge Agent", listings[0].AgentName, "listing uses the last synced snapshot before metadata sync")
 
-	synced, err := svc.SyncCloudListingMetadata(ctx, ownerID, cloudListingID)
+	synced, err := svc.SyncRegistryListingMetadata(ctx, ownerID, registryListingID)
 	require.NoError(t, err)
 	assert.Equal(t, "Bridge Agent Synced", synced.AgentName)
 	assert.Equal(t, "synced description", synced.AgentDescription)
@@ -194,7 +194,7 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	assert.Equal(t, node.ID, nodeSync.RegistryNodeID)
 	assert.Equal(t, int32(1), nodeSync.SyncedListingCount)
 
-	listings, err = svc.ListCloudListings(ctx, ownerID)
+	listings, err = svc.ListRegistryListings(ctx, ownerID)
 	require.NoError(t, err)
 	require.Len(t, listings, 1)
 	assert.Equal(t, "Bridge Agent Node Synced", listings[0].AgentName)
@@ -203,8 +203,8 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 
 	idempotencyKey := "proxy-test-" + uuid.NewString()
 	proxyRun, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
-		CloudListingID: listing.CloudListingID,
-		IdempotencyKey: idempotencyKey,
+		RegistryListingID: listing.RegistryListingID,
+		IdempotencyKey:    idempotencyKey,
 		Input: map[string]any{
 			"task": "run SQL and summarize",
 		},
@@ -213,7 +213,7 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, proxyRun.ID)
 	assert.Equal(t, "pending", proxyRun.Status)
-	assert.Equal(t, listing.CloudListingID, proxyRun.CloudListingID)
+	assert.Equal(t, listing.RegistryListingID, proxyRun.RegistryListingID)
 	assert.Equal(t, node.ID, proxyRun.RegistryNodeID)
 	assert.Equal(t, agentID.String(), proxyRun.LocalAgentID)
 	assert.Equal(t, "metadata_only", proxyRun.PayloadPolicy)
@@ -225,8 +225,8 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	assert.Equal(t, int32(1), heartbeat.PendingRunCount)
 
 	again, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
-		CloudListingID: listing.CloudListingID,
-		IdempotencyKey: idempotencyKey,
+		RegistryListingID: listing.RegistryListingID,
+		IdempotencyKey:    idempotencyKey,
 		Input: map[string]any{
 			"task": "duplicate should not create another row",
 		},
@@ -324,19 +324,19 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, emptyClaim)
 
-	paused, err := svc.UpdateCloudListingStatus(ctx, ownerID, cloudListingID, &registry.UpdateCloudListingStatusRequest{
+	paused, err := svc.UpdateRegistryListingStatus(ctx, ownerID, registryListingID, &registry.UpdateRegistryListingStatusRequest{
 		SyncStatus: "paused",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "paused", paused.SyncStatus)
 
 	_, err = svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
-		CloudListingID: listing.CloudListingID,
-		IdempotencyKey: "paused-" + uuid.NewString(),
+		RegistryListingID: listing.RegistryListingID,
+		IdempotencyKey:    "paused-" + uuid.NewString(),
 	})
 	requireHTTPStatus(t, err, http.StatusNotFound)
 
-	resumed, err := svc.UpdateCloudListingStatus(ctx, ownerID, cloudListingID, &registry.UpdateCloudListingStatusRequest{
+	resumed, err := svc.UpdateRegistryListingStatus(ctx, ownerID, registryListingID, &registry.UpdateRegistryListingStatusRequest{
 		SyncStatus: "linked",
 	})
 	require.NoError(t, err)
@@ -355,9 +355,9 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	assert.Equal(t, node.ID, heartbeat.NodeID)
 
 	timeoutRun, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
-		CloudListingID: listing.CloudListingID,
-		IdempotencyKey: "timeout-" + uuid.NewString(),
-		InputSummary:   "will timeout",
+		RegistryListingID: listing.RegistryListingID,
+		IdempotencyKey:    "timeout-" + uuid.NewString(),
+		InputSummary:      "will timeout",
 	})
 	require.NoError(t, err)
 	claimedTimeout, err := svc.ClaimProxyRun(ctx, rotated.NodeSecret)
@@ -392,17 +392,17 @@ func TestRegistryNodeHeartbeatAndCloudListing(t *testing.T) {
 	requireHTTPStatus(t, err, http.StatusUnauthorized)
 	_, err = svc.RotateNodeSecret(ctx, ownerID, nodeID)
 	requireHTTPStatus(t, err, http.StatusNotFound)
-	_, err = svc.UpdateCloudListingStatus(ctx, ownerID, cloudListingID, &registry.UpdateCloudListingStatusRequest{
+	_, err = svc.UpdateRegistryListingStatus(ctx, ownerID, registryListingID, &registry.UpdateRegistryListingStatusRequest{
 		SyncStatus: "linked",
 	})
 	requireHTTPStatus(t, err, http.StatusNotFound)
 	_, err = svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
-		CloudListingID: listing.CloudListingID,
-		IdempotencyKey: "revoked-" + uuid.NewString(),
+		RegistryListingID: listing.RegistryListingID,
+		IdempotencyKey:    "revoked-" + uuid.NewString(),
 	})
 	requireHTTPStatus(t, err, http.StatusNotFound)
 
-	listings, err = svc.ListCloudListings(ctx, ownerID)
+	listings, err = svc.ListRegistryListings(ctx, ownerID)
 	require.NoError(t, err)
 	require.Len(t, listings, 1)
 	assert.Equal(t, "paused", listings[0].SyncStatus)
@@ -428,7 +428,7 @@ func TestStartProxyRunWorkerExpiresStaleProxyRuns(t *testing.T) {
 		BaseURL:  "http://127.0.0.1:3000",
 	})
 	require.NoError(t, err)
-	listing, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+	listing, err := svc.CreateRegistryListing(ctx, ownerID, &registry.CreateRegistryListingRequest{
 		RegistryNodeID: node.ID,
 		AgentID:        agentID.String(),
 		RoutingMode:    "pull_proxy",
@@ -436,9 +436,9 @@ func TestStartProxyRunWorkerExpiresStaleProxyRuns(t *testing.T) {
 	})
 	require.NoError(t, err)
 	proxyRun, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
-		CloudListingID: listing.CloudListingID,
-		IdempotencyKey: "worker-timeout-" + uuid.NewString(),
-		InputSummary:   "worker should expire this run",
+		RegistryListingID: listing.RegistryListingID,
+		IdempotencyKey:    "worker-timeout-" + uuid.NewString(),
+		InputSummary:      "worker should expire this run",
 	})
 	require.NoError(t, err)
 	claimed, err := svc.ClaimProxyRun(ctx, node.NodeSecret)
@@ -487,10 +487,10 @@ func TestCreateRemoteProxyRunRoutesToRemoteRegistryAPI(t *testing.T) {
 	remoteRunID := uuid.New()
 	var capturedAuth string
 	var capturedBody struct {
-		CloudListingID string         `json:"cloud_listing_id"`
-		IdempotencyKey string         `json:"idempotency_key"`
-		Input          map[string]any `json:"input"`
-		InputSummary   string         `json:"input_summary"`
+		RegistryListingID string         `json:"registry_listing_id"`
+		IdempotencyKey    string         `json:"idempotency_key"`
+		Input             map[string]any `json:"input"`
+		InputSummary      string         `json:"input_summary"`
 	}
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
@@ -500,32 +500,32 @@ func TestCreateRemoteProxyRunRoutesToRemoteRegistryAPI(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		require.NoError(t, json.NewEncoder(w).Encode(registry.ProxyRunResponse{
-			ID:                 remoteRunID.String(),
-			CloudRunID:         uuid.NewString(),
-			CloudListingLinkID: uuid.NewString(),
-			CloudListingID:     remoteListingID.String(),
-			RegistryNodeID:     uuid.NewString(),
-			LocalAgentID:       uuid.NewString(),
-			RequestingUserID:   uuid.NewString(),
-			IdempotencyKey:     "cross-route-123",
-			Status:             "pending",
-			PayloadPolicy:      "metadata_only",
-			AttemptCount:       0,
-			MaxAttempts:        3,
-			CreatedAt:          time.Now().UTC().Format(time.RFC3339),
-			UpdatedAt:          time.Now().UTC().Format(time.RFC3339),
+			ID:                    remoteRunID.String(),
+			RegistryRunID:         uuid.NewString(),
+			RegistryListingLinkID: uuid.NewString(),
+			RegistryListingID:     remoteListingID.String(),
+			RegistryNodeID:        uuid.NewString(),
+			LocalAgentID:          uuid.NewString(),
+			RequestingUserID:      uuid.NewString(),
+			IdempotencyKey:        "cross-route-123",
+			Status:                "pending",
+			PayloadPolicy:         "metadata_only",
+			AttemptCount:          0,
+			MaxAttempts:           3,
+			CreatedAt:             time.Now().UTC().Format(time.RFC3339),
+			UpdatedAt:             time.Now().UTC().Format(time.RFC3339),
 		}))
 	}))
 	defer remote.Close()
 
 	svc := newLocalRegistryService(nil)
 	resp, err := svc.CreateRemoteProxyRun(context.Background(), uuid.Nil, &registry.CreateRemoteProxyRunRequest{
-		RemoteAPIBaseURL:     remote.URL,
-		RemoteBearerToken:    "remote-token-123",
-		RemoteCloudListingID: remoteListingID.String(),
-		IdempotencyKey:       "cross-route-123",
-		Input:                map[string]any{"task": "route cross registry"},
-		InputSummary:         "cross registry route",
+		RemoteAPIBaseURL:        remote.URL,
+		RemoteBearerToken:       "remote-token-123",
+		RemoteRegistryListingID: remoteListingID.String(),
+		IdempotencyKey:          "cross-route-123",
+		Input:                   map[string]any{"task": "route cross registry"},
+		InputSummary:            "cross registry route",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -534,7 +534,7 @@ func TestCreateRemoteProxyRunRoutesToRemoteRegistryAPI(t *testing.T) {
 	assert.Empty(t, resp.RegistryPeerID)
 	assert.Equal(t, remoteRunID.String(), resp.RemoteRun.ID)
 	assert.Equal(t, "Bearer remote-token-123", capturedAuth)
-	assert.Equal(t, remoteListingID.String(), capturedBody.CloudListingID)
+	assert.Equal(t, remoteListingID.String(), capturedBody.RegistryListingID)
 	assert.Equal(t, "cross-route-123", capturedBody.IdempotencyKey)
 	assert.Equal(t, "route cross registry", capturedBody.Input["task"])
 	assert.Equal(t, "cross registry route", capturedBody.InputSummary)
@@ -556,20 +556,20 @@ func TestRegistryPeerRoutesRemoteProxyRunWithoutRepeatingCredentials(t *testing.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		require.NoError(t, json.NewEncoder(w).Encode(registry.ProxyRunResponse{
-			ID:                 remoteRunID.String(),
-			CloudRunID:         uuid.NewString(),
-			CloudListingLinkID: uuid.NewString(),
-			CloudListingID:     remoteListingID.String(),
-			RegistryNodeID:     uuid.NewString(),
-			LocalAgentID:       uuid.NewString(),
-			RequestingUserID:   ownerID.String(),
-			IdempotencyKey:     "peer-route-123",
-			Status:             "pending",
-			PayloadPolicy:      "metadata_only",
-			AttemptCount:       0,
-			MaxAttempts:        3,
-			CreatedAt:          time.Now().UTC().Format(time.RFC3339),
-			UpdatedAt:          time.Now().UTC().Format(time.RFC3339),
+			ID:                    remoteRunID.String(),
+			RegistryRunID:         uuid.NewString(),
+			RegistryListingLinkID: uuid.NewString(),
+			RegistryListingID:     remoteListingID.String(),
+			RegistryNodeID:        uuid.NewString(),
+			LocalAgentID:          uuid.NewString(),
+			RequestingUserID:      ownerID.String(),
+			IdempotencyKey:        "peer-route-123",
+			Status:                "pending",
+			PayloadPolicy:         "metadata_only",
+			AttemptCount:          0,
+			MaxAttempts:           3,
+			CreatedAt:             time.Now().UTC().Format(time.RFC3339),
+			UpdatedAt:             time.Now().UTC().Format(time.RFC3339),
 		}))
 	}))
 	defer remote.Close()
@@ -586,10 +586,10 @@ func TestRegistryPeerRoutesRemoteProxyRunWithoutRepeatingCredentials(t *testing.
 	assert.NotContains(t, peer.CredentialHint, "peer-token-123")
 
 	resp, err := svc.CreateRemoteProxyRun(ctx, ownerID, &registry.CreateRemoteProxyRunRequest{
-		RegistryPeerID:       peer.ID,
-		RemoteCloudListingID: remoteListingID.String(),
-		IdempotencyKey:       "peer-route-123",
-		Input:                map[string]any{"task": "route via trusted registry directory"},
+		RegistryPeerID:          peer.ID,
+		RemoteRegistryListingID: remoteListingID.String(),
+		IdempotencyKey:          "peer-route-123",
+		Input:                   map[string]any{"task": "route via trusted registry directory"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "registry_peer", resp.RouteMode)
@@ -598,9 +598,9 @@ func TestRegistryPeerRoutesRemoteProxyRunWithoutRepeatingCredentials(t *testing.
 	assert.Equal(t, "Bearer peer-token-123", capturedAuth)
 
 	autoResp, err := svc.CreateRemoteProxyRun(ctx, ownerID, &registry.CreateRemoteProxyRunRequest{
-		RemoteCloudListingID: remoteListingID.String(),
-		IdempotencyKey:       "peer-route-auto",
-		Input:                map[string]any{"task": "auto route via the only active registry peer"},
+		RemoteRegistryListingID: remoteListingID.String(),
+		IdempotencyKey:          "peer-route-auto",
+		Input:                   map[string]any{"task": "auto route via the only active registry peer"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "registry_peer_auto", autoResp.RouteMode)
@@ -620,8 +620,8 @@ func TestRegistryPeerRoutesRemoteProxyRunWithoutRepeatingCredentials(t *testing.
 	})
 	require.NoError(t, err)
 	_, err = svc.CreateRemoteProxyRun(ctx, ownerID, &registry.CreateRemoteProxyRunRequest{
-		RemoteCloudListingID: remoteListingID.String(),
-		IdempotencyKey:       "peer-route-ambiguous",
+		RemoteRegistryListingID: remoteListingID.String(),
+		IdempotencyKey:          "peer-route-ambiguous",
 	})
 	requireHTTPStatus(t, err, http.StatusConflict)
 
@@ -684,37 +684,37 @@ func TestRegistryNodePeerAndRemoteRouteBoundaries(t *testing.T) {
 	require.NoError(t, err)
 	nodeID := uuid.MustParse(node.ID)
 
-	_, err = svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+	_, err = svc.CreateRegistryListing(ctx, ownerID, &registry.CreateRegistryListingRequest{
 		RegistryNodeID: "not-a-uuid",
 		AgentID:        agentID.String(),
 	})
 	requireHTTPStatus(t, err, http.StatusBadRequest)
-	_, err = svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+	_, err = svc.CreateRegistryListing(ctx, ownerID, &registry.CreateRegistryListingRequest{
 		RegistryNodeID: node.ID,
 		AgentID:        "not-a-uuid",
 	})
 	requireHTTPStatus(t, err, http.StatusBadRequest)
-	_, err = svc.CreateCloudListing(ctx, otherOwnerID, &registry.CreateCloudListingRequest{
+	_, err = svc.CreateRegistryListing(ctx, otherOwnerID, &registry.CreateRegistryListingRequest{
 		RegistryNodeID: node.ID,
 		AgentID:        agentID.String(),
 	})
 	requireHTTPStatus(t, err, http.StatusNotFound)
 
-	listing, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+	listing, err := svc.CreateRegistryListing(ctx, ownerID, &registry.CreateRegistryListingRequest{
 		RegistryNodeID: node.ID,
 		AgentID:        agentID.String(),
 		PayloadPolicy:  "metadata_only",
 	})
 	require.NoError(t, err)
-	listingID := uuid.MustParse(listing.CloudListingID)
+	listingID := uuid.MustParse(listing.RegistryListingID)
 
-	_, err = svc.SyncCloudListingMetadata(ctx, otherOwnerID, listingID)
+	_, err = svc.SyncRegistryListingMetadata(ctx, otherOwnerID, listingID)
 	requireHTTPStatus(t, err, http.StatusNotFound)
-	_, err = svc.UpdateCloudListingStatus(ctx, otherOwnerID, listingID, &registry.UpdateCloudListingStatusRequest{
+	_, err = svc.UpdateRegistryListingStatus(ctx, otherOwnerID, listingID, &registry.UpdateRegistryListingStatusRequest{
 		SyncStatus: "paused",
 	})
 	requireHTTPStatus(t, err, http.StatusNotFound)
-	_, err = svc.UpdateCloudListingStatus(ctx, ownerID, listingID, &registry.UpdateCloudListingStatusRequest{
+	_, err = svc.UpdateRegistryListingStatus(ctx, ownerID, listingID, &registry.UpdateRegistryListingStatusRequest{
 		SyncStatus: "archived",
 	})
 	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
@@ -750,22 +750,22 @@ func TestRegistryNodePeerAndRemoteRouteBoundaries(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "paused", pausedPeer.Status)
 	_, err = svc.CreateRemoteProxyRun(ctx, ownerID, &registry.CreateRemoteProxyRunRequest{
-		RegistryPeerID:       pausedPeer.ID,
-		RemoteCloudListingID: uuid.NewString(),
-		IdempotencyKey:       "remote-paused-peer",
+		RegistryPeerID:          pausedPeer.ID,
+		RemoteRegistryListingID: uuid.NewString(),
+		IdempotencyKey:          "remote-paused-peer",
 	})
 	requireHTTPStatus(t, err, http.StatusNotFound)
 	_, err = svc.CreateRemoteProxyRun(ctx, ownerID, &registry.CreateRemoteProxyRunRequest{
-		RegistryPeerID:       pausedPeer.ID,
-		RemoteAPIBaseURL:     "https://remote.example",
-		RemoteBearerToken:    "explicit-token-123",
-		RemoteCloudListingID: uuid.NewString(),
-		IdempotencyKey:       "remote-peer-mixed",
+		RegistryPeerID:          pausedPeer.ID,
+		RemoteAPIBaseURL:        "https://remote.example",
+		RemoteBearerToken:       "explicit-token-123",
+		RemoteRegistryListingID: uuid.NewString(),
+		IdempotencyKey:          "remote-peer-mixed",
 	})
 	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
 	_, err = svc.CreateRemoteProxyRun(ctx, ownerID, &registry.CreateRemoteProxyRunRequest{
-		RemoteCloudListingID: uuid.NewString(),
-		IdempotencyKey:       "remote-no-active-peer",
+		RemoteRegistryListingID: uuid.NewString(),
+		IdempotencyKey:          "remote-no-active-peer",
 	})
 	requireHTTPStatus(t, err, http.StatusUnprocessableEntity)
 
@@ -831,7 +831,7 @@ func TestRegistryNodePeerAndRemoteRouteBoundaries(t *testing.T) {
 	require.NotEmpty(t, revoked.RevokedAt)
 	_, err = svc.Heartbeat(ctx, node.NodeSecret)
 	requireHTTPStatus(t, err, http.StatusUnauthorized)
-	_, err = svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+	_, err = svc.CreateRegistryListing(ctx, ownerID, &registry.CreateRegistryListingRequest{
 		RegistryNodeID: node.ID,
 		AgentID:        agentID.String(),
 	})
@@ -887,11 +887,11 @@ func TestCreateRemoteProxyRunHandlesRemoteFailures(t *testing.T) {
 
 			svc := newLocalRegistryService(nil)
 			_, err := svc.CreateRemoteProxyRun(context.Background(), uuid.Nil, &registry.CreateRemoteProxyRunRequest{
-				RemoteAPIBaseURL:     remote.URL,
-				RemoteBearerToken:    "explicit-token-123",
-				RemoteCloudListingID: uuid.NewString(),
-				IdempotencyKey:       "remote-failure-" + tt.name,
-				Input:                map[string]any{"task": "remote failure"},
+				RemoteAPIBaseURL:        remote.URL,
+				RemoteBearerToken:       "explicit-token-123",
+				RemoteRegistryListingID: uuid.NewString(),
+				IdempotencyKey:          "remote-failure-" + tt.name,
+				Input:                   map[string]any{"task": "remote failure"},
 			})
 			requireHTTPStatus(t, err, tt.want)
 		})
@@ -907,7 +907,7 @@ func TestRegistryFederationInviteExchangeCreatesPeer(t *testing.T) {
 	var capturedExchangeToken string
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, "/api/v1/registry-peers/federation-invitations/exchange", r.URL.Path)
+		assert.Equal(t, "/api/v1/registry/peers/federation-invitations/exchange", r.URL.Path)
 		assert.Empty(t, r.Header.Get("Authorization"))
 
 		var req registry.ConsumeRegistryFederationInviteRequest
@@ -934,7 +934,7 @@ func TestRegistryFederationInviteExchangeCreatesPeer(t *testing.T) {
 	require.NotEmpty(t, directInvite.FederationToken)
 	assert.Equal(t, "active", directInvite.Status)
 	assert.Equal(t, remote.URL+"/api/v1", directInvite.APIBaseURL)
-	assert.Equal(t, remote.URL+"/api/v1/registry-peers/federation-invitations/exchange", directInvite.ExchangeURL)
+	assert.Equal(t, remote.URL+"/api/v1/registry/peers/federation-invitations/exchange", directInvite.ExchangeURL)
 	assert.NotContains(t, directInvite.CredentialHint, "direct-peer-token-123")
 
 	material, err := svc.ConsumeRegistryFederationInvite(ctx, &registry.ConsumeRegistryFederationInviteRequest{
@@ -992,7 +992,7 @@ func TestProxyRunPayloadPolicies(t *testing.T) {
 	require.NoError(t, err)
 
 	summaryAgentID := insertRegistryAgent(t, pool, ownerID)
-	summaryListing, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+	summaryListing, err := svc.CreateRegistryListing(ctx, ownerID, &registry.CreateRegistryListingRequest{
 		RegistryNodeID: node.ID,
 		AgentID:        summaryAgentID.String(),
 		PayloadPolicy:  "store_run_summary",
@@ -1000,8 +1000,8 @@ func TestProxyRunPayloadPolicies(t *testing.T) {
 	require.NoError(t, err)
 
 	summaryRun, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
-		CloudListingID: summaryListing.CloudListingID,
-		IdempotencyKey: "summary-" + uuid.NewString(),
+		RegistryListingID: summaryListing.RegistryListingID,
+		IdempotencyKey:    "summary-" + uuid.NewString(),
 		Input: map[string]any{
 			"prompt": "contains private customer payload",
 			"secret": "do-not-store",
@@ -1040,7 +1040,7 @@ func TestProxyRunPayloadPolicies(t *testing.T) {
 	assert.Equal(t, "private result summarized", fetchedSummary.OutputSummary)
 
 	fullAgentID := insertRegistryAgent(t, pool, ownerID)
-	fullListing, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+	fullListing, err := svc.CreateRegistryListing(ctx, ownerID, &registry.CreateRegistryListingRequest{
 		RegistryNodeID:       node.ID,
 		AgentID:              fullAgentID.String(),
 		PayloadPolicy:        "store_full_payload",
@@ -1050,8 +1050,8 @@ func TestProxyRunPayloadPolicies(t *testing.T) {
 	assert.ElementsMatch(t, []string{"secret", "apiKey"}, fullListing.PayloadRedactionKeys)
 
 	fullRun, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
-		CloudListingID: fullListing.CloudListingID,
-		IdempotencyKey: "full-" + uuid.NewString(),
+		RegistryListingID: fullListing.RegistryListingID,
+		IdempotencyKey:    "full-" + uuid.NewString(),
 		Input: map[string]any{
 			"prompt": "store this payload",
 			"secret": "do not persist",
@@ -1135,25 +1135,25 @@ func TestProxyRunRoutesAcrossMultipleHealthyNodesByLoad(t *testing.T) {
 	_, err = svc.Heartbeat(ctx, nodeA.NodeSecret)
 	require.NoError(t, err)
 
-	listingA, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+	listingA, err := svc.CreateRegistryListing(ctx, ownerID, &registry.CreateRegistryListingRequest{
 		RegistryNodeID: nodeA.ID,
 		AgentID:        agentID.String(),
 		PayloadPolicy:  "store_run_summary",
 	})
 	require.NoError(t, err)
-	listingB, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
-		CloudListingID: listingA.CloudListingID,
-		RegistryNodeID: nodeB.ID,
-		AgentID:        agentID.String(),
-		PayloadPolicy:  "store_run_summary",
+	listingB, err := svc.CreateRegistryListing(ctx, ownerID, &registry.CreateRegistryListingRequest{
+		RegistryListingID: listingA.RegistryListingID,
+		RegistryNodeID:    nodeB.ID,
+		AgentID:           agentID.String(),
+		PayloadPolicy:     "store_run_summary",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, listingA.CloudListingID, listingB.CloudListingID)
+	assert.Equal(t, listingA.RegistryListingID, listingB.RegistryListingID)
 	assert.NotEqual(t, listingA.ID, listingB.ID)
 
 	first, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
-		CloudListingID: listingA.CloudListingID,
-		IdempotencyKey: "multi-" + uuid.NewString(),
+		RegistryListingID: listingA.RegistryListingID,
+		IdempotencyKey:    "multi-" + uuid.NewString(),
 		Input: map[string]any{
 			"task": "first run keeps its node busy",
 		},
@@ -1163,8 +1163,8 @@ func TestProxyRunRoutesAcrossMultipleHealthyNodesByLoad(t *testing.T) {
 	assert.Equal(t, "pending", first.Status)
 
 	second, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
-		CloudListingID: listingA.CloudListingID,
-		IdempotencyKey: "multi-" + uuid.NewString(),
+		RegistryListingID: listingA.RegistryListingID,
+		IdempotencyKey:    "multi-" + uuid.NewString(),
 		Input: map[string]any{
 			"task": "second run should route away from loaded node",
 		},
@@ -1173,11 +1173,11 @@ func TestProxyRunRoutesAcrossMultipleHealthyNodesByLoad(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "pending", second.Status)
 	assert.NotEqual(t, first.RegistryNodeID, second.RegistryNodeID)
-	assert.Equal(t, first.CloudListingID, second.CloudListingID)
+	assert.Equal(t, first.RegistryListingID, second.RegistryListingID)
 
 	again, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
-		CloudListingID: listingA.CloudListingID,
-		IdempotencyKey: first.IdempotencyKey,
+		RegistryListingID: listingA.RegistryListingID,
+		IdempotencyKey:    first.IdempotencyKey,
 		Input: map[string]any{
 			"task": "idempotent duplicate should keep the original node",
 		},
@@ -1209,7 +1209,7 @@ func TestProxyRunRetryableFailureRequeues(t *testing.T) {
 		NodeType: "bridge_proxy",
 	})
 	require.NoError(t, err)
-	listing, err := svc.CreateCloudListing(ctx, ownerID, &registry.CreateCloudListingRequest{
+	listing, err := svc.CreateRegistryListing(ctx, ownerID, &registry.CreateRegistryListingRequest{
 		RegistryNodeID: node.ID,
 		AgentID:        agentID.String(),
 		PayloadPolicy:  "metadata_only",
@@ -1217,8 +1217,8 @@ func TestProxyRunRetryableFailureRequeues(t *testing.T) {
 	require.NoError(t, err)
 
 	proxyRun, err := svc.CreateProxyRun(ctx, ownerID, &registry.CreateProxyRunRequest{
-		CloudListingID: listing.CloudListingID,
-		IdempotencyKey: "retry-" + uuid.NewString(),
+		RegistryListingID: listing.RegistryListingID,
+		IdempotencyKey:    "retry-" + uuid.NewString(),
 		Input: map[string]any{
 			"task": "retry me once",
 		},

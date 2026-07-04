@@ -240,7 +240,7 @@ type AgentAvailabilityAlert struct {
 
 // RegistryNode 对应 registry_nodes 表。
 //
-// 这是 Bridge / Proxy Node 的云侧身份；明文 secret 只在创建时返回，数据库只保存 hash。
+// 这是 Bridge / Proxy Node 的代理身份；明文 secret 只在创建时返回，数据库只保存 hash。
 type RegistryNode struct {
 	ID              uuid.UUID  `db:"id" json:"id"`
 	OwnerUserID     uuid.UUID  `db:"owner_user_id" json:"owner_user_id"`
@@ -290,12 +290,12 @@ type RegistryFederationInvite struct {
 	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
 }
 
-// CloudListingLink 对应 cloud_listing_links 表。
+// RegistryListingLink 对应 registry_listing_links 表。
 //
-// 它表达“用户显式把某个本地 Agent 暴露成 Cloud Listing”的关系。
-type CloudListingLink struct {
+// 它表达“用户显式把某个本地 Agent 暴露成 Registry Listing”的关系。
+type RegistryListingLink struct {
 	ID                       uuid.UUID  `db:"id" json:"id"`
-	CloudListingID           uuid.UUID  `db:"cloud_listing_id" json:"cloud_listing_id"`
+	RegistryListingID        uuid.UUID  `db:"registry_listing_id" json:"registry_listing_id"`
 	RegistryNodeID           uuid.UUID  `db:"registry_node_id" json:"registry_node_id"`
 	LocalAgentID             uuid.UUID  `db:"local_agent_id" json:"local_agent_id"`
 	RoutingMode              string     `db:"routing_mode" json:"routing_mode"`
@@ -316,32 +316,32 @@ type CloudListingLink struct {
 
 // ProxyRun 对应 proxy_runs 表。
 //
-// 它是 Cloud Listing 经 Registry Node 拉取执行的云侧任务状态机。
+// 它是 Registry Listing 经 Registry Node 拉取执行的代理任务状态机。
 type ProxyRun struct {
-	ID                   uuid.UUID  `db:"id" json:"id"`
-	CloudRunID           uuid.UUID  `db:"cloud_run_id" json:"cloud_run_id"`
-	CloudListingLinkID   uuid.UUID  `db:"cloud_listing_link_id" json:"cloud_listing_link_id"`
-	CloudListingID       uuid.UUID  `db:"cloud_listing_id" json:"cloud_listing_id"`
-	RegistryNodeID       uuid.UUID  `db:"registry_node_id" json:"registry_node_id"`
-	LocalAgentID         uuid.UUID  `db:"local_agent_id" json:"local_agent_id"`
-	RequestingUserID     uuid.UUID  `db:"requesting_user_id" json:"requesting_user_id"`
-	IdempotencyKey       string     `db:"idempotency_key" json:"idempotency_key"`
-	Status               string     `db:"status" json:"status"`
-	PayloadPolicy        string     `db:"payload_policy" json:"payload_policy"`
-	PayloadRedactionKeys []string   `db:"payload_redaction_keys" json:"payload_redaction_keys"`
-	Input                []byte     `db:"input" json:"input"`
-	InputSummary         *string    `db:"input_summary" json:"input_summary"`
-	Output               []byte     `db:"output" json:"output"`
-	OutputSummary        *string    `db:"output_summary" json:"output_summary"`
-	ErrorCode            *string    `db:"error_code" json:"error_code"`
-	ErrorMessage         *string    `db:"error_message" json:"error_message"`
-	AttemptCount         int32      `db:"attempt_count" json:"attempt_count"`
-	MaxAttempts          int32      `db:"max_attempts" json:"max_attempts"`
-	NextRetryAt          *time.Time `db:"next_retry_at" json:"next_retry_at"`
-	ClaimedAt            *time.Time `db:"claimed_at" json:"claimed_at"`
-	FinishedAt           *time.Time `db:"finished_at" json:"finished_at"`
-	CreatedAt            time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt            time.Time  `db:"updated_at" json:"updated_at"`
+	ID                    uuid.UUID  `db:"id" json:"id"`
+	RegistryRunID         uuid.UUID  `db:"registry_run_id" json:"registry_run_id"`
+	RegistryListingLinkID uuid.UUID  `db:"registry_listing_link_id" json:"registry_listing_link_id"`
+	RegistryListingID     uuid.UUID  `db:"registry_listing_id" json:"registry_listing_id"`
+	RegistryNodeID        uuid.UUID  `db:"registry_node_id" json:"registry_node_id"`
+	LocalAgentID          uuid.UUID  `db:"local_agent_id" json:"local_agent_id"`
+	RequestingUserID      uuid.UUID  `db:"requesting_user_id" json:"requesting_user_id"`
+	IdempotencyKey        string     `db:"idempotency_key" json:"idempotency_key"`
+	Status                string     `db:"status" json:"status"`
+	PayloadPolicy         string     `db:"payload_policy" json:"payload_policy"`
+	PayloadRedactionKeys  []string   `db:"payload_redaction_keys" json:"payload_redaction_keys"`
+	Input                 []byte     `db:"input" json:"input"`
+	InputSummary          *string    `db:"input_summary" json:"input_summary"`
+	Output                []byte     `db:"output" json:"output"`
+	OutputSummary         *string    `db:"output_summary" json:"output_summary"`
+	ErrorCode             *string    `db:"error_code" json:"error_code"`
+	ErrorMessage          *string    `db:"error_message" json:"error_message"`
+	AttemptCount          int32      `db:"attempt_count" json:"attempt_count"`
+	MaxAttempts           int32      `db:"max_attempts" json:"max_attempts"`
+	NextRetryAt           *time.Time `db:"next_retry_at" json:"next_retry_at"`
+	ClaimedAt             *time.Time `db:"claimed_at" json:"claimed_at"`
+	FinishedAt            *time.Time `db:"finished_at" json:"finished_at"`
+	CreatedAt             time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt             time.Time  `db:"updated_at" json:"updated_at"`
 }
 
 // ProxyRunArtifact stores artifact references returned by a Registry Node for a
@@ -350,7 +350,7 @@ type ProxyRun struct {
 type ProxyRunArtifact struct {
 	ID               uuid.UUID `db:"id" json:"id"`
 	ProxyRunID       uuid.UUID `db:"proxy_run_id" json:"proxy_run_id"`
-	CloudRunID       uuid.UUID `db:"cloud_run_id" json:"cloud_run_id"`
+	RegistryRunID    uuid.UUID `db:"registry_run_id" json:"registry_run_id"`
 	SourceArtifactID string    `db:"source_artifact_id" json:"source_artifact_id"`
 	ArtifactType     string    `db:"artifact_type" json:"artifact_type"`
 	Title            string    `db:"title" json:"title"`
@@ -444,6 +444,25 @@ type Skill struct {
 	Description string    `db:"description" json:"description"`
 	SortOrder   int32     `db:"sort_order" json:"sort_order"`
 	CreatedAt   time.Time `db:"created_at" json:"created_at"`
+}
+
+// SkillProposal 对应 skill_proposals 表。
+//
+// 用户提交缺失 Skill 或导入 Agent 声明时写入，平台后续可合并到 skills。
+// 当 proposed_skill_id 已存在时 status=merged，并通过 matched_skill_id 指向内置 Skill。
+type SkillProposal struct {
+	ID              uuid.UUID  `db:"id" json:"id"`
+	OwnerUserID     uuid.UUID  `db:"owner_user_id" json:"owner_user_id"`
+	AgentID         *uuid.UUID `db:"agent_id" json:"agent_id"`
+	ProposedSkillID string     `db:"proposed_skill_id" json:"proposed_skill_id"`
+	Category        string     `db:"category" json:"category"`
+	Name            string     `db:"name" json:"name"`
+	Description     string     `db:"description" json:"description"`
+	Source          string     `db:"source" json:"source"`
+	Status          string     `db:"status" json:"status"`
+	MatchedSkillID  *string    `db:"matched_skill_id" json:"matched_skill_id"`
+	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time  `db:"updated_at" json:"updated_at"`
 }
 
 // AgentSkill 对应 agent_skills 关联表。

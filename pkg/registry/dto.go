@@ -1,6 +1,6 @@
 package registry
 
-// CreateNodeRequest creates a cloud-side identity for a self-hosted Registry /
+// CreateNodeRequest creates a registry-side identity for a self-hosted Registry /
 // Bridge Node. The returned node_secret is shown once.
 type CreateNodeRequest struct {
 	NodeName string   `json:"node_name" validate:"required,min=2,max=120"`
@@ -111,9 +111,8 @@ type RegistryFederationExchangeResponse struct {
 	RemoteCredentialHint string               `json:"remote_credential_hint"`
 }
 
-type CreateCloudListingRequest struct {
+type CreateRegistryListingRequest struct {
 	RegistryListingID    string   `json:"registry_listing_id,omitempty" validate:"omitempty,uuid"`
-	CloudListingID       string   `json:"cloud_listing_id,omitempty" validate:"omitempty,uuid"`
 	RegistryNodeID       string   `json:"registry_node_id" validate:"required,uuid"`
 	AgentID              string   `json:"agent_id" validate:"required,uuid"`
 	RoutingMode          string   `json:"routing_mode,omitempty" validate:"omitempty,oneof=direct_endpoint pull_proxy"`
@@ -121,10 +120,9 @@ type CreateCloudListingRequest struct {
 	PayloadRedactionKeys []string `json:"payload_redaction_keys,omitempty" validate:"omitempty,max=20,dive,min=1,max=80"`
 }
 
-type CloudListingLinkResponse struct {
+type RegistryListingLinkResponse struct {
 	ID                   string   `json:"id"`
 	RegistryListingID    string   `json:"registry_listing_id"`
-	CloudListingID       string   `json:"cloud_listing_id"`
 	RegistryNodeID       string   `json:"registry_node_id"`
 	NodeName             string   `json:"node_name"`
 	AgentID              string   `json:"agent_id"`
@@ -144,17 +142,16 @@ type CloudListingLinkResponse struct {
 	UpdatedAt            string   `json:"updated_at"`
 }
 
-type CloudListingListResponse struct {
-	Items []CloudListingLinkResponse `json:"items"`
+type RegistryListingListResponse struct {
+	Items []RegistryListingLinkResponse `json:"items"`
 }
 
-type UpdateCloudListingStatusRequest struct {
+type UpdateRegistryListingStatusRequest struct {
 	SyncStatus string `json:"sync_status" validate:"required,oneof=linked paused"`
 }
 
 type CreateProxyRunRequest struct {
-	RegistryListingID string         `json:"registry_listing_id,omitempty" validate:"required_without=CloudListingID,omitempty,uuid"`
-	CloudListingID    string         `json:"cloud_listing_id,omitempty" validate:"required_without=RegistryListingID,omitempty,uuid"`
+	RegistryListingID string         `json:"registry_listing_id" validate:"required,uuid"`
 	IdempotencyKey    string         `json:"idempotency_key,omitempty" validate:"omitempty,min=8,max=160"`
 	Input             map[string]any `json:"input,omitempty"`
 	InputSummary      string         `json:"input_summary,omitempty" validate:"omitempty,max=500"`
@@ -164,8 +161,7 @@ type CreateRemoteProxyRunRequest struct {
 	RegistryPeerID          string         `json:"registry_peer_id,omitempty" validate:"omitempty,uuid"`
 	RemoteAPIBaseURL        string         `json:"remote_api_base_url,omitempty" validate:"omitempty,url,max=500"`
 	RemoteBearerToken       string         `json:"remote_bearer_token,omitempty" validate:"omitempty,min=8,max=4096"`
-	RemoteRegistryListingID string         `json:"remote_registry_listing_id,omitempty" validate:"required_without=RemoteCloudListingID,omitempty,uuid"`
-	RemoteCloudListingID    string         `json:"remote_cloud_listing_id,omitempty" validate:"required_without=RemoteRegistryListingID,omitempty,uuid"`
+	RemoteRegistryListingID string         `json:"remote_registry_listing_id" validate:"required,uuid"`
 	IdempotencyKey          string         `json:"idempotency_key,omitempty" validate:"omitempty,min=8,max=160"`
 	Input                   map[string]any `json:"input,omitempty"`
 	InputSummary            string         `json:"input_summary,omitempty" validate:"omitempty,max=500"`
@@ -183,11 +179,9 @@ type CompleteProxyRunRequest struct {
 
 type ProxyRunResponse struct {
 	ID                    string         `json:"id"`
-	CloudRunID            string         `json:"cloud_run_id"`
+	RegistryRunID         string         `json:"registry_run_id"`
 	RegistryListingLinkID string         `json:"registry_listing_link_id"`
-	CloudListingLinkID    string         `json:"cloud_listing_link_id"`
 	RegistryListingID     string         `json:"registry_listing_id"`
-	CloudListingID        string         `json:"cloud_listing_id"`
 	RegistryNodeID        string         `json:"registry_node_id"`
 	LocalAgentID          string         `json:"local_agent_id"`
 	RequestingUserID      string         `json:"requesting_user_id"`
@@ -219,7 +213,7 @@ type RemoteProxyRunResponse struct {
 type ProxyRunArtifactResponse struct {
 	ID               string         `json:"id"`
 	ProxyRunID       string         `json:"proxy_run_id"`
-	CloudRunID       string         `json:"cloud_run_id"`
+	RegistryRunID    string         `json:"registry_run_id"`
 	SourceArtifactID string         `json:"source_artifact_id"`
 	ArtifactType     string         `json:"artifact_type"`
 	Title            string         `json:"title"`

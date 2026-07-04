@@ -861,8 +861,8 @@ func TestRegistryBridgeQueriesScanRowsAndScalars(t *testing.T) {
 	now := time.Date(2026, 6, 20, 17, 0, 0, 0, time.UTC)
 	baseURL := "https://node.example"
 	nodeValues := registryNodeRow(nodeID, ownerID, now, &baseURL)
-	linkValues := cloudListingLinkRow(linkID, listingID, nodeID, agentID, now)
-	linkRowValues := cloudListingLinkOwnerRow(linkID, listingID, nodeID, agentID, now)
+	linkValues := registryListingLinkRow(linkID, listingID, nodeID, agentID, now)
+	linkRowValues := registryListingLinkOwnerRow(linkID, listingID, nodeID, agentID, now)
 	dbtx := &fakeDBTX{
 		row:       fakeRow{values: nodeValues},
 		queryRows: &fakeRows{rows: [][]any{nodeValues}},
@@ -977,8 +977,8 @@ func TestRegistryBridgeQueriesScanRowsAndScalars(t *testing.T) {
 	}
 
 	dbtx.row = fakeRow{values: linkValues}
-	link, err := q.UpsertCloudListingLink(context.Background(), UpsertCloudListingLinkParams{
-		CloudListingID:       listingID,
+	link, err := q.UpsertRegistryListingLink(context.Background(), UpsertRegistryListingLinkParams{
+		RegistryListingID:    listingID,
 		RegistryNodeID:       nodeID,
 		LocalAgentID:         agentID,
 		RoutingMode:          "pull_proxy",
@@ -986,94 +986,94 @@ func TestRegistryBridgeQueriesScanRowsAndScalars(t *testing.T) {
 		PayloadRedactionKeys: []string{"secret"},
 	})
 	if err != nil {
-		t.Fatalf("UpsertCloudListingLink error = %v", err)
+		t.Fatalf("UpsertRegistryListingLink error = %v", err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "UpsertCloudListingLink")
+	requireSQLName(t, dbtx.queryRowSQL, "UpsertRegistryListingLink")
 	if link.ID != linkID || link.SyncStatus != "linked" || link.MetadataSyncedAt == nil {
-		t.Fatalf("UpsertCloudListingLink scan = %#v", link)
+		t.Fatalf("UpsertRegistryListingLink scan = %#v", link)
 	}
 
 	dbtx.row = fakeRow{values: linkValues}
-	ownerLink, err := q.GetCloudListingLinkForOwner(context.Background(), GetCloudListingLinkForOwnerParams{CloudListingID: listingID, OwnerUserID: ownerID})
+	ownerLink, err := q.GetRegistryListingLinkForOwner(context.Background(), GetRegistryListingLinkForOwnerParams{RegistryListingID: listingID, OwnerUserID: ownerID})
 	if err != nil {
-		t.Fatalf("GetCloudListingLinkForOwner error = %v", err)
+		t.Fatalf("GetRegistryListingLinkForOwner error = %v", err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "GetCloudListingLinkForOwner")
+	requireSQLName(t, dbtx.queryRowSQL, "GetRegistryListingLinkForOwner")
 	if ownerLink.ID != linkID || ownerLink.RegistryNodeID != nodeID {
-		t.Fatalf("GetCloudListingLinkForOwner scan = %#v", ownerLink)
+		t.Fatalf("GetRegistryListingLinkForOwner scan = %#v", ownerLink)
 	}
 	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{listingID, ownerID}) {
-		t.Fatalf("GetCloudListingLinkForOwner args = %#v", dbtx.queryRowArgs)
+		t.Fatalf("GetRegistryListingLinkForOwner args = %#v", dbtx.queryRowArgs)
 	}
 
 	dbtx.queryRows = &fakeRows{rows: [][]any{linkRowValues}}
-	links, err := q.ListCloudListingLinksByOwner(context.Background(), ownerID)
+	links, err := q.ListRegistryListingLinksByOwner(context.Background(), ownerID)
 	if err != nil {
-		t.Fatalf("ListCloudListingLinksByOwner error = %v", err)
+		t.Fatalf("ListRegistryListingLinksByOwner error = %v", err)
 	}
-	requireSQLName(t, dbtx.querySQL, "ListCloudListingLinksByOwner")
+	requireSQLName(t, dbtx.querySQL, "ListRegistryListingLinksByOwner")
 	if len(links) != 1 || links[0].NodeName != "edge-one" || links[0].AgentSlug != "local-agent" {
-		t.Fatalf("ListCloudListingLinksByOwner scan = %#v", links)
+		t.Fatalf("ListRegistryListingLinksByOwner scan = %#v", links)
 	}
 
 	dbtx.row = fakeRow{values: linkRowValues}
-	linkRow, err := q.GetCloudListingLinkRowForOwner(context.Background(), GetCloudListingLinkRowForOwnerParams{ID: linkID, OwnerUserID: ownerID})
+	linkRow, err := q.GetRegistryListingLinkRowForOwner(context.Background(), GetRegistryListingLinkRowForOwnerParams{ID: linkID, OwnerUserID: ownerID})
 	if err != nil {
-		t.Fatalf("GetCloudListingLinkRowForOwner error = %v", err)
+		t.Fatalf("GetRegistryListingLinkRowForOwner error = %v", err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "GetCloudListingLinkRowForOwner")
+	requireSQLName(t, dbtx.queryRowSQL, "GetRegistryListingLinkRowForOwner")
 	if linkRow.ID != linkID || linkRow.NodeName != "edge-one" || linkRow.AgentName != "Local Agent" {
-		t.Fatalf("GetCloudListingLinkRowForOwner scan = %#v", linkRow)
+		t.Fatalf("GetRegistryListingLinkRowForOwner scan = %#v", linkRow)
 	}
 	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{linkID, ownerID}) {
-		t.Fatalf("GetCloudListingLinkRowForOwner args = %#v", dbtx.queryRowArgs)
+		t.Fatalf("GetRegistryListingLinkRowForOwner args = %#v", dbtx.queryRowArgs)
 	}
 
 	pausedLinkRowValues := append([]any{}, linkRowValues...)
 	pausedLinkRowValues[10] = "paused"
 	dbtx.row = fakeRow{values: pausedLinkRowValues}
-	pausedLink, err := q.UpdateCloudListingLinkStatusForOwner(context.Background(), UpdateCloudListingLinkStatusForOwnerParams{
-		CloudListingID: listingID,
-		OwnerUserID:    ownerID,
-		SyncStatus:     "paused",
+	pausedLink, err := q.UpdateRegistryListingLinkStatusForOwner(context.Background(), UpdateRegistryListingLinkStatusForOwnerParams{
+		RegistryListingID: listingID,
+		OwnerUserID:       ownerID,
+		SyncStatus:        "paused",
 	})
 	if err != nil {
-		t.Fatalf("UpdateCloudListingLinkStatusForOwner error = %v", err)
+		t.Fatalf("UpdateRegistryListingLinkStatusForOwner error = %v", err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "UpdateCloudListingLinkStatusForOwner")
+	requireSQLName(t, dbtx.queryRowSQL, "UpdateRegistryListingLinkStatusForOwner")
 	if pausedLink.ID != linkID || pausedLink.SyncStatus != "paused" {
-		t.Fatalf("UpdateCloudListingLinkStatusForOwner scan = %#v", pausedLink)
+		t.Fatalf("UpdateRegistryListingLinkStatusForOwner scan = %#v", pausedLink)
 	}
 	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{listingID, ownerID, "paused"}) {
-		t.Fatalf("UpdateCloudListingLinkStatusForOwner args = %#v", dbtx.queryRowArgs)
+		t.Fatalf("UpdateRegistryListingLinkStatusForOwner args = %#v", dbtx.queryRowArgs)
 	}
 
 	dbtx.row = fakeRow{values: linkRowValues}
-	syncedLink, err := q.SyncCloudListingMetadataForOwner(context.Background(), SyncCloudListingMetadataForOwnerParams{CloudListingID: listingID, OwnerUserID: ownerID})
+	syncedLink, err := q.SyncRegistryListingMetadataForOwner(context.Background(), SyncRegistryListingMetadataForOwnerParams{RegistryListingID: listingID, OwnerUserID: ownerID})
 	if err != nil {
-		t.Fatalf("SyncCloudListingMetadataForOwner error = %v", err)
+		t.Fatalf("SyncRegistryListingMetadataForOwner error = %v", err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "SyncCloudListingMetadataForOwner")
+	requireSQLName(t, dbtx.queryRowSQL, "SyncRegistryListingMetadataForOwner")
 	if syncedLink.ID != linkID || syncedLink.MetadataSyncedAt == nil || syncedLink.AvailabilityStatus != "healthy" {
-		t.Fatalf("SyncCloudListingMetadataForOwner scan = %#v", syncedLink)
+		t.Fatalf("SyncRegistryListingMetadataForOwner scan = %#v", syncedLink)
 	}
 	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{listingID, ownerID}) {
-		t.Fatalf("SyncCloudListingMetadataForOwner args = %#v", dbtx.queryRowArgs)
+		t.Fatalf("SyncRegistryListingMetadataForOwner args = %#v", dbtx.queryRowArgs)
 	}
 
 	dbtx.row = fakeRow{values: []any{int32(4)}}
-	linkCount, err := q.CountCloudListingLinksByNode(context.Background(), nodeID)
+	linkCount, err := q.CountRegistryListingLinksByNode(context.Background(), nodeID)
 	if err != nil || linkCount != 4 {
-		t.Fatalf("CountCloudListingLinksByNode = %d, %v", linkCount, err)
+		t.Fatalf("CountRegistryListingLinksByNode = %d, %v", linkCount, err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "CountCloudListingLinksByNode")
+	requireSQLName(t, dbtx.queryRowSQL, "CountRegistryListingLinksByNode")
 
 	dbtx.row = fakeRow{values: []any{int32(5)}}
-	syncedCount, err := q.SyncCloudListingMetadataByNode(context.Background(), nodeID)
+	syncedCount, err := q.SyncRegistryListingMetadataByNode(context.Background(), nodeID)
 	if err != nil || syncedCount != 5 {
-		t.Fatalf("SyncCloudListingMetadataByNode = %d, %v", syncedCount, err)
+		t.Fatalf("SyncRegistryListingMetadataByNode = %d, %v", syncedCount, err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "SyncCloudListingMetadataByNode")
+	requireSQLName(t, dbtx.queryRowSQL, "SyncRegistryListingMetadataByNode")
 
 	dbtx.row = fakeRow{values: []any{int32(6)}}
 	count, err := q.CountPendingProxyRunsByNode(context.Background(), nodeID)
@@ -1225,7 +1225,7 @@ func TestProxyRunAndTaskCallbackQueriesScanRowsAndArgs(t *testing.T) {
 	linkID := uuid.New()
 	localAgentID := uuid.New()
 	proxyRunID := uuid.New()
-	cloudRunID := uuid.New()
+	registryRunID := uuid.New()
 	artifactID := uuid.New()
 	runID := uuid.New()
 	callerAgentID := uuid.New()
@@ -1251,9 +1251,9 @@ func TestProxyRunAndTaskCallbackQueriesScanRowsAndArgs(t *testing.T) {
 	responseStatus := int32(202)
 	responseBody := "accepted"
 	deliveryErr := "retry later"
-	linkValues := cloudListingLinkRow(linkID, listingID, nodeID, localAgentID, now)
-	proxyValues := proxyRunRow(proxyRunID, cloudRunID, linkID, listingID, nodeID, localAgentID, requestingUserID, now, &inputSummary, &outputSummary, &errCode, &errMsg, &nextRetry, &claimedAt, &finishedAt)
-	artifactValues := proxyRunArtifactRow(artifactID, proxyRunID, cloudRunID, now, &mimeType, &fileURI, &fileName, &fileSHA, &fileSize)
+	linkValues := registryListingLinkRow(linkID, listingID, nodeID, localAgentID, now)
+	proxyValues := proxyRunRow(proxyRunID, registryRunID, linkID, listingID, nodeID, localAgentID, requestingUserID, now, &inputSummary, &outputSummary, &errCode, &errMsg, &nextRetry, &claimedAt, &finishedAt)
+	artifactValues := proxyRunArtifactRow(artifactID, proxyRunID, registryRunID, now, &mimeType, &fileURI, &fileName, &fileSHA, &fileSize)
 	subscriptionValues := taskCallbackSubscriptionRow(subscriptionID, runID, ownerID, &callerAgentID, now, &pushScheme, &pushCredentials, nil)
 	deliveryValues := taskCallbackDeliveryRow(deliveryID, subscriptionID, runEventID, now, &responseStatus, &responseBody, &deliveryErr, &nextRetry, &deliveredAt)
 	dbtx := &fakeDBTX{
@@ -1262,24 +1262,24 @@ func TestProxyRunAndTaskCallbackQueriesScanRowsAndArgs(t *testing.T) {
 	}
 	q := New(dbtx)
 
-	link, err := q.GetCloudListingLinkForProxyRun(context.Background(), listingID)
+	link, err := q.GetRegistryListingLinkForProxyRun(context.Background(), listingID)
 	if err != nil {
-		t.Fatalf("GetCloudListingLinkForProxyRun error = %v", err)
+		t.Fatalf("GetRegistryListingLinkForProxyRun error = %v", err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "GetCloudListingLinkForProxyRun")
+	requireSQLName(t, dbtx.queryRowSQL, "GetRegistryListingLinkForProxyRun")
 	if link.ID != linkID || link.RegistryNodeID != nodeID {
-		t.Fatalf("GetCloudListingLinkForProxyRun scan = %#v", link)
+		t.Fatalf("GetRegistryListingLinkForProxyRun scan = %#v", link)
 	}
 
 	dbtx.row = fakeRow{values: proxyValues}
 	proxy, err := q.CreateProxyRun(context.Background(), CreateProxyRunParams{
-		CloudListingID:     listingID,
-		CloudListingLinkID: linkID,
-		RequestingUserID:   requestingUserID,
-		IdempotencyKey:     "idem-1",
-		Input:              []byte(`{"prompt":"hi"}`),
-		InputSummary:       &inputSummary,
-		NodeInput:          []byte(`{"node":"input"}`),
+		RegistryListingID:     listingID,
+		RegistryListingLinkID: linkID,
+		RequestingUserID:      requestingUserID,
+		IdempotencyKey:        "idem-1",
+		Input:                 []byte(`{"prompt":"hi"}`),
+		InputSummary:          &inputSummary,
+		NodeInput:             []byte(`{"node":"input"}`),
 	})
 	if err != nil {
 		t.Fatalf("CreateProxyRun error = %v", err)
@@ -1334,7 +1334,7 @@ func TestProxyRunAndTaskCallbackQueriesScanRowsAndArgs(t *testing.T) {
 	dbtx.row = fakeRow{values: artifactValues}
 	artifact, err := q.CreateProxyRunArtifact(context.Background(), CreateProxyRunArtifactParams{
 		ProxyRunID:       proxyRunID,
-		CloudRunID:       cloudRunID,
+		RegistryRunID:    registryRunID,
 		SourceArtifactID: "artifact-1",
 		ArtifactType:     "json",
 		Title:            "Proxy result",
@@ -1973,8 +1973,8 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			_, err := q.ListActiveRegistryNodesBySecretPrefix(ctx, "rn_live_abcd")
 			return err
 		}},
-		{name: "ListCloudListingLinksByOwner", run: func() error {
-			_, err := q.ListCloudListingLinksByOwner(ctx, id)
+		{name: "ListRegistryListingLinksByOwner", run: func() error {
+			_, err := q.ListRegistryListingLinksByOwner(ctx, id)
 			return err
 		}},
 		{name: "ListProxyRunArtifactsForRequester", run: func() error {
@@ -4030,7 +4030,7 @@ func registryFederationInviteRow(id, ownerID uuid.UUID, now, expiresAt time.Time
 	}
 }
 
-func cloudListingLinkRow(id, listingID, nodeID, agentID uuid.UUID, now time.Time) []any {
+func registryListingLinkRow(id, listingID, nodeID, agentID uuid.UUID, now time.Time) []any {
 	syncedAt := now.Add(30 * time.Second)
 	return []any{
 		id,
@@ -4054,8 +4054,8 @@ func cloudListingLinkRow(id, listingID, nodeID, agentID uuid.UUID, now time.Time
 	}
 }
 
-func cloudListingLinkOwnerRow(id, listingID, nodeID, agentID uuid.UUID, now time.Time) []any {
-	link := cloudListingLinkRow(id, listingID, nodeID, agentID, now)
+func registryListingLinkOwnerRow(id, listingID, nodeID, agentID uuid.UUID, now time.Time) []any {
+	link := registryListingLinkRow(id, listingID, nodeID, agentID, now)
 	return []any{
 		link[0],
 		link[1],
@@ -4080,14 +4080,14 @@ func cloudListingLinkOwnerRow(id, listingID, nodeID, agentID uuid.UUID, now time
 }
 
 func proxyRunRow(
-	id, cloudRunID, linkID, listingID, nodeID, localAgentID, requestingUserID uuid.UUID,
+	id, registryRunID, linkID, listingID, nodeID, localAgentID, requestingUserID uuid.UUID,
 	now time.Time,
 	inputSummary, outputSummary, errorCode, errorMessage *string,
 	nextRetryAt, claimedAt, finishedAt *time.Time,
 ) []any {
 	return []any{
 		id,
-		cloudRunID,
+		registryRunID,
 		linkID,
 		listingID,
 		nodeID,
@@ -4113,11 +4113,11 @@ func proxyRunRow(
 	}
 }
 
-func proxyRunArtifactRow(id, proxyRunID, cloudRunID uuid.UUID, now time.Time, mimeType, fileURI, fileName, fileSHA *string, fileSize *int64) []any {
+func proxyRunArtifactRow(id, proxyRunID, registryRunID uuid.UUID, now time.Time, mimeType, fileURI, fileName, fileSHA *string, fileSize *int64) []any {
 	return []any{
 		id,
 		proxyRunID,
-		cloudRunID,
+		registryRunID,
 		"artifact-1",
 		"json",
 		"Proxy result",

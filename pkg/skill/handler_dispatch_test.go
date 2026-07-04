@@ -72,6 +72,47 @@ func TestSkillHandlerDispatchesServiceSuccess(t *testing.T) {
 			t.Fatalf("body = %#v", body)
 		}
 	})
+
+	t.Run("create proposal", func(t *testing.T) {
+		proposalID := uuid.NewString()
+		mock := &mockSkillService{proposalResp: &SkillProposalItem{ID: proposalID, ProposedSkillID: "data/pdf-parse", Status: "pending"}}
+		c, rec := newSkillDispatchContext(
+			http.MethodPost,
+			"/skills/proposals",
+			`{"proposed_skill_id":"data/pdf-parse","category":"data","name":"PDF 解析","description":"解析 PDF 表格","source":"manual"}`,
+			userID.String(),
+			nil,
+		)
+
+		if err := NewHandler(mock, nil).CreateProposal(c); err != nil {
+			t.Fatalf("CreateProposal error = %v", err)
+		}
+		if rec.Code != http.StatusCreated || mock.proposalOwnerID != userID || mock.proposalReq.ProposedSkillID != "data/pdf-parse" {
+			t.Fatalf("proposal code=%d owner=%s req=%#v", rec.Code, mock.proposalOwnerID, mock.proposalReq)
+		}
+		var body SkillProposalItem
+		decodeSkillDispatchJSON(t, rec, &body)
+		if body.ID != proposalID || body.Status != "pending" {
+			t.Fatalf("body = %#v", body)
+		}
+	})
+
+	t.Run("list proposals", func(t *testing.T) {
+		mock := &mockSkillService{proposalListResp: []SkillProposalItem{{ID: uuid.NewString(), ProposedSkillID: "data/pdf-parse", Status: "pending"}}}
+		c, rec := newSkillDispatchContext(http.MethodGet, "/creator/skill-proposals", "", userID.String(), nil)
+
+		if err := NewHandler(mock, nil).ListProposals(c); err != nil {
+			t.Fatalf("ListProposals error = %v", err)
+		}
+		if rec.Code != http.StatusOK || mock.proposalListOwnerID != userID {
+			t.Fatalf("list proposals code=%d owner=%s", rec.Code, mock.proposalListOwnerID)
+		}
+		var body SkillProposalListResponse
+		decodeSkillDispatchJSON(t, rec, &body)
+		if len(body.Items) != 1 || body.Items[0].ProposedSkillID != "data/pdf-parse" {
+			t.Fatalf("body = %#v", body)
+		}
+	})
 }
 
 func TestSkillHandlerPropagatesServiceAndOwnershipErrors(t *testing.T) {
@@ -367,6 +408,15 @@ type mockSkillService struct {
 	listForAgentID   uuid.UUID
 	listForAgentResp []db.Skill
 	listForAgentErr  error
+
+	proposalOwnerID uuid.UUID
+	proposalReq     *CreateSkillProposalRequest
+	proposalResp    *SkillProposalItem
+	proposalErr     error
+
+	proposalListOwnerID uuid.UUID
+	proposalListResp    []SkillProposalItem
+	proposalListErr     error
 }
 
 func (m *mockSkillService) ListAll(context.Context) ([]db.Skill, error) {
@@ -383,6 +433,17 @@ func (m *mockSkillService) SetAgentSkills(_ context.Context, agentID uuid.UUID, 
 func (m *mockSkillService) ListForAgent(_ context.Context, agentID uuid.UUID) ([]db.Skill, error) {
 	m.listForAgentID = agentID
 	return m.listForAgentResp, m.listForAgentErr
+}
+
+func (m *mockSkillService) CreateProposal(_ context.Context, ownerID uuid.UUID, req *CreateSkillProposalRequest) (*SkillProposalItem, error) {
+	m.proposalOwnerID = ownerID
+	m.proposalReq = req
+	return m.proposalResp, m.proposalErr
+}
+
+func (m *mockSkillService) ListProposals(_ context.Context, ownerID uuid.UUID) ([]SkillProposalItem, error) {
+	m.proposalListOwnerID = ownerID
+	return m.proposalListResp, m.proposalListErr
 }
 
 type mockSkillAgentReader struct {

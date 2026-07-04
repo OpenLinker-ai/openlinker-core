@@ -35,6 +35,47 @@ func TestNormalizeSkillIDsAndDTOs(t *testing.T) {
 		SortOrder:   7,
 	})
 	require.Equal(t, SkillItem{ID: "data/sql", Category: "data", Name: "SQL", Description: "query", SortOrder: 7}, item)
+
+	req, err := normalizeSkillProposalRequest(&CreateSkillProposalRequest{
+		ProposedSkillID: " Data/PDF-Parse ",
+		Category:        " Data ",
+		Name:            " PDF 解析 ",
+		Description:     " 解析 PDF 表格 ",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "data/pdf-parse", req.ProposedSkillID)
+	require.Equal(t, "data", req.Category)
+	require.Equal(t, "manual", req.Source)
+
+	_, err = normalizeSkillProposalRequest(&CreateSkillProposalRequest{
+		ProposedSkillID: "-bad",
+		Category:        "data",
+		Name:            "Bad",
+		Description:     "bad skill",
+	})
+	require.Error(t, err)
+
+	proposalID := uuid.New()
+	agentID := uuid.New()
+	matched := "data/sql"
+	now := time.Date(2026, 7, 4, 10, 0, 0, 0, time.UTC)
+	proposal := toSkillProposalItem(&db.SkillProposal{
+		ID:              proposalID,
+		OwnerUserID:     uuid.New(),
+		AgentID:         &agentID,
+		ProposedSkillID: "data/sql",
+		Category:        "data",
+		Name:            "SQL",
+		Description:     "query",
+		Source:          "manual",
+		Status:          "merged",
+		MatchedSkillID:  &matched,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	})
+	require.Equal(t, proposalID.String(), proposal.ID)
+	require.Equal(t, agentID.String(), *proposal.AgentID)
+	require.Equal(t, &matched, proposal.MatchedSkillID)
 }
 
 func TestSkillContextAndPathHelpers(t *testing.T) {
@@ -211,6 +252,9 @@ func TestSkillHandlersValidateBeforeServiceDispatch(t *testing.T) {
 		{name: "set skills invalid id", call: (*Handler).SetAgentSkills, method: http.MethodPatch, path: "/api/v1/creator/agents/bad/skills", body: `{"skill_ids":["data/sql"]}`, userID: validUser, paramID: "bad", wantHTTP: http.StatusBadRequest, wantError: "id 不是合法 uuid"},
 		{name: "set skills invalid json", call: (*Handler).SetAgentSkills, method: http.MethodPatch, path: "/api/v1/creator/agents/" + validAgent + "/skills", body: `{`, userID: validUser, paramID: validAgent, wantHTTP: http.StatusBadRequest, wantError: "请求体格式错误"},
 		{name: "set skills validation", call: (*Handler).SetAgentSkills, method: http.MethodPatch, path: "/api/v1/creator/agents/" + validAgent + "/skills", body: `{}`, userID: validUser, paramID: validAgent, wantHTTP: http.StatusUnprocessableEntity, wantError: "SkillIDs"},
+		{name: "proposal missing user", call: (*Handler).CreateProposal, method: http.MethodPost, path: "/api/v1/skills/proposals", body: `{"proposed_skill_id":"data/pdf","category":"data","name":"PDF","description":"parse pdf"}`, wantHTTP: http.StatusUnauthorized, wantError: "认证失败"},
+		{name: "proposal invalid json", call: (*Handler).CreateProposal, method: http.MethodPost, path: "/api/v1/skills/proposals", body: `{`, userID: validUser, wantHTTP: http.StatusBadRequest, wantError: "请求体格式错误"},
+		{name: "proposal validation", call: (*Handler).CreateProposal, method: http.MethodPost, path: "/api/v1/skills/proposals", body: `{}`, userID: validUser, wantHTTP: http.StatusUnprocessableEntity, wantError: "ProposedSkillID"},
 	}
 
 	for _, tt := range tests {
@@ -294,7 +338,9 @@ func TestSkillAndBenchmarkRoutesAndRuntimeStatus(t *testing.T) {
 	}
 	for _, key := range []string{
 		http.MethodGet + " /api/v1/skills",
+		http.MethodPost + " /api/v1/skills/proposals",
 		http.MethodPatch + " /api/v1/creator/agents/:id/skills",
+		http.MethodGet + " /api/v1/creator/skill-proposals",
 		http.MethodGet + " /api/v1/benchmark/status",
 		http.MethodGet + " /api/v1/skills/:id/top-agents",
 		http.MethodGet + " /api/v1/skills/:category/:name/top-agents",

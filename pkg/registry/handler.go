@@ -31,10 +31,10 @@ type registryService interface {
 	CreateRegistryFederationInvite(context.Context, uuid.UUID, *CreateRegistryFederationInviteRequest) (*RegistryFederationInviteResponse, error)
 	ConsumeRegistryFederationInvite(context.Context, *ConsumeRegistryFederationInviteRequest) (*RegistryFederationExchangeMaterial, error)
 	ExchangeRegistryFederationInvite(context.Context, uuid.UUID, *ExchangeRegistryFederationInviteRequest) (*RegistryFederationExchangeResponse, error)
-	CreateCloudListing(context.Context, uuid.UUID, *CreateCloudListingRequest) (*CloudListingLinkResponse, error)
-	ListCloudListings(context.Context, uuid.UUID) ([]CloudListingLinkResponse, error)
-	UpdateCloudListingStatus(context.Context, uuid.UUID, uuid.UUID, *UpdateCloudListingStatusRequest) (*CloudListingLinkResponse, error)
-	SyncCloudListingMetadata(context.Context, uuid.UUID, uuid.UUID) (*CloudListingLinkResponse, error)
+	CreateRegistryListing(context.Context, uuid.UUID, *CreateRegistryListingRequest) (*RegistryListingLinkResponse, error)
+	ListRegistryListings(context.Context, uuid.UUID) ([]RegistryListingLinkResponse, error)
+	UpdateRegistryListingStatus(context.Context, uuid.UUID, uuid.UUID, *UpdateRegistryListingStatusRequest) (*RegistryListingLinkResponse, error)
+	SyncRegistryListingMetadata(context.Context, uuid.UUID, uuid.UUID) (*RegistryListingLinkResponse, error)
 	CreateProxyRun(context.Context, uuid.UUID, *CreateProxyRunRequest) (*ProxyRunResponse, error)
 	CreateRemoteProxyRun(context.Context, uuid.UUID, *CreateRemoteProxyRunRequest) (*RemoteProxyRunResponse, error)
 	GetProxyRun(context.Context, uuid.UUID, uuid.UUID) (*ProxyRunResponse, error)
@@ -53,62 +53,57 @@ func NewHandler(svc registryService) *Handler {
 
 // RegisterProtected mounts the first Registry / Bridge control-plane endpoints.
 //
-//	POST /registry-node/link       create a node identity and return node_secret once
-//	GET  /registry-node/nodes      list current user's nodes
-//	POST /registry-node/nodes/:id/revoke
-//	POST /registry-node/nodes/:id/rotate-secret
-//	POST /registry-node/heartbeat  node secret heartbeat
-//	POST /registry-node/metadata-sync node secret metadata sync
-//	POST /registry-peers            save a trusted remote Registry endpoint
-//	GET  /registry-peers            list trusted remote Registry endpoints
-//	DELETE /registry-peers/:id      remove a trusted remote Registry endpoint
-//	POST /registry-peers/federation-invitations create a one-time peer exchange token
-//	POST /registry-peers/federation-invitations/exchange consume a one-time peer exchange token
-//	POST /registry-peers/federation-exchanges exchange a remote invitation into a local peer
-//	POST /registry/listings        explicitly expose an Agent through a node
-//	GET  /registry/listings        list current user's explicit listing links
-//	PATCH /registry/listings/:id/status
-//	POST /registry/listings/:id/sync
-//	POST /cloud/listings           legacy alias for /registry/listings
-//	POST /proxy/runs               create a pending run for a Registry Listing
-//	POST /proxy/remote-runs        route to another OpenLinker Registry API
-//	GET  /proxy/runs/:id           inspect a requester-owned Proxy Run
-//	GET  /proxy/runs/:id/artifacts inspect requester-owned Proxy Run artifacts
-//	GET  /proxy/runs/:id/artifacts/:artifactID/download proxy-download artifact file_uri
-//	GET  /proxy/runs/claim         node secret claim next pending run
-//	POST /proxy/runs/:id/result    node secret complete a claimed run
+//	POST   /registry/nodes              create a node identity and return node_secret once
+//	GET    /registry/nodes              list current user's nodes
+//	POST   /registry/nodes/:id/revoke
+//	POST   /registry/nodes/:id/rotate-secret
+//	POST   /registry/nodes/heartbeat    node secret heartbeat
+//	POST   /registry/nodes/metadata-sync node secret metadata sync
+//	POST   /registry/peers              save a trusted remote Registry endpoint
+//	GET    /registry/peers              list trusted remote Registry endpoints
+//	DELETE /registry/peers/:id          remove a trusted remote Registry endpoint
+//	POST   /registry/peers/federation-invitations create a one-time peer exchange token
+//	POST   /registry/peers/federation-invitations/exchange consume a one-time peer exchange token
+//	POST   /registry/peers/federation-exchanges exchange a remote invitation into a local peer
+//	POST   /registry/listings           explicitly expose an Agent through a node
+//	GET    /registry/listings           list current user's explicit listing links
+//	PATCH  /registry/listings/:id/status
+//	POST   /registry/listings/:id/sync
+//	POST   /proxy/runs                  create a pending run for a Registry Listing
+//	POST   /proxy/remote-runs           route to another OpenLinker Registry API
+//	GET    /proxy/runs/:id              inspect a requester-owned Proxy Run
+//	GET    /proxy/runs/:id/artifacts    inspect requester-owned Proxy Run artifacts
+//	GET    /proxy/runs/:id/artifacts/:artifactID/download proxy-download artifact file_uri
+//	GET    /proxy/runs/claim            node secret claim next pending run
+//	POST   /proxy/runs/:id/result       node secret complete a claimed run
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
-	node := api.Group("/registry-node")
+	registryRoot := api.Group("/registry")
+
+	node := registryRoot.Group("/nodes")
 	node.POST("/heartbeat", h.Heartbeat)
 	node.POST("/metadata-sync", h.SyncNodeMetadata)
 
-	protectedNode := api.Group("/registry-node", jwtMiddleware)
-	protectedNode.POST("/link", h.CreateNode)
-	protectedNode.GET("/nodes", h.ListNodes)
-	protectedNode.POST("/nodes/:id/revoke", h.RevokeNode)
-	protectedNode.POST("/nodes/:id/rotate-secret", h.RotateNodeSecret)
+	protectedNode := registryRoot.Group("/nodes", jwtMiddleware)
+	protectedNode.POST("", h.CreateNode)
+	protectedNode.GET("", h.ListNodes)
+	protectedNode.POST("/:id/revoke", h.RevokeNode)
+	protectedNode.POST("/:id/rotate-secret", h.RotateNodeSecret)
 
-	peers := api.Group("/registry-peers", jwtMiddleware)
+	peers := registryRoot.Group("/peers", jwtMiddleware)
 	peers.POST("", h.CreateRegistryPeer)
 	peers.GET("", h.ListRegistryPeers)
 	peers.POST("/federation-invitations", h.CreateRegistryFederationInvite)
 	peers.POST("/federation-exchanges", h.ExchangeRegistryFederationInvite)
 	peers.DELETE("/:id", h.DeleteRegistryPeer)
 
-	publicPeers := api.Group("/registry-peers")
+	publicPeers := registryRoot.Group("/peers")
 	publicPeers.POST("/federation-invitations/exchange", h.ConsumeRegistryFederationInvite)
 
-	listings := api.Group("/registry/listings", jwtMiddleware)
-	listings.POST("", h.CreateCloudListing)
-	listings.GET("", h.ListCloudListings)
-	listings.PATCH("/:id/status", h.UpdateCloudListingStatus)
-	listings.POST("/:id/sync", h.SyncCloudListingMetadata)
-
-	legacyCloud := api.Group("/cloud", jwtMiddleware)
-	legacyCloud.POST("/listings", h.CreateCloudListing)
-	legacyCloud.GET("/listings", h.ListCloudListings)
-	legacyCloud.PATCH("/listings/:id/status", h.UpdateCloudListingStatus)
-	legacyCloud.POST("/listings/:id/sync", h.SyncCloudListingMetadata)
+	listings := registryRoot.Group("/listings", jwtMiddleware)
+	listings.POST("", h.CreateRegistryListing)
+	listings.GET("", h.ListRegistryListings)
+	listings.PATCH("/:id/status", h.UpdateRegistryListingStatus)
+	listings.POST("/:id/sync", h.SyncRegistryListingMetadata)
 
 	proxy := api.Group("/proxy")
 	proxy.GET("/runs/claim", h.ClaimProxyRun)
@@ -315,70 +310,70 @@ func (h *Handler) ExchangeRegistryFederationInvite(c echo.Context) error {
 	return c.JSON(http.StatusCreated, resp)
 }
 
-func (h *Handler) CreateCloudListing(c echo.Context) error {
+func (h *Handler) CreateRegistryListing(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
 	}
-	var req CreateCloudListingRequest
+	var req CreateRegistryListingRequest
 	if err := c.Bind(&req); err != nil {
 		return httpx.BadRequest("请求体格式错误")
 	}
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
 	}
-	resp, err := h.svc.CreateCloudListing(c.Request().Context(), uid, &req)
+	resp, err := h.svc.CreateRegistryListing(c.Request().Context(), uid, &req)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusCreated, resp)
 }
 
-func (h *Handler) ListCloudListings(c echo.Context) error {
+func (h *Handler) ListRegistryListings(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
 	}
-	items, err := h.svc.ListCloudListings(c.Request().Context(), uid)
+	items, err := h.svc.ListRegistryListings(c.Request().Context(), uid)
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, CloudListingListResponse{Items: items})
+	return c.JSON(http.StatusOK, RegistryListingListResponse{Items: items})
 }
 
-func (h *Handler) UpdateCloudListingStatus(c echo.Context) error {
+func (h *Handler) UpdateRegistryListingStatus(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
 	}
-	cloudListingID, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	registryListingID, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
 	if err != nil {
 		return httpx.BadRequest("id 不是合法 uuid")
 	}
-	var req UpdateCloudListingStatusRequest
+	var req UpdateRegistryListingStatusRequest
 	if err := c.Bind(&req); err != nil {
 		return httpx.BadRequest("请求体格式错误")
 	}
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
 	}
-	resp, err := h.svc.UpdateCloudListingStatus(c.Request().Context(), uid, cloudListingID, &req)
+	resp, err := h.svc.UpdateRegistryListingStatus(c.Request().Context(), uid, registryListingID, &req)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, resp)
 }
 
-func (h *Handler) SyncCloudListingMetadata(c echo.Context) error {
+func (h *Handler) SyncRegistryListingMetadata(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
 	}
-	cloudListingID, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	registryListingID, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
 	if err != nil {
 		return httpx.BadRequest("id 不是合法 uuid")
 	}
-	resp, err := h.svc.SyncCloudListingMetadata(c.Request().Context(), uid, cloudListingID)
+	resp, err := h.svc.SyncRegistryListingMetadata(c.Request().Context(), uid, registryListingID)
 	if err != nil {
 		return err
 	}

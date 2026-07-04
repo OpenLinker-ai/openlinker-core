@@ -93,6 +93,110 @@ func (q *Queries) ListAgentSkills(ctx context.Context, agentID uuid.UUID) ([]Ski
 	return items, nil
 }
 
+// scanSkillProposal 把一行扫描成 SkillProposal 结构。
+func scanSkillProposal(row interface {
+	Scan(dest ...any) error
+}, p *SkillProposal) error {
+	return row.Scan(
+		&p.ID,
+		&p.OwnerUserID,
+		&p.AgentID,
+		&p.ProposedSkillID,
+		&p.Category,
+		&p.Name,
+		&p.Description,
+		&p.Source,
+		&p.Status,
+		&p.MatchedSkillID,
+		&p.CreatedAt,
+		&p.UpdatedAt,
+	)
+}
+
+const createSkillProposal = `-- name: CreateSkillProposal :one
+INSERT INTO skill_proposals (
+  owner_user_id,
+  agent_id,
+  proposed_skill_id,
+  category,
+  name,
+  description,
+  source,
+  status,
+  matched_skill_id
+) VALUES (
+  $1, $2, $3, $4, $5, $6, $7, $8, $9
+)
+ON CONFLICT (owner_user_id, proposed_skill_id) DO UPDATE SET
+  agent_id = EXCLUDED.agent_id,
+  category = EXCLUDED.category,
+  name = EXCLUDED.name,
+  description = EXCLUDED.description,
+  source = EXCLUDED.source,
+  status = EXCLUDED.status,
+  matched_skill_id = EXCLUDED.matched_skill_id,
+  updated_at = NOW()
+RETURNING id, owner_user_id, agent_id, proposed_skill_id, category, name, description, source, status, matched_skill_id, created_at, updated_at`
+
+// CreateSkillProposalParams 是 CreateSkillProposal 的参数。
+type CreateSkillProposalParams struct {
+	OwnerUserID     uuid.UUID  `db:"owner_user_id" json:"owner_user_id"`
+	AgentID         *uuid.UUID `db:"agent_id" json:"agent_id"`
+	ProposedSkillID string     `db:"proposed_skill_id" json:"proposed_skill_id"`
+	Category        string     `db:"category" json:"category"`
+	Name            string     `db:"name" json:"name"`
+	Description     string     `db:"description" json:"description"`
+	Source          string     `db:"source" json:"source"`
+	Status          string     `db:"status" json:"status"`
+	MatchedSkillID  *string    `db:"matched_skill_id" json:"matched_skill_id"`
+}
+
+// CreateSkillProposal 创建或更新当前用户的 Skill Proposal。
+func (q *Queries) CreateSkillProposal(ctx context.Context, arg CreateSkillProposalParams) (SkillProposal, error) {
+	row := q.db.QueryRow(ctx, createSkillProposal,
+		arg.OwnerUserID,
+		arg.AgentID,
+		arg.ProposedSkillID,
+		arg.Category,
+		arg.Name,
+		arg.Description,
+		arg.Source,
+		arg.Status,
+		arg.MatchedSkillID,
+	)
+	var p SkillProposal
+	err := scanSkillProposal(row, &p)
+	return p, err
+}
+
+const listSkillProposalsByOwner = `-- name: ListSkillProposalsByOwner :many
+SELECT id, owner_user_id, agent_id, proposed_skill_id, category, name, description, source, status, matched_skill_id, created_at, updated_at
+FROM skill_proposals
+WHERE owner_user_id = $1
+ORDER BY updated_at DESC, created_at DESC
+LIMIT 100`
+
+// ListSkillProposalsByOwner 列出当前用户最近 100 条 Skill Proposal。
+func (q *Queries) ListSkillProposalsByOwner(ctx context.Context, ownerUserID uuid.UUID) ([]SkillProposal, error) {
+	rows, err := q.db.Query(ctx, listSkillProposalsByOwner, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SkillProposal
+	for rows.Next() {
+		var p SkillProposal
+		if err := scanSkillProposal(rows, &p); err != nil {
+			return nil, err
+		}
+		items = append(items, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 // 下面两条不是单条 sqlc 语句，由调用方在事务里 / 用数组传入：
 //
 //   ReplaceAgentSkills    DELETE + 批量 INSERT（事务内）

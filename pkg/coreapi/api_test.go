@@ -208,6 +208,8 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		"POST /api/v1/mcp/run_agent",
 		"POST /api/v1/workflows/:id/run",
 		"GET /api/v1/skills",
+		"POST /api/v1/skills/proposals",
+		"GET /api/v1/creator/skill-proposals",
 		"GET /api/v1/benchmark/status",
 		"POST /api/v1/delivery-targets",
 		"PATCH /api/v1/delivery-targets/:id",

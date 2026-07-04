@@ -103,8 +103,8 @@ func parseConfig(args []string, env map[string]string) (config, error) {
 	fs.Var(cfg.Endpoints, "agent-endpoint", "Repeatable local_agent_id=url mapping for claimed proxy runs")
 	fs.BoolVar(&cfg.Once, "once", false, "Run one heartbeat/claim cycle and exit")
 	fs.DurationVar(&cfg.Interval, "interval", cfg.Interval, "Polling interval")
-	fs.DurationVar(&cfg.HTTPTimeout, "timeout", cfg.HTTPTimeout, "HTTP timeout for cloud and local agent calls")
-	fs.BoolVar(&cfg.SyncMetadata, "sync-metadata", cfg.SyncMetadata, "Sync cloud listing metadata each cycle")
+	fs.DurationVar(&cfg.HTTPTimeout, "timeout", cfg.HTTPTimeout, "HTTP timeout for registry and local agent calls")
+	fs.BoolVar(&cfg.SyncMetadata, "sync-metadata", cfg.SyncMetadata, "Sync registry listing metadata each cycle")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -142,14 +142,14 @@ func normalizeAPIBase(raw string) string {
 	return raw + "/api/v1"
 }
 
-type cloudClient struct {
+type registryClient struct {
 	base       string
 	secret     string
 	httpClient *http.Client
 }
 
-func newCloudClient(cfg config) *cloudClient {
-	return &cloudClient{
+func newRegistryClient(cfg config) *registryClient {
+	return &registryClient{
 		base:   cfg.APIBase,
 		secret: cfg.NodeSecret,
 		httpClient: &http.Client{
@@ -171,23 +171,23 @@ type nodeMetadataSyncResponse struct {
 }
 
 type proxyRun struct {
-	ID               string         `json:"id"`
-	CloudRunID       string         `json:"cloud_run_id"`
-	CloudListingID   string         `json:"cloud_listing_id"`
-	RegistryNodeID   string         `json:"registry_node_id"`
-	LocalAgentID     string         `json:"local_agent_id"`
-	RequestingUserID string         `json:"requesting_user_id"`
-	Status           string         `json:"status"`
-	PayloadPolicy    string         `json:"payload_policy"`
-	Input            map[string]any `json:"input,omitempty"`
-	InputSummary     string         `json:"input_summary,omitempty"`
-	Output           map[string]any `json:"output,omitempty"`
-	OutputSummary    string         `json:"output_summary,omitempty"`
-	ErrorCode        string         `json:"error_code,omitempty"`
-	ErrorMessage     string         `json:"error_message,omitempty"`
-	AttemptCount     int32          `json:"attempt_count,omitempty"`
-	MaxAttempts      int32          `json:"max_attempts,omitempty"`
-	NextRetryAt      string         `json:"next_retry_at,omitempty"`
+	ID                string         `json:"id"`
+	RegistryRunID     string         `json:"registry_run_id"`
+	RegistryListingID string         `json:"registry_listing_id"`
+	RegistryNodeID    string         `json:"registry_node_id"`
+	LocalAgentID      string         `json:"local_agent_id"`
+	RequestingUserID  string         `json:"requesting_user_id"`
+	Status            string         `json:"status"`
+	PayloadPolicy     string         `json:"payload_policy"`
+	Input             map[string]any `json:"input,omitempty"`
+	InputSummary      string         `json:"input_summary,omitempty"`
+	Output            map[string]any `json:"output,omitempty"`
+	OutputSummary     string         `json:"output_summary,omitempty"`
+	ErrorCode         string         `json:"error_code,omitempty"`
+	ErrorMessage      string         `json:"error_message,omitempty"`
+	AttemptCount      int32          `json:"attempt_count,omitempty"`
+	MaxAttempts       int32          `json:"max_attempts,omitempty"`
+	NextRetryAt       string         `json:"next_retry_at,omitempty"`
 }
 
 type completeProxyRunRequest struct {
@@ -199,7 +199,7 @@ type completeProxyRunRequest struct {
 	Retryable     bool           `json:"retryable,omitempty"`
 }
 
-func (c *cloudClient) post(ctx context.Context, path string, body any, out any) error {
+func (c *registryClient) post(ctx context.Context, path string, body any, out any) error {
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -219,7 +219,7 @@ func (c *cloudClient) post(ctx context.Context, path string, body any, out any) 
 	return c.doJSON(req, out, http.StatusOK, http.StatusCreated, http.StatusAccepted)
 }
 
-func (c *cloudClient) get(ctx context.Context, path string, out any, okStatuses ...int) (*http.Response, error) {
+func (c *registryClient) get(ctx context.Context, path string, out any, okStatuses ...int) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {
 		return nil, err
@@ -241,17 +241,17 @@ func (c *cloudClient) get(ctx context.Context, path string, out any, okStatuses 
 		return resp, nil
 	}
 	defer resp.Body.Close()
-	return resp, fmt.Errorf("cloud API %s returned %d: %s", path, resp.StatusCode, readSmallBody(resp.Body))
+	return resp, fmt.Errorf("registry API %s returned %d: %s", path, resp.StatusCode, readSmallBody(resp.Body))
 }
 
-func (c *cloudClient) doJSON(req *http.Request, out any, okStatuses ...int) error {
+func (c *registryClient) doJSON(req *http.Request, out any, okStatuses ...int) error {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if !statusAllowed(resp.StatusCode, okStatuses...) {
-		return fmt.Errorf("cloud API %s returned %d: %s", req.URL.Path, resp.StatusCode, readSmallBody(resp.Body))
+		return fmt.Errorf("registry API %s returned %d: %s", req.URL.Path, resp.StatusCode, readSmallBody(resp.Body))
 	}
 	if out == nil {
 		return nil
@@ -273,23 +273,23 @@ func readSmallBody(r io.Reader) string {
 	return strings.TrimSpace(string(raw))
 }
 
-func (c *cloudClient) heartbeat(ctx context.Context) (*heartbeatResponse, error) {
+func (c *registryClient) heartbeat(ctx context.Context) (*heartbeatResponse, error) {
 	var resp heartbeatResponse
-	if err := c.post(ctx, "/registry-node/heartbeat", nil, &resp); err != nil {
+	if err := c.post(ctx, "/registry/nodes/heartbeat", nil, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-func (c *cloudClient) syncMetadata(ctx context.Context) (*nodeMetadataSyncResponse, error) {
+func (c *registryClient) syncMetadata(ctx context.Context) (*nodeMetadataSyncResponse, error) {
 	var resp nodeMetadataSyncResponse
-	if err := c.post(ctx, "/registry-node/metadata-sync", nil, &resp); err != nil {
+	if err := c.post(ctx, "/registry/nodes/metadata-sync", nil, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-func (c *cloudClient) claim(ctx context.Context) (*proxyRun, bool, error) {
+func (c *registryClient) claim(ctx context.Context) (*proxyRun, bool, error) {
 	var run proxyRun
 	resp, err := c.get(ctx, "/proxy/runs/claim", &run, http.StatusOK, http.StatusNoContent)
 	if err != nil {
@@ -301,7 +301,7 @@ func (c *cloudClient) claim(ctx context.Context) (*proxyRun, bool, error) {
 	return &run, true, nil
 }
 
-func (c *cloudClient) complete(ctx context.Context, runID string, req completeProxyRunRequest) (*proxyRun, error) {
+func (c *registryClient) complete(ctx context.Context, runID string, req completeProxyRunRequest) (*proxyRun, error) {
 	var resp proxyRun
 	if err := c.post(ctx, "/proxy/runs/"+url.PathEscape(runID)+"/result", req, &resp); err != nil {
 		return nil, err
@@ -328,7 +328,7 @@ type agentError struct {
 }
 
 type daemon struct {
-	cloud      *cloudClient
+	registry   *registryClient
 	endpoints  endpointMap
 	httpClient *http.Client
 	logger     *log.Logger
@@ -339,7 +339,7 @@ func newDaemon(cfg config, logger *log.Logger) *daemon {
 		logger = log.New(io.Discard, "", 0)
 	}
 	return &daemon{
-		cloud:      newCloudClient(cfg),
+		registry:   newRegistryClient(cfg),
 		endpoints:  cfg.Endpoints,
 		httpClient: &http.Client{Timeout: cfg.HTTPTimeout},
 		logger:     logger,
@@ -347,14 +347,14 @@ func newDaemon(cfg config, logger *log.Logger) *daemon {
 }
 
 func (d *daemon) runCycle(ctx context.Context, syncMetadata bool) error {
-	hb, err := d.cloud.heartbeat(ctx)
+	hb, err := d.registry.heartbeat(ctx)
 	if err != nil {
 		return fmt.Errorf("heartbeat: %w", err)
 	}
 	d.logger.Printf("heartbeat node=%s status=%s linked=%d pending=%d", hb.NodeID, hb.HeartbeatStatus, hb.LinkedListingCount, hb.PendingRunCount)
 
 	if syncMetadata {
-		synced, err := d.cloud.syncMetadata(ctx)
+		synced, err := d.registry.syncMetadata(ctx)
 		if err != nil {
 			return fmt.Errorf("metadata sync: %w", err)
 		}
@@ -362,7 +362,7 @@ func (d *daemon) runCycle(ctx context.Context, syncMetadata bool) error {
 	}
 
 	for {
-		run, ok, err := d.cloud.claim(ctx)
+		run, ok, err := d.registry.claim(ctx)
 		if err != nil {
 			return fmt.Errorf("claim proxy run: %w", err)
 		}
@@ -370,9 +370,9 @@ func (d *daemon) runCycle(ctx context.Context, syncMetadata bool) error {
 			d.logger.Printf("claim no pending runs")
 			return nil
 		}
-		d.logger.Printf("claimed proxy_run=%s cloud_run=%s local_agent=%s", run.ID, run.CloudRunID, run.LocalAgentID)
+		d.logger.Printf("claimed proxy_run=%s registry_run=%s local_agent=%s", run.ID, run.RegistryRunID, run.LocalAgentID)
 		result := d.invokeLocalAgent(ctx, run)
-		completed, err := d.cloud.complete(ctx, run.ID, result)
+		completed, err := d.registry.complete(ctx, run.ID, result)
 		if err != nil {
 			return fmt.Errorf("complete proxy run %s: %w", run.ID, err)
 		}
@@ -392,15 +392,15 @@ func (d *daemon) invokeLocalAgent(ctx context.Context, run *proxyRun) completePr
 	}
 	payload := agentRequest{
 		Input: input,
-		RunID: run.CloudRunID,
+		RunID: run.RegistryRunID,
 		Metadata: map[string]any{
-			"platform":         "openlinker",
-			"proxy_run_id":     run.ID,
-			"cloud_run_id":     run.CloudRunID,
-			"cloud_listing_id": run.CloudListingID,
-			"registry_node_id": run.RegistryNodeID,
-			"local_agent_id":   run.LocalAgentID,
-			"payload_policy":   run.PayloadPolicy,
+			"platform":            "openlinker",
+			"proxy_run_id":        run.ID,
+			"registry_run_id":     run.RegistryRunID,
+			"registry_listing_id": run.RegistryListingID,
+			"registry_node_id":    run.RegistryNodeID,
+			"local_agent_id":      run.LocalAgentID,
+			"payload_policy":      run.PayloadPolicy,
 		},
 	}
 	raw, err := json.Marshal(payload)
@@ -412,7 +412,7 @@ func (d *daemon) invokeLocalAgent(ctx context.Context, run *proxyRun) completePr
 		return failedResult("LOCAL_AGENT_REQUEST_ERROR", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-OpenLinker-Run-Id", run.CloudRunID)
+	req.Header.Set("X-OpenLinker-Run-Id", run.RegistryRunID)
 	req.Header.Set("X-OpenLinker-Proxy-Run-Id", run.ID)
 	req.Header.Set("X-OpenLinker-Registry-Node-Id", run.RegistryNodeID)
 
