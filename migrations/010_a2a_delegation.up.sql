@@ -15,7 +15,7 @@ CREATE TABLE agent_runtime_tokens (
     revoked_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT agent_runtime_tokens_name_len CHECK (char_length(name) BETWEEN 1 AND 80),
-    CONSTRAINT agent_runtime_tokens_prefix_format CHECK (prefix ~ '^rt_live_[a-f0-9]+$'),
+    CONSTRAINT agent_runtime_tokens_prefix_format CHECK (prefix ~ '^ol_agent_[a-f0-9]+$'),
     CONSTRAINT agent_runtime_tokens_call_scope CHECK ('agent:call' = ANY(scopes))
 );
 

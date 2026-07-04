@@ -5,11 +5,11 @@ BEGIN;
 ALTER TABLE agent_registration_tokens
     DROP CONSTRAINT IF EXISTS agent_registration_tokens_prefix_format,
     ADD CONSTRAINT agent_registration_tokens_prefix_format
-        CHECK (prefix ~ '^br_live_[a-f0-9]+$');
+        CHECK (prefix ~ '^ol_agent_[a-f0-9]+$');
 
 ALTER TABLE agent_runtime_tokens
     DROP CONSTRAINT IF EXISTS agent_runtime_tokens_prefix_format,
     ADD CONSTRAINT agent_runtime_tokens_prefix_format
-        CHECK (prefix ~ '^rt_live_[a-f0-9]+$');
+        CHECK (prefix ~ '^ol_agent_[a-f0-9]+$');
 
 COMMIT;

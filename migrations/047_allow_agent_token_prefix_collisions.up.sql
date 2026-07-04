@@ -2,7 +2,7 @@
 -- Token prefix is a short lookup hint, not an identifier. Verification already
 -- handles multiple candidates with the same prefix by bcrypt-comparing the full
 -- plaintext token, so uniqueness here causes random production insert failures
--- once enough ol_live_* tokens have been minted.
+-- once enough ol_agent_* tokens have been minted.
 
 BEGIN;
 

@@ -2,10 +2,8 @@
 -- Phase 2 缺口 1：Agent 自注册访问令牌。
 -- docs/29 §2，docs/22 §2.1。
 --
--- 注册用途访问令牌与 Agent 绑定用途访问令牌解耦：
---   registration 短期、与创作者绑定，只能换 (1..max_agents) 次注册；
---   agent-bound 长期、与单个 Agent 绑定，由 a2a / runtime 调用流复用。
--- 新签发令牌统一为 ol_live_xxx；br_live_xxx / rt_live_xxx 仅为历史兼容前缀。
+-- 注册用途访问令牌与 Agent 绑定用途访问令牌已经统一为同一种
+-- ol_agent_* Agent Token；状态和绑定关系决定它处于待注册还是运行态。
 --
 -- 用尽 (used_count >= max_agents) 或过期 (expires_at <= NOW()) 或撤销 (revoked_at IS NOT NULL)
 -- 任一条件成立即视为失效。
@@ -27,7 +25,7 @@ CREATE TABLE agent_registration_tokens (
     CONSTRAINT agent_registration_tokens_label_len
         CHECK (char_length(label) BETWEEN 1 AND 80),
     CONSTRAINT agent_registration_tokens_prefix_format
-        CHECK (prefix ~ '^br_live_[a-f0-9]+$'),
+        CHECK (prefix ~ '^ol_agent_[a-f0-9]+$'),
     CONSTRAINT agent_registration_tokens_max_agents_range
         CHECK (max_agents BETWEEN 1 AND 10),
     CONSTRAINT agent_registration_tokens_used_nonneg

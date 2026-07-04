@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS agent_registration_tokens (
     CONSTRAINT agent_registration_tokens_label_len
         CHECK (char_length(label) BETWEEN 1 AND 80),
     CONSTRAINT agent_registration_tokens_prefix_format
-        CHECK (prefix ~ '^ol_live_[a-f0-9]+$'),
+        CHECK (prefix ~ '^ol_agent_[a-f0-9]+$'),
     CONSTRAINT agent_registration_tokens_max_agents_range
         CHECK (max_agents BETWEEN 1 AND 10),
     CONSTRAINT agent_registration_tokens_used_nonneg
@@ -69,7 +69,7 @@ ALTER TABLE agent_runtime_tokens
     ADD CONSTRAINT agent_runtime_tokens_name_len
         CHECK (char_length(name) BETWEEN 1 AND 80),
     ADD CONSTRAINT agent_runtime_tokens_prefix_format
-        CHECK (prefix ~ '^ol_live_[a-f0-9]+$'),
+        CHECK (prefix ~ '^ol_agent_[a-f0-9]+$'),
     ADD CONSTRAINT agent_runtime_tokens_scopes_nonempty
         CHECK (cardinality(scopes) > 0),
     ADD CONSTRAINT agent_runtime_tokens_scopes_known
