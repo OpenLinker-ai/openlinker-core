@@ -59,8 +59,8 @@ func TestValidateProductionConfig(t *testing.T) {
 		t.Fatalf("missing frontend error = %v", err)
 	}
 	if err := validateProductionConfig(&config.Config{
-		Env:             "production",
-		FrontendURL:     "https://app.example",
+		Env:                "production",
+		FrontendURL:        "https://app.example",
 		UserTokenVerifyURL: "https://cloud.example/internal/user-tokens/verify",
 	}); err == nil || !strings.Contains(err.Error(), "OPENLINKER_INTERNAL_TOKEN") {
 		t.Fatalf("missing verify secret error = %v", err)
@@ -118,8 +118,11 @@ func TestNewHTTPServerSetsConnectionTimeouts(t *testing.T) {
 	}
 }
 
-func TestRequestLoggerReturnsHandlerError(t *testing.T) {
+func TestRequestLoggerHandlesHandlerErrorBeforeLogging(t *testing.T) {
 	e := echo.New()
+	e.HTTPErrorHandler = func(err error, c echo.Context) {
+		_ = httpx.SendError(c, err)
+	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
 	req.Header.Set(echo.HeaderXRequestID, "rid-123")
 	rec := httptest.NewRecorder()
@@ -129,8 +132,11 @@ func TestRequestLoggerReturnsHandlerError(t *testing.T) {
 	err := requestLogger()(func(c echo.Context) error {
 		return sentinel
 	})(c)
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("requestLogger returned %v, want sentinel", err)
+	if err != nil {
+		t.Fatalf("requestLogger returned %v, want nil", err)
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
 	}
 }
 

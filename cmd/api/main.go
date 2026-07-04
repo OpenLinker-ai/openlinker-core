@@ -145,6 +145,9 @@ func requestLogger() echo.MiddlewareFunc {
 		return func(c echo.Context) error {
 			start := time.Now()
 			err := next(c)
+			if err != nil {
+				c.Error(err)
+			}
 			req := c.Request()
 			res := c.Response()
 			ev := log.Info()
@@ -158,7 +161,7 @@ func requestLogger() echo.MiddlewareFunc {
 				Dur("dur", time.Since(start)).
 				Str("rid", res.Header().Get(echo.HeaderXRequestID)).
 				Msg("http")
-			return err
+			return nil
 		}
 	}
 }
