@@ -20,7 +20,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/task"
 )
 
-const truncateMCPServiceTables = "TRUNCATE run_requirement_evidence, run_artifact_chunks, run_artifacts, run_messages, run_events, task_callback_deliveries, wallets, runs, charges, withdrawals, task_queries, agent_tokens, agent_availability_snapshots, agent_skills, agents, users RESTART IDENTITY CASCADE"
+const truncateMCPServiceTables = "TRUNCATE run_requirement_evidence, run_artifact_chunks, run_artifacts, run_messages, run_events, task_callback_deliveries, runs, task_queries, agent_tokens, agent_availability_snapshots, agent_skills, agents, users RESTART IDENTITY CASCADE"
 
 func TestServiceBridgesMarketRuntimeAndRunReads(t *testing.T) {
 	pool := setupMCPServiceTestDB(t)

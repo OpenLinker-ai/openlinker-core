@@ -21,7 +21,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/registry"
 )
 
-const truncateRegistryBridgeTables = "TRUNCATE proxy_runs, registry_peers, registry_federation_invites, registry_listing_links, registry_nodes, agent_skills, agents, wallets, users RESTART IDENTITY CASCADE"
+const truncateRegistryBridgeTables = "TRUNCATE proxy_runs, registry_peers, registry_federation_invites, registry_listing_links, registry_nodes, agent_skills, agents, users RESTART IDENTITY CASCADE"
 const registryTestDBTimeout = 30 * time.Second
 
 func newLocalRegistryService(pool *pgxpool.Pool) *registry.Service {

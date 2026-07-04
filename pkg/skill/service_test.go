@@ -17,7 +17,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/skill"
 )
 
-const truncateSkillTables = "TRUNCATE webhook_deliveries, user_tokens, wallets, runs, charges, withdrawals, task_queries, agent_tokens, agent_availability_snapshots, agent_skills, agents, users RESTART IDENTITY CASCADE"
+const truncateSkillTables = "TRUNCATE webhook_deliveries, runs, task_queries, agent_tokens, agent_availability_snapshots, agent_skills, agents, users RESTART IDENTITY CASCADE"
 
 func setupSkillTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()

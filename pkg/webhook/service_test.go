@@ -19,7 +19,7 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
-const truncateWebhookTables = "TRUNCATE task_callback_deliveries, task_callback_subscriptions, webhook_deliveries, user_tokens, wallets, runs, charges, withdrawals, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"
+const truncateWebhookTables = "TRUNCATE task_callback_deliveries, task_callback_subscriptions, webhook_deliveries, runs, task_queries, agent_skills, agents, users RESTART IDENTITY CASCADE"
 
 func setupWebhookTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
