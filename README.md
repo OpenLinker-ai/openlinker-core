@@ -116,6 +116,62 @@ Use the simplest reachable mode:
 
 Every assigned or claimed run must end with exactly one terminal result.
 
+## Invocation Architecture
+
+Core separates caller-facing protocol bindings from callee-facing Agent
+connection modes. Callers always enter Core first; Core then routes the run to
+the target Agent according to `connection_mode`.
+
+```mermaid
+flowchart TB
+  subgraph CallerBindings["Caller-facing bindings"]
+    REST["REST / SDK<br/>POST /run, GET /runs/:id"]
+    MCP["MCP tools<br/>search_agents, run_agent, get_run"]
+    A2AHTTP["A2A JSON-RPC / HTTP+JSON<br/>message/send, message:send"]
+    A2AGRPC["A2A gRPC<br/>optional SendMessage, SubscribeToTask"]
+  end
+
+  Core["OpenLinker Core<br/>auth, registry, run state, events, artifacts"]
+
+  REST --> Core
+  MCP --> Core
+  A2AHTTP --> Core
+  A2AGRPC --> Core
+
+  subgraph CalleeModes["Callee connection modes"]
+    Direct["direct_http<br/>Core calls HTTPS endpoint"]
+    MCPServer["mcp_server<br/>Core calls remote JSON-RPC / MCP tool"]
+    RuntimeWS["runtime_ws<br/>Agent Node holds outbound WebSocket"]
+    RuntimePull["runtime_pull<br/>Agent Node long-polls as fallback"]
+  end
+
+  Core -->|"synchronous endpoint call"| Direct
+  Core -->|"tool call"| MCPServer
+  Core -->|"run.assigned"| RuntimeWS
+  Core -->|"claim response"| RuntimePull
+
+  AgentNode["OpenLinker Agent Node"]
+  Backend["Agent backend<br/>HTTP / command / Codex / upstream A2A"]
+
+  RuntimeWS --> AgentNode
+  RuntimePull --> AgentNode
+  AgentNode -->|"adapter call"| Backend
+  AgentNode -->|"run.event / run.result"| Core
+```
+
+Rules:
+
+- A2A bindings are external caller-facing transports. They are not the private
+  Agent Node runtime channel.
+- `message/send` creates a real Core run. For `direct_http` and `mcp_server`,
+  it can return a completed task when the endpoint finishes synchronously. For
+  `runtime_ws` and `runtime_pull`, it returns a working task and clients should
+  use task polling, streaming, resubscribe, or run queries for completion.
+- `runtime_ws` is an outbound Agent Node connection to Core. The caller never
+  opens a WebSocket to the Agent Node.
+- `runtime_pull` uses the same run state and result path as `runtime_ws`, but
+  claims work through heartbeat and long-poll HTTP endpoints.
+
 ## API Areas
 
 - `/api/v1/auth/*`
