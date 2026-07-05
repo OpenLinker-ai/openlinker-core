@@ -1,0 +1,198 @@
+name: Images and Artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: openlinker-core-api
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  build-image:
+    name: Build image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          short_sha="${GITHUB_SHA::12}"
+          image="${REGISTRY}/${owner}/${IMAGE_NAME}"
+          version="sha-${short_sha}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME}"
+          fi
+
+          {
+            echo "image=${image}"
+            echo "short_sha=${short_sha}"
+            echo "version=${version}"
+            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "tags<<EOF"
+            echo "${image}:sha-${short_sha}"
+            if [[ "${GITHUB_REF_TYPE}" == "branch" ]]; then
+              echo "${image}:${GITHUB_REF_NAME//\//-}"
+            fi
+            if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+              echo "${image}:${GITHUB_REF_NAME}"
+              echo "${image}:latest"
+            fi
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.PLATFORMS }}
+          build-args: |
+            OPENLINKER_GIT_SHA=${{ github.sha }}
+            OPENLINKER_RELEASE_ID=${{ steps.meta.outputs.version }}
+            OPENLINKER_DEPLOYED_AT=${{ steps.meta.outputs.created }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=${{ env.IMAGE_NAME }}
+          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}
+          cache-to: type=gha,scope=${{ env.IMAGE_NAME }},mode=max
+
+      - name: Inspect pushed manifest
+        shell: bash
+        run: docker buildx imagetools inspect "${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.short_sha }}"
+
+  package-binaries:
+    name: Package ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Package binary
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+            version="sha-${GITHUB_SHA::12}"
+          fi
+
+          artifact_base="openlinker-core-api-${version}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          work_dir="${RUNNER_TEMP}/${artifact_base}"
+          dist_dir="${GITHUB_WORKSPACE}/dist"
+          mkdir -p "${work_dir}" "${dist_dir}"
+
+          binary_name="openlinker-core-api"
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            binary_name="${binary_name}.exe"
+          fi
+
+          CGO_ENABLED=0 GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" \
+            go build -trimpath -ldflags="-s -w" -o "${work_dir}/${binary_name}" ./cmd/api
+
+          cp README.md LICENSE "${work_dir}/" 2>/dev/null || true
+          cp -R migrations "${work_dir}/migrations"
+
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            archive="${dist_dir}/${artifact_base}.zip"
+            (cd "${RUNNER_TEMP}" && zip -qr "${archive}" "${artifact_base}")
+          else
+            archive="${dist_dir}/${artifact_base}.tar.gz"
+            tar -C "${RUNNER_TEMP}" -czf "${archive}" "${artifact_base}"
+          fi
+
+          (cd "${dist_dir}" && sha256sum "$(basename "${archive}")" > "$(basename "${archive}").sha256")
+          echo "artifact_base=${artifact_base}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_base }}
+          path: |
+            dist/${{ steps.package.outputs.artifact_base }}.*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-release:
+    name: Publish GitHub release artifacts
+    if: github.ref_type == 'tag'
+    needs:
+      - build-image
+      - package-binaries
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "${tag}" >/dev/null 2>&1; then
+            gh release create "${tag}" --title "${tag}" --generate-notes
+          fi
+          gh release upload "${tag}" dist/* --clobber

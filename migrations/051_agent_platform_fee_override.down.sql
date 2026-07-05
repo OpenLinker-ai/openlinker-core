@@ -1,0 +1,1 @@
+-- Deprecated no-op; see 058 for cleanup of older databases.

@@ -1,0 +1,93 @@
+package config
+
+import (
+	"os"
+	"testing"
+)
+
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	original, ok := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if ok {
+			_ = os.Setenv(key, original)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
+}
+
+func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://dev:dev@localhost/openlinker_test")
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("OAUTH_SESSION_SECRET", "oauth-secret")
+	t.Setenv("OPENLINKER_INTERNAL_TOKEN", "internal-secret")
+	t.Setenv("ENV", "production")
+	t.Setenv("PORT", "9090")
+	t.Setenv("ALLOW_LOCAL_HTTP_ENDPOINTS", "true")
+	t.Setenv("OAUTH_CALLBACK_BASE_URL", "https://openlinker.test")
+	t.Setenv("OAUTH_ALLOWED_FRONTEND_ORIGINS", "https://*.openlinker.test")
+	t.Setenv("LLM_COMPLETE_URL", "https://cloud.internal/llm")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !cfg.IsProduction() {
+		t.Fatalf("expected production env")
+	}
+	if cfg.Port != 9090 {
+		t.Fatalf("Port = %d", cfg.Port)
+	}
+	if cfg.RedisURL != "redis://localhost:6379/0" {
+		t.Fatalf("unexpected default RedisURL: %q", cfg.RedisURL)
+	}
+	if cfg.OAuthCallbackBaseURL != "https://openlinker.test" {
+		t.Fatalf("OAuthCallbackBaseURL = %q", cfg.OAuthCallbackBaseURL)
+	}
+	if cfg.OAuthAllowedFrontendOrigins != "https://*.openlinker.test" {
+		t.Fatalf("OAuthAllowedFrontendOrigins = %q", cfg.OAuthAllowedFrontendOrigins)
+	}
+	if cfg.OAuthSessionSecret != "oauth-secret" {
+		t.Fatalf("OAuthSessionSecret = %q", cfg.OAuthSessionSecret)
+	}
+	if cfg.InternalToken != "internal-secret" {
+		t.Fatalf("InternalToken = %q", cfg.InternalToken)
+	}
+	if cfg.LLMCompleteURL != "https://cloud.internal/llm" {
+		t.Fatalf("LLMCompleteURL = %q", cfg.LLMCompleteURL)
+	}
+	if cfg.DBMaxConns != 20 || cfg.DBMinConns != 2 || cfg.DBMaxConnLifetimeMinutes != 30 ||
+		cfg.DBMaxConnIdleTimeMinutes != 5 || cfg.DBHealthCheckPeriodSeconds != 60 {
+		t.Fatalf("unexpected db pool defaults: %#v", cfg)
+	}
+	if !cfg.AllowLocalHTTPEndpoints {
+		t.Fatalf("expected AllowLocalHTTPEndpoints from env")
+	}
+	if cfg.HTTPRateLimitRate != 50 || cfg.HTTPRateLimitBurst != 200 || cfg.HTTPRateLimitPeriodSec != 1 {
+		t.Fatalf("unexpected http rate limit defaults: %#v", cfg)
+	}
+	if cfg.RuntimePullRunWorkerTimeoutBatchSize != 50 {
+		t.Fatalf("unexpected runtime pull batch default: %d", cfg.RuntimePullRunWorkerTimeoutBatchSize)
+	}
+	if !cfg.RuntimeEndpointRunWorkerEnabled {
+		t.Fatalf("expected RuntimeEndpointRunWorkerEnabled default true")
+	}
+	if cfg.RuntimeEndpointRunWorkerIntervalSeconds != 30 ||
+		cfg.RuntimeEndpointRunTimeoutSeconds != 0 ||
+		cfg.RuntimeEndpointRunWorkerBatchSize != 50 {
+		t.Fatalf("unexpected runtime endpoint worker defaults: %#v", cfg)
+	}
+}
+
+func TestLoadRequiresDatabaseURLAndJWTSecret(t *testing.T) {
+	unsetEnv(t, "DATABASE_URL")
+	unsetEnv(t, "JWT_SECRET")
+
+	if _, err := Load(); err == nil {
+		t.Fatalf("Load should fail when required env is missing")
+	}
+}
