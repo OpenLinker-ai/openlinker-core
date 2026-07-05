@@ -1,0 +1,3 @@
+-- Deprecated: core no longer owns commercial settlement configuration.
+-- This migration is intentionally a no-op for fresh databases; see 058 for
+-- cleanup of older databases that already applied the column.
