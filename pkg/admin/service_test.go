@@ -59,6 +59,39 @@ func TestCreateUserNormalizesFlagsAndHashesPassword(t *testing.T) {
 	}
 }
 
+func TestUpdateUserFlagsCanDisableUserButNotSelf(t *testing.T) {
+	actorID := uuid.New()
+	targetID := uuid.New()
+	now := time.Date(2026, 7, 6, 10, 0, 0, 0, time.UTC)
+	disabledAt := now.Add(time.Minute)
+	updatedRow := adminUserRow(targetID, "target@example.com", "Target User", false, false, false, now)
+	updatedRow[10] = &disabledAt
+	fake := &adminFakeDBTX{
+		rows: []pgx.Row{
+			adminFakeRow{values: adminUserRow(targetID, "target@example.com", "Target User", false, false, false, now)},
+			adminFakeRow{values: updatedRow},
+		},
+	}
+	svc := NewService(fake)
+	disabled := true
+
+	item, err := svc.UpdateUserFlags(context.Background(), actorID, targetID, &UpdateUserFlagsRequest{Disabled: &disabled})
+	if err != nil {
+		t.Fatalf("UpdateUserFlags disable error = %v", err)
+	}
+	if !item.Disabled {
+		t.Fatalf("disabled item = %#v", item)
+	}
+	if !reflect.DeepEqual(fake.queryRowArgs, []any{targetID, false, false, false, true}) {
+		t.Fatalf("UpdateUserFlags args = %#v", fake.queryRowArgs)
+	}
+
+	fake = &adminFakeDBTX{row: adminFakeRow{values: adminUserRow(actorID, "admin@example.com", "Admin User", false, false, true, now)}}
+	svc = NewService(fake)
+	_, err = svc.UpdateUserFlags(context.Background(), actorID, actorID, &UpdateUserFlagsRequest{Disabled: &disabled})
+	assertAdminHTTPStatus(t, err, http.StatusUnprocessableEntity)
+}
+
 func TestCreateUserValidation(t *testing.T) {
 	cases := []struct {
 		name string
@@ -184,6 +217,7 @@ func adminUserRow(id uuid.UUID, email, displayName string, isCreator, creatorVer
 		isCreator,
 		creatorVerified,
 		isAdmin,
+		nil,
 		now,
 		now,
 		nil,
@@ -194,6 +228,7 @@ type adminFakeDBTX struct {
 	queryRowSQL  string
 	queryRowArgs []any
 	row          pgx.Row
+	rows         []pgx.Row
 }
 
 func (f *adminFakeDBTX) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
@@ -207,6 +242,11 @@ func (f *adminFakeDBTX) Query(context.Context, string, ...interface{}) (pgx.Rows
 func (f *adminFakeDBTX) QueryRow(_ context.Context, sql string, args ...interface{}) pgx.Row {
 	f.queryRowSQL = sql
 	f.queryRowArgs = append([]any(nil), args...)
+	if len(f.rows) > 0 {
+		row := f.rows[0]
+		f.rows = f.rows[1:]
+		return row
+	}
 	return f.row
 }
 

@@ -77,6 +77,9 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 		log.Error().Err(err).Str("user_id", creatorID.String()).Msg("agent.CreateAgent: GetUserByID")
 		return nil, httpx.Internal("查询用户失败")
 	}
+	if user.DisabledAt != nil {
+		return nil, httpx.Unauthorized("账号已禁用")
+	}
 	if !user.IsCreator {
 		return nil, httpx.Forbidden("仅创作者可创建 Agent")
 	}

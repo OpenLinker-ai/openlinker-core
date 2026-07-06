@@ -122,6 +122,9 @@ func (s *Service) GetUserDashboard(ctx context.Context, userID uuid.UUID) (*User
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("userdash.GetUserDashboard: GetUserByID")
 		return nil, httpx.Internal("查询用户失败")
 	}
+	if user.DisabledAt != nil {
+		return nil, httpx.Unauthorized("账号已禁用")
+	}
 
 	monthCalls, err := s.queries.CountRunsByUserThisMonth(ctx, userID)
 	if err != nil {
@@ -179,6 +182,9 @@ func (s *Service) GetCreatorDashboard(ctx context.Context, creatorID uuid.UUID) 
 		}
 		log.Error().Err(err).Str("user_id", creatorID.String()).Msg("userdash.GetCreatorDashboard: GetUserByID")
 		return nil, httpx.Internal("查询用户失败")
+	}
+	if user.DisabledAt != nil {
+		return nil, httpx.Unauthorized("账号已禁用")
 	}
 	if !user.IsCreator {
 		return nil, httpx.Forbidden("仅创作者可访问创作者中心")

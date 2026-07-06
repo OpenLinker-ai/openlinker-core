@@ -349,6 +349,14 @@ func TestAuthServicePureHelpers(t *testing.T) {
 	if got, err := ParseToken(resp.JWT, pureAuthSecret); err != nil || got != userID.String() {
 		t.Fatalf("response token = %s %v", got, err)
 	}
+	disabledAt := time.Now()
+	_, err = svc.respondWithToken(&db.User{
+		ID:          userID,
+		Email:       "user@example.com",
+		DisplayName: "User",
+		DisabledAt:  &disabledAt,
+	})
+	requireAuthHTTPStatus(t, err, http.StatusUnauthorized)
 
 	if isUniqueViolation(nil) || isUniqueViolation(errors.New("plain")) {
 		t.Fatalf("non-sqlstate errors should not be unique violations")

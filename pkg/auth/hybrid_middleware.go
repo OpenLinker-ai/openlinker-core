@@ -28,6 +28,11 @@ type ApiKeyVerifier interface {
 // 命中后写入 c.Set(httpx.CtxKeyUserID, userID)，与 JWTMiddleware 行为一致；
 // 这样下游 handler 用 httpx.UserIDFrom(c) 即可拿到当前用户。
 func HybridAuthMiddleware(jwtSecret string, verifier ApiKeyVerifier) echo.MiddlewareFunc {
+	return HybridAuthMiddlewareWithUserStatus(jwtSecret, verifier, nil)
+}
+
+// HybridAuthMiddlewareWithUserStatus additionally rejects deleted or disabled users.
+func HybridAuthMiddlewareWithUserStatus(jwtSecret string, verifier ApiKeyVerifier, users userStatusQuerier) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			h := c.Request().Header.Get(echo.HeaderAuthorization)
@@ -61,6 +66,9 @@ func HybridAuthMiddleware(jwtSecret string, verifier ApiKeyVerifier) echo.Middle
 				}
 				userID = uid
 				authMethod = "jwt"
+			}
+			if err := ensureTokenUserEnabled(c.Request().Context(), users, userID); err != nil {
+				return err
 			}
 
 			c.Set(string(httpx.CtxKeyUserID), userID)

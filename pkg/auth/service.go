@@ -120,6 +120,9 @@ func (s *Service) Login(ctx context.Context, req *LoginRequest) (*AuthResponse, 
 		log.Error().Err(err).Msg("auth.Login: GetUserByEmail")
 		return nil, httpx.Internal("查询用户失败")
 	}
+	if err := ensureUserEnabled(&user); err != nil {
+		return nil, err
+	}
 
 	// OAuth-only 用户没有 password_hash
 	if user.PasswordHash == nil || *user.PasswordHash == "" {
@@ -151,6 +154,9 @@ func (s *Service) RefreshToken(ctx context.Context, userID uuid.UUID) (*AuthResp
 		}
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("auth.RefreshToken: GetUserByID")
 		return nil, httpx.Internal("刷新登录会话失败")
+	}
+	if err := ensureUserEnabled(&user); err != nil {
+		return nil, err
 	}
 	return s.respondWithToken(&user)
 }
@@ -285,6 +291,9 @@ RETURNING user_id, jwt
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("auth.ExchangeOAuthCode: user")
 		return nil, httpx.Internal("交换 OAuth code 失败")
 	}
+	if err := ensureUserEnabled(&user); err != nil {
+		return nil, err
+	}
 	return &AuthResponse{
 		UserID:      user.ID.String(),
 		Email:       user.Email,
@@ -302,6 +311,9 @@ func (s *Service) GetMe(ctx context.Context, userID uuid.UUID) (*MeResponse, err
 		}
 		log.Error().Err(err).Msg("auth.GetMe: GetUserByID")
 		return nil, httpx.Internal("查询用户失败")
+	}
+	if err := ensureUserEnabled(&user); err != nil {
+		return nil, err
 	}
 	hasPassword, isOAuthUser, oauthProvider, authMethod := userAuthSummary(user.PasswordHash, user.OauthProvider)
 	resp := &MeResponse{
@@ -352,6 +364,7 @@ UPDATE users
 SET display_name = $2,
     updated_at = NOW()
 WHERE id = $1 AND deleted_at IS NULL
+  AND disabled_at IS NULL
 `, userID, displayName)
 	if err != nil {
 		log.Error().Err(err).Msg("auth.UpdateMe: update user")
@@ -381,6 +394,9 @@ func (s *Service) ChangePassword(ctx context.Context, userID uuid.UUID, req *Cha
 		log.Error().Err(err).Msg("auth.ChangePassword: GetUserByID")
 		return httpx.Internal("查询用户失败")
 	}
+	if err := ensureUserEnabled(&user); err != nil {
+		return err
+	}
 	if user.PasswordHash == nil || *user.PasswordHash == "" {
 		return httpx.BadRequest("第三方登录账号暂不支持设置密码")
 	}
@@ -399,6 +415,7 @@ UPDATE users
 SET password_hash = $2,
     updated_at = NOW()
 WHERE id = $1 AND deleted_at IS NULL
+  AND disabled_at IS NULL
 `, userID, hashed)
 	if err != nil {
 		log.Error().Err(err).Msg("auth.ChangePassword: update password")
@@ -429,6 +446,7 @@ UPDATE users
 SET password_hash = $2,
     updated_at = NOW()
 WHERE id = $1 AND deleted_at IS NULL
+  AND disabled_at IS NULL
 `, user.ID, hashed)
 	if err != nil {
 		log.Error().Err(err).Msg("auth.ResetPassword: update password")
@@ -459,6 +477,9 @@ func (s *Service) validatePasswordReset(ctx context.Context, email, newPassword 
 	}
 	if user.PasswordHash == nil || *user.PasswordHash == "" {
 		return db.User{}, httpx.BadRequest("第三方登录账号请使用对应登录方式")
+	}
+	if err := ensureUserEnabled(&user); err != nil {
+		return db.User{}, err
 	}
 	if err := authutil.ComparePasswordHash(*user.PasswordHash, newPassword); err == nil {
 		return db.User{}, httpx.Unprocessable("新密码不能与当前密码相同")
@@ -493,6 +514,9 @@ func (s *Service) createUser(ctx context.Context, params db.CreateUserParams) (d
 
 // respondWithToken 把 db.User 转成 AuthResponse + JWT。
 func (s *Service) respondWithToken(user *db.User) (*AuthResponse, error) {
+	if err := ensureUserEnabled(user); err != nil {
+		return nil, err
+	}
 	token, err := GenerateToken(user.ID.String(), s.jwtSecret, s.jwtExpire)
 	if err != nil {
 		log.Error().Err(err).Msg("auth: GenerateToken")
@@ -504,6 +528,13 @@ func (s *Service) respondWithToken(user *db.User) (*AuthResponse, error) {
 		DisplayName: user.DisplayName,
 		JWT:         token,
 	}, nil
+}
+
+func ensureUserEnabled(user *db.User) error {
+	if user != nil && user.DisabledAt != nil {
+		return httpx.Unauthorized("账号已禁用")
+	}
+	return nil
 }
 
 func randomOAuthCode() (string, error) {

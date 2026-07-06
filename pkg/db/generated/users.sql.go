@@ -22,7 +22,7 @@ INSERT INTO users (
     $1, $2, $3, $4, $5, $6
 )
 RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
-          avatar_url, is_creator, creator_verified, is_admin,
+          avatar_url, is_creator, creator_verified, is_admin, disabled_at,
           created_at, updated_at, deleted_at`
 
 // CreateUserParams 入参（password_hash / oauth_* / avatar_url 可空）。
@@ -57,6 +57,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&u.IsCreator,
 		&u.CreatorVerified,
 		&u.IsAdmin,
+		&u.DisabledAt,
 		&u.CreatedAt,
 		&u.UpdatedAt,
 		&u.DeletedAt,
@@ -76,7 +77,7 @@ INSERT INTO users (
     $1, $2, $3, $4, $5, $6
 )
 RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
-          avatar_url, is_creator, creator_verified, is_admin,
+          avatar_url, is_creator, creator_verified, is_admin, disabled_at,
           created_at, updated_at, deleted_at`
 
 // CreateAdminUserParams 入参（管理台创建用户）。
@@ -111,6 +112,7 @@ func (q *Queries) CreateAdminUser(ctx context.Context, arg CreateAdminUserParams
 		&u.IsCreator,
 		&u.CreatorVerified,
 		&u.IsAdmin,
+		&u.DisabledAt,
 		&u.CreatedAt,
 		&u.UpdatedAt,
 		&u.DeletedAt,
@@ -120,7 +122,7 @@ func (q *Queries) CreateAdminUser(ctx context.Context, arg CreateAdminUserParams
 
 const getUserByEmail = `-- name: GetUserByEmail :one
 SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,
-       avatar_url, is_creator, creator_verified, is_admin,
+       avatar_url, is_creator, creator_verified, is_admin, disabled_at,
        created_at, updated_at, deleted_at
 FROM users
 WHERE email = $1 AND deleted_at IS NULL`
@@ -140,6 +142,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&u.IsCreator,
 		&u.CreatorVerified,
 		&u.IsAdmin,
+		&u.DisabledAt,
 		&u.CreatedAt,
 		&u.UpdatedAt,
 		&u.DeletedAt,
@@ -149,7 +152,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 
 const getUserByOAuth = `-- name: GetUserByOAuth :one
 SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,
-       avatar_url, is_creator, creator_verified, is_admin,
+       avatar_url, is_creator, creator_verified, is_admin, disabled_at,
        created_at, updated_at, deleted_at
 FROM users
 WHERE oauth_provider = $1 AND oauth_id = $2 AND deleted_at IS NULL`
@@ -175,6 +178,7 @@ func (q *Queries) GetUserByOAuth(ctx context.Context, arg GetUserByOAuthParams) 
 		&u.IsCreator,
 		&u.CreatorVerified,
 		&u.IsAdmin,
+		&u.DisabledAt,
 		&u.CreatedAt,
 		&u.UpdatedAt,
 		&u.DeletedAt,
@@ -184,7 +188,7 @@ func (q *Queries) GetUserByOAuth(ctx context.Context, arg GetUserByOAuthParams) 
 
 const getUserByID = `-- name: GetUserByID :one
 SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,
-       avatar_url, is_creator, creator_verified, is_admin,
+       avatar_url, is_creator, creator_verified, is_admin, disabled_at,
        created_at, updated_at, deleted_at
 FROM users
 WHERE id = $1 AND deleted_at IS NULL`
@@ -204,6 +208,7 @@ func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
 		&u.IsCreator,
 		&u.CreatorVerified,
 		&u.IsAdmin,
+		&u.DisabledAt,
 		&u.CreatedAt,
 		&u.UpdatedAt,
 		&u.DeletedAt,
@@ -241,7 +246,7 @@ const updateUserBecomeCreator = `-- name: UpdateUserBecomeCreator :exec
 UPDATE users
 SET is_creator = TRUE,
     updated_at = NOW()
-WHERE id = $1 AND deleted_at IS NULL`
+WHERE id = $1 AND deleted_at IS NULL AND disabled_at IS NULL`
 
 // UpdateUserBecomeCreator Phase 1 一键成为创作者（无审核）。
 // 返回受影响行数：0 表示用户不存在或已被软删。
@@ -255,7 +260,7 @@ func (q *Queries) UpdateUserBecomeCreator(ctx context.Context, id uuid.UUID) (in
 
 const listAdminUsers = `-- name: ListAdminUsers :many
 SELECT u.id, u.email, u.password_hash, u.oauth_provider, u.oauth_id, u.display_name,
-       u.avatar_url, u.is_creator, u.creator_verified, u.is_admin,
+       u.avatar_url, u.is_creator, u.creator_verified, u.is_admin, u.disabled_at,
        u.created_at, u.updated_at, u.deleted_at,
        COALESCE(agent_stats.agent_count, 0)::int AS agent_count,
        COALESCE(agent_stats.active_agent_count, 0)::int AS active_agent_count,
@@ -299,6 +304,7 @@ WHERE u.deleted_at IS NULL
     OR ($2 = 'creator' AND u.is_creator)
     OR ($2 = 'creator_verified' AND u.creator_verified)
     OR ($2 = 'regular' AND NOT u.is_admin AND NOT u.is_creator)
+    OR ($2 = 'disabled' AND u.disabled_at IS NOT NULL)
   )
 ORDER BY u.created_at DESC
 LIMIT $3 OFFSET $4`
@@ -342,6 +348,7 @@ func (q *Queries) ListAdminUsers(ctx context.Context, arg ListAdminUsersParams) 
 			&u.IsCreator,
 			&u.CreatorVerified,
 			&u.IsAdmin,
+			&u.DisabledAt,
 			&u.CreatedAt,
 			&u.UpdatedAt,
 			&u.DeletedAt,
@@ -378,6 +385,7 @@ WHERE deleted_at IS NULL
     OR ($2 = 'creator' AND is_creator)
     OR ($2 = 'creator_verified' AND creator_verified)
     OR ($2 = 'regular' AND NOT is_admin AND NOT is_creator)
+    OR ($2 = 'disabled' AND disabled_at IS NOT NULL)
   )`
 
 type CountAdminUsersParams struct {
@@ -397,10 +405,11 @@ UPDATE users
 SET is_admin = $2,
     is_creator = $3,
     creator_verified = $4,
+    disabled_at = CASE WHEN $5 THEN COALESCE(disabled_at, NOW()) ELSE NULL END,
     updated_at = NOW()
 WHERE id = $1 AND deleted_at IS NULL
 RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
-          avatar_url, is_creator, creator_verified, is_admin,
+          avatar_url, is_creator, creator_verified, is_admin, disabled_at,
           created_at, updated_at, deleted_at`
 
 type UpdateAdminUserFlagsParams struct {
@@ -408,11 +417,12 @@ type UpdateAdminUserFlagsParams struct {
 	IsAdmin         bool      `db:"is_admin" json:"is_admin"`
 	IsCreator       bool      `db:"is_creator" json:"is_creator"`
 	CreatorVerified bool      `db:"creator_verified" json:"creator_verified"`
+	Disabled        bool      `db:"disabled" json:"disabled"`
 }
 
 // UpdateAdminUserFlags 管理台调整用户身份标志。
 func (q *Queries) UpdateAdminUserFlags(ctx context.Context, arg UpdateAdminUserFlagsParams) (User, error) {
-	row := q.db.QueryRow(ctx, updateAdminUserFlags, arg.ID, arg.IsAdmin, arg.IsCreator, arg.CreatorVerified)
+	row := q.db.QueryRow(ctx, updateAdminUserFlags, arg.ID, arg.IsAdmin, arg.IsCreator, arg.CreatorVerified, arg.Disabled)
 	var u User
 	err := row.Scan(
 		&u.ID,
@@ -425,6 +435,7 @@ func (q *Queries) UpdateAdminUserFlags(ctx context.Context, arg UpdateAdminUserF
 		&u.IsCreator,
 		&u.CreatorVerified,
 		&u.IsAdmin,
+		&u.DisabledAt,
 		&u.CreatedAt,
 		&u.UpdatedAt,
 		&u.DeletedAt,

@@ -178,7 +178,7 @@ func hasBootstrapAdmin(ctx context.Context, dbtx bootstrapAdminDB) (bool, error)
 SELECT EXISTS (
   SELECT 1
   FROM users
-  WHERE is_admin = TRUE AND deleted_at IS NULL
+  WHERE is_admin = TRUE AND deleted_at IS NULL AND disabled_at IS NULL
 )
 `).Scan(&exists); err != nil {
 		return false, fmt.Errorf("check admin users: %w", err)
@@ -202,6 +202,7 @@ UPDATE users
 SET password_hash = $2,
     display_name = $3,
     is_admin = TRUE,
+    disabled_at = NULL,
     deleted_at = NULL,
     updated_at = NOW()
 WHERE id = $1

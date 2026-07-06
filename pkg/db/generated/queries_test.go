@@ -108,12 +108,13 @@ func TestUserQueriesScanRowsAndUseExpectedArgs(t *testing.T) {
 		IsAdmin:         true,
 		IsCreator:       true,
 		CreatorVerified: true,
+		Disabled:        true,
 	})
 	if err != nil {
 		t.Fatalf("UpdateAdminUserFlags error = %v", err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "UpdateAdminUserFlags")
-	if updated.ID != userID || !reflect.DeepEqual(dbtx.queryRowArgs, []any{userID, true, true, true}) {
+	if updated.ID != userID || !reflect.DeepEqual(dbtx.queryRowArgs, []any{userID, true, true, true, true}) {
 		t.Fatalf("UpdateAdminUserFlags scan/args = %#v args=%#v", updated, dbtx.queryRowArgs)
 	}
 }
@@ -3885,6 +3886,7 @@ func userRow(id uuid.UUID, now time.Time, passwordHash, provider, oauthID, avata
 		true,
 		true,
 		false,
+		nil,
 		now,
 		now.Add(time.Minute),
 		deletedAt,

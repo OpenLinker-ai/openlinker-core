@@ -156,6 +156,7 @@ func (s *Service) UpdateUserFlags(ctx context.Context, actorID, targetID uuid.UU
 	isAdmin := current.IsAdmin
 	isCreator := current.IsCreator
 	creatorVerified := current.CreatorVerified
+	disabled := current.DisabledAt != nil
 	if req.IsAdmin != nil {
 		isAdmin = *req.IsAdmin
 	}
@@ -164,6 +165,9 @@ func (s *Service) UpdateUserFlags(ctx context.Context, actorID, targetID uuid.UU
 	}
 	if req.CreatorVerified != nil {
 		creatorVerified = *req.CreatorVerified
+	}
+	if req.Disabled != nil {
+		disabled = *req.Disabled
 	}
 	if creatorVerified {
 		isCreator = true
@@ -174,12 +178,16 @@ func (s *Service) UpdateUserFlags(ctx context.Context, actorID, targetID uuid.UU
 	if actorID == targetID && current.IsAdmin && !isAdmin {
 		return nil, httpx.Unprocessable("不能移除自己的管理员权限")
 	}
+	if actorID == targetID && disabled {
+		return nil, httpx.Unprocessable("不能禁用当前登录账号")
+	}
 
 	updated, err := s.queries.UpdateAdminUserFlags(ctx, db.UpdateAdminUserFlagsParams{
 		ID:              targetID,
 		IsAdmin:         isAdmin,
 		IsCreator:       isCreator,
 		CreatorVerified: creatorVerified,
+		Disabled:        disabled,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -353,7 +361,7 @@ func normalizePage(limit, offset int32) (int32, int32) {
 func normalizeUserRole(role string) string {
 	role = strings.TrimSpace(strings.ToLower(role))
 	switch role {
-	case "", "admin", "creator", "creator_verified", "regular":
+	case "", "admin", "creator", "creator_verified", "regular", "disabled":
 		return role
 	default:
 		return ""
@@ -420,6 +428,8 @@ func toUserItem(user *db.User) UserItem {
 		IsCreator:       user.IsCreator,
 		CreatorVerified: user.CreatorVerified,
 		IsAdmin:         user.IsAdmin,
+		Disabled:        user.DisabledAt != nil,
+		DisabledAt:      timePtrString(user.DisabledAt),
 		CreatedAt:       formatTime(user.CreatedAt),
 		UpdatedAt:       formatTime(user.UpdatedAt),
 	}

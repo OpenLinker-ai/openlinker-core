@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
@@ -142,4 +143,24 @@ func TestJWTMiddleware_WrongSecret(t *testing.T) {
 	rec, _, nextCalled := invokeMiddleware(t, testMWSecret, "Bearer "+tok)
 	assert.False(t, nextCalled, "next must NOT run when token signed by different secret")
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestJWTMiddlewareWithUserStatusRejectsDisabledUser(t *testing.T) {
+	uid := uuid.New()
+	tok, err := GenerateToken(uid.String(), testMWSecret, time.Hour)
+	require.NoError(t, err)
+
+	disabledAt := time.Now()
+	q := &fakeUserByIDQuerier{user: db.User{ID: uid, DisabledAt: &disabledAt}}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer "+tok)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err = JWTMiddlewareWithUserStatus(testMWSecret, q)(func(c echo.Context) error {
+		return c.NoContent(http.StatusOK)
+	})(c)
+	requireAuthHTTPStatus(t, err, http.StatusUnauthorized)
 }

@@ -68,7 +68,8 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	authSvc := auth.NewService(pool, cfg.JWTSecret, time.Duration(cfg.JWTExpireHours)*time.Hour)
 	authSvc.SetUserProvisioner(opts.UserProvisioner)
 	authHandler := auth.NewHandler(authSvc, cfg)
-	jwtMiddleware := auth.JWTMiddleware(cfg.JWTSecret)
+	userStatusQueries := db.New(pool)
+	jwtMiddleware := auth.JWTMiddlewareWithUserStatus(cfg.JWTSecret, userStatusQueries)
 	authHandler.Register(api)
 	authHandler.RegisterProtected(api, jwtMiddleware)
 	var adminSvc *coreadmin.Service
@@ -114,7 +115,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	skillHandler.Register(api)
 	skillHandler.RegisterProtected(api, jwtMiddleware)
 
-	hybridMw := auth.HybridAuthMiddleware(cfg.JWTSecret, opts.APIKeyVerifier)
+	hybridMw := auth.HybridAuthMiddlewareWithUserStatus(cfg.JWTSecret, opts.APIKeyVerifier, userStatusQueries)
 
 	runtimeSvc := runtime.NewService(pool, cfg)
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)

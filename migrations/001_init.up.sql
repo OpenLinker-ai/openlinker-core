@@ -21,6 +21,7 @@ CREATE TABLE users (
     is_creator BOOLEAN NOT NULL DEFAULT FALSE,
     creator_verified BOOLEAN NOT NULL DEFAULT FALSE,
     is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+    disabled_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ,

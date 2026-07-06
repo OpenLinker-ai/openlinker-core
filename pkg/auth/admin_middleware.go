@@ -37,6 +37,9 @@ func AdminMiddleware(queries userByIDQuerier) echo.MiddlewareFunc {
 				log.Error().Err(err).Msg("auth.admin: GetUserByID")
 				return httpx.Internal("权限校验失败")
 			}
+			if user.DisabledAt != nil {
+				return httpx.Unauthorized("账号已禁用")
+			}
 			if !user.IsAdmin {
 				return httpx.Forbidden("需要管理员权限")
 			}

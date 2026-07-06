@@ -34,6 +34,8 @@ type UserItem struct {
 	IsCreator        bool    `json:"is_creator"`
 	CreatorVerified  bool    `json:"creator_verified"`
 	IsAdmin          bool    `json:"is_admin"`
+	Disabled         bool    `json:"disabled"`
+	DisabledAt       *string `json:"disabled_at,omitempty"`
 	CreatedAt        string  `json:"created_at"`
 	UpdatedAt        string  `json:"updated_at"`
 	AgentCount       int32   `json:"agent_count"`
@@ -65,6 +67,7 @@ type UpdateUserFlagsRequest struct {
 	IsAdmin         *bool `json:"is_admin"`
 	IsCreator       *bool `json:"is_creator"`
 	CreatorVerified *bool `json:"creator_verified"`
+	Disabled        *bool `json:"disabled"`
 }
 
 type AgentCreator struct {

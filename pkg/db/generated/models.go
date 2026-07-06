@@ -22,6 +22,7 @@ type User struct {
 	IsCreator       bool       `db:"is_creator" json:"is_creator"`
 	CreatorVerified bool       `db:"creator_verified" json:"creator_verified"`
 	IsAdmin         bool       `db:"is_admin" json:"is_admin"`
+	DisabledAt      *time.Time `db:"disabled_at" json:"disabled_at"`
 	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt       time.Time  `db:"updated_at" json:"updated_at"`
 	DeletedAt       *time.Time `db:"deleted_at" json:"deleted_at"`

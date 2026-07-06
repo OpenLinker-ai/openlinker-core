@@ -193,6 +193,9 @@ func (s *RegistrationService) RegisterAgentViaToken(ctx context.Context, req *Re
 	if err != nil {
 		return nil, err
 	}
+	if err := s.ensureCreator(ctx, matched.CreatorUserID); err != nil {
+		return nil, err
+	}
 
 	slug := strings.TrimSpace(req.Slug)
 	if slug == "" {
@@ -291,6 +294,9 @@ func (s *RegistrationService) ensureCreator(ctx context.Context, userID uuid.UUI
 		}
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("registration.ensureCreator: GetUserByID")
 		return httpx.Internal("查询用户失败")
+	}
+	if user.DisabledAt != nil {
+		return httpx.Unauthorized("账号已禁用")
 	}
 	if !user.IsCreator {
 		return httpx.Forbidden("仅创作者可生成 Agent Token")

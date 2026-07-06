@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -62,6 +63,12 @@ func TestAdminMiddleware(t *testing.T) {
 	t.Run("rejects non-admin", func(t *testing.T) {
 		c := newAdminMiddlewareContext(adminID.String())
 		requireAuthHTTPStatus(t, AdminMiddleware(&fakeUserByIDQuerier{user: db.User{ID: adminID}})(noopAdminNext)(c), http.StatusForbidden)
+	})
+
+	t.Run("rejects disabled admin", func(t *testing.T) {
+		disabledAt := time.Now()
+		c := newAdminMiddlewareContext(adminID.String())
+		requireAuthHTTPStatus(t, AdminMiddleware(&fakeUserByIDQuerier{user: db.User{ID: adminID, IsAdmin: true, DisabledAt: &disabledAt}})(noopAdminNext)(c), http.StatusUnauthorized)
 	})
 }
 
