@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +29,95 @@ func TestAPIClientDoWithHeadersSkipsContextCancellationMetric(t *testing.T) {
 	}
 	if got := len(m.httpOps); got != 0 {
 		t.Fatalf("http metric count = %d, want 0", got)
+	}
+}
+
+func TestWebSocketDialErrorIncludesResponseDetails(t *testing.T) {
+	err := websocketDialError(errors.New("websocket: bad handshake"), &http.Response{
+		Status: "429 Too Many Requests",
+		Header: http.Header{
+			"Content-Type": []string{"application/json"},
+			"Retry-After":  []string{"5"},
+		},
+		Body: io.NopCloser(strings.NewReader(`{"code":"RATE_LIMITED","message":"slow down"}`)),
+	})
+	got := err.Error()
+	for _, want := range []string{
+		"websocket: bad handshake",
+		"status=429 Too Many Requests",
+		"retry_after=5",
+		"content_type=application/json",
+		`body={"code":"RATE_LIMITED","message":"slow down"}`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("websocketDialError = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestEnsureAccountUsesVerificationCodeAndLoginAfterRegister(t *testing.T) {
+	var loginCalls int
+	var sawVerification bool
+	var sawRegister bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth/login":
+			loginCalls++
+			if loginCalls == 1 {
+				http.Error(w, `{"error":{"code":"UNAUTHORIZED"}}`, http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"email": "perf@example.local",
+				"jwt":   "jwt-token",
+				"user":  map[string]any{"id": "user-1"},
+			})
+		case "/auth/verification-code":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode verification request: %v", err)
+			}
+			if body["email"] != "perf@example.local" || body["purpose"] != "register" {
+				t.Fatalf("verification body = %#v", body)
+			}
+			sawVerification = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"debug_code": "123456"})
+		case "/auth/register":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode register request: %v", err)
+			}
+			if body["password_confirm"] != "password-123" || body["verification_code"] != "123456" {
+				t.Fatalf("register body = %#v", body)
+			}
+			sawRegister = true
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"user_id":      "user-1",
+				"email":        "perf@example.local",
+				"display_name": "Perf User",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	got, err := ensureAccount(context.Background(), &apiClient{
+		root:   server.URL,
+		client: server.Client(),
+	}, "perf@example.local", "password-123", "Perf User", &metrics{})
+	if err != nil {
+		t.Fatalf("ensureAccount error = %v", err)
+	}
+	if got.JWT != "jwt-token" {
+		t.Fatalf("jwt = %q, want jwt-token", got.JWT)
+	}
+	if !sawVerification || !sawRegister {
+		t.Fatalf("saw verification=%v register=%v", sawVerification, sawRegister)
+	}
+	if loginCalls != 2 {
+		t.Fatalf("login calls = %d, want 2", loginCalls)
 	}
 }
 
@@ -118,6 +211,47 @@ func TestRunSetupJobsCancelsOnFirstError(t *testing.T) {
 	})
 	if !errors.Is(err, want) {
 		t.Fatalf("runSetupJobs error = %v, want %v", err, want)
+	}
+}
+
+func TestSubmitRunsDoesNotDeadlockWhenErrorsExceedConcurrency(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, `{"error":"create failed"}`, http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	creator := &account{
+		Email: "perf@example.local",
+		JWT:   "jwt-token",
+	}
+	creator.User.ID = "user-1"
+	done := make(chan error, 1)
+	go func() {
+		done <- submitRuns(
+			context.Background(),
+			&apiClient{root: server.URL, client: server.Client()},
+			config{},
+			[]agentRef{{ID: "agent-1", Creator: creator}},
+			newRunTracker(),
+			&metrics{},
+			"measured",
+			8,
+			2,
+		)
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("submitRuns error = nil, want create-run error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("submitRuns deadlocked after create-run errors exceeded concurrency")
+	}
+	if got := requests.Load(); got != 8 {
+		t.Fatalf("requests = %d, want 8", got)
 	}
 }
 

@@ -46,11 +46,13 @@ type config struct {
 	SubmitDuration        time.Duration
 	HistoryPerAgent       int
 	ContextMode           bool
+	AccountRunID          string
 	Timeout               time.Duration
 	ReadyTimeout          time.Duration
 	RequestTimeout        time.Duration
 	PullClaimWait         time.Duration
 	WSHeartbeat           time.Duration
+	WSConnectStagger      time.Duration
 	HoldAfter             time.Duration
 	Output                string
 	InsecureTLS           bool
@@ -68,6 +70,10 @@ type account struct {
 	User  struct {
 		ID string `json:"id"`
 	} `json:"user"`
+}
+
+type verificationCodeResponse struct {
+	DebugCode string `json:"debug_code"`
 }
 
 type agentRef struct {
@@ -630,8 +636,12 @@ func main() {
 	tracker := newRunTracker()
 	api := newAPIClient(cfg)
 	runID := randomSuffix()
+	accountRunID := cfg.AccountRunID
+	if accountRunID == "" {
+		accountRunID = runID
+	}
 
-	accounts, err := setupAccounts(ctx, api, cfg, runID, m)
+	accounts, err := setupAccounts(ctx, api, cfg, accountRunID, m)
 	if err != nil {
 		fail(err)
 	}
@@ -654,17 +664,29 @@ func main() {
 	if cfg.Mode == "runtime_ws" {
 		m.startWSReadyWindow(time.Now())
 	}
+	workerOrdinal := 0
 	for _, agent := range agents {
 		for i, token := range agent.RuntimeKeys {
+			connectDelay := time.Duration(0)
+			if cfg.Mode == "runtime_ws" && cfg.WSConnectStagger > 0 {
+				connectDelay = time.Duration(workerOrdinal) * cfg.WSConnectStagger
+			}
+			workerOrdinal++
 			workerWG.Add(1)
-			go func(agent agentRef, token string, workerIndex int) {
+			go func(agent agentRef, token string, workerIndex int, connectDelay time.Duration) {
 				defer workerWG.Done()
 				if cfg.Mode == "runtime_pull" {
 					runPullWorker(workerCtx, api, cfg, agent, token, workerIndex, tracker, m)
 					return
 				}
+				if connectDelay > 0 {
+					sleepContext(workerCtx, connectDelay)
+					if workerCtx.Err() != nil {
+						return
+					}
+				}
 				runWebSocketWorker(workerCtx, api, cfg, agent, token, workerIndex, tracker, m, stopWSHeartbeats)
-			}(agent, token, i)
+			}(agent, token, i, connectDelay)
 		}
 	}
 
@@ -711,7 +733,7 @@ func main() {
 	workerWG.Wait()
 	m.endedAt = time.Now()
 
-	report := buildReport(cfg, runID, accounts, agents, tracker, m, measuredStart, measuredEnd, holdStart, holdEnd, waitErr, holdErr)
+	report := buildReport(cfg, runID, accountRunID, accounts, agents, tracker, m, measuredStart, measuredEnd, holdStart, holdEnd, waitErr, holdErr)
 	if dbSampler != nil {
 		report["db_activity_sample"] = dbSampler.stopAndReport()
 	}
@@ -753,11 +775,13 @@ func parseFlags() config {
 	flag.DurationVar(&cfg.SubmitDuration, "submit-duration", durationEnv("OPENLINKER_RUNTIME_LOADTEST_SUBMIT_DURATION", 0), "spread measured run submissions across this duration instead of submitting as fast as possible")
 	flag.IntVar(&cfg.HistoryPerAgent, "history-per-agent", intEnv("OPENLINKER_RUNTIME_LOADTEST_HISTORY_PER_AGENT", 0), "completed prior A2A-context runs per agent before measured phase")
 	flag.BoolVar(&cfg.ContextMode, "a2a-context", boolEnv("OPENLINKER_RUNTIME_LOADTEST_A2A_CONTEXT", true), "include A2A context ids so assignment builds conversation context")
+	flag.StringVar(&cfg.AccountRunID, "account-run-id", os.Getenv("OPENLINKER_RUNTIME_LOADTEST_ACCOUNT_RUN_ID"), "reuse accounts from a previous run id while creating fresh agents/runs")
 	flag.DurationVar(&cfg.Timeout, "timeout", durationEnv("OPENLINKER_RUNTIME_LOADTEST_TIMEOUT", 2*time.Minute), "overall timeout")
 	flag.DurationVar(&cfg.ReadyTimeout, "ready-timeout", durationEnv("OPENLINKER_RUNTIME_LOADTEST_READY_TIMEOUT", 30*time.Second), "timeout for runtime_ws workers to report runtime.ready")
 	flag.DurationVar(&cfg.RequestTimeout, "request-timeout", durationEnv("OPENLINKER_RUNTIME_LOADTEST_REQUEST_TIMEOUT", 20*time.Second), "per HTTP request timeout")
 	flag.DurationVar(&cfg.PullClaimWait, "pull-claim-wait", durationEnv("OPENLINKER_RUNTIME_LOADTEST_PULL_CLAIM_WAIT", 25*time.Second), "runtime_pull long-poll wait; capped below request-timeout")
 	flag.DurationVar(&cfg.WSHeartbeat, "ws-heartbeat", durationEnv("OPENLINKER_RUNTIME_LOADTEST_WS_HEARTBEAT", 60*time.Second), "runtime_ws application heartbeat interval; set 0 to disable")
+	flag.DurationVar(&cfg.WSConnectStagger, "ws-connect-stagger", durationEnv("OPENLINKER_RUNTIME_LOADTEST_WS_CONNECT_STAGGER", 0), "delay increment between runtime_ws worker connection attempts, e.g. 100ms")
 	flag.DurationVar(&cfg.HoldAfter, "hold-after-completion", durationEnv("OPENLINKER_RUNTIME_LOADTEST_HOLD_AFTER_COMPLETION", 0), "keep runtime workers connected after measured runs complete, for soak checks")
 	flag.StringVar(&cfg.Output, "output", os.Getenv("OPENLINKER_RUNTIME_LOADTEST_OUTPUT"), "JSON report path; default .openlinker-dev/performance/runtime-loadtest-<timestamp>.json")
 	flag.BoolVar(&cfg.InsecureTLS, "insecure-tls", boolEnv("OPENLINKER_RUNTIME_LOADTEST_INSECURE_TLS", false), "skip TLS verification for test hosts")
@@ -809,6 +833,9 @@ func (c *config) validate() error {
 	}
 	if c.WSHeartbeat < 0 {
 		return fmt.Errorf("ws-heartbeat cannot be negative")
+	}
+	if c.WSConnectStagger < 0 {
+		return fmt.Errorf("ws-connect-stagger cannot be negative")
 	}
 	if _, err := url.ParseRequestURI(c.APIRoot); err != nil {
 		return fmt.Errorf("invalid api root: %w", err)
@@ -977,14 +1004,39 @@ func ensureAccount(ctx context.Context, api *apiClient, email, password, display
 	if err == nil && status == http.StatusOK && acc.JWT != "" {
 		return acc, nil
 	}
+
+	registerBody := map[string]any{
+		"email":            email,
+		"password":         password,
+		"password_confirm": password,
+		"display_name":     display,
+	}
+	var verification verificationCodeResponse
+	codeStatus, codeErr := api.do(ctx, "verification-code", http.MethodPost, "/auth/verification-code", map[string]any{
+		"email":   email,
+		"purpose": "register",
+	}, "", &verification)
+	if codeErr == nil && codeStatus == http.StatusOK {
+		if verification.DebugCode == "" {
+			return account{}, fmt.Errorf("ensure account %s failed: verification-code returned no debug_code", email)
+		}
+		registerBody["verification_code"] = verification.DebugCode
+	} else if codeStatus != http.StatusNotFound && codeStatus != http.StatusMethodNotAllowed {
+		return account{}, fmt.Errorf("ensure account %s failed: verification-code status=%d err=%v", email, codeStatus, codeErr)
+	}
+
 	var registered account
-	status, err = api.do(ctx, "register", http.MethodPost, "/auth/register", map[string]any{
-		"email":        email,
-		"password":     password,
-		"display_name": display,
-	}, "", &registered)
+	status, err = api.do(ctx, "register", http.MethodPost, "/auth/register", registerBody, "", &registered)
 	if err == nil && status == http.StatusCreated && registered.JWT != "" {
 		return registered, nil
+	}
+	if err == nil && status == http.StatusCreated {
+		var loggedIn account
+		loginStatus, loginErr := api.do(ctx, "login", http.MethodPost, "/auth/login", body, "", &loggedIn)
+		if loginErr == nil && loginStatus == http.StatusOK && loggedIn.JWT != "" {
+			return loggedIn, nil
+		}
+		return account{}, fmt.Errorf("ensure account %s failed: register created account but login status=%d err=%v", email, loginStatus, loginErr)
 	}
 	return account{}, fmt.Errorf("ensure account %s failed: status=%d err=%v", email, status, err)
 }
@@ -1062,7 +1114,16 @@ var fallbackMetrics = &metrics{}
 func submitRuns(ctx context.Context, api *apiClient, cfg config, agents []agentRef, tracker *runTracker, m *metrics, phase string, total, concurrency int) error {
 	ctx = withMetrics(ctx, m)
 	jobs := make(chan int)
-	errCh := make(chan error, concurrency)
+	errCh := make(chan error, 1)
+	recordErr := func(err error) {
+		if err == nil {
+			return
+		}
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
 	var wg sync.WaitGroup
 	for worker := 0; worker < concurrency; worker++ {
 		wg.Add(1)
@@ -1106,13 +1167,13 @@ func submitRuns(ctx context.Context, api *apiClient, cfg config, agents []agentR
 				status, err := api.do(ctx, "create-run", http.MethodPost, "/runs", body, agent.Creator.JWT, &resp)
 				if err != nil {
 					tracker.markCreated(clientID, "", time.Now(), err.Error())
-					errCh <- err
+					recordErr(err)
 					continue
 				}
 				if status != http.StatusAccepted || resp.RunID == "" {
 					err := fmt.Errorf("POST /runs returned status=%d run_id=%q", status, resp.RunID)
 					tracker.markCreated(clientID, resp.RunID, time.Now(), err.Error())
-					errCh <- err
+					recordErr(err)
 					continue
 				}
 				tracker.markCreated(clientID, resp.RunID, time.Now(), "")
@@ -1143,9 +1204,10 @@ func submitRuns(ctx context.Context, api *apiClient, cfg config, agents []agentR
 	}
 	close(jobs)
 	wg.Wait()
-	close(errCh)
-	if len(errCh) > 0 {
-		return <-errCh
+	select {
+	case err := <-errCh:
+		return err
+	default:
 	}
 	return nil
 }
@@ -1326,9 +1388,9 @@ func runWebSocketSession(ctx context.Context, api *apiClient, cfg config, agent 
 		dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // explicit load-test flag for disposable test hosts.
 	}
 	header := http.Header{"Authorization": []string{"Bearer " + token}}
-	rawConn, _, err := dialer.DialContext(ctx, wsURL, header)
+	rawConn, resp, err := dialer.DialContext(ctx, wsURL, header)
 	if err != nil {
-		return err
+		return websocketDialError(err, resp)
 	}
 	conn := &loadtestWSConn{conn: rawConn}
 	defer func() {
@@ -1399,6 +1461,29 @@ func runWebSocketSession(ctx context.Context, api *apiClient, cfg config, agent 
 			m.recordWSError(fmt.Errorf("server error message: %s", raw))
 		}
 	}
+}
+
+func websocketDialError(err error, resp *http.Response) error {
+	if err == nil || resp == nil {
+		return err
+	}
+	parts := []string{"status=" + resp.Status}
+	if retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After")); retryAfter != "" {
+		parts = append(parts, "retry_after="+retryAfter)
+	}
+	if contentType := strings.TrimSpace(resp.Header.Get("Content-Type")); contentType != "" {
+		parts = append(parts, "content_type="+contentType)
+	}
+	if resp.Body != nil {
+		defer resp.Body.Close()
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if readErr == nil {
+			if trimmed := strings.Join(strings.Fields(string(body)), " "); trimmed != "" {
+				parts = append(parts, "body="+trimmed)
+			}
+		}
+	}
+	return fmt.Errorf("%w (%s)", err, strings.Join(parts, ", "))
 }
 
 func runWebSocketHeartbeatLoop(ctx context.Context, conn *loadtestWSConn, interval time.Duration, sessionStop <-chan struct{}, globalStop <-chan struct{}, m *metrics) {
@@ -1600,7 +1685,7 @@ func retryAfterDuration(headers http.Header, fallback time.Duration) time.Durati
 	return fallback
 }
 
-func buildReport(cfg config, runID string, accounts []account, agents []agentRef, tracker *runTracker, m *metrics, measuredStart, measuredEnd, holdStart, holdEnd time.Time, waitErr, holdErr error) map[string]any {
+func buildReport(cfg config, runID, accountRunID string, accounts []account, agents []agentRef, tracker *runTracker, m *metrics, measuredStart, measuredEnd, holdStart, holdEnd time.Time, waitErr, holdErr error) map[string]any {
 	records := tracker.snapshot()
 	var measured []*runRecord
 	var allCreateDur, assignDur, completeDur, resultAckDur []float64
@@ -1663,6 +1748,7 @@ func buildReport(cfg config, runID string, accounts []account, agents []agentRef
 	report := map[string]any{
 		"ok":                      waitErr == nil && holdErr == nil && failed == 0 && completed == cfg.Runs,
 		"run_id":                  runID,
+		"account_run_id":          accountRunID,
 		"api_root":                cfg.APIRoot,
 		"mode":                    cfg.Mode,
 		"users":                   len(accounts),
@@ -1679,6 +1765,7 @@ func buildReport(cfg config, runID string, accounts []account, agents []agentRef
 		"ready_timeout_ms":        ms(cfg.ReadyTimeout),
 		"pull_claim_wait_ms":      ms(effectivePullClaimWait(cfg)),
 		"ws_heartbeat_ms":         ms(cfg.WSHeartbeat),
+		"ws_connect_stagger_ms":   ms(cfg.WSConnectStagger),
 		"hold_after_ms":           ms(cfg.HoldAfter),
 		"hold_actual_ms":          holdActual,
 		"a2a_context":             cfg.ContextMode,
