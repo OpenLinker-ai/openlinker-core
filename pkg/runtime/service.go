@@ -654,6 +654,7 @@ func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunReques
 				"recommended_action": "start_worker",
 				"next_action":        resp.NextAction,
 			})
+			s.notifyRuntimePullRun(invocation.agent.ID)
 		}
 		return resp, nil
 	}
