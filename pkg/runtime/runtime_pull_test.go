@@ -1113,6 +1113,7 @@ func TestRuntimePull_LongPollClaimWaitsForRun(t *testing.T) {
 		err  error
 	}
 	resultC := make(chan claimResult, 1)
+	claimStarted := time.Now()
 	go func() {
 		resp, err := svc.ClaimRuntimePullRun(ctx, token, runtime.RuntimePullClaimOptions{Wait: 2 * time.Second})
 		resultC <- claimResult{resp: resp, err: err}
@@ -1128,6 +1129,7 @@ func TestRuntimePull_LongPollClaimWaitsForRun(t *testing.T) {
 		require.NotNil(t, result.resp)
 		assert.Equal(t, started.RunID, result.resp.RunID)
 		assert.Equal(t, "long poll", result.resp.Input["q"])
+		assert.Less(t, time.Since(claimStarted), time.Second, "long-poll claim should be notified instead of waiting for the full poll interval")
 	case <-time.After(3 * time.Second):
 		t.Fatal("long-poll claim did not return the run before timeout")
 	}

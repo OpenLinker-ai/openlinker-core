@@ -107,6 +107,7 @@ type Service struct {
 	taskCallbackSvc TaskCallbackEnqueuer
 	deliverySvc     DeliveryEnqueuer
 	wsHub           *runtimeWSHub
+	pullNotifier    *runtimePullNotifier
 	bestEffortDBSem chan struct{}
 	tokenTouchMu    sync.Mutex
 	tokenTouchAt    map[uuid.UUID]time.Time
@@ -195,6 +196,7 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		pool:         pool,
 		cfg:          cfg,
 		wsHub:        newRuntimeWSHub(),
+		pullNotifier: newRuntimePullNotifier(),
 		bestEffortDBSem: make(
 			chan struct{},
 			runtimeBestEffortWriteConcurrency,
@@ -620,6 +622,7 @@ func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, so
 			"connection_mode": invocation.agent.ConnectionMode,
 			"agent_id":        invocation.agent.ID.String(),
 		})
+		s.notifyRuntimePullRun(invocation.agent.ID)
 		s.dispatchRuntimeWSRunAsync(ctx, invocation.agent)
 		return resp, nil
 	}
@@ -640,6 +643,7 @@ func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunReques
 				"connection_mode": invocation.agent.ConnectionMode,
 				"agent_id":        invocation.agent.ID.String(),
 			})
+			s.notifyRuntimePullRun(invocation.agent.ID)
 			s.dispatchRuntimeWSRunAsync(ctx, invocation.agent)
 		} else {
 			resp.NextAction = runtimePullWaitingNextAction(resp.RunID, invocation.agent.ID)
@@ -671,6 +675,7 @@ func (s *Service) RunDelegated(ctx context.Context, userID uuid.UUID, delegation
 			"connection_mode": invocation.agent.ConnectionMode,
 			"agent_id":        invocation.agent.ID.String(),
 		})
+		s.notifyRuntimePullRun(invocation.agent.ID)
 		s.dispatchRuntimeWSRunAsync(ctx, invocation.agent)
 		return resp, nil
 	}
@@ -1543,6 +1548,12 @@ func (s *Service) ClaimRuntimePullRunForToken(ctx context.Context, token db.Agen
 		return nil, httpx.Conflict("Agent 不是队列型 runtime 接入模式")
 	}
 	claimOpts := normalizeRuntimePullClaimOptions(opts...)
+	notifyC := (<-chan struct{})(nil)
+	if claimOpts.Wait > 0 && s.pullNotifier != nil {
+		var unsubscribe func()
+		notifyC, unsubscribe = s.pullNotifier.subscribe(token.AgentID)
+		defer unsubscribe()
+	}
 	startedWaiting := time.Now()
 	for {
 		resp, err := s.claimRuntimePullRunOnce(ctx, token, connectionMode)
@@ -1561,6 +1572,8 @@ func (s *Service) ClaimRuntimePullRunForToken(ctx context.Context, token db.Agen
 		case <-ctx.Done():
 			timer.Stop()
 			return nil, ctx.Err()
+		case <-notifyC:
+			timer.Stop()
 		case <-timer.C:
 		}
 	}
