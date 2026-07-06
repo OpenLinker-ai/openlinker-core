@@ -66,6 +66,21 @@ func TestAgentHandlerDispatchesServiceSuccess(t *testing.T) {
 
 	c, rec = newAgentDispatchContext(agentDispatchRequest{
 		method: http.MethodGet,
+		target: "/creator/agents?limit=10&offset=20&q=demo&status=online&visibility=public&certification_status=certified&sort_by=name",
+		userID: userID.String(),
+	})
+	requireNoDispatchError(t, h.ListMyAgents(c))
+	requireDispatchStatus(t, rec, http.StatusOK)
+	pageBody := decodeAgentDispatchJSON[AgentListResponse](t, rec)
+	if pageBody.Limit != 10 || pageBody.Offset != 20 {
+		t.Fatalf("ListMyAgentsPage pagination = %#v", pageBody)
+	}
+	if mock.lastListOptions.Query != "demo" || mock.lastListOptions.Status != "online" || mock.lastListOptions.SortBy != "name" {
+		t.Fatalf("ListMyAgentsPage options = %#v", mock.lastListOptions)
+	}
+
+	c, rec = newAgentDispatchContext(agentDispatchRequest{
+		method: http.MethodGet,
 		target: "/creator/agents/" + agentID.String(),
 		userID: userID.String(),
 		params: map[string]string{"id": agentID.String()},
@@ -220,6 +235,7 @@ func TestAgentHandlerDispatchesServiceSuccess(t *testing.T) {
 		"BecomeCreator",
 		"CreateAgent",
 		"ListMyAgents",
+		"ListMyAgentsPage",
 		"GetMyAgent",
 		"UpdateAgent",
 		"SetVisibility",
@@ -479,6 +495,7 @@ type mockAgentService struct {
 	lastVisibility   string
 	lastRejectReason string
 	lastCreateAgent  *CreateAgentRequest
+	lastListOptions  AgentListOptions
 }
 
 func (m *mockAgentService) record(call string) {
@@ -514,6 +531,16 @@ func (m *mockAgentService) ListMyAgents(_ context.Context, userID uuid.UUID) ([]
 	m.record("ListMyAgents")
 	m.lastUserID = userID
 	return nil, m.err
+}
+
+func (m *mockAgentService) ListMyAgentsPage(_ context.Context, userID uuid.UUID, opts AgentListOptions) (*AgentListResponse, error) {
+	m.record("ListMyAgentsPage")
+	m.lastUserID = userID
+	m.lastListOptions = opts
+	if m.err != nil {
+		return nil, m.err
+	}
+	return &AgentListResponse{Items: []AgentResponse{}, Total: 42, Limit: opts.Limit, Offset: opts.Offset}, nil
 }
 
 func (m *mockAgentService) GetMyAgent(_ context.Context, agentID, userID uuid.UUID) (*AgentResponse, error) {

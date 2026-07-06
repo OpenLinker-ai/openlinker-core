@@ -25,6 +25,7 @@ type agentService interface {
 	BecomeCreator(context.Context, uuid.UUID) error
 	CreateAgent(context.Context, uuid.UUID, *CreateAgentRequest) (*AgentResponse, error)
 	ListMyAgents(context.Context, uuid.UUID) ([]AgentResponse, error)
+	ListMyAgentsPage(context.Context, uuid.UUID, AgentListOptions) (*AgentListResponse, error)
 	GetMyAgent(context.Context, uuid.UUID, uuid.UUID) (*AgentResponse, error)
 	UpdateAgent(context.Context, uuid.UUID, uuid.UUID, *UpdateAgentRequest) (*AgentResponse, error)
 	SetVisibility(context.Context, uuid.UUID, uuid.UUID, string) (*AgentResponse, error)
@@ -163,6 +164,21 @@ func (h *Handler) ListMyAgents(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	if hasAgentListQuery(c) {
+		resp, err := h.svc.ListMyAgentsPage(c.Request().Context(), uid, AgentListOptions{
+			Query:               c.QueryParam("q"),
+			Status:              c.QueryParam("status"),
+			Visibility:          c.QueryParam("visibility"),
+			CertificationStatus: c.QueryParam("certification_status"),
+			SortBy:              c.QueryParam("sort_by"),
+			Limit:               parseInt32Query(c, "limit", 25),
+			Offset:              parseInt32Query(c, "offset", 0),
+		})
+		if err != nil {
+			return err
+		}
+		return c.JSON(http.StatusOK, resp)
+	}
 	items, err := h.svc.ListMyAgents(c.Request().Context(), uid)
 	if err != nil {
 		return err
@@ -171,6 +187,28 @@ func (h *Handler) ListMyAgents(c echo.Context) error {
 		items = []AgentResponse{}
 	}
 	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
+func hasAgentListQuery(c echo.Context) bool {
+	for _, key := range []string{"limit", "offset", "q", "status", "visibility", "certification_status", "sort_by"} {
+		if c.QueryParam(key) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func parseInt32Query(c echo.Context, key string, fallback int32) int32 {
+	raw := c.QueryParam(key)
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return fallback
+	}
+	// #nosec G115 -- strconv.ParseInt with bitSize=32 guarantees int32 range.
+	return int32(value)
 }
 
 // GetMyAgent 创作者按 id 查自己的 Agent。

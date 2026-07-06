@@ -59,6 +59,8 @@ type AgentResponse struct {
 	RejectionReason     *string       `json:"rejection_reason,omitempty"`
 	TotalCalls          int32         `json:"total_calls"`
 	TotalRevenueCents   int64         `json:"total_revenue_cents"`
+	CallsThisMonth      int64         `json:"calls_this_month,omitempty"`
+	RevenueThisMonth    int64         `json:"revenue_this_month_cents,omitempty"`
 	ConnectionMode      string        `json:"connection_mode"`
 	MCPToolName         *string       `json:"mcp_tool_name,omitempty"`
 	Availability        *Availability `json:"availability,omitempty"`
@@ -66,6 +68,33 @@ type AgentResponse struct {
 	CreatedAt           string        `json:"created_at"`
 	CertifiedAt         *string       `json:"certified_at,omitempty"`
 	Creator             *Creator      `json:"creator,omitempty"`
+}
+
+type AgentCounts struct {
+	Total    int32 `json:"total"`
+	Online   int32 `json:"online"`
+	Public   int32 `json:"public"`
+	Unlisted int32 `json:"unlisted"`
+	Private  int32 `json:"private"`
+	Pending  int32 `json:"pending"`
+}
+
+type AgentListOptions struct {
+	Query               string
+	Status              string
+	Visibility          string
+	CertificationStatus string
+	SortBy              string
+	Limit               int32
+	Offset              int32
+}
+
+type AgentListResponse struct {
+	Items  []AgentResponse `json:"items"`
+	Total  int32           `json:"total"`
+	Limit  int32           `json:"limit"`
+	Offset int32           `json:"offset"`
+	Counts AgentCounts     `json:"counts"`
 }
 
 // Creator admin 视图嵌入的创作者信息。

@@ -256,6 +256,274 @@ func (q *Queries) ListAgentsByCreator(ctx context.Context, creatorID uuid.UUID) 
 	return items, nil
 }
 
+const listAgentsByCreatorPage = `-- name: ListAgentsByCreatorPage :many
+SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
+       a.endpoint_auth_header, a.price_per_call_cents, a.tags,
+       a.lifecycle_status, a.visibility, a.certification_status,
+       a.rejection_reason, a.certified_at,
+       a.total_calls, a.total_revenue_cents,
+       a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
+       COALESCE(av.availability_status, 'unknown') AS availability_status,
+       av.last_successful_run_at AS availability_last_successful_run_at,
+       av.last_failed_run_at AS availability_last_failed_run_at,
+       av.last_checked_at AS availability_last_checked_at,
+       COALESCE(av.consecutive_failures, 0)::int AS availability_consecutive_failures,
+       rt.last_runtime_token_used_at,
+       COALESCE(monthly.calls_this_month, 0)::bigint AS calls_this_month,
+       COALESCE(monthly.revenue_this_month, 0)::bigint AS revenue_this_month
+FROM agents a
+LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
+LEFT JOIN LATERAL (
+    SELECT MAX(last_used_at) AS last_runtime_token_used_at
+    FROM agent_tokens
+    WHERE agent_id = a.id
+      AND revoked_at IS NULL
+      AND status = 'active_runtime'
+      AND 'agent:pull' = ANY(scopes)
+) rt ON TRUE
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*)::bigint AS calls_this_month,
+        COALESCE(SUM(creator_revenue_cents), 0)::bigint AS revenue_this_month
+    FROM runs r
+    WHERE r.agent_id = a.id
+      AND r.status = 'success'
+      AND r.started_at >= date_trunc('month', NOW())
+) monthly ON TRUE
+WHERE a.creator_id = $1
+  AND (
+    $2::text = ''
+    OR a.slug ILIKE '%' || $2 || '%'
+    OR a.name ILIKE '%' || $2 || '%'
+    OR a.description ILIKE '%' || $2 || '%'
+    OR a.endpoint_url ILIKE '%' || $2 || '%'
+    OR array_to_string(a.tags, ' ') ILIKE '%' || $2 || '%'
+  )
+  AND (
+    $3::text = ''
+    OR ($3 = 'online' AND a.lifecycle_status = 'active' AND (
+      COALESCE(av.availability_status, 'unknown') = 'healthy'
+      OR (
+        av.last_successful_run_at IS NOT NULL
+        AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+      )
+    ) AND NOT (
+      a.connection_mode IN ('runtime_pull', 'runtime_ws')
+      AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+    ))
+    OR ($3 = 'offline' AND a.lifecycle_status = 'active' AND COALESCE(av.availability_status, 'unknown') <> 'degraded' AND NOT (
+      (
+        COALESCE(av.availability_status, 'unknown') = 'healthy'
+        OR (
+          av.last_successful_run_at IS NOT NULL
+          AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+        )
+      )
+      AND NOT (
+        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+      )
+    ))
+    OR ($3 = 'degraded' AND COALESCE(av.availability_status, 'unknown') = 'degraded')
+    OR ($3 = 'disabled' AND a.lifecycle_status = 'disabled')
+    OR ($3 = 'review' AND a.certification_status = 'pending')
+  )
+  AND ($4::text = '' OR a.visibility = $4)
+  AND ($5::text = '' OR a.certification_status = $5)
+ORDER BY
+  CASE WHEN $6 = 'name' THEN lower(a.name) END ASC,
+  CASE WHEN $6 = 'created_at' THEN a.created_at END DESC,
+  CASE WHEN $6 = 'lifetime_calls' THEN a.total_calls END DESC,
+  CASE WHEN $6 = 'calls_this_month' THEN COALESCE(monthly.calls_this_month, 0) END DESC,
+  a.created_at DESC
+LIMIT $7 OFFSET $8`
+
+type ListAgentsByCreatorPageParams struct {
+	CreatorID           uuid.UUID `db:"creator_id" json:"creator_id"`
+	Query               string    `db:"query" json:"query"`
+	Status              string    `db:"status" json:"status"`
+	Visibility          string    `db:"visibility" json:"visibility"`
+	CertificationStatus string    `db:"certification_status" json:"certification_status"`
+	SortBy              string    `db:"sort_by" json:"sort_by"`
+	Limit               int32     `db:"limit" json:"limit"`
+	Offset              int32     `db:"offset" json:"offset"`
+}
+
+type ListAgentsByCreatorPageRow struct {
+	Agent
+	AvailabilityStatus              string     `db:"availability_status" json:"availability_status"`
+	AvailabilityLastSuccessfulRunAt *time.Time `db:"availability_last_successful_run_at" json:"availability_last_successful_run_at"`
+	AvailabilityLastFailedRunAt     *time.Time `db:"availability_last_failed_run_at" json:"availability_last_failed_run_at"`
+	AvailabilityLastCheckedAt       *time.Time `db:"availability_last_checked_at" json:"availability_last_checked_at"`
+	AvailabilityConsecutiveFailures int32      `db:"availability_consecutive_failures" json:"availability_consecutive_failures"`
+	LastRuntimeTokenUsedAt          *time.Time `db:"last_runtime_token_used_at" json:"last_runtime_token_used_at"`
+	CallsThisMonth                  int64      `db:"calls_this_month" json:"calls_this_month"`
+	RevenueThisMonth                int64      `db:"revenue_this_month" json:"revenue_this_month"`
+}
+
+func (q *Queries) ListAgentsByCreatorPage(ctx context.Context, arg ListAgentsByCreatorPageParams) ([]ListAgentsByCreatorPageRow, error) {
+	rows, err := q.db.Query(ctx, listAgentsByCreatorPage, arg.CreatorID, arg.Query, arg.Status, arg.Visibility, arg.CertificationStatus, arg.SortBy, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAgentsByCreatorPageRow
+	for rows.Next() {
+		var r ListAgentsByCreatorPageRow
+		if err := rows.Scan(
+			&r.ID,
+			&r.CreatorID,
+			&r.Slug,
+			&r.Name,
+			&r.Description,
+			&r.EndpointURL,
+			&r.EndpointAuthHeader,
+			&r.PricePerCallCents,
+			&r.Tags,
+			&r.LifecycleStatus,
+			&r.Visibility,
+			&r.CertificationStatus,
+			&r.RejectionReason,
+			&r.CertifiedAt,
+			&r.TotalCalls,
+			&r.TotalRevenueCents,
+			&r.WebhookURL,
+			&r.ConnectionMode,
+			&r.MCPToolName,
+			&r.CreatedAt,
+			&r.UpdatedAt,
+			&r.AvailabilityStatus,
+			&r.AvailabilityLastSuccessfulRunAt,
+			&r.AvailabilityLastFailedRunAt,
+			&r.AvailabilityLastCheckedAt,
+			&r.AvailabilityConsecutiveFailures,
+			&r.LastRuntimeTokenUsedAt,
+			&r.CallsThisMonth,
+			&r.RevenueThisMonth,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const countAgentsByCreatorFiltered = `-- name: CountAgentsByCreatorFiltered :one
+SELECT COUNT(*)::int AS total
+FROM agents a
+LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
+LEFT JOIN LATERAL (
+    SELECT MAX(last_used_at) AS last_runtime_token_used_at
+    FROM agent_tokens
+    WHERE agent_id = a.id
+      AND revoked_at IS NULL
+      AND status = 'active_runtime'
+      AND 'agent:pull' = ANY(scopes)
+) rt ON TRUE
+WHERE a.creator_id = $1
+  AND (
+    $2::text = ''
+    OR a.slug ILIKE '%' || $2 || '%'
+    OR a.name ILIKE '%' || $2 || '%'
+    OR a.description ILIKE '%' || $2 || '%'
+    OR a.endpoint_url ILIKE '%' || $2 || '%'
+    OR array_to_string(a.tags, ' ') ILIKE '%' || $2 || '%'
+  )
+  AND (
+    $3::text = ''
+    OR ($3 = 'online' AND a.lifecycle_status = 'active' AND (
+      COALESCE(av.availability_status, 'unknown') = 'healthy'
+      OR (
+        av.last_successful_run_at IS NOT NULL
+        AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+      )
+    ) AND NOT (
+      a.connection_mode IN ('runtime_pull', 'runtime_ws')
+      AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+    ))
+    OR ($3 = 'offline' AND a.lifecycle_status = 'active' AND COALESCE(av.availability_status, 'unknown') <> 'degraded' AND NOT (
+      (
+        COALESCE(av.availability_status, 'unknown') = 'healthy'
+        OR (
+          av.last_successful_run_at IS NOT NULL
+          AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+        )
+      )
+      AND NOT (
+        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+      )
+    ))
+    OR ($3 = 'degraded' AND COALESCE(av.availability_status, 'unknown') = 'degraded')
+    OR ($3 = 'disabled' AND a.lifecycle_status = 'disabled')
+    OR ($3 = 'review' AND a.certification_status = 'pending')
+  )
+  AND ($4::text = '' OR a.visibility = $4)
+  AND ($5::text = '' OR a.certification_status = $5)`
+
+type CountAgentsByCreatorFilteredParams struct {
+	CreatorID           uuid.UUID `db:"creator_id" json:"creator_id"`
+	Query               string    `db:"query" json:"query"`
+	Status              string    `db:"status" json:"status"`
+	Visibility          string    `db:"visibility" json:"visibility"`
+	CertificationStatus string    `db:"certification_status" json:"certification_status"`
+}
+
+func (q *Queries) CountAgentsByCreatorFiltered(ctx context.Context, arg CountAgentsByCreatorFilteredParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countAgentsByCreatorFiltered, arg.CreatorID, arg.Query, arg.Status, arg.Visibility, arg.CertificationStatus)
+	var total int32
+	err := row.Scan(&total)
+	return total, err
+}
+
+const countAgentBucketsByCreator = `-- name: CountAgentBucketsByCreator :one
+SELECT
+  COUNT(*)::int AS total,
+  COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND (
+    COALESCE(av.availability_status, 'unknown') = 'healthy'
+    OR (
+      av.last_successful_run_at IS NOT NULL
+      AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+    )
+  ) AND NOT (
+    a.connection_mode IN ('runtime_pull', 'runtime_ws')
+    AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+  ))::int AS online,
+  COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.visibility = 'public')::int AS public,
+  COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.visibility = 'unlisted')::int AS unlisted,
+  COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.visibility = 'private')::int AS private,
+  COUNT(*) FILTER (WHERE a.certification_status = 'pending')::int AS pending
+FROM agents a
+LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
+LEFT JOIN LATERAL (
+    SELECT MAX(last_used_at) AS last_runtime_token_used_at
+    FROM agent_tokens
+    WHERE agent_id = a.id
+      AND revoked_at IS NULL
+      AND status = 'active_runtime'
+      AND 'agent:pull' = ANY(scopes)
+) rt ON TRUE
+WHERE a.creator_id = $1`
+
+type CountAgentBucketsByCreatorRow struct {
+	Total    int32 `db:"total" json:"total"`
+	Online   int32 `db:"online" json:"online"`
+	Public   int32 `db:"public" json:"public"`
+	Unlisted int32 `db:"unlisted" json:"unlisted"`
+	Private  int32 `db:"private" json:"private"`
+	Pending  int32 `db:"pending" json:"pending"`
+}
+
+func (q *Queries) CountAgentBucketsByCreator(ctx context.Context, creatorID uuid.UUID) (CountAgentBucketsByCreatorRow, error) {
+	row := q.db.QueryRow(ctx, countAgentBucketsByCreator, creatorID)
+	var r CountAgentBucketsByCreatorRow
+	err := row.Scan(&r.Total, &r.Online, &r.Public, &r.Unlisted, &r.Private, &r.Pending)
+	return r, err
+}
+
 const disableAgent = `-- name: DisableAgent :exec
 UPDATE agents
 SET lifecycle_status = 'disabled',

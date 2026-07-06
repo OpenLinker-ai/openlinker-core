@@ -86,6 +86,171 @@ FROM agents
 WHERE creator_id = $1
 ORDER BY created_at DESC;
 
+-- name: ListAgentsByCreatorPage :many
+-- 创作者中心 Agent 分页列表：搜索、状态筛选和排序都在数据库侧完成。
+SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
+       a.endpoint_auth_header, a.price_per_call_cents, a.tags,
+       a.lifecycle_status, a.visibility, a.certification_status,
+       a.rejection_reason, a.certified_at,
+       a.total_calls, a.total_revenue_cents,
+       a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
+       COALESCE(av.availability_status, 'unknown') AS availability_status,
+       av.last_successful_run_at AS availability_last_successful_run_at,
+       av.last_failed_run_at AS availability_last_failed_run_at,
+       av.last_checked_at AS availability_last_checked_at,
+       COALESCE(av.consecutive_failures, 0)::int AS availability_consecutive_failures,
+       rt.last_runtime_token_used_at,
+       COALESCE(monthly.calls_this_month, 0)::bigint AS calls_this_month,
+       COALESCE(monthly.revenue_this_month, 0)::bigint AS revenue_this_month
+FROM agents a
+LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
+LEFT JOIN LATERAL (
+    SELECT MAX(last_used_at) AS last_runtime_token_used_at
+    FROM agent_tokens
+    WHERE agent_id = a.id
+      AND revoked_at IS NULL
+      AND status = 'active_runtime'
+      AND 'agent:pull' = ANY(scopes)
+) rt ON TRUE
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*)::bigint AS calls_this_month,
+        COALESCE(SUM(creator_revenue_cents), 0)::bigint AS revenue_this_month
+    FROM runs r
+    WHERE r.agent_id = a.id
+      AND r.status = 'success'
+      AND r.started_at >= date_trunc('month', NOW())
+) monthly ON TRUE
+WHERE a.creator_id = $1
+  AND (
+    $2::text = ''
+    OR a.slug ILIKE '%' || $2 || '%'
+    OR a.name ILIKE '%' || $2 || '%'
+    OR a.description ILIKE '%' || $2 || '%'
+    OR a.endpoint_url ILIKE '%' || $2 || '%'
+    OR array_to_string(a.tags, ' ') ILIKE '%' || $2 || '%'
+  )
+  AND (
+    $3::text = ''
+    OR ($3 = 'online' AND a.lifecycle_status = 'active' AND (
+      COALESCE(av.availability_status, 'unknown') = 'healthy'
+      OR (
+        av.last_successful_run_at IS NOT NULL
+        AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+      )
+    ) AND NOT (
+      a.connection_mode IN ('runtime_pull', 'runtime_ws')
+      AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+    ))
+    OR ($3 = 'offline' AND a.lifecycle_status = 'active' AND COALESCE(av.availability_status, 'unknown') <> 'degraded' AND NOT (
+      (
+        COALESCE(av.availability_status, 'unknown') = 'healthy'
+        OR (
+          av.last_successful_run_at IS NOT NULL
+          AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+        )
+      )
+      AND NOT (
+        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+      )
+    ))
+    OR ($3 = 'degraded' AND COALESCE(av.availability_status, 'unknown') = 'degraded')
+    OR ($3 = 'disabled' AND a.lifecycle_status = 'disabled')
+    OR ($3 = 'review' AND a.certification_status = 'pending')
+  )
+  AND ($4::text = '' OR a.visibility = $4)
+  AND ($5::text = '' OR a.certification_status = $5)
+ORDER BY
+  CASE WHEN $6 = 'name' THEN lower(a.name) END ASC,
+  CASE WHEN $6 = 'created_at' THEN a.created_at END DESC,
+  CASE WHEN $6 = 'lifetime_calls' THEN a.total_calls END DESC,
+  CASE WHEN $6 = 'calls_this_month' THEN COALESCE(monthly.calls_this_month, 0) END DESC,
+  a.created_at DESC
+LIMIT $7 OFFSET $8;
+
+-- name: CountAgentsByCreatorFiltered :one
+SELECT COUNT(*)::int AS total
+FROM agents a
+LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
+LEFT JOIN LATERAL (
+    SELECT MAX(last_used_at) AS last_runtime_token_used_at
+    FROM agent_tokens
+    WHERE agent_id = a.id
+      AND revoked_at IS NULL
+      AND status = 'active_runtime'
+      AND 'agent:pull' = ANY(scopes)
+) rt ON TRUE
+WHERE a.creator_id = $1
+  AND (
+    $2::text = ''
+    OR a.slug ILIKE '%' || $2 || '%'
+    OR a.name ILIKE '%' || $2 || '%'
+    OR a.description ILIKE '%' || $2 || '%'
+    OR a.endpoint_url ILIKE '%' || $2 || '%'
+    OR array_to_string(a.tags, ' ') ILIKE '%' || $2 || '%'
+  )
+  AND (
+    $3::text = ''
+    OR ($3 = 'online' AND a.lifecycle_status = 'active' AND (
+      COALESCE(av.availability_status, 'unknown') = 'healthy'
+      OR (
+        av.last_successful_run_at IS NOT NULL
+        AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+      )
+    ) AND NOT (
+      a.connection_mode IN ('runtime_pull', 'runtime_ws')
+      AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+    ))
+    OR ($3 = 'offline' AND a.lifecycle_status = 'active' AND COALESCE(av.availability_status, 'unknown') <> 'degraded' AND NOT (
+      (
+        COALESCE(av.availability_status, 'unknown') = 'healthy'
+        OR (
+          av.last_successful_run_at IS NOT NULL
+          AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+        )
+      )
+      AND NOT (
+        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+      )
+    ))
+    OR ($3 = 'degraded' AND COALESCE(av.availability_status, 'unknown') = 'degraded')
+    OR ($3 = 'disabled' AND a.lifecycle_status = 'disabled')
+    OR ($3 = 'review' AND a.certification_status = 'pending')
+  )
+  AND ($4::text = '' OR a.visibility = $4)
+  AND ($5::text = '' OR a.certification_status = $5);
+
+-- name: CountAgentBucketsByCreator :one
+SELECT
+  COUNT(*)::int AS total,
+  COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND (
+    COALESCE(av.availability_status, 'unknown') = 'healthy'
+    OR (
+      av.last_successful_run_at IS NOT NULL
+      AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+    )
+  ) AND NOT (
+    a.connection_mode IN ('runtime_pull', 'runtime_ws')
+    AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+  ))::int AS online,
+  COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.visibility = 'public')::int AS public,
+  COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.visibility = 'unlisted')::int AS unlisted,
+  COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.visibility = 'private')::int AS private,
+  COUNT(*) FILTER (WHERE a.certification_status = 'pending')::int AS pending
+FROM agents a
+LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
+LEFT JOIN LATERAL (
+    SELECT MAX(last_used_at) AS last_runtime_token_used_at
+    FROM agent_tokens
+    WHERE agent_id = a.id
+      AND revoked_at IS NULL
+      AND status = 'active_runtime'
+      AND 'agent:pull' = ANY(scopes)
+) rt ON TRUE
+WHERE a.creator_id = $1;
+
 -- name: DisableAgent :exec
 -- 创作者主动下架：lifecycle_status='disabled'。
 UPDATE agents

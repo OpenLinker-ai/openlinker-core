@@ -23,9 +23,18 @@ var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
 
 // minSlugLen / maxSlugLen 与 dto validator 保持一致。
 const (
-	minSlugLen       = 3
-	maxSlugLen       = 80
-	maxAgentExamples = 20
+	minSlugLen            = 3
+	maxSlugLen            = 80
+	maxAgentExamples      = 20
+	defaultAgentListLimit = int32(25)
+	maxAgentListLimit     = int32(100)
+)
+
+var (
+	creatorAgentListStatusValues        = map[string]bool{"online": true, "offline": true, "degraded": true, "disabled": true, "review": true}
+	creatorAgentListVisibilityValues    = map[string]bool{"public": true, "unlisted": true, "private": true}
+	creatorAgentListCertificationValues = map[string]bool{"unreviewed": true, "pending": true, "certified": true, "rejected": true}
+	creatorAgentListSortValues          = map[string]bool{"calls_this_month": true, "lifetime_calls": true, "name": true, "created_at": true}
 )
 
 // Service Agent 注册 / 公开状态业务逻辑层。
@@ -306,6 +315,59 @@ func (s *Service) ListMyAgents(ctx context.Context, creatorID uuid.UUID) ([]Agen
 		out = append(out, s.toAgentResponseWithReadiness(ctx, &rows[i]))
 	}
 	return out, nil
+}
+
+func (s *Service) ListMyAgentsPage(ctx context.Context, creatorID uuid.UUID, opts AgentListOptions) (*AgentListResponse, error) {
+	opts = normalizeAgentListOptions(opts)
+	params := db.ListAgentsByCreatorPageParams{
+		CreatorID:           creatorID,
+		Query:               opts.Query,
+		Status:              opts.Status,
+		Visibility:          opts.Visibility,
+		CertificationStatus: opts.CertificationStatus,
+		SortBy:              opts.SortBy,
+		Limit:               opts.Limit,
+		Offset:              opts.Offset,
+	}
+	rows, err := s.queries.ListAgentsByCreatorPage(ctx, params)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", creatorID.String()).Msg("agent.ListMyAgentsPage")
+		return nil, httpx.Internal("查询 Agent 列表失败")
+	}
+	total, err := s.queries.CountAgentsByCreatorFiltered(ctx, db.CountAgentsByCreatorFilteredParams{
+		CreatorID:           creatorID,
+		Query:               opts.Query,
+		Status:              opts.Status,
+		Visibility:          opts.Visibility,
+		CertificationStatus: opts.CertificationStatus,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", creatorID.String()).Msg("agent.ListMyAgentsPage: count")
+		return nil, httpx.Internal("查询 Agent 总数失败")
+	}
+	buckets, err := s.queries.CountAgentBucketsByCreator(ctx, creatorID)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", creatorID.String()).Msg("agent.ListMyAgentsPage: buckets")
+		return nil, httpx.Internal("查询 Agent 统计失败")
+	}
+	out := make([]AgentResponse, 0, len(rows))
+	for i := range rows {
+		out = append(out, s.agentListRowToResponse(&rows[i]))
+	}
+	return &AgentListResponse{
+		Items:  out,
+		Total:  total,
+		Limit:  opts.Limit,
+		Offset: opts.Offset,
+		Counts: AgentCounts{
+			Total:    buckets.Total,
+			Online:   buckets.Online,
+			Public:   buckets.Public,
+			Unlisted: buckets.Unlisted,
+			Private:  buckets.Private,
+			Pending:  buckets.Pending,
+		},
+	}, nil
 }
 
 // GetMyAgent 创作者按 id 查自己的 Agent（编辑前预填用）。
@@ -809,6 +871,35 @@ func normalizeTagsForInsert(in []string) []string {
 	return out
 }
 
+func normalizeAgentListOptions(opts AgentListOptions) AgentListOptions {
+	opts.Query = strings.TrimSpace(opts.Query)
+	opts.Status = normalizeAgentListFilter(opts.Status, creatorAgentListStatusValues)
+	opts.Visibility = normalizeAgentListFilter(opts.Visibility, creatorAgentListVisibilityValues)
+	opts.CertificationStatus = normalizeAgentListFilter(opts.CertificationStatus, creatorAgentListCertificationValues)
+	opts.SortBy = normalizeAgentListFilter(opts.SortBy, creatorAgentListSortValues)
+	if opts.SortBy == "" {
+		opts.SortBy = "calls_this_month"
+	}
+	if opts.Limit <= 0 {
+		opts.Limit = defaultAgentListLimit
+	}
+	if opts.Limit > maxAgentListLimit {
+		opts.Limit = maxAgentListLimit
+	}
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
+	return opts
+}
+
+func normalizeAgentListFilter(value string, allowedValues map[string]bool) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if allowedValues[value] {
+		return value
+	}
+	return ""
+}
+
 // toAgentResponse db.Agent → API DTO。
 //
 // Status 字段从三维状态机派生，保留给老前端读：
@@ -842,6 +933,36 @@ func toAgentResponse(a *db.Agent) AgentResponse {
 		ts := a.CertifiedAt.UTC().Format(time.RFC3339)
 		resp.CertifiedAt = &ts
 	}
+	return resp
+}
+
+func (s *Service) agentListRowToResponse(row *db.ListAgentsByCreatorPageRow) AgentResponse {
+	resp := toAgentResponse(&row.Agent)
+	availability := runtimeAwareAvailabilityFromLastRuntimeToken(
+		row.ConnectionMode,
+		availabilityResponse(
+			row.AvailabilityStatus,
+			row.AvailabilityLastSuccessfulRunAt,
+			row.AvailabilityLastFailedRunAt,
+			row.AvailabilityLastCheckedAt,
+			row.AvailabilityConsecutiveFailures,
+		),
+		row.LastRuntimeTokenUsedAt,
+		time.Now(),
+	)
+	readiness := readinessForAgent(
+		row.Slug,
+		row.LifecycleStatus,
+		row.Visibility,
+		row.CertificationStatus,
+		availability,
+		0,
+		nil,
+	)
+	resp.Availability = &availability
+	resp.Readiness = &readiness
+	resp.CallsThisMonth = row.CallsThisMonth
+	resp.RevenueThisMonth = row.RevenueThisMonth
 	return resp
 }
 
