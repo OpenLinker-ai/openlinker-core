@@ -584,18 +584,37 @@ func (s *Service) ListWorkflowRuns(ctx context.Context, userID, workflowID uuid.
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
+	return s.ListWorkflowRunsPage(ctx, userID, workflowID, "", "", "created_desc", 1, limit)
+}
+
+// ListWorkflowRunsPage returns workflow run history with server-side search,
+// status filtering, sorting, and pagination.
+func (s *Service) ListWorkflowRunsPage(ctx context.Context, userID, workflowID uuid.UUID, query, status, sort string, page, size int32) (*WorkflowRunListResponse, error) {
+	page, size = normalizeWorkflowListPage(page, size)
+	query = normalizeWorkflowListQuery(query)
+	status = normalizeWorkflowRunStatusFilter(status)
+	sort = normalizeWorkflowRunListSort(sort)
+	offset := (page - 1) * size
 	if _, _, err := s.getWorkflowForOwner(ctx, userID, workflowID); err != nil {
 		return nil, err
 	}
 	rows, err := s.queries.ListWorkflowRunsByWorkflow(ctx, db.ListWorkflowRunsByWorkflowParams{
 		WorkflowID: workflowID,
-		Limit:      limit,
+		Query:      query,
+		Status:     status,
+		Sort:       sort,
+		Limit:      size,
+		Offset:     offset,
 	})
 	if err != nil {
 		log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.ListWorkflowRuns")
 		return nil, httpx.Internal("查询 workflow_runs 失败")
 	}
-	total, err := s.queries.CountWorkflowRunsByWorkflow(ctx, workflowID)
+	total, err := s.queries.CountWorkflowRunsByWorkflow(ctx, db.CountWorkflowRunsByWorkflowParams{
+		WorkflowID: workflowID,
+		Query:      query,
+		Status:     status,
+	})
 	if err != nil {
 		log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.ListWorkflowRuns: count")
 		return nil, httpx.Internal("查询 workflow_run 数量失败")
@@ -613,7 +632,55 @@ func (s *Service) ListWorkflowRuns(ctx context.Context, userID, workflowID uuid.
 	for _, run := range rows {
 		items = append(items, workflowRunToResponse(run, stepsByRunID[run.ID]))
 	}
-	return &WorkflowRunListResponse{Items: items, Total: total}, nil
+	return &WorkflowRunListResponse{
+		Items:        items,
+		Total:        total,
+		Page:         page,
+		Size:         size,
+		Query:        query,
+		Sort:         sort,
+		StatusFilter: status,
+	}, nil
+}
+
+func normalizeWorkflowRunStatusFilter(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case workflowRunStatusPending:
+		return workflowRunStatusPending
+	case workflowRunStatusRunning:
+		return workflowRunStatusRunning
+	case workflowRunStatusPaused:
+		return workflowRunStatusPaused
+	case workflowRunStatusCanceled:
+		return workflowRunStatusCanceled
+	case workflowRunStatusSuccess:
+		return workflowRunStatusSuccess
+	case workflowRunStatusFailed:
+		return workflowRunStatusFailed
+	default:
+		return ""
+	}
+}
+
+func normalizeWorkflowRunListSort(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "created_asc":
+		return "created_asc"
+	case "updated_desc":
+		return "updated_desc"
+	case "updated_asc":
+		return "updated_asc"
+	case "finished_desc":
+		return "finished_desc"
+	case "finished_asc":
+		return "finished_asc"
+	case "status_asc":
+		return "status_asc"
+	case "status_desc":
+		return "status_desc"
+	default:
+		return "created_desc"
+	}
 }
 
 func (s *Service) prepareWorkflowExecution(

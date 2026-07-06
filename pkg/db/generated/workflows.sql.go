@@ -406,16 +406,53 @@ const listWorkflowRunsByWorkflow = `-- name: ListWorkflowRunsByWorkflow :many
 	       attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error
 	FROM workflow_runs
 	WHERE workflow_id = $1
-	ORDER BY created_at DESC
-	LIMIT $2`
+	  AND (
+	      $2::text = ''
+	      OR id::text ILIKE '%' || $2 || '%'
+	      OR status ILIKE '%' || $2 || '%'
+	      OR COALESCE(input::text, '') ILIKE '%' || $2 || '%'
+	      OR COALESCE(output::text, '') ILIKE '%' || $2 || '%'
+	      OR COALESCE(error_message, '') ILIKE '%' || $2 || '%'
+	      OR COALESCE(last_worker_error, '') ILIKE '%' || $2 || '%'
+	      OR EXISTS (
+	          SELECT 1
+	          FROM workflow_run_steps s
+	          WHERE s.workflow_run_id = workflow_runs.id
+	            AND (
+	                s.id::text ILIKE '%' || $2 || '%'
+	                OR s.node_key ILIKE '%' || $2 || '%'
+	                OR s.agent_id::text ILIKE '%' || $2 || '%'
+	                OR COALESCE(s.run_id::text, '') ILIKE '%' || $2 || '%'
+	                OR s.status ILIKE '%' || $2 || '%'
+	                OR COALESCE(s.error_message, '') ILIKE '%' || $2 || '%'
+	            )
+	      )
+	  )
+	  AND ($3::text = '' OR status = $3)
+	ORDER BY
+	  CASE WHEN $4 = 'created_asc' THEN created_at END ASC,
+	  CASE WHEN $4 = 'created_desc' THEN created_at END DESC,
+	  CASE WHEN $4 = 'updated_asc' THEN updated_at END ASC,
+	  CASE WHEN $4 = 'updated_desc' THEN updated_at END DESC,
+	  CASE WHEN $4 = 'finished_asc' THEN finished_at END ASC NULLS LAST,
+	  CASE WHEN $4 = 'finished_desc' THEN finished_at END DESC NULLS LAST,
+	  CASE WHEN $4 = 'status_asc' THEN status END ASC,
+	  CASE WHEN $4 = 'status_desc' THEN status END DESC,
+	  created_at DESC,
+	  id DESC
+	LIMIT $5 OFFSET $6`
 
 type ListWorkflowRunsByWorkflowParams struct {
 	WorkflowID uuid.UUID `db:"workflow_id" json:"workflow_id"`
+	Query      string    `db:"query" json:"query"`
+	Status     string    `db:"status" json:"status"`
+	Sort       string    `db:"sort" json:"sort"`
 	Limit      int32     `db:"limit" json:"limit"`
+	Offset     int32     `db:"offset" json:"offset"`
 }
 
 func (q *Queries) ListWorkflowRunsByWorkflow(ctx context.Context, arg ListWorkflowRunsByWorkflowParams) ([]WorkflowRun, error) {
-	rows, err := q.db.Query(ctx, listWorkflowRunsByWorkflow, arg.WorkflowID, arg.Limit)
+	rows, err := q.db.Query(ctx, listWorkflowRunsByWorkflow, arg.WorkflowID, arg.Query, arg.Status, arg.Sort, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
@@ -434,10 +471,39 @@ func (q *Queries) ListWorkflowRunsByWorkflow(ctx context.Context, arg ListWorkfl
 const countWorkflowRunsByWorkflow = `-- name: CountWorkflowRunsByWorkflow :one
 	SELECT COUNT(*)::int
 	FROM workflow_runs
-	WHERE workflow_id = $1`
+	WHERE workflow_id = $1
+	  AND (
+	      $2::text = ''
+	      OR id::text ILIKE '%' || $2 || '%'
+	      OR status ILIKE '%' || $2 || '%'
+	      OR COALESCE(input::text, '') ILIKE '%' || $2 || '%'
+	      OR COALESCE(output::text, '') ILIKE '%' || $2 || '%'
+	      OR COALESCE(error_message, '') ILIKE '%' || $2 || '%'
+	      OR COALESCE(last_worker_error, '') ILIKE '%' || $2 || '%'
+	      OR EXISTS (
+	          SELECT 1
+	          FROM workflow_run_steps s
+	          WHERE s.workflow_run_id = workflow_runs.id
+	            AND (
+	                s.id::text ILIKE '%' || $2 || '%'
+	                OR s.node_key ILIKE '%' || $2 || '%'
+	                OR s.agent_id::text ILIKE '%' || $2 || '%'
+	                OR COALESCE(s.run_id::text, '') ILIKE '%' || $2 || '%'
+	                OR s.status ILIKE '%' || $2 || '%'
+	                OR COALESCE(s.error_message, '') ILIKE '%' || $2 || '%'
+	            )
+	      )
+	  )
+	  AND ($3::text = '' OR status = $3)`
 
-func (q *Queries) CountWorkflowRunsByWorkflow(ctx context.Context, workflowID uuid.UUID) (int32, error) {
-	row := q.db.QueryRow(ctx, countWorkflowRunsByWorkflow, workflowID)
+type CountWorkflowRunsByWorkflowParams struct {
+	WorkflowID uuid.UUID `db:"workflow_id" json:"workflow_id"`
+	Query      string    `db:"query" json:"query"`
+	Status     string    `db:"status" json:"status"`
+}
+
+func (q *Queries) CountWorkflowRunsByWorkflow(ctx context.Context, arg CountWorkflowRunsByWorkflowParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countWorkflowRunsByWorkflow, arg.WorkflowID, arg.Query, arg.Status)
 	var count int32
 	err := row.Scan(&count)
 	return count, err

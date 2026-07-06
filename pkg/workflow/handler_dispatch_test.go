@@ -155,15 +155,15 @@ func TestWorkflowHandlerDispatchesServiceSuccess(t *testing.T) {
 
 		listRunsCtx, listRunsRec := newWorkflowDispatchContext(&workflowDispatchRequest{
 			method: http.MethodGet,
-			target: "/workflows/" + workflowID.String() + "/runs",
+			target: "/workflows/" + workflowID.String() + "/runs?q=extract&status=success&sort=updated_desc&page=2&size=5",
 			userID: userID.String(),
 			params: map[string]string{"id": workflowID.String()},
 		})
 		if err := h.ListRuns(listRunsCtx); err != nil {
 			t.Fatalf("ListRuns error = %v", err)
 		}
-		if listRunsRec.Code != http.StatusOK || mock.listRunsUserID != userID || mock.listRunsWorkflowID != workflowID || mock.listRunsLimit != 20 {
-			t.Fatalf("list runs code=%d user=%s workflow=%s limit=%d", listRunsRec.Code, mock.listRunsUserID, mock.listRunsWorkflowID, mock.listRunsLimit)
+		if listRunsRec.Code != http.StatusOK || mock.listRunsUserID != userID || mock.listRunsWorkflowID != workflowID || mock.listRunsLimit != 5 || mock.listRunsPage != 2 || mock.listRunsQuery != "extract" || mock.listRunsStatus != "success" || mock.listRunsSort != "updated_desc" {
+			t.Fatalf("list runs code=%d user=%s workflow=%s page=%d limit=%d q=%q status=%q sort=%q", listRunsRec.Code, mock.listRunsUserID, mock.listRunsWorkflowID, mock.listRunsPage, mock.listRunsLimit, mock.listRunsQuery, mock.listRunsStatus, mock.listRunsSort)
 		}
 
 		getRunCtx, getRunRec := newWorkflowDispatchContext(&workflowDispatchRequest{
@@ -445,6 +445,10 @@ type mockWorkflowService struct {
 	listRunsUserID     uuid.UUID
 	listRunsWorkflowID uuid.UUID
 	listRunsLimit      int32
+	listRunsPage       int32
+	listRunsQuery      string
+	listRunsStatus     string
+	listRunsSort       string
 	runListResp        *WorkflowRunListResponse
 
 	getRunUserID uuid.UUID
@@ -519,6 +523,17 @@ func (m *mockWorkflowService) ListWorkflowRuns(_ context.Context, userID, workfl
 	m.listRunsUserID = userID
 	m.listRunsWorkflowID = workflowID
 	m.listRunsLimit = limit
+	return m.runListResp, m.err
+}
+
+func (m *mockWorkflowService) ListWorkflowRunsPage(_ context.Context, userID, workflowID uuid.UUID, query, status, sort string, page, size int32) (*WorkflowRunListResponse, error) {
+	m.listRunsUserID = userID
+	m.listRunsWorkflowID = workflowID
+	m.listRunsQuery = query
+	m.listRunsStatus = status
+	m.listRunsSort = sort
+	m.listRunsPage = page
+	m.listRunsLimit = size
 	return m.runListResp, m.err
 }
 

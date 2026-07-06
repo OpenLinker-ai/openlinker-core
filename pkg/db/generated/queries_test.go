@@ -2132,7 +2132,7 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			return err
 		}},
 		{name: "ListWorkflowRunsByWorkflow", run: func() error {
-			_, err := q.ListWorkflowRunsByWorkflow(ctx, ListWorkflowRunsByWorkflowParams{WorkflowID: id, Limit: 10})
+			_, err := q.ListWorkflowRunsByWorkflow(ctx, ListWorkflowRunsByWorkflowParams{WorkflowID: id, Sort: "created_desc", Limit: 10})
 			return err
 		}},
 		{name: "ListWorkflowRunSteps", run: func() error {
@@ -2519,7 +2519,14 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	}
 
 	dbtx.queryRows = &fakeRows{rows: [][]any{runValues}}
-	runs, err := q.ListWorkflowRunsByWorkflow(context.Background(), ListWorkflowRunsByWorkflowParams{WorkflowID: workflowID, Limit: 10})
+	runs, err := q.ListWorkflowRunsByWorkflow(context.Background(), ListWorkflowRunsByWorkflowParams{
+		WorkflowID: workflowID,
+		Query:      "extract",
+		Status:     "success",
+		Sort:       "created_desc",
+		Limit:      10,
+		Offset:     20,
+	})
 	if err != nil {
 		t.Fatalf("ListWorkflowRunsByWorkflow error = %v", err)
 	}
@@ -2527,13 +2534,23 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	if len(runs) != 1 || runs[0].ID != runID {
 		t.Fatalf("ListWorkflowRunsByWorkflow scan = %#v", runs)
 	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{workflowID, "extract", "success", "created_desc", int32(10), int32(20)}) {
+		t.Fatalf("ListWorkflowRunsByWorkflow args = %#v", dbtx.queryArgs)
+	}
 
 	dbtx.row = fakeRow{values: []any{int32(8)}}
-	count, err := q.CountWorkflowRunsByWorkflow(context.Background(), workflowID)
+	count, err := q.CountWorkflowRunsByWorkflow(context.Background(), CountWorkflowRunsByWorkflowParams{
+		WorkflowID: workflowID,
+		Query:      "extract",
+		Status:     "success",
+	})
 	if err != nil || count != 8 {
 		t.Fatalf("CountWorkflowRunsByWorkflow = %d, %v", count, err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "CountWorkflowRunsByWorkflow")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{workflowID, "extract", "success"}) {
+		t.Fatalf("CountWorkflowRunsByWorkflow args = %#v", dbtx.queryRowArgs)
+	}
 
 	before := now.Add(-time.Hour)
 	if rows, err := q.RequeueStaleWorkflowRuns(context.Background(), before); err != nil || rows != 7 {

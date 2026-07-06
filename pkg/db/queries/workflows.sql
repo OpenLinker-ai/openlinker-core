@@ -184,13 +184,69 @@ SELECT id, workflow_id, user_id, status, input, output, error_message,
        attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error
 FROM workflow_runs
 WHERE workflow_id = $1
-ORDER BY created_at DESC
-LIMIT $2;
+  AND (
+      $2::text = ''
+      OR id::text ILIKE '%' || $2 || '%'
+      OR status ILIKE '%' || $2 || '%'
+      OR COALESCE(input::text, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(output::text, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(error_message, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(last_worker_error, '') ILIKE '%' || $2 || '%'
+      OR EXISTS (
+          SELECT 1
+          FROM workflow_run_steps s
+          WHERE s.workflow_run_id = workflow_runs.id
+            AND (
+                s.id::text ILIKE '%' || $2 || '%'
+                OR s.node_key ILIKE '%' || $2 || '%'
+                OR s.agent_id::text ILIKE '%' || $2 || '%'
+                OR COALESCE(s.run_id::text, '') ILIKE '%' || $2 || '%'
+                OR s.status ILIKE '%' || $2 || '%'
+                OR COALESCE(s.error_message, '') ILIKE '%' || $2 || '%'
+            )
+      )
+  )
+  AND ($3::text = '' OR status = $3)
+ORDER BY
+  CASE WHEN $4 = 'created_asc' THEN created_at END ASC,
+  CASE WHEN $4 = 'created_desc' THEN created_at END DESC,
+  CASE WHEN $4 = 'updated_asc' THEN updated_at END ASC,
+  CASE WHEN $4 = 'updated_desc' THEN updated_at END DESC,
+  CASE WHEN $4 = 'finished_asc' THEN finished_at END ASC NULLS LAST,
+  CASE WHEN $4 = 'finished_desc' THEN finished_at END DESC NULLS LAST,
+  CASE WHEN $4 = 'status_asc' THEN status END ASC,
+  CASE WHEN $4 = 'status_desc' THEN status END DESC,
+  created_at DESC,
+  id DESC
+LIMIT $5 OFFSET $6;
 
 -- name: CountWorkflowRunsByWorkflow :one
 SELECT COUNT(*)::int
 FROM workflow_runs
-WHERE workflow_id = $1;
+WHERE workflow_id = $1
+  AND (
+      $2::text = ''
+      OR id::text ILIKE '%' || $2 || '%'
+      OR status ILIKE '%' || $2 || '%'
+      OR COALESCE(input::text, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(output::text, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(error_message, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(last_worker_error, '') ILIKE '%' || $2 || '%'
+      OR EXISTS (
+          SELECT 1
+          FROM workflow_run_steps s
+          WHERE s.workflow_run_id = workflow_runs.id
+            AND (
+                s.id::text ILIKE '%' || $2 || '%'
+                OR s.node_key ILIKE '%' || $2 || '%'
+                OR s.agent_id::text ILIKE '%' || $2 || '%'
+                OR COALESCE(s.run_id::text, '') ILIKE '%' || $2 || '%'
+                OR s.status ILIKE '%' || $2 || '%'
+                OR COALESCE(s.error_message, '') ILIKE '%' || $2 || '%'
+            )
+      )
+  )
+  AND ($3::text = '' OR status = $3);
 
 -- name: ClaimPendingWorkflowRun :one
 WITH candidate AS (

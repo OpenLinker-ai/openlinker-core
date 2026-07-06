@@ -77,8 +77,13 @@ type WorkflowRunResponse struct {
 }
 
 type WorkflowRunListResponse struct {
-	Items []WorkflowRunResponse `json:"items"`
-	Total int32                 `json:"total"`
+	Items        []WorkflowRunResponse `json:"items"`
+	Total        int32                 `json:"total"`
+	Page         int32                 `json:"page"`
+	Size         int32                 `json:"size"`
+	Query        string                `json:"query,omitempty"`
+	Sort         string                `json:"sort"`
+	StatusFilter string                `json:"status_filter,omitempty"`
 }
 
 type WorkflowStepRerunResponse struct {

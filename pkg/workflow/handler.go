@@ -25,6 +25,7 @@ type workflowService interface {
 	RunWorkflow(context.Context, uuid.UUID, uuid.UUID, *RunWorkflowRequest) (*WorkflowRunResponse, error)
 	StartWorkflowRun(context.Context, uuid.UUID, uuid.UUID, *RunWorkflowRequest) (*WorkflowRunResponse, error)
 	ListWorkflowRuns(context.Context, uuid.UUID, uuid.UUID, int32) (*WorkflowRunListResponse, error)
+	ListWorkflowRunsPage(context.Context, uuid.UUID, uuid.UUID, string, string, string, int32, int32) (*WorkflowRunListResponse, error)
 	GetWorkflowRun(context.Context, uuid.UUID, uuid.UUID) (*WorkflowRunResponse, error)
 	RetryWorkflowRun(context.Context, uuid.UUID, uuid.UUID) (*WorkflowRunResponse, error)
 	RerunWorkflowStep(context.Context, uuid.UUID, uuid.UUID, *RerunWorkflowStepRequest) (*WorkflowStepRerunResponse, error)
@@ -207,7 +208,31 @@ func (h *Handler) ListRuns(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	resp, err := h.svc.ListWorkflowRuns(c.Request().Context(), uid, id, 20)
+	page := int32(1)
+	if v := c.QueryParam("page"); v != "" {
+		if n, perr := strconv.ParseInt(v, 10, 32); perr == nil && n > 0 {
+			page = int32(n) // #nosec G115 -- ParseInt bitSize=32 guarantees range.
+		}
+	}
+	size := int32(20)
+	if v := firstNonEmpty(c.QueryParam("size"), c.QueryParam("limit")); v != "" {
+		if n, perr := strconv.ParseInt(v, 10, 32); perr == nil && n > 0 {
+			if n > 50 {
+				n = 50
+			}
+			size = int32(n) // #nosec G115 -- ParseInt bitSize=32 guarantees range, then size is capped.
+		}
+	}
+	resp, err := h.svc.ListWorkflowRunsPage(
+		c.Request().Context(),
+		uid,
+		id,
+		c.QueryParam("q"),
+		c.QueryParam("status"),
+		c.QueryParam("sort"),
+		page,
+		size,
+	)
 	if err != nil {
 		return err
 	}
