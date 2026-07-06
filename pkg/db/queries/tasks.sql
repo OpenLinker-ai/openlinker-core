@@ -239,6 +239,70 @@ WHERE visibility = 'public'
 ORDER BY published_at DESC, created_at DESC
 LIMIT $1;
 
+-- name: ListPublicTaskQueriesPage :many
+-- 公开任务广场分页列表：搜索只匹配公开摘要、Skill/MCP 引用和公开任务 ID，不用私有原始 query 做匹配。
+SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+       chosen_agent_id, chosen_at,
+       claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+       completed_at, completion_summary, completion_run_id,
+       delivery_status, delivery_visibility, delivery_artifact,
+       accepted_at, revision_requested_at, revision_note,
+       visibility, public_summary, published_at,
+       created_at
+FROM task_queries
+WHERE visibility = 'public'
+  AND (
+      $1::text = ''
+      OR id::text ILIKE '%' || $1 || '%'
+      OR COALESCE(public_summary, '') ILIKE '%' || $1 || '%'
+      OR array_to_string(COALESCE(parsed_skills, ARRAY[]::text[]), ' ') ILIKE '%' || $1 || '%'
+      OR array_to_string(COALESCE(mcp_tools, ARRAY[]::text[]), ' ') ILIKE '%' || $1 || '%'
+  )
+  AND (
+      $2::text = ''
+      OR ($2 = 'accepted' AND delivery_status = 'accepted')
+      OR ($2 = 'revision_requested' AND delivery_status = 'revision_requested')
+      OR ($2 = 'completed' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NOT NULL)
+      OR ($2 = 'in_progress' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NOT NULL)
+      OR ($2 = 'matched' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NOT NULL)
+      OR ($2 = 'needs_agent' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) = 0)
+      OR ($2 = 'open' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) > 0)
+  )
+  AND ($3::text = '' OR $3 = ANY(COALESCE(parsed_skills, ARRAY[]::text[])))
+  AND ($4::text = '' OR $4 = ANY(COALESCE(mcp_tools, ARRAY[]::text[])))
+ORDER BY
+  CASE WHEN $5 = 'published_asc' THEN COALESCE(published_at, created_at) END ASC,
+  CASE WHEN $5 = 'created_desc' THEN created_at END DESC,
+  CASE WHEN $5 = 'recommended_desc' THEN cardinality(recommended_agent_ids) END DESC,
+  COALESCE(published_at, created_at) DESC,
+  created_at DESC,
+  id DESC
+LIMIT $6 OFFSET $7;
+
+-- name: CountPublicTaskQueriesPage :one
+SELECT COUNT(*)::int
+FROM task_queries
+WHERE visibility = 'public'
+  AND (
+      $1::text = ''
+      OR id::text ILIKE '%' || $1 || '%'
+      OR COALESCE(public_summary, '') ILIKE '%' || $1 || '%'
+      OR array_to_string(COALESCE(parsed_skills, ARRAY[]::text[]), ' ') ILIKE '%' || $1 || '%'
+      OR array_to_string(COALESCE(mcp_tools, ARRAY[]::text[]), ' ') ILIKE '%' || $1 || '%'
+  )
+  AND (
+      $2::text = ''
+      OR ($2 = 'accepted' AND delivery_status = 'accepted')
+      OR ($2 = 'revision_requested' AND delivery_status = 'revision_requested')
+      OR ($2 = 'completed' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NOT NULL)
+      OR ($2 = 'in_progress' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NOT NULL)
+      OR ($2 = 'matched' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NOT NULL)
+      OR ($2 = 'needs_agent' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) = 0)
+      OR ($2 = 'open' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) > 0)
+  )
+  AND ($3::text = '' OR $3 = ANY(COALESCE(parsed_skills, ARRAY[]::text[])))
+  AND ($4::text = '' OR $4 = ANY(COALESCE(mcp_tools, ARRAY[]::text[])));
+
 -- name: GetAgentsByIDs :many
 -- 任务推荐回填：按一组 agent_id 批量取详情（含 creator 显示名）。
 -- 只回当前仍公开运行的 Agent；已下架 / private / unlisted 的历史推荐不再展示。

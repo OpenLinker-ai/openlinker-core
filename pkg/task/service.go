@@ -742,12 +742,46 @@ func normalizeTaskHistorySort(sort string) string {
 
 // ListBoard 返回任务广场最近公开任务。列表不暴露发布者身份。
 func (s *Service) ListBoard(ctx context.Context, limit int32) ([]PublicTaskItem, error) {
-	if limit <= 0 || limit > 50 {
-		limit = 20
+	resp, err := s.ListBoardPage(ctx, "", "", "", "", "published_desc", 1, limit)
+	if err != nil {
+		return nil, err
 	}
-	rows, err := s.queries.ListPublicTaskQueries(ctx, limit)
+	return resp.Items, nil
+}
+
+// ListBoardPage returns public task board data with server-side search,
+// filters, sorting, and pagination. It never exposes publisher identity or
+// uses the private original query as public search text.
+func (s *Service) ListBoardPage(ctx context.Context, query, status, skill, mcp, sort string, page, size int32) (*PublicTaskListResponse, error) {
+	page, size = normalizeTaskHistoryPage(page, size)
+	query = normalizeTaskHistoryQuery(query)
+	status = normalizeTaskHistoryStatus(status)
+	skill = normalizeTaskBoardExactFilter(skill)
+	mcp = normalizeTaskBoardExactFilter(mcp)
+	sort = normalizeTaskBoardSort(sort)
+	offset := (page - 1) * size
+
+	rows, err := s.queries.ListPublicTaskQueriesPage(ctx, db.ListPublicTaskQueriesPageParams{
+		Query:  query,
+		Status: status,
+		Skill:  skill,
+		MCP:    mcp,
+		Sort:   sort,
+		Limit:  size,
+		Offset: offset,
+	})
 	if err != nil {
 		log.Error().Err(err).Msg("task.ListBoard: query")
+		return nil, httpx.Internal("查询任务广场失败")
+	}
+	total, err := s.queries.CountPublicTaskQueriesPage(ctx, db.CountPublicTaskQueriesPageParams{
+		Query:  query,
+		Status: status,
+		Skill:  skill,
+		MCP:    mcp,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("task.ListBoard: count")
 		return nil, httpx.Internal("查询任务广场失败")
 	}
 	skills, err := s.skills(ctx)
@@ -759,7 +793,38 @@ func (s *Service) ListBoard(ctx context.Context, limit int32) ([]PublicTaskItem,
 	for i := range rows {
 		out = append(out, toPublicTaskItem(&rows[i], skillByID))
 	}
-	return out, nil
+	return &PublicTaskListResponse{
+		Items:        out,
+		Total:        total,
+		Page:         page,
+		Size:         size,
+		Query:        query,
+		Sort:         sort,
+		StatusFilter: status,
+		SkillFilter:  skill,
+		MCPFilter:    mcp,
+	}, nil
+}
+
+func normalizeTaskBoardExactFilter(value string) string {
+	value = strings.TrimSpace(value)
+	if len([]rune(value)) > 80 {
+		value = string([]rune(value)[:80])
+	}
+	return value
+}
+
+func normalizeTaskBoardSort(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "published_asc":
+		return "published_asc"
+	case "created_desc":
+		return "created_desc"
+	case "recommended_desc":
+		return "recommended_desc"
+	default:
+		return "published_desc"
+	}
 }
 
 // GetByID 取单个任务 + 回填推荐卡。用于冷链接（sessionStorage 缓存丢失）。

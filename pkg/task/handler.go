@@ -290,23 +290,37 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// ListBoard GET /tasks/board?limit=20
+// ListBoard GET /tasks/board?q=&status=&skill=&mcp=&sort=published_desc&page=1&size=20
 func (h *Handler) ListBoard(c echo.Context) error {
-	limit := int32(20)
-	if v := c.QueryParam("limit"); v != "" {
+	page := int32(1)
+	if v := c.QueryParam("page"); v != "" {
+		if n, perr := strconv.ParseInt(v, 10, 32); perr == nil && n > 0 {
+			page = int32(n) // #nosec G115 -- ParseInt bitSize=32 guarantees range.
+		}
+	}
+	size := int32(20)
+	if v := firstNonEmpty(c.QueryParam("size"), c.QueryParam("limit")); v != "" {
 		if n, perr := strconv.ParseInt(v, 10, 32); perr == nil && n > 0 {
 			if n > 50 {
 				n = 50
 			}
-			// #nosec G115 -- strconv.ParseInt with bitSize=32 guarantees int32 range, then limit is capped.
-			limit = int32(n)
+			size = int32(n) // #nosec G115 -- ParseInt bitSize=32 guarantees range, then size is capped.
 		}
 	}
-	items, err := h.svc.ListBoard(c.Request().Context(), limit)
+	resp, err := h.svc.ListBoardPage(
+		c.Request().Context(),
+		c.QueryParam("q"),
+		c.QueryParam("status"),
+		c.QueryParam("skill"),
+		c.QueryParam("mcp"),
+		c.QueryParam("sort"),
+		page,
+		size,
+	)
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, map[string]any{"items": items})
+	return c.JSON(http.StatusOK, resp)
 }
 
 // GetByID GET /tasks/:id

@@ -464,6 +464,115 @@ func (q *Queries) ListPublicTaskQueries(ctx context.Context, limit int32) ([]Tas
 	return items, nil
 }
 
+const listPublicTaskQueriesPage = `-- name: ListPublicTaskQueriesPage :many
+SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+       chosen_agent_id, chosen_at,
+       claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+       completed_at, completion_summary, completion_run_id,
+       delivery_status, delivery_visibility, delivery_artifact,
+       accepted_at, revision_requested_at, revision_note,
+       visibility, public_summary, published_at,
+       created_at
+FROM task_queries
+WHERE visibility = 'public'
+  AND (
+      $1::text = ''
+      OR id::text ILIKE '%' || $1 || '%'
+      OR COALESCE(public_summary, '') ILIKE '%' || $1 || '%'
+      OR array_to_string(COALESCE(parsed_skills, ARRAY[]::text[]), ' ') ILIKE '%' || $1 || '%'
+      OR array_to_string(COALESCE(mcp_tools, ARRAY[]::text[]), ' ') ILIKE '%' || $1 || '%'
+  )
+  AND (
+      $2::text = ''
+      OR ($2 = 'accepted' AND delivery_status = 'accepted')
+      OR ($2 = 'revision_requested' AND delivery_status = 'revision_requested')
+      OR ($2 = 'completed' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NOT NULL)
+      OR ($2 = 'in_progress' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NOT NULL)
+      OR ($2 = 'matched' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NOT NULL)
+      OR ($2 = 'needs_agent' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) = 0)
+      OR ($2 = 'open' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) > 0)
+  )
+  AND ($3::text = '' OR $3 = ANY(COALESCE(parsed_skills, ARRAY[]::text[])))
+  AND ($4::text = '' OR $4 = ANY(COALESCE(mcp_tools, ARRAY[]::text[])))
+ORDER BY
+  CASE WHEN $5 = 'published_asc' THEN COALESCE(published_at, created_at) END ASC,
+  CASE WHEN $5 = 'created_desc' THEN created_at END DESC,
+  CASE WHEN $5 = 'recommended_desc' THEN cardinality(recommended_agent_ids) END DESC,
+  COALESCE(published_at, created_at) DESC,
+  created_at DESC,
+  id DESC
+LIMIT $6 OFFSET $7`
+
+type ListPublicTaskQueriesPageParams struct {
+	Query  string `db:"query" json:"query"`
+	Status string `db:"status" json:"status"`
+	Skill  string `db:"skill" json:"skill"`
+	MCP    string `db:"mcp" json:"mcp"`
+	Sort   string `db:"sort" json:"sort"`
+	Limit  int32  `db:"limit" json:"limit"`
+	Offset int32  `db:"offset" json:"offset"`
+}
+
+// ListPublicTaskQueriesPage returns public task board rows with search,
+// filters, sorting, and pagination.
+func (q *Queries) ListPublicTaskQueriesPage(ctx context.Context, arg ListPublicTaskQueriesPageParams) ([]TaskQuery, error) {
+	rows, err := q.db.Query(ctx, listPublicTaskQueriesPage, arg.Query, arg.Status, arg.Skill, arg.MCP, arg.Sort, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TaskQuery
+	for rows.Next() {
+		var t TaskQuery
+		if err := scanTaskQuery(rows, &t); err != nil {
+			return nil, err
+		}
+		items = append(items, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const countPublicTaskQueriesPage = `-- name: CountPublicTaskQueriesPage :one
+SELECT COUNT(*)::int
+FROM task_queries
+WHERE visibility = 'public'
+  AND (
+      $1::text = ''
+      OR id::text ILIKE '%' || $1 || '%'
+      OR COALESCE(public_summary, '') ILIKE '%' || $1 || '%'
+      OR array_to_string(COALESCE(parsed_skills, ARRAY[]::text[]), ' ') ILIKE '%' || $1 || '%'
+      OR array_to_string(COALESCE(mcp_tools, ARRAY[]::text[]), ' ') ILIKE '%' || $1 || '%'
+  )
+  AND (
+      $2::text = ''
+      OR ($2 = 'accepted' AND delivery_status = 'accepted')
+      OR ($2 = 'revision_requested' AND delivery_status = 'revision_requested')
+      OR ($2 = 'completed' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NOT NULL)
+      OR ($2 = 'in_progress' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NOT NULL)
+      OR ($2 = 'matched' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NOT NULL)
+      OR ($2 = 'needs_agent' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) = 0)
+      OR ($2 = 'open' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) > 0)
+  )
+  AND ($3::text = '' OR $3 = ANY(COALESCE(parsed_skills, ARRAY[]::text[])))
+  AND ($4::text = '' OR $4 = ANY(COALESCE(mcp_tools, ARRAY[]::text[])))`
+
+type CountPublicTaskQueriesPageParams struct {
+	Query  string `db:"query" json:"query"`
+	Status string `db:"status" json:"status"`
+	Skill  string `db:"skill" json:"skill"`
+	MCP    string `db:"mcp" json:"mcp"`
+}
+
+func (q *Queries) CountPublicTaskQueriesPage(ctx context.Context, arg CountPublicTaskQueriesPageParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countPublicTaskQueriesPage, arg.Query, arg.Status, arg.Skill, arg.MCP)
+	var count int32
+	err := row.Scan(&count)
+	return count, err
+}
+
 const getAgentsByIDs = `-- name: GetAgentsByIDs :many
 SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        a.endpoint_auth_header, a.price_per_call_cents, a.tags,

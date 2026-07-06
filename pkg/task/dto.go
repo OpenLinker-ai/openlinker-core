@@ -197,6 +197,18 @@ type PublicTaskItem struct {
 	CreatedAt             string       `json:"created_at"`
 }
 
+type PublicTaskListResponse struct {
+	Items        []PublicTaskItem `json:"items"`
+	Total        int32            `json:"total"`
+	Page         int32            `json:"page"`
+	Size         int32            `json:"size"`
+	Query        string           `json:"query,omitempty"`
+	Sort         string           `json:"sort"`
+	StatusFilter string           `json:"status_filter,omitempty"`
+	SkillFilter  string           `json:"skill_filter,omitempty"`
+	MCPFilter    string           `json:"mcp_filter,omitempty"`
+}
+
 // DetailResponse GET /tasks/:id 详情响应。
 //
 // 用于冷链接（直接打开 /tasks/<id> URL，sessionStorage 无缓存）时

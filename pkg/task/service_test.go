@@ -425,6 +425,13 @@ func TestTaskBoardClaimAndCompleteRoundTrip(t *testing.T) {
 	require.NotNil(t, board[0].ClaimedAgentID)
 	assert.Equal(t, agentID.String(), *board[0].ClaimedAgentID)
 
+	boardPage, err := svc.ListBoardPage(context.Background(), "SQL", "in_progress", "data/sql-query", "", "published_desc", 1, 10)
+	require.NoError(t, err)
+	require.Len(t, boardPage.Items, 1)
+	assert.Equal(t, int32(1), boardPage.Total)
+	assert.Equal(t, "in_progress", boardPage.StatusFilter)
+	assert.Equal(t, "data/sql-query", boardPage.SkillFilter)
+
 	runID := insertSuccessfulTaskRun(t, pool, creatorID, agentID, "分析完成")
 	completed, err := svc.Complete(context.Background(), taskID, creatorID, &task.CompleteRequest{
 		AgentID:       agentID,
@@ -576,6 +583,18 @@ func TestPublicTaskBoundariesAndCatalogFallback(t *testing.T) {
 	require.Len(t, board[0].MCPToolRefs, 2)
 	assert.Equal(t, "run_agent", board[0].MCPToolRefs[0].Name)
 
+	boardPage, err := svc.ListBoardPage(context.Background(), "SQL", "open", "data/sql-query", "run_agent", "recommended_desc", 1, 10)
+	require.NoError(t, err)
+	require.Len(t, boardPage.Items, 1)
+	assert.Equal(t, int32(1), boardPage.Total)
+	assert.Equal(t, "recommended_desc", boardPage.Sort)
+	assert.Equal(t, "run_agent", boardPage.MCPFilter)
+
+	privateQuerySearch, err := svc.ListBoardPage(context.Background(), "SQL task boundary", "", "", "", "", 1, 10)
+	require.NoError(t, err)
+	require.Empty(t, privateQuerySearch.Items)
+	assert.Equal(t, int32(0), privateQuerySearch.Total)
+
 	history, err := svc.ListMine(context.Background(), ownerID, 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, history)
@@ -642,13 +661,31 @@ func TestTaskHandlersListBoardAndMineSuccess(t *testing.T) {
 	require.Equal(t, http.StatusOK, boardRec.Code)
 	var boardBody struct {
 		Items []task.PublicTaskItem `json:"items"`
+		Total int32                 `json:"total"`
+		Page  int32                 `json:"page"`
+		Size  int32                 `json:"size"`
 	}
 	decodeTaskHandlerJSON(t, boardRec, &boardBody)
 	require.Len(t, boardBody.Items, 1)
+	assert.Equal(t, int32(1), boardBody.Total)
+	assert.Equal(t, int32(1), boardBody.Page)
+	assert.Equal(t, int32(50), boardBody.Size)
 	assert.Equal(t, publicSummary, boardBody.Items[0].Query)
 	assert.Equal(t, "open", boardBody.Items[0].Status)
 	require.Len(t, boardBody.Items[0].ParsedSkillRefs, 1)
 	assert.Equal(t, "SQL 查询", boardBody.Items[0].ParsedSkillRefs[0].Name)
+
+	privateSearchRec := httptest.NewRecorder()
+	privateSearchCtx := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/tasks/board?q=private+board+source", nil), privateSearchRec)
+	require.NoError(t, h.ListBoard(privateSearchCtx))
+	require.Equal(t, http.StatusOK, privateSearchRec.Code)
+	var privateSearchBody struct {
+		Items []task.PublicTaskItem `json:"items"`
+		Total int32                 `json:"total"`
+	}
+	decodeTaskHandlerJSON(t, privateSearchRec, &privateSearchBody)
+	require.Empty(t, privateSearchBody.Items)
+	assert.Equal(t, int32(0), privateSearchBody.Total)
 
 	mineRec := httptest.NewRecorder()
 	mineCtx := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/tasks/me?limit=99", nil), mineRec)
