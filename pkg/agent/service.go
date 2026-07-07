@@ -26,6 +26,7 @@ const (
 	minSlugLen            = 3
 	maxSlugLen            = 80
 	maxAgentExamples      = 20
+	maxAgentSkillIDs      = 5
 	defaultAgentListLimit = int32(25)
 	maxAgentListLimit     = int32(100)
 )
@@ -116,24 +117,40 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 	if !avail {
 		return nil, httpx.Conflict("slug 已被占用")
 	}
+	skillIDs, err := s.normalizeCreateAgentSkillIDs(ctx, req.SkillIDs)
+	if err != nil {
+		return nil, err
+	}
 
 	authHeader := normalizeAuthHeader(req.EndpointAuthHeader)
 	visibility := strings.TrimSpace(req.Visibility)
 	if visibility == "" {
 		visibility = "public"
 	}
-	created, err := s.queries.CreateAgent(ctx, db.CreateAgentParams{
-		CreatorID:          creatorID,
-		Slug:               slug,
-		Name:               strings.TrimSpace(req.Name),
-		Description:        strings.TrimSpace(req.Description),
-		EndpointURL:        connection.EndpointURL,
-		EndpointAuthHeader: authHeader,
-		PricePerCallCents:  req.PricePerCallCents,
-		Tags:               normalizeTagsForInsert(req.Tags),
-		Visibility:         visibility,
-		ConnectionMode:     connection.Mode,
-		MCPToolName:        connection.MCPToolName,
+	var created db.Agent
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		qtx := s.queries.WithTx(tx)
+		var createErr error
+		created, createErr = qtx.CreateAgent(ctx, db.CreateAgentParams{
+			CreatorID:          creatorID,
+			Slug:               slug,
+			Name:               strings.TrimSpace(req.Name),
+			Description:        strings.TrimSpace(req.Description),
+			EndpointURL:        connection.EndpointURL,
+			EndpointAuthHeader: authHeader,
+			PricePerCallCents:  req.PricePerCallCents,
+			Tags:               normalizeTagsForInsert(req.Tags),
+			Visibility:         visibility,
+			ConnectionMode:     connection.Mode,
+			MCPToolName:        connection.MCPToolName,
+		})
+		if createErr != nil {
+			return createErr
+		}
+		if len(skillIDs) == 0 {
+			return nil
+		}
+		return db.ReplaceAgentSkills(ctx, tx, created.ID, skillIDs)
 	})
 	if err != nil {
 		// UNIQUE violation 兜底（并发场景）
@@ -852,6 +869,38 @@ func nextEndpointAuthHeader(existing *string, incoming string, clear bool) *stri
 		return existing
 	}
 	return normalizeAuthHeader(incoming)
+}
+
+func (s *Service) normalizeCreateAgentSkillIDs(ctx context.Context, in []string) ([]string, error) {
+	if len(in) == 0 {
+		return []string{}, nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		skillID := strings.TrimSpace(raw)
+		if skillID == "" {
+			continue
+		}
+		if _, ok := seen[skillID]; ok {
+			continue
+		}
+		seen[skillID] = struct{}{}
+		out = append(out, skillID)
+	}
+	if len(out) > maxAgentSkillIDs {
+		return nil, httpx.BadRequest("最多只能声明 5 个 skill")
+	}
+	for _, skillID := range out {
+		if _, err := s.queries.GetSkill(ctx, skillID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, httpx.BadRequest("skill_id 不存在: " + skillID)
+			}
+			log.Error().Err(err).Str("skill_id", skillID).Msg("agent.CreateAgent: GetSkill")
+			return nil, httpx.Internal("校验 skill 失败")
+		}
+	}
+	return out, nil
 }
 
 // normalizeTagsForInsert 去前后空格、过滤空 tag、转小写。

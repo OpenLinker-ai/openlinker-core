@@ -47,10 +47,13 @@ func TestAgentHandlerDispatchesServiceSuccess(t *testing.T) {
 		method: http.MethodPost,
 		target: "/creator/agents",
 		userID: userID.String(),
-		body:   `{"slug":"demo-agent","name":"Demo Agent","description":"demo","endpoint_url":"https://example.com/a","tags":["ai"],"visibility":"public"}`,
+		body:   `{"slug":"demo-agent","name":"Demo Agent","description":"demo","endpoint_url":"https://example.com/a","tags":["ai"],"skill_ids":["data/sql-query"],"visibility":"public"}`,
 	})
 	requireNoDispatchError(t, h.CreateAgent(c))
 	requireDispatchStatus(t, rec, http.StatusCreated)
+	if !reflect.DeepEqual(mock.lastCreateAgent.SkillIDs, []string{"data/sql-query"}) {
+		t.Fatalf("CreateAgent skill_ids = %#v", mock.lastCreateAgent.SkillIDs)
+	}
 
 	c, rec = newAgentDispatchContext(agentDispatchRequest{
 		method: http.MethodGet,

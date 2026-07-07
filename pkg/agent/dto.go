@@ -12,6 +12,7 @@ type CreateAgentRequest struct {
 	EndpointAuthHeader string   `json:"endpoint_auth_header" validate:"max=500"`
 	PricePerCallCents  int32    `json:"price_per_call_cents" validate:"min=0,max=1000000"`
 	Tags               []string `json:"tags" validate:"required,min=1,max=5,dive,min=2,max=30"`
+	SkillIDs           []string `json:"skill_ids,omitempty" validate:"omitempty,max=5,dive,min=1,max=120"`
 	Visibility         string   `json:"visibility" validate:"omitempty,oneof=public unlisted private"`
 	ConnectionMode     string   `json:"connection_mode" validate:"omitempty,oneof=direct_http mcp_server runtime_pull runtime_ws"`
 	MCPToolName        string   `json:"mcp_tool_name" validate:"omitempty,min=1,max=120"`

@@ -295,6 +295,49 @@ func TestCreateAgent_HappyPath(t *testing.T) {
 	assert.Equal(t, 1, count)
 }
 
+func TestCreateAgent_BindsDeclaredSkillIDs(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	uid := insertCreator(t, pool)
+	req := validCreateReq(freshSlug("create-skills"))
+	req.SkillIDs = []string{" data/sql-query ", "content/translation", "data/sql-query"}
+
+	resp, err := svc.CreateAgent(ctx, uid, req)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.ElementsMatch(t, []string{"data/sql-query", "content/translation"}, resp.SkillIDs)
+
+	agentID, err := uuid.Parse(resp.ID)
+	require.NoError(t, err)
+	var skillIDs []string
+	err = pool.QueryRow(ctx,
+		`SELECT COALESCE(ARRAY_AGG(skill_id ORDER BY skill_id), ARRAY[]::text[]) FROM agent_skills WHERE agent_id=$1`,
+		agentID).Scan(&skillIDs)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"content/translation", "data/sql-query"}, skillIDs)
+}
+
+func TestCreateAgent_RejectsUnknownSkillWithoutCreatingAgent(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	uid := insertCreator(t, pool)
+	slug := freshSlug("bad-skill")
+	req := validCreateReq(slug)
+	req.SkillIDs = []string{"missing/skill"}
+
+	_, err := svc.CreateAgent(ctx, uid, req)
+	assertHTTPStatus(t, err, http.StatusBadRequest)
+
+	var count int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM agents WHERE slug=$1`, slug).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+}
+
 func TestCreateAgent_NotCreator(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
