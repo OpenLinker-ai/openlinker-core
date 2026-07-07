@@ -301,6 +301,7 @@ WHERE a.creator_id = $1
   )
   AND (
     $3::text = ''
+    OR ($3 = 'active' AND a.lifecycle_status = 'active')
     OR ($3 = 'online' AND a.lifecycle_status = 'active' AND (
       COALESCE(av.availability_status, 'unknown') = 'healthy'
       OR (
@@ -434,6 +435,7 @@ WHERE a.creator_id = $1
   )
   AND (
     $3::text = ''
+    OR ($3 = 'active' AND a.lifecycle_status = 'active')
     OR ($3 = 'online' AND a.lifecycle_status = 'active' AND (
       COALESCE(av.availability_status, 'unknown') = 'healthy'
       OR (

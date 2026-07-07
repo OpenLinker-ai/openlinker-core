@@ -32,7 +32,7 @@ const (
 )
 
 var (
-	creatorAgentListStatusValues        = map[string]bool{"online": true, "offline": true, "degraded": true, "disabled": true, "review": true}
+	creatorAgentListStatusValues        = map[string]bool{"active": true, "online": true, "offline": true, "degraded": true, "disabled": true, "review": true}
 	creatorAgentListVisibilityValues    = map[string]bool{"public": true, "unlisted": true, "private": true}
 	creatorAgentListCertificationValues = map[string]bool{"unreviewed": true, "pending": true, "certified": true, "rejected": true}
 	creatorAgentListSortValues          = map[string]bool{"calls_this_month": true, "lifetime_calls": true, "name": true, "created_at": true}

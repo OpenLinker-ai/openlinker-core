@@ -69,7 +69,7 @@ func TestAgentHandlerDispatchesServiceSuccess(t *testing.T) {
 
 	c, rec = newAgentDispatchContext(agentDispatchRequest{
 		method: http.MethodGet,
-		target: "/creator/agents?limit=10&offset=20&q=demo&status=online&visibility=public&certification_status=certified&sort_by=name",
+		target: "/creator/agents?limit=10&offset=20&q=demo&status=active&visibility=public&certification_status=certified&sort_by=name",
 		userID: userID.String(),
 	})
 	requireNoDispatchError(t, h.ListMyAgents(c))
@@ -78,7 +78,7 @@ func TestAgentHandlerDispatchesServiceSuccess(t *testing.T) {
 	if pageBody.Limit != 10 || pageBody.Offset != 20 {
 		t.Fatalf("ListMyAgentsPage pagination = %#v", pageBody)
 	}
-	if mock.lastListOptions.Query != "demo" || mock.lastListOptions.Status != "online" || mock.lastListOptions.SortBy != "name" {
+	if mock.lastListOptions.Query != "demo" || mock.lastListOptions.Status != "active" || mock.lastListOptions.SortBy != "name" {
 		t.Fatalf("ListMyAgentsPage options = %#v", mock.lastListOptions)
 	}
 

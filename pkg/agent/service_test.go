@@ -750,6 +750,29 @@ func TestListMyAgents_Empty(t *testing.T) {
 	assert.Empty(t, got, "no agents -> empty slice (not error)")
 }
 
+func TestListMyAgentsPageStatusActiveFiltersDisabled(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	uid := insertCreator(t, pool)
+	activeAgent, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("active-page")))
+	require.NoError(t, err)
+	disabledAgent, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("disabled-page")))
+	require.NoError(t, err)
+	require.NoError(t, svc.DisableAgent(ctx, uuid.MustParse(disabledAgent.ID), uid))
+
+	page, err := svc.ListMyAgentsPage(ctx, uid, agent.AgentListOptions{
+		Status: "active",
+		Limit:  10,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, page.Total)
+	require.Len(t, page.Items, 1)
+	require.Equal(t, activeAgent.ID, page.Items[0].ID)
+	require.Equal(t, "active", page.Items[0].LifecycleStatus)
+}
+
 func TestListMyAgents_IncludesDeclaredSkillIDs(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
