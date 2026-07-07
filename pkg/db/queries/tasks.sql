@@ -259,6 +259,7 @@ LIMIT $1;
 
 -- name: ListPublicTaskQueriesPage :many
 -- 公开任务广场分页列表：搜索只匹配公开摘要、Skill/MCP 引用和公开任务 ID，不用私有原始 query 做匹配。
+-- $3 skill_ids TEXT[]：多个 Skill ID 任意命中即返回（OR）。
 SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
        chosen_agent_id, chosen_at,
        claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
@@ -286,7 +287,10 @@ WHERE visibility = 'public'
       OR ($2 = 'needs_agent' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) = 0)
       OR ($2 = 'open' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) > 0)
   )
-  AND ($3::text = '' OR $3 = ANY(COALESCE(parsed_skills, ARRAY[]::text[])))
+  AND (
+      cardinality(COALESCE($3::text[], ARRAY[]::text[])) = 0
+      OR COALESCE(parsed_skills, ARRAY[]::text[]) && COALESCE($3::text[], ARRAY[]::text[])
+  )
   AND ($4::text = '' OR $4 = ANY(COALESCE(mcp_tools, ARRAY[]::text[])))
 ORDER BY
   CASE WHEN $5 = 'published_asc' THEN COALESCE(published_at, created_at) END ASC,
@@ -318,7 +322,10 @@ WHERE visibility = 'public'
       OR ($2 = 'needs_agent' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) = 0)
       OR ($2 = 'open' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) > 0)
   )
-  AND ($3::text = '' OR $3 = ANY(COALESCE(parsed_skills, ARRAY[]::text[])))
+  AND (
+      cardinality(COALESCE($3::text[], ARRAY[]::text[])) = 0
+      OR COALESCE(parsed_skills, ARRAY[]::text[]) && COALESCE($3::text[], ARRAY[]::text[])
+  )
   AND ($4::text = '' OR $4 = ANY(COALESCE(mcp_tools, ARRAY[]::text[])));
 
 -- name: GetAgentsByIDs :many

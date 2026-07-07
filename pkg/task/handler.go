@@ -3,6 +3,7 @@ package task
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
@@ -309,7 +310,7 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// ListBoard GET /tasks/board?q=&status=&skill=&mcp=&sort=published_desc&page=1&size=20
+// ListBoard GET /tasks/board?q=&status=&skill=&skill_ids=&mcp=&sort=published_desc&page=1&size=20
 func (h *Handler) ListBoard(c echo.Context) error {
 	page := int32(1)
 	if v := c.QueryParam("page"); v != "" {
@@ -330,7 +331,7 @@ func (h *Handler) ListBoard(c echo.Context) error {
 		c.Request().Context(),
 		c.QueryParam("q"),
 		c.QueryParam("status"),
-		c.QueryParam("skill"),
+		strings.Join([]string{c.QueryParam("skill"), c.QueryParam("skill_ids")}, ","),
 		c.QueryParam("mcp"),
 		c.QueryParam("sort"),
 		page,

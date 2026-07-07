@@ -521,7 +521,10 @@ WHERE visibility = 'public'
       OR ($2 = 'needs_agent' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) = 0)
       OR ($2 = 'open' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) > 0)
   )
-  AND ($3::text = '' OR $3 = ANY(COALESCE(parsed_skills, ARRAY[]::text[])))
+  AND (
+      cardinality(COALESCE($3::text[], ARRAY[]::text[])) = 0
+      OR COALESCE(parsed_skills, ARRAY[]::text[]) && COALESCE($3::text[], ARRAY[]::text[])
+  )
   AND ($4::text = '' OR $4 = ANY(COALESCE(mcp_tools, ARRAY[]::text[])))
 ORDER BY
   CASE WHEN $5 = 'published_asc' THEN COALESCE(published_at, created_at) END ASC,
@@ -533,19 +536,19 @@ ORDER BY
 LIMIT $6 OFFSET $7`
 
 type ListPublicTaskQueriesPageParams struct {
-	Query  string `db:"query" json:"query"`
-	Status string `db:"status" json:"status"`
-	Skill  string `db:"skill" json:"skill"`
-	MCP    string `db:"mcp" json:"mcp"`
-	Sort   string `db:"sort" json:"sort"`
-	Limit  int32  `db:"limit" json:"limit"`
-	Offset int32  `db:"offset" json:"offset"`
+	Query    string   `db:"query" json:"query"`
+	Status   string   `db:"status" json:"status"`
+	SkillIDs []string `db:"skill_ids" json:"skill_ids"`
+	MCP      string   `db:"mcp" json:"mcp"`
+	Sort     string   `db:"sort" json:"sort"`
+	Limit    int32    `db:"limit" json:"limit"`
+	Offset   int32    `db:"offset" json:"offset"`
 }
 
 // ListPublicTaskQueriesPage returns public task board rows with search,
 // filters, sorting, and pagination.
 func (q *Queries) ListPublicTaskQueriesPage(ctx context.Context, arg ListPublicTaskQueriesPageParams) ([]TaskQuery, error) {
-	rows, err := q.db.Query(ctx, listPublicTaskQueriesPage, arg.Query, arg.Status, arg.Skill, arg.MCP, arg.Sort, arg.Limit, arg.Offset)
+	rows, err := q.db.Query(ctx, listPublicTaskQueriesPage, arg.Query, arg.Status, arg.SkillIDs, arg.MCP, arg.Sort, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
@@ -585,18 +588,21 @@ WHERE visibility = 'public'
       OR ($2 = 'needs_agent' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) = 0)
       OR ($2 = 'open' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) > 0)
   )
-  AND ($3::text = '' OR $3 = ANY(COALESCE(parsed_skills, ARRAY[]::text[])))
+  AND (
+      cardinality(COALESCE($3::text[], ARRAY[]::text[])) = 0
+      OR COALESCE(parsed_skills, ARRAY[]::text[]) && COALESCE($3::text[], ARRAY[]::text[])
+  )
   AND ($4::text = '' OR $4 = ANY(COALESCE(mcp_tools, ARRAY[]::text[])))`
 
 type CountPublicTaskQueriesPageParams struct {
-	Query  string `db:"query" json:"query"`
-	Status string `db:"status" json:"status"`
-	Skill  string `db:"skill" json:"skill"`
-	MCP    string `db:"mcp" json:"mcp"`
+	Query    string   `db:"query" json:"query"`
+	Status   string   `db:"status" json:"status"`
+	SkillIDs []string `db:"skill_ids" json:"skill_ids"`
+	MCP      string   `db:"mcp" json:"mcp"`
 }
 
 func (q *Queries) CountPublicTaskQueriesPage(ctx context.Context, arg CountPublicTaskQueriesPageParams) (int32, error) {
-	row := q.db.QueryRow(ctx, countPublicTaskQueriesPage, arg.Query, arg.Status, arg.Skill, arg.MCP)
+	row := q.db.QueryRow(ctx, countPublicTaskQueriesPage, arg.Query, arg.Status, arg.SkillIDs, arg.MCP)
 	var count int32
 	err := row.Scan(&count)
 	return count, err

@@ -474,6 +474,7 @@ func TestTaskBoardClaimAndCompleteRoundTrip(t *testing.T) {
 	assert.Equal(t, int32(1), boardPage.Total)
 	assert.Equal(t, "in_progress", boardPage.StatusFilter)
 	assert.Equal(t, "data/sql-query", boardPage.SkillFilter)
+	assert.Equal(t, []string{"data/sql-query"}, boardPage.SkillIDsFilter)
 
 	runID := insertSuccessfulTaskRun(t, pool, creatorID, agentID, "分析完成")
 	completed, err := svc.Complete(context.Background(), taskID, creatorID, &task.CompleteRequest{
@@ -648,6 +649,14 @@ func TestPublicTaskBoundariesAndCatalogFallback(t *testing.T) {
 	assert.Equal(t, int32(1), boardPage.Total)
 	assert.Equal(t, "recommended_desc", boardPage.Sort)
 	assert.Equal(t, "run_agent", boardPage.MCPFilter)
+	assert.Equal(t, []string{"data/sql-query"}, boardPage.SkillIDsFilter)
+
+	multiSkillBoardPage, err := svc.ListBoardPage(context.Background(), "SQL", "open", "missing/other,data/sql-query", "", "published_desc", 1, 10)
+	require.NoError(t, err)
+	require.Len(t, multiSkillBoardPage.Items, 1)
+	assert.Equal(t, int32(1), multiSkillBoardPage.Total)
+	assert.Equal(t, "missing/other,data/sql-query", multiSkillBoardPage.SkillFilter)
+	assert.Equal(t, []string{"missing/other", "data/sql-query"}, multiSkillBoardPage.SkillIDsFilter)
 
 	privateQuerySearch, err := svc.ListBoardPage(context.Background(), "SQL task boundary", "", "", "", "", 1, 10)
 	require.NoError(t, err)

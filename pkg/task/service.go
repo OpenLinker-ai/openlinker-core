@@ -809,29 +809,30 @@ func (s *Service) ListBoardPage(ctx context.Context, query, status, skill, mcp, 
 	page, size = normalizeTaskHistoryPage(page, size)
 	query = normalizeTaskHistoryQuery(query)
 	status = normalizeTaskHistoryStatus(status)
-	skill = normalizeTaskBoardExactFilter(skill)
+	skillIDs := normalizeTaskBoardSkillFilters(skill)
+	skillFilter := strings.Join(skillIDs, ",")
 	mcp = normalizeTaskBoardExactFilter(mcp)
 	sort = normalizeTaskBoardSort(sort)
 	offset := (page - 1) * size
 
 	rows, err := s.queries.ListPublicTaskQueriesPage(ctx, db.ListPublicTaskQueriesPageParams{
-		Query:  query,
-		Status: status,
-		Skill:  skill,
-		MCP:    mcp,
-		Sort:   sort,
-		Limit:  size,
-		Offset: offset,
+		Query:    query,
+		Status:   status,
+		SkillIDs: skillIDs,
+		MCP:      mcp,
+		Sort:     sort,
+		Limit:    size,
+		Offset:   offset,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("task.ListBoard: query")
 		return nil, httpx.Internal("查询任务广场失败")
 	}
 	total, err := s.queries.CountPublicTaskQueriesPage(ctx, db.CountPublicTaskQueriesPageParams{
-		Query:  query,
-		Status: status,
-		Skill:  skill,
-		MCP:    mcp,
+		Query:    query,
+		Status:   status,
+		SkillIDs: skillIDs,
+		MCP:      mcp,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("task.ListBoard: count")
@@ -847,16 +848,42 @@ func (s *Service) ListBoardPage(ctx context.Context, query, status, skill, mcp, 
 		out = append(out, toPublicTaskItem(&rows[i], skillByID))
 	}
 	return &PublicTaskListResponse{
-		Items:        out,
-		Total:        total,
-		Page:         page,
-		Size:         size,
-		Query:        query,
-		Sort:         sort,
-		StatusFilter: status,
-		SkillFilter:  skill,
-		MCPFilter:    mcp,
+		Items:          out,
+		Total:          total,
+		Page:           page,
+		Size:           size,
+		Query:          query,
+		Sort:           sort,
+		StatusFilter:   status,
+		SkillFilter:    skillFilter,
+		SkillIDsFilter: skillIDs,
+		MCPFilter:      mcp,
 	}, nil
+}
+
+func normalizeTaskBoardSkillFilters(values ...string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 5)
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			clean := strings.TrimSpace(strings.ToLower(part))
+			if clean == "" {
+				continue
+			}
+			if len([]rune(clean)) > 80 {
+				clean = string([]rune(clean)[:80])
+			}
+			if _, ok := seen[clean]; ok {
+				continue
+			}
+			seen[clean] = struct{}{}
+			out = append(out, clean)
+			if len(out) >= 5 {
+				return out
+			}
+		}
+	}
+	return out
 }
 
 func normalizeTaskBoardExactFilter(value string) string {
