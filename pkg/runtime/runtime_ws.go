@@ -362,11 +362,14 @@ func (c *runtimeWSConn) markRunAssignmentAcked(runID uuid.UUID) bool {
 	return true
 }
 
-func (c *runtimeWSConn) isRunAssignmentAcked(runID uuid.UUID) bool {
+func (c *runtimeWSConn) runAssignmentState(runID uuid.UUID) (bool, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	inFlight := c.inFlightRuns[runID]
-	return inFlight != nil && inFlight.acked
+	if inFlight == nil {
+		return false, false
+	}
+	return true, inFlight.acked
 }
 
 func (c *runtimeWSConn) startAssignmentAckTimer(runID uuid.UUID) {
@@ -378,7 +381,8 @@ func (c *runtimeWSConn) startAssignmentAckTimer(runID uuid.UUID) {
 			return
 		case <-timer.C:
 		}
-		if c.isRunAssignmentAcked(runID) {
+		present, acked := c.runAssignmentState(runID)
+		if !present || acked {
 			return
 		}
 		c.releaseRunSlot(runID)

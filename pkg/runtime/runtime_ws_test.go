@@ -217,6 +217,31 @@ func TestRuntimeWSConnRunSlotReservationSkipsClosedConnection(t *testing.T) {
 	}
 }
 
+func TestRuntimeWSConnRunAssignmentStateDistinguishesReleasedSlot(t *testing.T) {
+	runID := uuid.New()
+	conn := &runtimeWSConn{closed: make(chan struct{})}
+
+	if present, acked := conn.runAssignmentState(runID); present || acked {
+		t.Fatalf("empty runAssignmentState() = present %v acked %v, want false false", present, acked)
+	}
+	if !conn.tryReserveRunSlot(runID) {
+		t.Fatal("tryReserveRunSlot() = false, want true")
+	}
+	if present, acked := conn.runAssignmentState(runID); !present || acked {
+		t.Fatalf("reserved runAssignmentState() = present %v acked %v, want true false", present, acked)
+	}
+	if !conn.markRunAssignmentAcked(runID) {
+		t.Fatal("markRunAssignmentAcked() = false, want true")
+	}
+	if present, acked := conn.runAssignmentState(runID); !present || !acked {
+		t.Fatalf("acked runAssignmentState() = present %v acked %v, want true true", present, acked)
+	}
+	conn.releaseRunSlot(runID)
+	if present, acked := conn.runAssignmentState(runID); present || acked {
+		t.Fatalf("released runAssignmentState() = present %v acked %v, want false false", present, acked)
+	}
+}
+
 func TestRuntimeWSConnReplaceReservedRunSlotAfterCloseDoesNotPanic(t *testing.T) {
 	conn := &runtimeWSConn{closed: make(chan struct{})}
 	if !conn.tryReserveRunSlot(uuid.Nil) {
