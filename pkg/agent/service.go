@@ -352,7 +352,7 @@ func (s *Service) ListMyAgentsPage(ctx context.Context, creatorID uuid.UUID, opt
 	}
 	out := make([]AgentResponse, 0, len(rows))
 	for i := range rows {
-		out = append(out, s.agentListRowToResponse(&rows[i]))
+		out = append(out, s.agentListRowToResponse(ctx, &rows[i]))
 	}
 	return &AgentListResponse{
 		Items:  out,
@@ -936,7 +936,7 @@ func toAgentResponse(a *db.Agent) AgentResponse {
 	return resp
 }
 
-func (s *Service) agentListRowToResponse(row *db.ListAgentsByCreatorPageRow) AgentResponse {
+func (s *Service) agentListRowToResponse(ctx context.Context, row *db.ListAgentsByCreatorPageRow) AgentResponse {
 	resp := toAgentResponse(&row.Agent)
 	availability := runtimeAwareAvailabilityFromLastRuntimeToken(
 		row.ConnectionMode,
@@ -963,6 +963,7 @@ func (s *Service) agentListRowToResponse(row *db.ListAgentsByCreatorPageRow) Age
 	resp.Readiness = &readiness
 	resp.CallsThisMonth = row.CallsThisMonth
 	resp.RevenueThisMonth = row.RevenueThisMonth
+	s.attachAgentSkillIDsBestEffort(ctx, &resp, row.ID)
 	return resp
 }
 
@@ -1051,7 +1052,20 @@ func (s *Service) toAgentResponseWithReadiness(ctx context.Context, a *db.Agent)
 	)
 	resp.Availability = &availability
 	resp.Readiness = &readiness
+	s.attachAgentSkillIDsBestEffort(ctx, &resp, a.ID)
 	return resp
+}
+
+func (s *Service) attachAgentSkillIDsBestEffort(ctx context.Context, resp *AgentResponse, agentID uuid.UUID) {
+	skills, err := s.queries.ListAgentSkills(ctx, agentID)
+	if err != nil {
+		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.attachAgentSkillIDs")
+		return
+	}
+	resp.SkillIDs = make([]string, 0, len(skills))
+	for _, skill := range skills {
+		resp.SkillIDs = append(resp.SkillIDs, skill.ID)
+	}
 }
 
 func repairHintsForDryRun(agent *db.Agent, errMsg string) []string {

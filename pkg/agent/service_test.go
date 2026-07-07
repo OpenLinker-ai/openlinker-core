@@ -707,6 +707,28 @@ func TestListMyAgents_Empty(t *testing.T) {
 	assert.Empty(t, got, "no agents -> empty slice (not error)")
 }
 
+func TestListMyAgents_IncludesDeclaredSkillIDs(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	uid := insertCreator(t, pool)
+	created, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("list-skill")))
+	require.NoError(t, err)
+	agentID, err := uuid.Parse(created.ID)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx,
+		`INSERT INTO agent_skills (agent_id, skill_id) VALUES ($1, $2)`,
+		agentID, "data/sql-query")
+	require.NoError(t, err)
+
+	got, err := svc.ListMyAgents(ctx, uid)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, []string{"data/sql-query"}, got[0].SkillIDs)
+}
+
 func TestListMyAgents_DoesNotExposeWebhookURL(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)

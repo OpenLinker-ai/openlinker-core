@@ -52,6 +52,7 @@ type AgentResponse struct {
 	EndpointURL         string        `json:"endpoint_url"`
 	PricePerCallCents   int32         `json:"price_per_call_cents"`
 	Tags                []string      `json:"tags"`
+	SkillIDs            []string      `json:"skill_ids,omitempty"`
 	Status              string        `json:"status"` // 派生，老前端兼容
 	LifecycleStatus     string        `json:"lifecycle_status"`
 	Visibility          string        `json:"visibility"`
