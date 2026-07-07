@@ -3991,6 +3991,12 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "ClaimRuntimePullRun")
 
+	dbtx.row = fakeRow{values: runValues}
+	if got, err := q.GetClaimedRuntimePullRunByToken(context.Background(), GetClaimedRuntimePullRunByTokenParams{AgentID: agentID, RuntimeTokenID: runtimeTokenID}); err != nil || got.AgentID != agentID {
+		t.Fatalf("GetClaimedRuntimePullRunByToken = %#v, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetClaimedRuntimePullRunByToken")
+
 	dbtx.row = fakeRow{values: []any{runID, userID, agentID, "running", int32(100), int32(75), now, &runtimeTokenID}}
 	runState, err := q.GetRuntimePullRunState(context.Background(), runID)
 	if err != nil {

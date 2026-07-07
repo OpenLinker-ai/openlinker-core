@@ -1606,7 +1606,23 @@ func normalizeRuntimePullClaimOptions(opts ...RuntimePullClaimOptions) RuntimePu
 }
 
 func (s *Service) claimRuntimePullRunOnce(ctx context.Context, token db.AgentRuntimeToken, connectionMode string) (*RuntimePullRunResponse, error) {
-	run, err := s.queries.ClaimRuntimePullRun(ctx, db.ClaimRuntimePullRunParams{
+	run, err := s.queries.GetClaimedRuntimePullRunByToken(ctx, db.GetClaimedRuntimePullRunByTokenParams{
+		AgentID:        token.AgentID,
+		RuntimeTokenID: token.ID,
+	})
+	if err == nil {
+		s.touchRuntimeTokenAsync(ctx, token.ID)
+		return s.runtimePullRunResponse(ctx, token, run)
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		log.Error().Err(err).Str("agent_id", token.AgentID.String()).Msg("runtime.GetClaimedRuntimePullRunByToken")
+		return nil, httpx.Internal("领取任务失败")
+	}
+
+	run, err = s.queries.ClaimRuntimePullRun(ctx, db.ClaimRuntimePullRunParams{
 		AgentID:        token.AgentID,
 		RuntimeTokenID: token.ID,
 	})
@@ -1636,7 +1652,10 @@ func (s *Service) claimRuntimePullRunOnce(ctx context.Context, token db.AgentRun
 		claimedPayload["connection_mode"] = strings.TrimSpace(connectionMode)
 	}
 	s.recordRunEventBestEffort(ctx, run.ID, "run.dispatch.claimed", claimedPayload)
+	return s.runtimePullRunResponse(ctx, token, run)
+}
 
+func (s *Service) runtimePullRunResponse(ctx context.Context, token db.AgentRuntimeToken, run db.Run) (*RuntimePullRunResponse, error) {
 	input := map[string]interface{}{}
 	if len(run.Input) > 0 {
 		_ = json.Unmarshal(run.Input, &input)

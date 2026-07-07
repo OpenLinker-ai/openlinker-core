@@ -203,6 +203,29 @@ func (q *Queries) ClaimRuntimePullRun(ctx context.Context, arg ClaimRuntimePullR
 	return r, err
 }
 
+const getClaimedRuntimePullRunByToken = `-- name: GetClaimedRuntimePullRunByToken :one
+SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code, r.error_message,
+       r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
+       r.started_at, r.finished_at, r.source
+FROM runs r
+WHERE r.agent_id = $1
+  AND r.status = 'running'
+  AND r.claimed_by_runtime_token_id = $2
+ORDER BY r.started_at ASC
+LIMIT 1`
+
+type GetClaimedRuntimePullRunByTokenParams struct {
+	AgentID        uuid.UUID `db:"agent_id" json:"agent_id"`
+	RuntimeTokenID uuid.UUID `db:"runtime_token_id" json:"runtime_token_id"`
+}
+
+func (q *Queries) GetClaimedRuntimePullRunByToken(ctx context.Context, arg GetClaimedRuntimePullRunByTokenParams) (Run, error) {
+	row := q.db.QueryRow(ctx, getClaimedRuntimePullRunByToken, arg.AgentID, arg.RuntimeTokenID)
+	var r Run
+	err := scanRun(row, &r)
+	return r, err
+}
+
 const claimStaleRuntimePullRun = `-- name: ClaimStaleRuntimePullRun :one
 WITH candidate AS (
     SELECT r.id

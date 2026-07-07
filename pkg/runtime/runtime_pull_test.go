@@ -198,6 +198,45 @@ func TestRuntimePull_ClaimAndCompleteSuccess(t *testing.T) {
 	assert.Contains(t, eventTypes, "run.completed")
 }
 
+func TestRuntimePull_RepeatedClaimReturnsRunClaimedBySameToken(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertRuntimeUser(t, pool)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
+	setRuntimePullMode(t, pool, agentID)
+	token := insertRuntimeToken(t, pool, agentID, creatorID, []string{"agent:call", "agent:pull"})
+	markRuntimePullAvailable(t, svc, token)
+
+	first, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "first"}), "")
+	require.NoError(t, err)
+	second, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "second"}), "")
+	require.NoError(t, err)
+
+	claimed, err := svc.ClaimRuntimePullRun(ctx, token)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	assert.Equal(t, first.RunID, claimed.RunID)
+
+	replayed, err := svc.ClaimRuntimePullRun(ctx, token)
+	require.NoError(t, err)
+	require.NotNil(t, replayed)
+	assert.Equal(t, first.RunID, replayed.RunID)
+
+	_, err = svc.CompleteRuntimePullRun(ctx, token, mustParseUUID(t, first.RunID), &runtime.RuntimePullResultRequest{
+		Status: "success",
+		Output: map[string]interface{}{"answer": "first done"},
+	})
+	require.NoError(t, err)
+
+	next, err := svc.ClaimRuntimePullRun(ctx, token)
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	assert.Equal(t, second.RunID, next.RunID)
+}
+
 func TestRuntimePull_FastRuntimeTokenHashCanClaim(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)

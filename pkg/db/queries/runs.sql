@@ -88,6 +88,18 @@ RETURNING r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code
           r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
           r.started_at, r.finished_at, r.source;
 
+-- name: GetClaimedRuntimePullRunByToken :one
+-- 同一个 runtime token 已领取但响应丢失时，重试 claim 应返回原 run，而不是 204。
+SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code, r.error_message,
+       r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
+       r.started_at, r.finished_at, r.source
+FROM runs r
+WHERE r.agent_id = $1
+  AND r.status = 'running'
+  AND r.claimed_by_runtime_token_id = $2
+ORDER BY r.started_at ASC
+LIMIT 1;
+
 -- name: ClaimStaleRuntimePullRun :one
 -- 兜底领取超过 claim TTL 的 run，避免 Agent 崩溃后任务永久卡住。
 WITH candidate AS (
