@@ -3803,6 +3803,10 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 		&now,
 		int32(2),
 		&latestBenchmarkID,
+		[]string{"data/sql-query"},
+		[]string{"data"},
+		[]string{"SQL 查询"},
+		[]string{"自然语言转 SQL"},
 	)
 	pendingAgentValues := append(append([]any{}, agentValues...), "creator@example.com", "Creator Name")
 	userValues := userRow(userID, now, nil, &provider, &oauthID, &avatar, nil)
@@ -3905,6 +3909,7 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 		Limit:        20,
 		Offset:       5,
 		CallableOnly: true,
+		SkillIDs:     []string{"data/sql-query"},
 	})
 	if err != nil {
 		t.Fatalf("ListPublicAgents error = %v", err)
@@ -3919,12 +3924,14 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 		publicAgents[0].LastRuntimeTokenUsedAt == nil ||
 		publicAgents[0].VerifiedSkillCount != 2 ||
 		publicAgents[0].LatestBenchmarkID == nil ||
-		*publicAgents[0].LatestBenchmarkID != latestBenchmarkID {
+		*publicAgents[0].LatestBenchmarkID != latestBenchmarkID ||
+		len(publicAgents[0].SkillIDs) != 1 ||
+		publicAgents[0].SkillIDs[0] != "data/sql-query" {
 		t.Fatalf("ListPublicAgents availability/benchmark scan = %#v", publicAgents[0])
 	}
 
 	dbtx.row = fakeRow{values: []any{int32(6)}}
-	publicCount, err := q.CountPublicAgents(context.Background(), CountPublicAgentsParams{Tags: []string{"data"}, Keyword: "agent", CallableOnly: true})
+	publicCount, err := q.CountPublicAgents(context.Background(), CountPublicAgentsParams{Tags: []string{"data"}, Keyword: "agent", CallableOnly: true, SkillIDs: []string{"data/sql-query"}})
 	if err != nil || publicCount != 6 {
 		t.Fatalf("CountPublicAgents = %d, %v", publicCount, err)
 	}

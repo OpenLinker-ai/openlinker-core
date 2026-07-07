@@ -54,6 +54,13 @@ const (
 //   - keyword：空串表示不搜；非空时对 name/description 做 ILIKE。
 //   - page 从 1 开始；size 由调用方 clamp 到 [1, 50]，但这里再做一次防御。
 func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword string, page, size int32, callableOnlyArg ...bool) (*MarketListResponse, error) {
+	return s.ListMarketWithSkills(ctx, tags, keyword, nil, page, size, callableOnlyArg...)
+}
+
+// ListMarketWithSkills 列出已公开 Agent，并支持结构化 Skill 过滤。
+//
+// skillIDs：空切片表示不按 Skill 筛；非空时命中任一声明 Skill 即返回。
+func (s *MarketService) ListMarketWithSkills(ctx context.Context, tags []string, keyword string, skillIDs []string, page, size int32, callableOnlyArg ...bool) (*MarketListResponse, error) {
 	if page < 1 {
 		page = defaultPage
 	}
@@ -68,6 +75,7 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 	if tags == nil {
 		tags = []string{}
 	}
+	skillIDs = normalizeSkillIDsForSearch(skillIDs)
 	callableOnly := len(callableOnlyArg) > 0 && callableOnlyArg[0]
 
 	offset := (page - 1) * size
@@ -78,6 +86,7 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 		Limit:        size,
 		Offset:       offset,
 		CallableOnly: callableOnly,
+		SkillIDs:     skillIDs,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("agent.MarketService.ListMarket: ListPublicAgents")
@@ -88,6 +97,7 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 		Tags:         tags,
 		Keyword:      keyword,
 		CallableOnly: callableOnly,
+		SkillIDs:     skillIDs,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("agent.MarketService.ListMarket: CountPublicAgents")
@@ -105,6 +115,7 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 			Description:       r.Description,
 			PricePerCallCents: r.PricePerCallCents,
 			Tags:              normalizeTags(r.Tags),
+			Skills:            marketSkillMinis(r.SkillIDs, r.SkillCategories, r.SkillNames, r.SkillDescriptions),
 			TotalCalls:        r.TotalCalls,
 			Creator:           CreatorMini{DisplayName: r.CreatorName},
 			ConnectionMode:    r.ConnectionMode,
@@ -128,6 +139,49 @@ func (s *MarketService) ListMarket(ctx context.Context, tags []string, keyword s
 		Page:  page,
 		Size:  size,
 	}, nil
+}
+
+func normalizeSkillIDsForSearch(ids []string) []string {
+	if ids == nil {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(strings.ToLower(raw))
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func marketSkillMinis(ids, categories, names, descriptions []string) []SkillMini {
+	if len(ids) == 0 {
+		return []SkillMini{}
+	}
+	items := make([]SkillMini, 0, len(ids))
+	for i, id := range ids {
+		items = append(items, SkillMini{
+			ID:          id,
+			Category:    stringAt(categories, i),
+			Name:        stringAt(names, i),
+			Description: stringAt(descriptions, i),
+		})
+	}
+	return items
+}
+
+func stringAt(values []string, index int) string {
+	if index < 0 || index >= len(values) {
+		return ""
+	}
+	return values[index]
 }
 
 // GetBySlug 按 slug 查询已公开 Agent 详情。

@@ -28,7 +28,11 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        COALESCE(av.consecutive_failures, 0)::int AS availability_consecutive_failures,
        rt.last_runtime_token_used_at,
        COALESCE(skill_stats.verified_count, 0)::int AS verified_skill_count,
-       skill_stats.latest_batch_id AS latest_benchmark_id
+       skill_stats.latest_batch_id AS latest_benchmark_id,
+       COALESCE(declared_skills.skill_ids, ARRAY[]::text[]) AS skill_ids,
+       COALESCE(declared_skills.skill_categories, ARRAY[]::text[]) AS skill_categories,
+       COALESCE(declared_skills.skill_names, ARRAY[]::text[]) AS skill_names,
+       COALESCE(declared_skills.skill_descriptions, ARRAY[]::text[]) AS skill_descriptions
 FROM agents a
 JOIN users u ON u.id = a.creator_id
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
@@ -54,6 +58,16 @@ LEFT JOIN LATERAL (
     FROM agent_skill_scores s
     WHERE s.agent_id = a.id
 ) skill_stats ON TRUE
+LEFT JOIN LATERAL (
+    SELECT
+        ARRAY_AGG(s.id ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_ids,
+        ARRAY_AGG(s.category ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_categories,
+        ARRAY_AGG(s.name ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_names,
+        ARRAY_AGG(s.description ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_descriptions
+    FROM agent_skills ag
+    JOIN skills s ON s.id = ag.skill_id
+    WHERE ag.agent_id = a.id
+) declared_skills ON TRUE
 WHERE a.visibility = 'public'
   AND a.lifecycle_status = 'active'
   AND NOT EXISTS (
@@ -63,7 +77,31 @@ WHERE a.visibility = 'public'
        OR tag IN ('内部', '测试', '验收')
   )
   AND (cardinality($1::text[]) = 0 OR a.tags && $1::text[])
-  AND ($2::text = '' OR a.name ILIKE '%' || $2 || '%' OR a.description ILIKE '%' || $2 || '%')
+  AND (
+    $2::text = ''
+    OR a.name ILIKE '%' || $2 || '%'
+    OR a.description ILIKE '%' || $2 || '%'
+    OR EXISTS (
+        SELECT 1
+        FROM agent_skills ag_search
+        JOIN skills s_search ON s_search.id = ag_search.skill_id
+        WHERE ag_search.agent_id = a.id
+          AND (
+            s_search.id ILIKE '%' || $2 || '%'
+            OR s_search.name ILIKE '%' || $2 || '%'
+            OR s_search.description ILIKE '%' || $2 || '%'
+          )
+    )
+  )
+  AND (
+    cardinality($6::text[]) = 0
+    OR EXISTS (
+        SELECT 1
+        FROM agent_skills ag_filter
+        WHERE ag_filter.agent_id = a.id
+          AND ag_filter.skill_id = ANY($6::text[])
+    )
+  )
   AND (
     NOT $5::bool
     OR (
@@ -116,6 +154,7 @@ type ListPublicAgentsParams struct {
 	Limit        int32    `db:"limit" json:"limit"`
 	Offset       int32    `db:"offset" json:"offset"`
 	CallableOnly bool     `db:"callable_only" json:"callable_only"`
+	SkillIDs     []string `db:"skill_ids" json:"skill_ids"`
 }
 
 type ListPublicAgentsRow struct {
@@ -129,6 +168,10 @@ type ListPublicAgentsRow struct {
 	LastRuntimeTokenUsedAt          *time.Time `db:"last_runtime_token_used_at" json:"last_runtime_token_used_at"`
 	VerifiedSkillCount              int32      `db:"verified_skill_count" json:"verified_skill_count"`
 	LatestBenchmarkID               *uuid.UUID `db:"latest_benchmark_id" json:"latest_benchmark_id"`
+	SkillIDs                        []string   `db:"skill_ids" json:"skill_ids"`
+	SkillCategories                 []string   `db:"skill_categories" json:"skill_categories"`
+	SkillNames                      []string   `db:"skill_names" json:"skill_names"`
+	SkillDescriptions               []string   `db:"skill_descriptions" json:"skill_descriptions"`
 }
 
 // ListPublicAgents 市场列表（visibility=public + lifecycle=active；tag/keyword 过滤；分页）。
@@ -139,6 +182,7 @@ func (q *Queries) ListPublicAgents(ctx context.Context, arg ListPublicAgentsPara
 		arg.Limit,
 		arg.Offset,
 		arg.CallableOnly,
+		arg.SkillIDs,
 	)
 	if err != nil {
 		return nil, err
@@ -178,6 +222,10 @@ func (q *Queries) ListPublicAgents(ctx context.Context, arg ListPublicAgentsPara
 			&r.LastRuntimeTokenUsedAt,
 			&r.VerifiedSkillCount,
 			&r.LatestBenchmarkID,
+			&r.SkillIDs,
+			&r.SkillCategories,
+			&r.SkillNames,
+			&r.SkillDescriptions,
 		); err != nil {
 			return nil, err
 		}
@@ -210,7 +258,31 @@ WHERE a.visibility = 'public'
        OR tag IN ('内部', '测试', '验收')
   )
   AND (cardinality($1::text[]) = 0 OR a.tags && $1::text[])
-  AND ($2::text = '' OR a.name ILIKE '%' || $2 || '%' OR a.description ILIKE '%' || $2 || '%')
+  AND (
+    $2::text = ''
+    OR a.name ILIKE '%' || $2 || '%'
+    OR a.description ILIKE '%' || $2 || '%'
+    OR EXISTS (
+        SELECT 1
+        FROM agent_skills ag_search
+        JOIN skills s_search ON s_search.id = ag_search.skill_id
+        WHERE ag_search.agent_id = a.id
+          AND (
+            s_search.id ILIKE '%' || $2 || '%'
+            OR s_search.name ILIKE '%' || $2 || '%'
+            OR s_search.description ILIKE '%' || $2 || '%'
+          )
+    )
+  )
+  AND (
+    cardinality($4::text[]) = 0
+    OR EXISTS (
+        SELECT 1
+        FROM agent_skills ag_filter
+        WHERE ag_filter.agent_id = a.id
+          AND ag_filter.skill_id = ANY($4::text[])
+    )
+  )
   AND (
     NOT $3::bool
     OR (
@@ -232,10 +304,11 @@ type CountPublicAgentsParams struct {
 	Tags         []string `db:"tags" json:"tags"`
 	Keyword      string   `db:"keyword" json:"keyword"`
 	CallableOnly bool     `db:"callable_only" json:"callable_only"`
+	SkillIDs     []string `db:"skill_ids" json:"skill_ids"`
 }
 
 func (q *Queries) CountPublicAgents(ctx context.Context, arg CountPublicAgentsParams) (int32, error) {
-	row := q.db.QueryRow(ctx, countPublicAgents, arg.Tags, arg.Keyword, arg.CallableOnly)
+	row := q.db.QueryRow(ctx, countPublicAgents, arg.Tags, arg.Keyword, arg.CallableOnly, arg.SkillIDs)
 	var total int32
 	err := row.Scan(&total)
 	return total, err

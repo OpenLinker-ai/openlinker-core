@@ -646,6 +646,12 @@ func TestMarketQueryParsingAndRouteRegistration(t *testing.T) {
 	if got := parseTagsParam(" , "); got != nil {
 		t.Fatalf("parseTagsParam(empty) = %#v, want nil", got)
 	}
+	if got := parseSkillIDsParam(" data/sql-query ", "dev/code-review,data/sql-query"); !reflect.DeepEqual(got, []string{"data/sql-query", "dev/code-review"}) {
+		t.Fatalf("parseSkillIDsParam = %#v", got)
+	}
+	if got := parseSkillIDsParam(" , "); got != nil {
+		t.Fatalf("parseSkillIDsParam(empty) = %#v, want nil", got)
+	}
 	if got := parseInt32QueryDefault("12", 3); got != 12 {
 		t.Fatalf("parseInt32QueryDefault valid = %d", got)
 	}

@@ -151,6 +151,10 @@ func TestGetListMarket_QueryParams(t *testing.T) {
 	createApprovedAgent(t, pool, creatorID, "h-both",
 		WithName("综合 Agent"),
 		WithTags([]string{"finance", "data"}))
+	var dataAgentID uuid.UUID
+	require.NoError(t, pool.QueryRow(context.Background(), `SELECT id FROM agents WHERE slug=$1`, "h-data").Scan(&dataAgentID))
+	_, err := pool.Exec(context.Background(), `INSERT INTO agent_skills (agent_id, skill_id) VALUES ($1, 'data/sql-query')`, dataAgentID)
+	require.NoError(t, err)
 
 	// tags=finance,data -> 3 个 (OR)
 	resp1, raw1 := getJSON(t, srv.URL, "/api/v1/agents?tags=finance,data", nil)
@@ -165,6 +169,16 @@ func TestGetListMarket_QueryParams(t *testing.T) {
 	var out2 listResponseBody
 	require.NoError(t, json.Unmarshal(raw2, &out2))
 	assert.Equal(t, int32(1), out2.Total, "q=审计 should match 1")
+
+	// skill=data/sql-query -> 结构化命中声明 Skill
+	respSkill, rawSkill := getJSON(t, srv.URL, "/api/v1/agents?skill=data/sql-query", nil)
+	assert.Equal(t, http.StatusOK, respSkill.StatusCode, "body=%s", string(rawSkill))
+	var outSkill listResponseBody
+	require.NoError(t, json.Unmarshal(rawSkill, &outSkill))
+	assert.Equal(t, int32(1), outSkill.Total, "skill=data/sql-query should match declared skill")
+	require.Len(t, outSkill.Items, 1)
+	assert.Equal(t, "h-data", outSkill.Items[0]["slug"])
+	require.NotEmpty(t, outSkill.Items[0]["skills"])
 
 	// page=2 size=10：先插更多达 25 个再测
 	for i := 0; i < 22; i++ {

@@ -309,6 +309,45 @@ func TestListMarket_FilterByTags(t *testing.T) {
 	assert.Len(t, resp2.Items, 3)
 }
 
+func TestListMarket_FilterBySkills(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := agent.NewMarketService(pool)
+	creatorID, _ := setupTestData(t, pool)
+	ctx := context.Background()
+
+	sqlAgent := createApprovedAgent(t, pool, creatorID, "ag-skill-sql", WithTags([]string{"data"}))
+	reviewAgent := createApprovedAgent(t, pool, creatorID, "ag-skill-review", WithTags([]string{"dev"}))
+	createApprovedAgent(t, pool, creatorID, "ag-skill-none", WithTags([]string{"data"}))
+	_, err := pool.Exec(ctx,
+		`INSERT INTO agent_skills (agent_id, skill_id)
+		 VALUES ($1, 'data/sql-query'), ($2, 'dev/code-review')`,
+		sqlAgent,
+		reviewAgent,
+	)
+	require.NoError(t, err)
+
+	resp, err := svc.ListMarketWithSkills(ctx, nil, "", []string{"data/sql-query"}, 1, 12)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), resp.Total)
+	require.Len(t, resp.Items, 1)
+	assert.Equal(t, "ag-skill-sql", resp.Items[0].Slug)
+	require.Len(t, resp.Items[0].Skills, 1)
+	assert.Equal(t, "data/sql-query", resp.Items[0].Skills[0].ID)
+	assert.Equal(t, "SQL 查询", resp.Items[0].Skills[0].Name)
+
+	bySkillKeyword, err := svc.ListMarketWithSkills(ctx, nil, "代码审查", nil, 1, 12)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), bySkillKeyword.Total)
+	require.Len(t, bySkillKeyword.Items, 1)
+	assert.Equal(t, "ag-skill-review", bySkillKeyword.Items[0].Slug)
+
+	combined, err := svc.ListMarketWithSkills(ctx, []string{"data"}, "", []string{"data/sql-query"}, 1, 12)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), combined.Total)
+	require.Len(t, combined.Items, 1)
+	assert.Equal(t, "ag-skill-sql", combined.Items[0].Slug)
+}
+
 func TestListMarket_KeywordSearch(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := agent.NewMarketService(pool)

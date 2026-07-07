@@ -49,12 +49,15 @@ func (h *MarketHandler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Mi
 // query params:
 //
 //	tags=finance,data    逗号分隔，任意命中即返回（OR）
+//	skill=data/sql-query  单个 Skill ID，结构化匹配 Agent 声明
+//	skill_ids=a,b         多个 Skill ID，任意命中即返回（OR）
 //	q=审计               关键词，对 name/description ILIKE
 //	page=1               1-based
 //	size=12              默认 12，max 50
 //	callable_only=true   只返回当前有可调用证据的 Agent
 func (h *MarketHandler) ListMarket(c echo.Context) error {
 	tags := parseTagsParam(c.QueryParam("tags"))
+	skillIDs := parseSkillIDsParam(c.QueryParam("skill"), c.QueryParam("skill_ids"))
 	keyword := strings.TrimSpace(c.QueryParam("q"))
 	page := parseInt32QueryDefault(c.QueryParam("page"), defaultPage)
 	size := parseInt32QueryDefault(c.QueryParam("size"), defaultSize)
@@ -71,7 +74,7 @@ func (h *MarketHandler) ListMarket(c echo.Context) error {
 		size = maxSize
 	}
 
-	resp, err := h.svc.ListMarket(c.Request().Context(), tags, keyword, page, size, callableOnly)
+	resp, err := h.svc.ListMarketWithSkills(c.Request().Context(), tags, keyword, skillIDs, page, size, callableOnly)
 	if err != nil {
 		return err
 	}
@@ -159,6 +162,28 @@ func parseTagsParam(raw string) []string {
 		}
 		seen[t] = struct{}{}
 		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func parseSkillIDsParam(values ...string) []string {
+	seen := make(map[string]struct{})
+	out := []string{}
+	for _, raw := range values {
+		for _, part := range strings.Split(raw, ",") {
+			id := strings.TrimSpace(strings.ToLower(part))
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
 	}
 	if len(out) == 0 {
 		return nil

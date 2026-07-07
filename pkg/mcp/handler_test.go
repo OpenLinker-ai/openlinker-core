@@ -421,7 +421,7 @@ func TestRESTHandlersDispatchToService(t *testing.T) {
 		{
 			name: "search agents",
 			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
-				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/search_agents", `{"query":"translate","tags":["text"],"limit":99}`), rec)
+				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/search_agents", `{"query":"translate","tags":["text"],"skill_ids":["content/translation"],"limit":99}`), rec)
 				setAPIKeyScopes(c, "agents:read")
 				return c
 			},
@@ -429,6 +429,7 @@ func TestRESTHandlersDispatchToService(t *testing.T) {
 			wantHTTP: http.StatusOK,
 			assert: func(t *testing.T) {
 				require.Equal(t, "translate", svc.searchReq.Query)
+				require.Equal(t, []string{"content/translation"}, svc.searchReq.SkillIDs)
 				require.Equal(t, int32(99), svc.searchReq.Limit)
 			},
 		},
@@ -517,9 +518,10 @@ func TestPostRPCToolCallDispatchesAllTools(t *testing.T) {
 	}{
 		{
 			name:   "search_agents",
-			params: `{"name":"search_agents","arguments":{"query":"data","limit":2}}`,
+			params: `{"name":"search_agents","arguments":{"query":"data","skill_ids":["data/sql-query"],"limit":2}}`,
 			assert: func(t *testing.T) {
 				require.Equal(t, "data", svc.searchReq.Query)
+				require.Equal(t, []string{"data/sql-query"}, svc.searchReq.SkillIDs)
 				require.Equal(t, int32(2), svc.searchReq.Limit)
 			},
 		},

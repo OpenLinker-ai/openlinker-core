@@ -15,6 +15,7 @@ type MarketListItem struct {
 	Description       string       `json:"description"`
 	PricePerCallCents int32        `json:"price_per_call_cents"`
 	Tags              []string     `json:"tags"`
+	Skills            []SkillMini  `json:"skills"`
 	TotalCalls        int32        `json:"total_calls"`
 	Creator           CreatorMini  `json:"creator"`
 	ConnectionMode    string       `json:"connection_mode"`

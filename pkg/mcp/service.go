@@ -30,7 +30,7 @@ func NewService(market *agent.MarketService, runtimeSvc *runtime.Service, taskSv
 	return &Service{market: market, runtime: runtimeSvc, task: taskSvc}
 }
 
-// SearchAgents 转 market.ListMarket，按 query/tags 过滤。
+// SearchAgents 转 market.ListMarketWithSkills，按 query/tags/skill_ids 过滤。
 func (s *Service) SearchAgents(ctx context.Context, req *SearchAgentsRequest) (*agent.MarketListResponse, error) {
 	limit := req.Limit
 	if limit <= 0 {
@@ -43,7 +43,7 @@ func (s *Service) SearchAgents(ctx context.Context, req *SearchAgentsRequest) (*
 	if tags == nil {
 		tags = []string{}
 	}
-	return s.market.ListMarket(ctx, tags, req.Query, 1, limit)
+	return s.market.ListMarketWithSkills(ctx, tags, req.Query, req.SkillIDs, 1, limit)
 }
 
 // GetAgent 转 market.GetBySlug；返回结构里已经包含 capability / examples。
@@ -94,6 +94,12 @@ var mcpTools = []ToolDescriptor{
 			"properties": map[string]interface{}{
 				"query": map[string]interface{}{"type": "string", "description": "可选关键词，匹配名称和描述"},
 				"tags":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "tag 过滤（任意命中）"},
+				"skill_ids": map[string]interface{}{
+					"type":        "array",
+					"maxItems":    5,
+					"items":       map[string]interface{}{"type": "string"},
+					"description": "可选。按 Agent 声明的 OpenLinker Skill ID 结构化过滤，任意命中。",
+				},
 				"limit": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
 			},
 		},

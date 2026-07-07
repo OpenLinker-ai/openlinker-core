@@ -42,6 +42,7 @@ func TestServiceBridgesMarketRuntimeAndRunReads(t *testing.T) {
 	userID := insertMCPUser(t, pool, "mcp-user", false)
 	creatorID := insertMCPUser(t, pool, "mcp-creator", true)
 	agentID := insertMCPAgent(t, pool, creatorID, "mcp-bridge-agent", "MCP Bridge Agent", server.URL, []string{"data", "sql"})
+	insertMCPAgentSkills(t, pool, agentID, "data/sql-query")
 
 	svc := NewService(
 		agent.NewMarketService(pool),
@@ -54,11 +55,13 @@ func TestServiceBridgesMarketRuntimeAndRunReads(t *testing.T) {
 	require.Equal(t, int32(10), defaultSearch.Size)
 	require.Equal(t, int32(1), defaultSearch.Total)
 
-	filtered, err := svc.SearchAgents(ctx, &SearchAgentsRequest{Query: "bridge", Tags: []string{"sql"}, Limit: 99})
+	filtered, err := svc.SearchAgents(ctx, &SearchAgentsRequest{Query: "bridge", Tags: []string{"sql"}, SkillIDs: []string{"data/sql-query"}, Limit: 99})
 	require.NoError(t, err)
 	require.Equal(t, int32(50), filtered.Size)
 	require.Len(t, filtered.Items, 1)
 	require.Equal(t, "mcp-bridge-agent", filtered.Items[0].Slug)
+	require.Len(t, filtered.Items[0].Skills, 1)
+	require.Equal(t, "data/sql-query", filtered.Items[0].Skills[0].ID)
 
 	detail, err := svc.GetAgent(ctx, &GetAgentRequest{Slug: "mcp-bridge-agent"})
 	require.NoError(t, err)

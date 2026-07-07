@@ -29,9 +29,10 @@ type ToolsResponse struct {
 //
 // 全部可选；不传任何字段时返回默认市场首页。
 type SearchAgentsRequest struct {
-	Query string   `json:"query,omitempty"`
-	Tags  []string `json:"tags,omitempty"`
-	Limit int32    `json:"limit,omitempty"`
+	Query    string   `json:"query,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
+	SkillIDs []string `json:"skill_ids,omitempty" validate:"omitempty,max=5,dive,min=1,max=80"`
+	Limit    int32    `json:"limit,omitempty"`
 }
 
 // GetAgentRequest POST /api/v1/mcp/get_agent 请求体。
