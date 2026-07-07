@@ -21,6 +21,7 @@ import (
 const (
 	maxTaskSkillRefs        = 5
 	maxTaskMCPTools         = 5
+	maxTaskAgentRefs        = 5
 	maxTaskResultSummaryLen = 2000
 	maxTaskRevisionNoteLen  = 2000
 	maxTaskPublicSummaryLen = 240
@@ -165,6 +166,10 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 		return nil, err
 	}
 	mcpTools = mergeTemplateMCPTools(tmpl, mcpTools)
+	preferredSlugs, err := normalizePreferredAgentSlugs(req.AgentSlugs)
+	if err != nil {
+		return nil, err
+	}
 
 	// 1. 解析 skill：优先 LLM；失败/未配置 → 规则
 	var parsed []string
@@ -208,7 +213,13 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 		return nil, httpx.Internal("推荐 Agent 失败")
 	}
 
-	if len(matches) == 0 {
+	preferredAgentIDs, err := s.preferredAgentIDsBySlug(ctx, preferredSlugs)
+	if err != nil {
+		return nil, err
+	}
+	orderedAgentIDs := mergePreferredAndMatchedAgentIDs(preferredAgentIDs, matches, 3)
+
+	if len(orderedAgentIDs) == 0 {
 		taskID, err := s.persist(ctx, userID, query, parsed, mcpTools, nil)
 		if err != nil {
 			return nil, err
@@ -219,11 +230,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 	}
 
 	// 4. 回填 Agent 详情
-	agentIDs := make([]uuid.UUID, len(matches))
-	for i := range matches {
-		agentIDs[i] = matches[i].AgentID
-	}
-	rows, err := s.queries.GetAgentsByIDs(ctx, agentIDs)
+	rows, err := s.queries.GetAgentsByIDs(ctx, orderedAgentIDs)
 	if err != nil {
 		log.Error().Err(err).Msg("task.Recommend: GetAgentsByIDs")
 		return nil, httpx.Internal("加载 Agent 详情失败")
@@ -236,22 +243,38 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 	// skill_id → 中文名（用于 Why 文案）
 	nameByID := skillNameByID(skills)
 	parsedCount := float32(len(parsed))
-
-	recs := make([]Recommendation, 0, len(matches))
+	matchCountByAgentID := make(map[uuid.UUID]int32, len(matches))
 	for i := range matches {
-		row, ok := byID[matches[i].AgentID]
+		matchCountByAgentID[matches[i].AgentID] = matches[i].MatchCount
+	}
+	preferredAgentIDSet := make(map[uuid.UUID]struct{}, len(preferredAgentIDs))
+	for i := range preferredAgentIDs {
+		preferredAgentIDSet[preferredAgentIDs[i]] = struct{}{}
+	}
+
+	recs := make([]Recommendation, 0, len(orderedAgentIDs))
+	for i := range orderedAgentIDs {
+		agentID := orderedAgentIDs[i]
+		row, ok := byID[agentID]
 		if !ok {
 			// 推荐了但回填不到（可能被下架）→ 跳过
 			continue
 		}
-		score := float32(matches[i].MatchCount) / parsedCount
+		matchedSkills, err := s.matchedSkillRefs(ctx, agentID, parsed)
+		if err != nil {
+			log.Error().Err(err).Str("agent_id", agentID.String()).Msg("task.Recommend: ListAgentSkills")
+			return nil, httpx.Internal("加载 Agent Skill 详情失败")
+		}
+		matchCount := matchCountByAgentID[agentID]
+		if matchCount == 0 {
+			matchCount = int32(len(matchedSkills))
+		}
+		if _, preferred := preferredAgentIDSet[agentID]; preferred && matchCount == 0 {
+			continue
+		}
+		score := float32(matchCount) / parsedCount
 		if score > 1 {
 			score = 1
-		}
-		matchedSkills, err := s.matchedSkillRefs(ctx, matches[i].AgentID, parsed)
-		if err != nil {
-			log.Error().Err(err).Str("agent_id", matches[i].AgentID.String()).Msg("task.Recommend: ListAgentSkills")
-			return nil, httpx.Internal("加载 Agent Skill 详情失败")
 		}
 		recs = append(recs, Recommendation{
 			Agent:         toAgentSummary(row),
@@ -1091,6 +1114,78 @@ func normalizeMCPTools(names []string) ([]string, error) {
 		out = append(out, name)
 	}
 	return out, nil
+}
+
+func normalizePreferredAgentSlugs(slugs []string) ([]string, error) {
+	if len(slugs) > maxTaskAgentRefs {
+		return nil, httpx.Unprocessable("agent_slugs 最多关联 5 个")
+	}
+	out := make([]string, 0, len(slugs))
+	seen := make(map[string]struct{}, len(slugs))
+	for _, raw := range slugs {
+		slug := strings.TrimSpace(raw)
+		if slug == "" {
+			return nil, httpx.Unprocessable("agent_slugs 不能包含空值")
+		}
+		if len(slug) > 120 {
+			return nil, httpx.Unprocessable("agent_slugs 单项不能超过 120 字符")
+		}
+		if _, ok := seen[slug]; ok {
+			continue
+		}
+		seen[slug] = struct{}{}
+		out = append(out, slug)
+	}
+	return out, nil
+}
+
+func (s *Service) preferredAgentIDsBySlug(ctx context.Context, slugs []string) ([]uuid.UUID, error) {
+	if len(slugs) == 0 || s.queries == nil {
+		return []uuid.UUID{}, nil
+	}
+	out := make([]uuid.UUID, 0, len(slugs))
+	seen := make(map[uuid.UUID]struct{}, len(slugs))
+	for _, slug := range slugs {
+		row, err := s.queries.GetAgentBySlug(ctx, slug)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			log.Error().Err(err).Str("slug", slug).Msg("task.preferredAgentIDsBySlug: GetAgentBySlug")
+			return nil, httpx.Internal("加载指定 Agent 失败")
+		}
+		if _, ok := seen[row.ID]; ok {
+			continue
+		}
+		seen[row.ID] = struct{}{}
+		out = append(out, row.ID)
+	}
+	return out, nil
+}
+
+func mergePreferredAndMatchedAgentIDs(preferred []uuid.UUID, matches []AgentMatch, max int) []uuid.UUID {
+	if max <= 0 {
+		return []uuid.UUID{}
+	}
+	out := make([]uuid.UUID, 0, max)
+	seen := make(map[uuid.UUID]struct{}, max)
+	add := func(id uuid.UUID) {
+		if id == uuid.Nil || len(out) >= max {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for _, id := range preferred {
+		add(id)
+	}
+	for i := range matches {
+		add(matches[i].AgentID)
+	}
+	return out
 }
 
 func normalizePublicSummary(req *PublishRequest, query string) (string, error) {

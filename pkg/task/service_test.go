@@ -351,6 +351,46 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"create_task", "run_agent"}, history[0].MCPTools)
 }
 
+func TestRecommendPreferredAgentSlugRanksFirst(t *testing.T) {
+	pool := setupTaskTestDB(t)
+	userID := insertTaskUser(t, pool)
+	creatorID := insertTaskCreator(t, pool)
+	firstSlug := "task-auto-" + uuid.NewString()[:8]
+	preferredSlug := "task-preferred-" + uuid.NewString()[:8]
+	firstAgent := insertTaskAgent(t, pool, creatorID, firstSlug, "approved")
+	preferredAgent := insertTaskAgent(t, pool, creatorID, preferredSlug, "approved")
+	insertTaskAgentSkills(t, pool, firstAgent, "dev/code-review")
+	insertTaskAgentSkills(t, pool, preferredAgent, "dev/code-review")
+
+	fake := &fakeSkillRecommender{
+		skills: testSkills(),
+		matches: []task.AgentMatch{
+			{AgentID: firstAgent, MatchCount: 1},
+			{AgentID: preferredAgent, MatchCount: 1},
+		},
+	}
+	svc := task.NewService(pool, nil, fake)
+
+	resp, err := svc.Recommend(context.Background(), userID, &task.RecommendRequest{
+		Query:      "请帮我审查这段代码有没有明显问题",
+		SkillIDs:   []string{"dev/code-review"},
+		AgentSlugs: []string{preferredSlug},
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.Recommendations, 2)
+	assert.Equal(t, preferredAgent.String(), resp.Recommendations[0].Agent.ID)
+	assert.Equal(t, preferredSlug, resp.Recommendations[0].Agent.Slug)
+	assert.Equal(t, firstAgent.String(), resp.Recommendations[1].Agent.ID)
+	require.Len(t, resp.Recommendations[0].MatchedSkills, 1)
+	assert.Equal(t, "dev/code-review", resp.Recommendations[0].MatchedSkills[0].ID)
+
+	var stored []uuid.UUID
+	err = pool.QueryRow(context.Background(),
+		`SELECT recommended_agent_ids FROM task_queries WHERE id=$1`, resp.TaskID).Scan(&stored)
+	require.NoError(t, err)
+	assert.Equal(t, []uuid.UUID{preferredAgent, firstAgent}, stored)
+}
+
 func TestTaskTemplatesAndTemplateIDDriveRecommendationSkills(t *testing.T) {
 	pool := setupTaskTestDB(t)
 	userID := insertTaskUser(t, pool)

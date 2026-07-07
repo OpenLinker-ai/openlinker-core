@@ -15,6 +15,7 @@ type RecommendRequest struct {
 	TemplateID string   `json:"template_id,omitempty" validate:"omitempty,min=2,max=80"`
 	SkillIDs   []string `json:"skill_ids,omitempty" validate:"omitempty,max=5,dive,min=1,max=80"`
 	MCPTools   []string `json:"mcp_tools,omitempty" validate:"omitempty,max=5,dive,min=1,max=80"`
+	AgentSlugs []string `json:"agent_slugs,omitempty" validate:"omitempty,max=5,dive,min=1,max=120"`
 }
 
 // AgentSummary 推荐返回的 Agent 简要信息（不含 endpoint / 鉴权头）。
