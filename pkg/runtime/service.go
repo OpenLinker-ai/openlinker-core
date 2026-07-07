@@ -1711,34 +1711,40 @@ func (s *Service) completeRuntimePullRunForToken(ctx context.Context, token db.A
 	if duration <= 0 {
 		duration = clampDurationMillisToInt32(time.Since(state.StartedAt))
 	}
-	triggerExternalDelivery := s.shouldTriggerExternalDelivery(ctx, runID)
 	var resp *RunResponse
+	var successOutput map[string]interface{}
+	success := false
 	switch req.Status {
 	case "success":
 		output := req.Output
 		if output == nil {
 			output = map[string]interface{}{}
 		}
-		resp = s.handleSuccess(ctx, runID, token.AgentID, output, req.Events, duration, triggerExternalDelivery)
+		resp = s.handleSuccess(ctx, runID, token.AgentID, output, req.Events, duration, false)
+		successOutput = output
+		success = true
 	case "failed":
 		agentErr := req.Error
 		if agentErr == nil {
 			agentErr = &AgentError{Code: "AGENT_REPORTED_FAILURE", Message: "Agent runtime reported failed"}
 		}
-		resp = s.handleFailure(ctx, runID, token.AgentID, duration, nil, agentErr, triggerExternalDelivery)
+		resp = s.handleFailure(ctx, runID, token.AgentID, duration, nil, agentErr, false)
 	case "timeout":
 		message := "Agent runtime reported timeout"
 		if req.Error != nil && strings.TrimSpace(req.Error.Message) != "" {
 			message = req.Error.Message
 		}
 		agentErr := &AgentError{Code: "TIMEOUT", Message: message}
-		resp = s.handleFailure(ctx, runID, token.AgentID, duration, nil, agentErr, triggerExternalDelivery)
+		resp = s.handleFailure(ctx, runID, token.AgentID, duration, nil, agentErr, false)
 	default:
 		return nil, httpx.BadRequest("status 取值非法")
 	}
 	s.touchRuntimeTokenAsync(ctx, token.ID)
-	s.decorateDelegationCompletion(ctx, runID, token.AgentID, resp)
-	s.attachRunRequirementEvidence(ctx, runID, resp)
+	postCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s.decorateDelegationCompletion(postCtx, runID, token.AgentID, resp)
+	s.attachRunRequirementEvidence(postCtx, runID, resp)
+	s.triggerRuntimePullCompletionDelivery(runID, token.AgentID, successOutput, success)
 	return resp, nil
 }
 
@@ -3223,6 +3229,22 @@ func (s *Service) shouldTriggerExternalDelivery(ctx context.Context, runID uuid.
 			Msg("runtime.shouldTriggerExternalDelivery: GetRunDelegationByChild")
 	}
 	return true
+}
+
+func (s *Service) triggerRuntimePullCompletionDelivery(runID, agentID uuid.UUID, output map[string]interface{}, success bool) {
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if !s.shouldTriggerExternalDelivery(bgCtx, runID) {
+			return
+		}
+		if success {
+			s.triggerWebhook(runID, agentID, output)
+		} else {
+			s.triggerWebhookByRun(runID)
+		}
+		s.triggerDelivery(runID)
+	}()
 }
 
 // runToResponse 把 db.Run 转成 RunResponse（GetRun 用）。

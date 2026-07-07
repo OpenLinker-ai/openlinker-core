@@ -1003,6 +1003,79 @@ func TestCancelRunningWorkflowRunPreventsSuccessOverwrite(t *testing.T) {
 	require.False(t, claimed)
 }
 
+func TestCancelRuntimePullWorkflowRunAllowsLateResult(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+	ctx := context.Background()
+
+	userID := insertWorkflowUser(t, pool, "wf-cancel-runtime-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-cancel-runtime-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, "https://example.com/not-used")
+	setWorkflowAgentRuntimePullMode(t, pool, agentID)
+
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	token := insertWorkflowRuntimeToken(t, pool, agentID, creatorID)
+	_, err := runtimeSvc.HeartbeatAgent(ctx, token)
+	require.NoError(t, err)
+	svc := workflow.NewService(pool, runtimeSvc)
+
+	created, err := svc.CreateWorkflow(ctx, userID, &workflow.CreateWorkflowRequest{
+		Name: "Cancelable runtime pull workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "worker", Title: "Worker", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+	queued, err := svc.StartWorkflowRun(ctx, userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"topic": "cancel runtime pull"},
+	})
+	require.NoError(t, err)
+
+	workerDone := make(chan error, 1)
+	go func() {
+		_, claimErr := svc.ClaimAndRunPendingWorkflow(ctx)
+		workerDone <- claimErr
+	}()
+
+	claimed, err := claimWorkflowRuntimeRun(t, runtimeSvc, token)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+
+	canceled, err := svc.CancelWorkflowRun(ctx, userID, uuid.MustParse(queued.ID))
+	require.NoError(t, err)
+	require.Equal(t, "canceled", canceled.Status)
+
+	childRunID := uuid.MustParse(claimed.RunID)
+	completed, err := runtimeSvc.CompleteRuntimePullRun(ctx, token, childRunID, &runtimemod.RuntimePullResultRequest{
+		Status: "success",
+		Output: map[string]interface{}{
+			"answer": "late runtime pull success",
+			"step":   claimed.Input["node_key"],
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "success", completed.Status)
+
+	select {
+	case err := <-workerDone:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("workflow worker did not finish after late runtime result")
+	}
+
+	final, err := svc.GetWorkflowRun(ctx, userID, uuid.MustParse(queued.ID))
+	require.NoError(t, err)
+	require.Equal(t, "canceled", final.Status)
+	require.Len(t, final.Steps, 1)
+	require.Equal(t, "success", final.Steps[0].Status)
+
+	child, err := runtimeSvc.GetRun(ctx, userID, childRunID)
+	require.NoError(t, err)
+	require.Equal(t, "success", child.Status)
+}
+
 func TestWorkflowWorkerRequeuesStaleRunAndCleansRetrySteps(t *testing.T) {
 	pool := setupWorkflowTestDB(t)
 
