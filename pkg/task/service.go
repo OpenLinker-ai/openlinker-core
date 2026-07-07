@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 
@@ -29,6 +30,8 @@ const (
 	taskVisibilityPrivate   = "private"
 	taskVisibilityPublic    = "public"
 )
+
+var explicitSkillIDPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[/_-][a-z0-9]+)*$`)
 
 var mcpToolCatalog = []MCPToolRef{
 	{Name: "create_task", Description: "发布自然语言任务，解析 Skill/MCP 引用并返回推荐 Agent"},
@@ -1086,7 +1089,9 @@ func normalizeExplicitSkillIDs(ids []string, byID map[string]db.Skill) ([]string
 			continue
 		}
 		if _, ok := byID[id]; !ok {
-			return nil, httpx.Unprocessable("未知 Skill: " + id)
+			if !explicitSkillIDPattern.MatchString(id) {
+				return nil, httpx.Unprocessable("未知 Skill: " + id)
+			}
 		}
 		seen[id] = struct{}{}
 		out = append(out, id)

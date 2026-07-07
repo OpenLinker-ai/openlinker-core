@@ -351,6 +351,45 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"create_task", "run_agent"}, history[0].MCPTools)
 }
 
+func TestRecommendPersistsPendingExplicitSkill(t *testing.T) {
+	pool := setupTaskTestDB(t)
+	userID := insertTaskUser(t, pool)
+	fake := &fakeSkillRecommender{skills: testSkills()}
+	svc := task.NewService(pool, nil, fake)
+
+	resp, err := svc.Recommend(context.Background(), userID, &task.RecommendRequest{
+		Query:    "I need an Agent for a missing capability",
+		SkillIDs: []string{"ai/custom-capability"},
+		MCPTools: []string{"create_task", "run_agent"},
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, uuid.Nil, resp.TaskID)
+	assert.Equal(t, []string{"ai/custom-capability"}, resp.ParsedSkills)
+	require.Len(t, resp.ParsedSkillRefs, 1)
+	assert.Equal(t, "ai/custom-capability", resp.ParsedSkillRefs[0].ID)
+	assert.Equal(t, "ai/custom-capability", resp.ParsedSkillRefs[0].Name)
+	assert.Empty(t, resp.Recommendations)
+	require.NotNil(t, resp.NextAction)
+	assert.Equal(t, "publish_task", resp.NextAction.Type)
+
+	var parsed []string
+	var recommended []uuid.UUID
+	err = pool.QueryRow(context.Background(),
+		`SELECT parsed_skills, recommended_agent_ids FROM task_queries WHERE id=$1`,
+		resp.TaskID,
+	).Scan(&parsed, &recommended)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ai/custom-capability"}, parsed)
+	assert.Empty(t, recommended)
+
+	detail, err := svc.GetByID(context.Background(), resp.TaskID, userID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ai/custom-capability"}, detail.ParsedSkills)
+	require.Len(t, detail.ParsedSkillRefs, 1)
+	assert.Equal(t, "ai/custom-capability", detail.ParsedSkillRefs[0].Name)
+	assert.Empty(t, detail.Recommendations)
+}
+
 func TestRecommendPreferredAgentSlugRanksFirst(t *testing.T) {
 	pool := setupTaskTestDB(t)
 	userID := insertTaskUser(t, pool)
