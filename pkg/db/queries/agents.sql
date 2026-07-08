@@ -159,10 +159,19 @@ WHERE a.creator_id = $1
     OR ($3 = 'degraded' AND COALESCE(av.availability_status, 'unknown') = 'degraded')
     OR ($3 = 'disabled' AND a.lifecycle_status = 'disabled')
     OR ($3 = 'review' AND a.certification_status = 'pending')
-  )
-  AND ($4::text = '' OR a.visibility = $4)
-  AND ($5::text = '' OR a.certification_status = $5)
-ORDER BY
+	  )
+	  AND ($4::text = '' OR a.visibility = $4)
+	  AND ($5::text = '' OR a.certification_status = $5)
+	  AND (
+	    cardinality($9::text[]) = 0
+	    OR EXISTS (
+	      SELECT 1
+	      FROM agent_skills askill
+	      WHERE askill.agent_id = a.id
+	        AND askill.skill_id = ANY($9::text[])
+	    )
+	  )
+	ORDER BY
   CASE WHEN $6 = 'name' THEN lower(a.name) END ASC,
   CASE WHEN $6 = 'created_at' THEN a.created_at END DESC,
   CASE WHEN $6 = 'lifetime_calls' THEN a.total_calls END DESC,
@@ -220,9 +229,18 @@ WHERE a.creator_id = $1
     OR ($3 = 'degraded' AND COALESCE(av.availability_status, 'unknown') = 'degraded')
     OR ($3 = 'disabled' AND a.lifecycle_status = 'disabled')
     OR ($3 = 'review' AND a.certification_status = 'pending')
-  )
-  AND ($4::text = '' OR a.visibility = $4)
-  AND ($5::text = '' OR a.certification_status = $5);
+	  )
+	  AND ($4::text = '' OR a.visibility = $4)
+	  AND ($5::text = '' OR a.certification_status = $5)
+	  AND (
+	    cardinality($6::text[]) = 0
+	    OR EXISTS (
+	      SELECT 1
+	      FROM agent_skills askill
+	      WHERE askill.agent_id = a.id
+	        AND askill.skill_id = ANY($6::text[])
+	    )
+	  );
 
 -- name: CountAgentBucketsByCreator :one
 SELECT

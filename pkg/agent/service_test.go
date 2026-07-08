@@ -815,6 +815,34 @@ func TestListMyAgentsPageDefaultsToNewestFirst(t *testing.T) {
 	require.Equal(t, olderAgent.ID, callsPage.Items[0].ID)
 }
 
+func TestListMyAgentsPageFiltersBySkillIDsBeforePagination(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	uid := insertCreator(t, pool)
+	_, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("unmatched-skill-page")))
+	require.NoError(t, err)
+	matchedAgent, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("matched-skill-page")))
+	require.NoError(t, err)
+	matchedAgentID := uuid.MustParse(matchedAgent.ID)
+	_, err = pool.Exec(ctx,
+		`INSERT INTO agent_skills (agent_id, skill_id) VALUES ($1, $2)`,
+		matchedAgentID, "data/sql-query")
+	require.NoError(t, err)
+
+	page, err := svc.ListMyAgentsPage(ctx, uid, agent.AgentListOptions{
+		Status:   "active",
+		SkillIDs: []string{"DATA/SQL-QUERY", "data/sql-query"},
+		Limit:    1,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, page.Total)
+	require.Len(t, page.Items, 1)
+	require.Equal(t, matchedAgent.ID, page.Items[0].ID)
+	require.Equal(t, []string{"data/sql-query"}, page.Items[0].SkillIDs)
+}
+
 func TestListMyAgents_IncludesDeclaredSkillIDs(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)

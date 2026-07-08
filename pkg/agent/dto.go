@@ -87,6 +87,7 @@ type AgentListOptions struct {
 	Visibility          string
 	CertificationStatus string
 	SortBy              string
+	SkillIDs            []string
 	Limit               int32
 	Offset              int32
 }

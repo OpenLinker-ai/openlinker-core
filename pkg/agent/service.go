@@ -345,6 +345,7 @@ func (s *Service) ListMyAgentsPage(ctx context.Context, creatorID uuid.UUID, opt
 		SortBy:              opts.SortBy,
 		Limit:               opts.Limit,
 		Offset:              opts.Offset,
+		SkillIds:            opts.SkillIDs,
 	}
 	rows, err := s.queries.ListAgentsByCreatorPage(ctx, params)
 	if err != nil {
@@ -357,6 +358,7 @@ func (s *Service) ListMyAgentsPage(ctx context.Context, creatorID uuid.UUID, opt
 		Status:              opts.Status,
 		Visibility:          opts.Visibility,
 		CertificationStatus: opts.CertificationStatus,
+		SkillIds:            opts.SkillIDs,
 	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", creatorID.String()).Msg("agent.ListMyAgentsPage: count")
@@ -926,6 +928,7 @@ func normalizeAgentListOptions(opts AgentListOptions) AgentListOptions {
 	opts.Visibility = normalizeAgentListFilter(opts.Visibility, creatorAgentListVisibilityValues)
 	opts.CertificationStatus = normalizeAgentListFilter(opts.CertificationStatus, creatorAgentListCertificationValues)
 	opts.SortBy = normalizeAgentListFilter(opts.SortBy, creatorAgentListSortValues)
+	opts.SkillIDs = normalizeAgentListSkillIDs(opts.SkillIDs)
 	if opts.SortBy == "" {
 		opts.SortBy = "created_at"
 	}
@@ -939,6 +942,26 @@ func normalizeAgentListOptions(opts AgentListOptions) AgentListOptions {
 		opts.Offset = 0
 	}
 	return opts
+}
+
+func normalizeAgentListSkillIDs(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, value := range in {
+		value = strings.TrimSpace(strings.ToLower(value))
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+		if len(out) >= 5 {
+			break
+		}
+	}
+	return out
 }
 
 func normalizeAgentListFilter(value string, allowedValues map[string]bool) string {

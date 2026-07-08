@@ -328,10 +328,19 @@ WHERE a.creator_id = $1
     OR ($3 = 'degraded' AND COALESCE(av.availability_status, 'unknown') = 'degraded')
     OR ($3 = 'disabled' AND a.lifecycle_status = 'disabled')
     OR ($3 = 'review' AND a.certification_status = 'pending')
-  )
-  AND ($4::text = '' OR a.visibility = $4)
-  AND ($5::text = '' OR a.certification_status = $5)
-ORDER BY
+	  )
+	  AND ($4::text = '' OR a.visibility = $4)
+	  AND ($5::text = '' OR a.certification_status = $5)
+	  AND (
+	    cardinality($9::text[]) = 0
+	    OR EXISTS (
+	      SELECT 1
+	      FROM agent_skills askill
+	      WHERE askill.agent_id = a.id
+	        AND askill.skill_id = ANY($9::text[])
+	    )
+	  )
+	ORDER BY
   CASE WHEN $6 = 'name' THEN lower(a.name) END ASC,
   CASE WHEN $6 = 'created_at' THEN a.created_at END DESC,
   CASE WHEN $6 = 'lifetime_calls' THEN a.total_calls END DESC,
@@ -348,6 +357,7 @@ type ListAgentsByCreatorPageParams struct {
 	SortBy              string    `db:"sort_by" json:"sort_by"`
 	Limit               int32     `db:"limit" json:"limit"`
 	Offset              int32     `db:"offset" json:"offset"`
+	SkillIds            []string  `db:"skill_ids" json:"skill_ids"`
 }
 
 type ListAgentsByCreatorPageRow struct {
@@ -363,7 +373,7 @@ type ListAgentsByCreatorPageRow struct {
 }
 
 func (q *Queries) ListAgentsByCreatorPage(ctx context.Context, arg ListAgentsByCreatorPageParams) ([]ListAgentsByCreatorPageRow, error) {
-	rows, err := q.db.Query(ctx, listAgentsByCreatorPage, arg.CreatorID, arg.Query, arg.Status, arg.Visibility, arg.CertificationStatus, arg.SortBy, arg.Limit, arg.Offset)
+	rows, err := q.db.Query(ctx, listAgentsByCreatorPage, arg.CreatorID, arg.Query, arg.Status, arg.Visibility, arg.CertificationStatus, arg.SortBy, arg.Limit, arg.Offset, arg.SkillIds)
 	if err != nil {
 		return nil, err
 	}
@@ -462,9 +472,18 @@ WHERE a.creator_id = $1
     OR ($3 = 'degraded' AND COALESCE(av.availability_status, 'unknown') = 'degraded')
     OR ($3 = 'disabled' AND a.lifecycle_status = 'disabled')
     OR ($3 = 'review' AND a.certification_status = 'pending')
-  )
-  AND ($4::text = '' OR a.visibility = $4)
-  AND ($5::text = '' OR a.certification_status = $5)`
+	  )
+	  AND ($4::text = '' OR a.visibility = $4)
+	  AND ($5::text = '' OR a.certification_status = $5)
+	  AND (
+	    cardinality($6::text[]) = 0
+	    OR EXISTS (
+	      SELECT 1
+	      FROM agent_skills askill
+	      WHERE askill.agent_id = a.id
+	        AND askill.skill_id = ANY($6::text[])
+	    )
+	  )`
 
 type CountAgentsByCreatorFilteredParams struct {
 	CreatorID           uuid.UUID `db:"creator_id" json:"creator_id"`
@@ -472,10 +491,11 @@ type CountAgentsByCreatorFilteredParams struct {
 	Status              string    `db:"status" json:"status"`
 	Visibility          string    `db:"visibility" json:"visibility"`
 	CertificationStatus string    `db:"certification_status" json:"certification_status"`
+	SkillIds            []string  `db:"skill_ids" json:"skill_ids"`
 }
 
 func (q *Queries) CountAgentsByCreatorFiltered(ctx context.Context, arg CountAgentsByCreatorFilteredParams) (int32, error) {
-	row := q.db.QueryRow(ctx, countAgentsByCreatorFiltered, arg.CreatorID, arg.Query, arg.Status, arg.Visibility, arg.CertificationStatus)
+	row := q.db.QueryRow(ctx, countAgentsByCreatorFiltered, arg.CreatorID, arg.Query, arg.Status, arg.Visibility, arg.CertificationStatus, arg.SkillIds)
 	var total int32
 	err := row.Scan(&total)
 	return total, err

@@ -84,7 +84,7 @@ func TestAgentHandlerDispatchesServiceSuccess(t *testing.T) {
 
 	c, rec = newAgentDispatchContext(agentDispatchRequest{
 		method: http.MethodGet,
-		target: "/creator/agents?limit=10&offset=20&q=demo&status=active&visibility=public&certification_status=certified&sort_by=name",
+		target: "/creator/agents?limit=10&offset=20&q=demo&status=active&visibility=public&certification_status=certified&sort_by=name&skill_ids=data/sql-query,dev/code-review",
 		userID: userID.String(),
 	})
 	requireNoDispatchError(t, h.ListMyAgents(c))
@@ -95,6 +95,9 @@ func TestAgentHandlerDispatchesServiceSuccess(t *testing.T) {
 	}
 	if mock.lastListOptions.Query != "demo" || mock.lastListOptions.Status != "active" || mock.lastListOptions.SortBy != "name" {
 		t.Fatalf("ListMyAgentsPage options = %#v", mock.lastListOptions)
+	}
+	if !reflect.DeepEqual(mock.lastListOptions.SkillIDs, []string{"data/sql-query", "dev/code-review"}) {
+		t.Fatalf("ListMyAgentsPage skill_ids = %#v", mock.lastListOptions.SkillIDs)
 	}
 
 	c, rec = newAgentDispatchContext(agentDispatchRequest{

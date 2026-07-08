@@ -174,6 +174,7 @@ func (h *Handler) ListMyAgents(c echo.Context) error {
 		Visibility:          c.QueryParam("visibility"),
 		CertificationStatus: c.QueryParam("certification_status"),
 		SortBy:              c.QueryParam("sort_by"),
+		SkillIDs:            parseSkillIDsParam(c.QueryParam("skill"), c.QueryParam("skill_ids")),
 		Limit:               parseInt32Query(c, "limit", 25),
 		Offset:              parseInt32Query(c, "offset", 0),
 	})
@@ -184,7 +185,7 @@ func (h *Handler) ListMyAgents(c echo.Context) error {
 }
 
 func hasAgentListQuery(c echo.Context) bool {
-	for _, key := range []string{"limit", "offset", "q", "status", "visibility", "certification_status", "sort_by"} {
+	for _, key := range []string{"limit", "offset", "q", "status", "visibility", "certification_status", "sort_by", "skill", "skill_ids"} {
 		if c.QueryParam(key) != "" {
 			return true
 		}
