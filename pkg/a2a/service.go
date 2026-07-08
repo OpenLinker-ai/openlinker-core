@@ -632,6 +632,21 @@ func copyMetadata(metadata map[string]interface{}) map[string]interface{} {
 }
 
 func (s *Service) ListChildren(ctx context.Context, userID, parentRunID uuid.UUID) ([]ChildRunResponse, error) {
+	maxDepth := s.maxDelegationDepth
+	if maxDepth <= 0 {
+		maxDepth = maxDelegationDepth
+	}
+	return s.listChildrenTree(ctx, userID, parentRunID, maxDepth, map[uuid.UUID]struct{}{})
+}
+
+func (s *Service) listChildrenTree(ctx context.Context, userID, parentRunID uuid.UUID, remainingDepth int, seen map[uuid.UUID]struct{}) ([]ChildRunResponse, error) {
+	if remainingDepth <= 0 {
+		return []ChildRunResponse{}, nil
+	}
+	if _, ok := seen[parentRunID]; ok {
+		return []ChildRunResponse{}, nil
+	}
+	seen[parentRunID] = struct{}{}
 	rows, err := s.queries.ListChildRunsByParentAndUser(ctx, db.ListChildRunsByParentAndUserParams{
 		ParentRunID: parentRunID, UserID: userID,
 	})
@@ -640,21 +655,13 @@ func (s *Service) ListChildren(ctx context.Context, userID, parentRunID uuid.UUI
 	}
 	items := make([]ChildRunResponse, 0, len(rows))
 	for _, row := range rows {
-		item := ChildRunResponse{
-			ChildRunID: row.ChildRunID.String(), ParentRunID: row.ParentRunID.String(),
-			CallerAgentID: row.CallerAgentID.String(), TargetAgentID: row.TargetAgentID.String(),
-			CallerAgentSlug: row.CallerAgentSlug, CallerAgentName: row.CallerAgentName,
-			CallerAgentTags: row.CallerAgentTags, CallerSkills: skillRefs(row.CallerSkillIDs, row.CallerSkillNames),
-			TargetAgentSlug: row.TargetAgentSlug, TargetAgentName: row.TargetAgentName,
-			TargetAgentTags: row.TargetAgentTags, TargetSkills: skillRefs(row.TargetSkillIDs, row.TargetSkillNames),
-			Reason: row.Reason, Status: row.Status, CostCents: row.CostCents,
-			DurationMs: row.DurationMs, StartedAt: row.StartedAt.UTC().Format(time.RFC3339),
-			Source: row.Source, BillingMode: "free_delegation",
-			A2AContext: contextRefFromChildRow(row),
+		item := childRunResponseFromRow(row)
+		children, err := s.listChildrenTree(ctx, userID, row.ChildRunID, remainingDepth-1, seen)
+		if err != nil {
+			return nil, err
 		}
-		if row.FinishedAt != nil {
-			formatted := row.FinishedAt.UTC().Format(time.RFC3339)
-			item.FinishedAt = &formatted
+		if len(children) > 0 {
+			item.Children = children
 		}
 		items = append(items, item)
 	}
@@ -737,6 +744,26 @@ func skillRefs(ids, names []string) []SkillRef {
 		items = append(items, SkillRef{ID: id, Name: name})
 	}
 	return items
+}
+
+func childRunResponseFromRow(row db.ListChildRunsByParentAndUserRow) ChildRunResponse {
+	item := ChildRunResponse{
+		ChildRunID: row.ChildRunID.String(), ParentRunID: row.ParentRunID.String(),
+		CallerAgentID: row.CallerAgentID.String(), TargetAgentID: row.TargetAgentID.String(),
+		CallerAgentSlug: row.CallerAgentSlug, CallerAgentName: row.CallerAgentName,
+		CallerAgentTags: row.CallerAgentTags, CallerSkills: skillRefs(row.CallerSkillIDs, row.CallerSkillNames),
+		TargetAgentSlug: row.TargetAgentSlug, TargetAgentName: row.TargetAgentName,
+		TargetAgentTags: row.TargetAgentTags, TargetSkills: skillRefs(row.TargetSkillIDs, row.TargetSkillNames),
+		Reason: row.Reason, Status: row.Status, CostCents: row.CostCents,
+		DurationMs: row.DurationMs, StartedAt: row.StartedAt.UTC().Format(time.RFC3339),
+		Source: row.Source, BillingMode: "free_delegation",
+		A2AContext: contextRefFromChildRow(row),
+	}
+	if row.FinishedAt != nil {
+		formatted := row.FinishedAt.UTC().Format(time.RFC3339)
+		item.FinishedAt = &formatted
+	}
+	return item
 }
 
 func contextRefFromChildRow(row db.ListChildRunsByParentAndUserRow) *A2AContextRef {

@@ -573,6 +573,87 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 	assert.Contains(t, eventTypes, "run.completed")
 }
 
+func TestListParentRunsAggregatesRootContextAndChildrenTree(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+	rootAgent := insertAgent(t, pool, owner, "https://example.com/root", "orchestration")
+	childAAgent := insertAgent(t, pool, owner, "https://example.com/child-a", "analysis")
+	childBAgent := insertAgent(t, pool, owner, "https://example.com/child-b", "scraping")
+	grandchildAgent := insertAgent(t, pool, owner, "https://example.com/grandchild", "grandchild")
+	attachSkill(t, pool, grandchildAgent, "data/deep-analysis", "深度分析")
+
+	rootRun := insertParentRun(t, pool, owner, rootAgent)
+	childA := insertDelegatedRun(t, pool, owner, childAAgent, rootRun, rootAgent)
+	childB := insertDelegatedRun(t, pool, owner, childBAgent, rootRun, rootAgent)
+	grandchild := insertDelegatedRun(t, pool, owner, grandchildAgent, childA, childAAgent)
+
+	_, err := pool.Exec(context.Background(),
+		`UPDATE runs
+		    SET status = CASE
+		      WHEN id = ANY($1::uuid[]) THEN 'success'
+		      ELSE status
+		    END
+		  WHERE id = ANY($2::uuid[])`,
+		[]uuid.UUID{childA, grandchild},
+		[]uuid.UUID{childA, childB, grandchild},
+	)
+	require.NoError(t, err)
+	for _, spec := range []struct {
+		runID         uuid.UUID
+		agentID       uuid.UUID
+		parentRunID   uuid.UUID
+		callerAgentID uuid.UUID
+		targetAgentID uuid.UUID
+		taskID        string
+		parentTaskID  string
+	}{
+		{childA, childAAgent, rootRun, rootAgent, childAAgent, childA.String(), rootRun.String()},
+		{childB, childBAgent, rootRun, rootAgent, childBAgent, childB.String(), rootRun.String()},
+		{grandchild, grandchildAgent, childA, childAAgent, grandchildAgent, grandchild.String(), childA.String()},
+	} {
+		_, err = pool.Exec(context.Background(),
+			`INSERT INTO a2a_context_mappings (
+			    run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+			    root_context_id, parent_context_id, parent_task_id, parent_run_id,
+			    caller_agent_id, target_agent_id, trace_id, reference_task_ids, source
+			  ) VALUES (
+			    $1, $2, $3, 'ctx-root-session', $4,
+			    'ctx-root-session', 'ctx-root-session', $5, $6,
+			    $7, $8, 'trace-root-session', ARRAY[$5]::text[], 'agent_delegation'
+			  )`,
+			spec.runID, owner, spec.agentID, spec.taskID, spec.parentTaskID, spec.parentRunID,
+			spec.callerAgentID, spec.targetAgentID,
+		)
+		require.NoError(t, err)
+	}
+
+	parents, err := svc.ListParentRuns(context.Background(), owner, 1, 10, "")
+	require.NoError(t, err)
+	require.Len(t, parents.Items, 1)
+	assert.Equal(t, int32(1), parents.Total)
+	assert.Equal(t, rootRun.String(), parents.Items[0].ParentRunID)
+	assert.Equal(t, int32(3), parents.Items[0].ChildCount)
+	assert.Equal(t, int32(2), parents.Items[0].SuccessfulChildCount)
+	assert.Equal(t, int32(1), parents.Items[0].RunningChildCount)
+	require.NotNil(t, parents.Items[0].A2AContext)
+	assert.Equal(t, "ctx-root-session", parents.Items[0].A2AContext.RootContextID)
+	assert.Equal(t, "trace-root-session", parents.Items[0].A2AContext.TraceID)
+
+	filtered, err := svc.ListParentRuns(context.Background(), owner, 1, 10, "grandchild")
+	require.NoError(t, err)
+	require.Len(t, filtered.Items, 1)
+	assert.Equal(t, rootRun.String(), filtered.Items[0].ParentRunID)
+
+	children, err := svc.ListChildren(context.Background(), owner, rootRun)
+	require.NoError(t, err)
+	require.Len(t, children, 2)
+	assert.Equal(t, childA.String(), children[0].ChildRunID)
+	require.Len(t, children[0].Children, 1)
+	assert.Equal(t, grandchild.String(), children[0].Children[0].ChildRunID)
+	assert.Equal(t, childB.String(), children[1].ChildRunID)
+	assert.Empty(t, children[1].Children)
+}
+
 func TestProtocolMessageSendAndGetTask(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	owner := insertCreator(t, pool)
