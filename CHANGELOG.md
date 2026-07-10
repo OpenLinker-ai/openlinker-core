@@ -29,6 +29,11 @@ runtime protocol, and migration contract are declared stable.
 - Ignored one-character ASCII letter and digit tokens in fallback Task Skill
   parsing, preventing ordinary English prose from selecting unrelated Skills
   while preserving Chinese single-character matching.
+- Restored Skill recommendations for active public Agents with any valid
+  readiness evidence: healthy availability, a non-unreachable successful Run,
+  or a recently used runtime pull token.
+- Aligned the runtime pull claim test contract with idempotent in-flight Run
+  replay, including the absence of a retry cooldown for successful claims.
 
 ### Documentation
 

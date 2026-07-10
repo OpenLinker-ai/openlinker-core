@@ -1,6 +1,7 @@
 package runtime_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -82,18 +83,24 @@ func TestAgentRuntimeRateLimiter_EmptyClaimStartsCooldown(t *testing.T) {
 	assert.Contains(t, string(body), "RATE_LIMITED")
 }
 
-func TestAgentRuntimeRateLimiter_SuccessfulClaimCanImmediatelyCheckForMoreWork(t *testing.T) {
+func TestAgentRuntimeRateLimiter_SuccessfulClaimReplaysInFlightRunWithoutCooldown(t *testing.T) {
 	e, pool := setupAgentRuntimeHandlerTest(t)
 	agentID, token := insertRuntimePullAgentWithToken(t, pool)
 	userID := insertRuntimeUser(t, pool)
 	insertRunningRun(t, pool, userID, agentID)
 
-	first, _ := doRequest(t, e, http.MethodGet, "/api/v1/agent-runtime/runs/claim", nil, runtimeAuthHeader(token))
+	first, firstBody := doRequest(t, e, http.MethodGet, "/api/v1/agent-runtime/runs/claim", nil, runtimeAuthHeader(token))
 	require.Equal(t, http.StatusOK, first.Code)
+	var firstClaim runtime.RuntimePullRunResponse
+	require.NoError(t, json.Unmarshal(firstBody, &firstClaim))
+	require.NotEmpty(t, firstClaim.RunID)
 
-	second, _ := doRequest(t, e, http.MethodGet, "/api/v1/agent-runtime/runs/claim", nil, runtimeAuthHeader(token))
-	assert.Equal(t, http.StatusNoContent, second.Code)
-	assert.Equal(t, "5", second.Header().Get(echo.HeaderRetryAfter))
+	second, secondBody := doRequest(t, e, http.MethodGet, "/api/v1/agent-runtime/runs/claim", nil, runtimeAuthHeader(token))
+	require.Equal(t, http.StatusOK, second.Code)
+	var secondClaim runtime.RuntimePullRunResponse
+	require.NoError(t, json.Unmarshal(secondBody, &secondClaim))
+	assert.Equal(t, firstClaim.RunID, secondClaim.RunID)
+	assert.Empty(t, second.Header().Get(echo.HeaderRetryAfter))
 }
 
 func TestAgentRuntimeRateLimiter_RejectsConcurrentLongPollClaim(t *testing.T) {

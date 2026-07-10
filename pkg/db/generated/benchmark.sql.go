@@ -397,17 +397,13 @@ WHERE ag.skill_id = ANY($1::text[])
       WHERE lower(tag) IN ('internal', 'test', 'testing', 'validation')
          OR tag IN ('内部', '测试', '验收')
   )
+  AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
   AND (
-      (
-          COALESCE(av.availability_status, 'unknown') = 'healthy'
-          OR (
-              av.last_successful_run_at IS NOT NULL
-              AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
-          )
-      )
-      AND NOT (
+      COALESCE(av.availability_status, 'unknown') = 'healthy'
+      OR av.last_successful_run_at IS NOT NULL
+      OR (
           a.connection_mode IN ('runtime_pull', 'runtime_ws')
-          AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+          AND rt.last_runtime_token_used_at >= NOW() - INTERVAL '5 minutes'
       )
   )
 GROUP BY a.id, a.total_calls, av.availability_status, av.last_successful_run_at, rt.last_runtime_token_used_at
