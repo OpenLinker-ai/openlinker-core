@@ -34,11 +34,11 @@ const (
 var explicitSkillIDPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[/_-][a-z0-9]+)*$`)
 
 var mcpToolCatalog = []MCPToolRef{
-	{Name: "create_task", Description: "发布自然语言任务，解析 Skill/MCP 引用并返回推荐 Agent"},
-	{Name: "search_agents", Description: "按关键词或标签搜索市场里的 Agent"},
-	{Name: "get_agent", Description: "读取单个 Agent 的详情、能力声明和示例"},
-	{Name: "run_agent", Description: "调用选定 Agent 并记录一次运行"},
-	{Name: "get_run", Description: "查询一次 Agent 调用的运行状态和结果"},
+	{Name: "create_task", Description: "创建私有任务，解析 Skill 和 MCP 引用并返回 Agent 推荐"},
+	{Name: "search_agents", Description: "按关键词或标签查找 Agent"},
+	{Name: "get_agent", Description: "读取 Agent 详情、能力声明和示例"},
+	{Name: "run_agent", Description: "调用 Agent 并保存运行记录"},
+	{Name: "get_run", Description: "查询运行状态和结果"},
 }
 
 // AgentMatch skill 模块返回给推荐器的最小信息。
@@ -209,7 +209,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 			return nil, err
 		}
 		resp.TaskID = taskID
-		resp.NextAction = nextActionForNeedsAgent(taskID, "暂未识别到足够稳定的 Skill，任务已先保存为私有草稿")
+		resp.NextAction = nextActionForNeedsAgent(taskID, "skill_not_identified", "暂未识别到明确的 Skill，任务已保存且仅自己可见")
 		return resp, nil
 	}
 
@@ -232,7 +232,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 			return nil, err
 		}
 		resp.TaskID = taskID
-		resp.NextAction = nextActionForNeedsAgent(taskID, "已识别 Skill，但当前没有可推荐的公开 Agent")
+		resp.NextAction = nextActionForNeedsAgent(taskID, "no_public_agent", "已识别 Skill，但当前没有可推荐的公开 Agent")
 		return resp, nil
 	}
 
@@ -247,8 +247,6 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 		byID[rows[i].ID] = &rows[i]
 	}
 
-	// skill_id → 中文名（用于 Why 文案）
-	nameByID := skillNameByID(skills)
 	parsedCount := float32(len(recommendSkillIDs))
 	matchCountByAgentID := make(map[uuid.UUID]int32, len(matches))
 	for i := range matches {
@@ -286,7 +284,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 		recs = append(recs, Recommendation{
 			Agent:         toAgentSummary(row),
 			MatchScore:    score,
-			Why:           buildWhy(recommendSkillIDs, nameByID),
+			Why:           buildWhy(matchedSkills),
 			MatchedSkills: matchedSkills,
 		})
 	}
@@ -304,12 +302,12 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 	resp.TaskID = taskID
 	resp.Recommendations = recs
 	if len(recs) == 0 {
-		resp.NextAction = nextActionForNeedsAgent(taskID, "候选 Agent 当前不可公开推荐或已不可用")
+		resp.NextAction = nextActionForNeedsAgent(taskID, "candidates_unavailable", "候选 Agent 当前不可公开推荐或已不可用")
 	}
 	return resp, nil
 }
 
-// Publish 把私有推荐草稿显式发布到任务广场。公开列表只展示 public_summary。
+// Publish 为私有任务发布一段公开摘要；公开列表只展示 public_summary。
 func (s *Service) Publish(ctx context.Context, taskID, userID uuid.UUID, req *PublishRequest) (*DetailResponse, error) {
 	t, err := s.queries.GetTaskQuery(ctx, taskID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -342,12 +340,12 @@ func (s *Service) Publish(ctx context.Context, taskID, userID uuid.UUID, req *Pu
 	}
 	if err != nil {
 		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Publish: PublishTaskQuery")
-		return nil, httpx.Internal("发布任务失败")
+		return nil, httpx.Internal("公开任务摘要失败")
 	}
 	return s.detailFromTask(ctx, &published)
 }
 
-// Unpublish 把已发布任务撤回为私有历史。任务内容、交付和验收记录不变。
+// Unpublish 撤下公开摘要，让任务恢复为仅创建者可见。任务内容、交付和验收记录不变。
 func (s *Service) Unpublish(ctx context.Context, taskID, userID uuid.UUID) (*DetailResponse, error) {
 	t, err := s.queries.GetTaskQuery(ctx, taskID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -452,7 +450,7 @@ func (s *Service) Claim(ctx context.Context, taskID, userID, agentID uuid.UUID) 
 		return nil, httpx.Conflict("任务已完成，不能重复接入")
 	}
 	if t.Visibility != taskVisibilityPublic {
-		return nil, httpx.Conflict("任务还是私有草稿，发布到任务广场后才能接入")
+		return nil, httpx.Conflict("任务当前仅创建者可见，需先发布公开摘要后才能接入")
 	}
 	if t.ClaimedAgentID != nil {
 		return nil, httpx.Conflict("任务已经有 Agent 接入")
@@ -471,7 +469,7 @@ func (s *Service) Claim(ctx context.Context, taskID, userID, agentID uuid.UUID) 
 	}
 	if err != nil {
 		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Claim: ClaimTaskQuery")
-		return nil, httpx.Internal("接入任务失败")
+		return nil, httpx.Internal("接任务失败")
 	}
 	return toWorkResponse(&claimed, agentID), nil
 }
@@ -511,7 +509,7 @@ func (s *Service) Complete(ctx context.Context, taskID, userID uuid.UUID, req *C
 
 	if t.ClaimedAgentID != nil {
 		if *t.ClaimedAgentID != req.AgentID {
-			return nil, httpx.Conflict("run 的 Agent 与接入任务的 Agent 不一致")
+			return nil, httpx.Conflict("run 的 Agent 与接任务时选择的 Agent 不一致")
 		}
 	} else if t.ChosenAgentID != nil {
 		if *t.ChosenAgentID != req.AgentID {
@@ -653,7 +651,7 @@ func (s *Service) RunTask(ctx context.Context, taskID, userID uuid.UUID, req *Ru
 
 	if t.ClaimedAgentID != nil {
 		if *t.ClaimedAgentID != req.AgentID {
-			return nil, httpx.Conflict("只能运行已接入任务的 Agent")
+			return nil, httpx.Conflict("只能运行接任务时选择的 Agent")
 		}
 	} else if t.ChosenAgentID != nil {
 		if *t.ChosenAgentID != req.AgentID {
@@ -974,7 +972,7 @@ func (s *Service) detailFromTask(ctx context.Context, t *db.TaskQuery) (*DetailR
 
 	if len(t.RecommendedAgentIDs) == 0 {
 		if t.Visibility != taskVisibilityPublic {
-			resp.NextAction = nextActionForNeedsAgent(t.ID, "当前任务没有可直接推荐的 Agent")
+			resp.NextAction = nextActionForNeedsAgent(t.ID, "no_recommendable_agent", "当前任务没有可直接推荐的 Agent")
 		}
 		return resp, nil
 	}
@@ -988,8 +986,6 @@ func (s *Service) detailFromTask(ctx context.Context, t *db.TaskQuery) (*DetailR
 	for i := range rows {
 		byID[rows[i].ID] = &rows[i]
 	}
-	nameByID := skillNameByID(skills)
-
 	parsedCount := float32(len(t.ParsedSkills))
 	if parsedCount == 0 {
 		parsedCount = 1
@@ -1011,12 +1007,12 @@ func (s *Service) detailFromTask(ctx context.Context, t *db.TaskQuery) (*DetailR
 		resp.Recommendations = append(resp.Recommendations, Recommendation{
 			Agent:         toAgentSummary(row),
 			MatchScore:    score,
-			Why:           buildWhy(t.ParsedSkills, nameByID),
+			Why:           buildWhy(matchedSkills),
 			MatchedSkills: matchedSkills,
 		})
 	}
 	if len(resp.Recommendations) == 0 && t.Visibility != taskVisibilityPublic {
-		resp.NextAction = nextActionForNeedsAgent(t.ID, "历史候选 Agent 当前不可用")
+		resp.NextAction = nextActionForNeedsAgent(t.ID, "historical_candidates_unavailable", "历史候选 Agent 当前不可用")
 	}
 	return resp, nil
 }
@@ -1046,28 +1042,20 @@ func (s *Service) persist(ctx context.Context, userID uuid.UUID, query string, p
 	return t.ID, nil
 }
 
-// buildWhy 按解析顺序生成中文文案，如 "匹配 SQL 查询 + 数据分析"。
-func buildWhy(parsed []string, nameByID map[string]string) string {
-	parts := make([]string, 0, len(parsed))
-	for _, id := range parsed {
-		if name, ok := nameByID[id]; ok {
-			parts = append(parts, name)
-		} else {
-			parts = append(parts, id)
+// buildWhy 只根据当前 Agent 实际命中的 Skill 生成说明。
+func buildWhy(matchedSkills []SkillRef) string {
+	parts := make([]string, 0, len(matchedSkills))
+	for _, skill := range matchedSkills {
+		name := strings.TrimSpace(skill.Name)
+		if name == "" {
+			name = skill.ID
 		}
+		parts = append(parts, name)
 	}
 	if len(parts) == 0 {
 		return ""
 	}
 	return "匹配 " + strings.Join(parts, " + ")
-}
-
-func skillNameByID(skills []db.Skill) map[string]string {
-	out := make(map[string]string, len(skills))
-	for i := range skills {
-		out[skills[i].ID] = skills[i].Name
-	}
-	return out
 }
 
 func skillCatalogByID(skills []db.Skill) map[string]db.Skill {
@@ -1282,13 +1270,14 @@ func normalizedTaskVisibility(raw string) string {
 	return taskVisibilityPrivate
 }
 
-func nextActionForNeedsAgent(taskID uuid.UUID, reason string) *TaskNextAction {
+func nextActionForNeedsAgent(taskID uuid.UUID, reasonCode, reason string) *TaskNextAction {
 	return &TaskNextAction{
-		Type:   "publish_task",
-		Label:  "发布到任务广场",
-		Hint:   "当前任务是私有推荐草稿。发布公开摘要后，创作者可以用自己的 Agent 接入并开始处理。",
-		Href:   "/tasks/" + taskID.String(),
-		Reason: reason,
+		Type:       "publish_task",
+		Label:      "发布公开摘要",
+		Hint:       "任务当前仅自己可见。若想让 Agent 提供方响应，可以单独发布一段不含敏感信息的公开摘要。",
+		Href:       "/tasks/" + taskID.String(),
+		ReasonCode: reasonCode,
+		Reason:     reason,
 	}
 }
 

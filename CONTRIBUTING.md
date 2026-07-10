@@ -24,7 +24,7 @@ Keep Core usable without hosted cloud services.
 
 Allowed here:
 
-- auth, sessions, registry, runs, runtime tokens, A2A, MCP, tasks, workflows,
+- auth, sessions, User Tokens, Agent Tokens, registry, runs, A2A, MCP, tasks, workflows,
   delivery, and local admin APIs
 - migrations and storage needed by those open-source surfaces
 - SDK contract updates that describe open-source Core behavior
@@ -32,8 +32,8 @@ Allowed here:
 Out of scope:
 
 - wallet balances, charges, withdrawals, Stripe, pricing, and billing
-- hosted marketplace ranking, commercial dashboards, and cloud-only account
-  products
+- hosted marketplace ranking, commercial dashboards, and managed Hosted
+  account products
 - private abuse, certification, or recommendation internals
 
 ## Pull Request Expectations

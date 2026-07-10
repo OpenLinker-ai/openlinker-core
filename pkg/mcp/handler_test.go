@@ -7,7 +7,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -55,6 +57,50 @@ func TestPostRPCListToolsUsesMCPToolShape(t *testing.T) {
 	require.NotEmpty(t, resp.Result.Tools)
 	require.Equal(t, "search_agents", resp.Result.Tools[0].Name)
 	require.Equal(t, "object", resp.Result.Tools[0].InputSchema["type"])
+}
+
+func TestMCPToolDescriptionsStayNeutralAndMachineReadable(t *testing.T) {
+	tools := NewService(nil, nil, nil).Tools()
+	names := make([]string, 0, len(tools))
+	descriptions := make([]string, 0)
+
+	var collectDescriptions func(interface{})
+	collectDescriptions = func(value interface{}) {
+		switch typed := value.(type) {
+		case map[string]interface{}:
+			for key, child := range typed {
+				if key == "description" {
+					if description, ok := child.(string); ok {
+						descriptions = append(descriptions, description)
+					}
+				}
+				collectDescriptions(child)
+			}
+		case []interface{}:
+			for _, child := range typed {
+				collectDescriptions(child)
+			}
+		}
+	}
+
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+		descriptions = append(descriptions, tool.Description)
+		collectDescriptions(tool.InputSchema)
+		collectDescriptions(tool.OutputSchema)
+	}
+	require.Equal(t, []string{"search_agents", "get_agent", "run_agent", "get_run", "create_task"}, names)
+
+	for _, description := range descriptions {
+		require.NotEmpty(t, strings.TrimSpace(description))
+		for _, r := range description {
+			require.Falsef(t, unicode.Is(unicode.Han, r), "description must not contain Chinese copy: %q", description)
+		}
+		lower := strings.ToLower(description)
+		for _, forbidden := range []string{"price", "balance", "creator endpoint", "used_mcp_tools", "future", "later"} {
+			require.NotContains(t, lower, forbidden)
+		}
+	}
 }
 
 func TestPostRPCToolCallReportsMissingScopeAsToolError(t *testing.T) {
@@ -185,7 +231,7 @@ func TestPostRPCInitializeRequiresAPIKeyAndReturnsCapabilities(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &denied))
 	require.NotNil(t, denied.Error)
 	require.Equal(t, -32000, denied.Error.Code)
-	require.Contains(t, denied.Error.Message, "访问令牌")
+	require.Contains(t, denied.Error.Message, "User Token")
 
 	rec = httptest.NewRecorder()
 	c = newRPCContext(`{"jsonrpc":"2.0","id":"ok","method":"initialize"}`, rec)
@@ -329,7 +375,7 @@ func TestRESTHandlersValidateAuthBodiesAndUserContextBeforeServiceDispatch(t *te
 				return e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/mcp/tools", nil), rec)
 			},
 			call:      (*Handler).GetTools,
-			wantError: "访问令牌",
+			wantError: "User Token",
 			wantHTTP:  http.StatusForbidden,
 		},
 		{

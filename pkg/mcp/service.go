@@ -88,17 +88,17 @@ func (s *Service) Tools() []ToolDescriptor {
 var mcpTools = []ToolDescriptor{
 	{
 		Name:        "search_agents",
-		Description: "在 OpenLinker 市场搜索 Agent。可按关键词 / tag 过滤；返回名称、价格、调用次数等列表项。",
+		Description: "Search public Agent listings by text, tags, or declared Skill IDs.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"query": map[string]interface{}{"type": "string", "description": "可选关键词，匹配名称和描述"},
-				"tags":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "tag 过滤（任意命中）"},
+				"query": map[string]interface{}{"type": "string", "description": "Optional text matched against Agent names and descriptions."},
+				"tags":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional tags; an Agent matches when any tag is present."},
 				"skill_ids": map[string]interface{}{
 					"type":        "array",
 					"maxItems":    5,
 					"items":       map[string]interface{}{"type": "string"},
-					"description": "可选。按 Agent 声明的 OpenLinker Skill ID 结构化过滤，任意命中。",
+					"description": "Optional declared OpenLinker Skill IDs; an Agent matches when any ID is present.",
 				},
 				"limit": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
 			},
@@ -106,31 +106,31 @@ var mcpTools = []ToolDescriptor{
 	},
 	{
 		Name:        "get_agent",
-		Description: "按 slug 获取单个 Agent 的详情，包括能力声明（input/output JSON Schema）和示例。",
+		Description: "Get an Agent listing by slug, including its capability schemas and examples.",
 		InputSchema: map[string]interface{}{
 			"type":     "object",
 			"required": []string{"slug"},
 			"properties": map[string]interface{}{
-				"slug": map[string]interface{}{"type": "string", "description": "市场 URL 中的 slug"},
+				"slug": map[string]interface{}{"type": "string", "description": "Agent slug."},
 			},
 		},
 	},
 	{
 		Name:        "run_agent",
-		Description: "调用一个 Agent。可直接传 search_agents/get_agent 的 agent_id，也可先用 create_task 让 OpenLinker 推荐后再选择 agent_id；同步等待结果，当前阶段免费运行，不扣除余额。",
+		Description: "Invoke an Agent by ID and wait for the result.",
 		InputSchema: map[string]interface{}{
 			"type":     "object",
 			"required": []string{"agent_id", "input"},
 			"properties": map[string]interface{}{
 				"agent_id": map[string]interface{}{"type": "string", "format": "uuid"},
-				"input":    map[string]interface{}{"type": "object", "description": "透传给创作者 endpoint 的输入"},
-				"metadata": map[string]interface{}{"type": "object", "description": "可选 metadata。传 task_id 可把本次 run 绑定到任务要求证据；used_mcp_tools 会与 run_agent 自动合并后记录。"},
+				"input":    map[string]interface{}{"type": "object", "description": "Input object sent to the selected Agent."},
+				"metadata": map[string]interface{}{"type": "object", "description": "Optional run metadata. Include task_id to associate the run with a task."},
 			},
 		},
 	},
 	{
 		Name:        "get_run",
-		Description: "按 run_id 查询调用结果。仅 owner 可见。",
+		Description: "Get a run by ID when the authenticated user is allowed to view it.",
 		InputSchema: map[string]interface{}{
 			"type":     "object",
 			"required": []string{"run_id"},
@@ -141,14 +141,14 @@ var mcpTools = []ToolDescriptor{
 	},
 	{
 		Name:        "create_task",
-		Description: "把一段自然语言任务交给 OpenLinker 的发布任务流解析。返回私有任务草稿 ID、解析出的 skill 引用、可用推荐 Agent；没有可推荐 Agent 时返回 next_action。",
+		Description: "Create a private task from a natural-language request and return Skill and MCP references, Agent recommendations, and an optional next action.",
 		InputSchema: map[string]interface{}{
 			"type":     "object",
 			"required": []string{"query"},
 			"properties": map[string]interface{}{
-				"query":     map[string]interface{}{"type": "string", "minLength": 4, "maxLength": 500, "description": "自然语言任务描述，4-500 字符"},
-				"skill_ids": map[string]interface{}{"type": "array", "maxItems": 5, "items": map[string]interface{}{"type": "string"}, "description": "可选。主动关联的 Skill ID，最多 5 个；会与自然语言解析结果合并后用于推荐。"},
-				"mcp_tools": map[string]interface{}{"type": "array", "maxItems": 5, "items": map[string]interface{}{"type": "string", "enum": []string{"create_task", "search_agents", "get_agent", "run_agent", "get_run"}}, "description": "可选。该任务期望串联的 MCP 工具名，最多 5 个。"},
+				"query":     map[string]interface{}{"type": "string", "minLength": 4, "maxLength": 500, "description": "Task description, 4 to 500 characters."},
+				"skill_ids": map[string]interface{}{"type": "array", "maxItems": 5, "items": map[string]interface{}{"type": "string"}, "description": "Optional Skill IDs to include when matching Agents."},
+				"mcp_tools": map[string]interface{}{"type": "array", "maxItems": 5, "items": map[string]interface{}{"type": "string", "enum": []string{"create_task", "search_agents", "get_agent", "run_agent", "get_run"}}, "description": "Optional MCP tool names associated with the task."},
 			},
 		},
 		OutputSchema: map[string]interface{}{
@@ -156,9 +156,9 @@ var mcpTools = []ToolDescriptor{
 			"required": []string{"task_id", "visibility", "parsed_skills", "parsed_skill_refs", "mcp_tools", "mcp_tool_refs", "recommendations"},
 			"properties": map[string]interface{}{
 				"task_id":           map[string]interface{}{"type": "string", "format": "uuid"},
-				"visibility":        map[string]interface{}{"type": "string", "enum": []string{"private", "public"}, "description": "create_task 默认创建 private 推荐草稿；显式 publish 后才进入任务广场。"},
-				"public_summary":    map[string]interface{}{"type": "string", "description": "任务公开摘要；未发布时通常为空。"},
-				"parsed_skills":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "关联/解析出的 skill_id 列表，按任务相关性排序"},
+				"visibility":        map[string]interface{}{"type": "string", "enum": []string{"private", "public"}, "description": "Task visibility. create_task returns a private task unless a safe summary is published separately."},
+				"public_summary":    map[string]interface{}{"type": "string", "description": "Public task summary, when available."},
+				"parsed_skills":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Skill IDs associated with the task, ordered by relevance."},
 				"parsed_skill_refs": skillRefsSchema(),
 				"mcp_tools":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 				"mcp_tool_refs":     mcpToolRefsSchema(),
@@ -178,7 +178,7 @@ var mcpTools = []ToolDescriptor{
 									"description":          map[string]interface{}{"type": "string"},
 									"price_per_call_cents": map[string]interface{}{"type": "integer"},
 									"total_calls":          map[string]interface{}{"type": "integer"},
-									"avg_rating":           map[string]interface{}{"type": "number", "description": "可选。评分系统上线后返回；未上线时不杜撰评分。"},
+									"avg_rating":           map[string]interface{}{"type": "number"},
 									"creator_name":         map[string]interface{}{"type": "string"},
 									"tags":                 map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 								},

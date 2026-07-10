@@ -734,7 +734,7 @@ func (s *Service) CheckSlug(ctx context.Context, slug string) (*SlugCheckRespons
 
 // BecomeCreator 设置 user.is_creator=true（一键，无审核）。
 //
-// Phase 1 决策：不做创作者认证审核，creator_verified 字段保留给后续运营手动设置。
+// 成为创作者不经过审核；creator_verified 由实例运营方单独维护。
 func (s *Service) BecomeCreator(ctx context.Context, userID uuid.UUID) error {
 	rows, err := s.queries.UpdateUserBecomeCreator(ctx, userID)
 	if err != nil {

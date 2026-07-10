@@ -566,7 +566,7 @@ func TestGetBySlug_ReadinessReflectsCertificationBenchmarkAndUnlisted(t *testing
 	assert.Equal(t, int32(1), detail.Readiness.VerifiedSkillCount)
 	require.NotNil(t, detail.Readiness.LatestBenchmarkBatchID)
 	assert.Equal(t, batchID.String(), *detail.Readiness.LatestBenchmarkBatchID)
-	assert.Equal(t, "payments are not enabled in the current release", detail.Readiness.Explanation["paid_enabled"])
+	assert.Equal(t, "paid Agent invocation is not enabled", detail.Readiness.Explanation["paid_enabled"])
 }
 
 func TestGetAgentCardBySlug_HappyPath(t *testing.T) {

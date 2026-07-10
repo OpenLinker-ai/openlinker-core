@@ -108,7 +108,7 @@ func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
 
 // PostRun 调用 Agent。
 //
-// 同步等待创作者 endpoint 返回（Phase 1 不做流式 / 异步队列）。
+// Endpoint 连接模式会同步等待 Agent 返回；其他运行模式由各自的调度路径处理。
 // 失败 / 超时 / 取消 → status='failed' or 'timeout' or 'canceled'，已退款。
 func (h *Handler) PostRun(c echo.Context) error {
 	if err := requireAPIKeyScope(c, "agents:run"); err != nil {

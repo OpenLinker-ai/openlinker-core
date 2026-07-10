@@ -43,11 +43,12 @@ type Config struct {
 	APIURL                      string `envconfig:"API_URL" default:"http://localhost:8080"`
 	OAuthCallbackBaseURL        string `envconfig:"OAUTH_CALLBACK_BASE_URL"`
 	OAuthAllowedFrontendOrigins string `envconfig:"OAUTH_ALLOWED_FRONTEND_ORIGINS"`
-	// UserTokenVerifyURL 是 openlinker.ai 云端专属配置，指向私有 User Token 验证服务。
-	// 自托管请留空；为空时 ol_user_* User Token 远程鉴权不可用，JWT 与 Agent Token 不受影响。
+	// UserTokenVerifyURL 是可选外部兼容桥接，指向远程 User Token 验证服务。
+	// 当前版本为空时 ol_user_* 远程鉴权不可用；后续本地签发与验证不应依赖此变量。
+	// JWT 与 Agent Token 不受影响。
 	UserTokenVerifyURL string `envconfig:"USER_TOKEN_VERIFY_URL"`
-	// InternalToken 用于 Core 与 openlinker.ai 私有服务（LLM 代理、Token 验证）之间的内部鉴权。
-	// 自托管请留空。
+	// InternalToken 用于 Core 与可选私有服务（LLM 代理、外部 Token 验证）之间的内部鉴权。
+	// 未启用这些桥接的自托管部署应留空。
 	InternalToken string `envconfig:"OPENLINKER_INTERNAL_TOKEN"`
 
 	// A2A gRPC binding. Disabled by default so existing HTTP deployments do not

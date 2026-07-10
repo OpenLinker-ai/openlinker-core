@@ -21,7 +21,7 @@ const mcpProtocolVersion = "2025-06-18"
 
 // Handler /api/v1/mcp/* 路由。
 //
-// 路由组应挂 HybridAuthMiddleware：JWT 与访问令牌都能进，
+// 路由组应挂 HybridAuthMiddleware：JWT 与 User Token 都能进，
 // 但 handler 内强制只接受 user_token（assertUserTokenAuth），避免浏览器 cookie 误调。
 type Handler struct {
 	svc       service
@@ -363,13 +363,13 @@ func assertAPIKeyAuth(c echo.Context) error {
 		return &httpx.HTTPError{
 			Status:  http.StatusForbidden,
 			Code:    httpx.CodeForbidden,
-			Message: "MCP 端点仅接受访问令牌 User Token（ol_user_...）",
+			Message: "MCP 端点仅接受 User Token（ol_user_...）",
 			Details: map[string]interface{}{
 				"required_auth": "user_token",
 				"next_action": map[string]string{
-					"type":   "create_user_token",
-					"label":  "创建 User Token",
-					"hint":   "在设置页创建 ol_user_... 令牌后，用 Authorization: Bearer 传给 MCP 客户端。",
+					"type":   "open_user_token_settings",
+					"label":  "查看 User Token 状态",
+					"hint":   "User Token 是 Core 正式能力；本地签发与验证将在下一实现切片补齐。已有 ol_user_... Token 的部署可用 Authorization: Bearer 传给 MCP 客户端。",
 					"href":   "/settings/user-tokens",
 					"reason": "MCP 是给外部客户端和 Agent 使用的服务端入口，不能使用浏览器 JWT 会话调用。",
 				},
@@ -387,15 +387,15 @@ func requireAPIKeyScope(c echo.Context, scope string) error {
 		return &httpx.HTTPError{
 			Status:  http.StatusForbidden,
 			Code:    httpx.CodeForbidden,
-			Message: "访问令牌缺少 scope: " + scope,
+			Message: "User Token 缺少 scope: " + scope,
 			Details: map[string]interface{}{
 				"required_scopes": []string{scope},
 				"next_action": map[string]string{
-					"type":   "create_access_token",
-					"label":  "创建包含所需 scope 的访问令牌",
-					"hint":   "在创作者中心的访问令牌页面选择 Agent / MCP 任务推荐模板，或手动勾选 " + scope + "。",
+					"type":   "open_user_token_settings",
+					"label":  "查看所需的 User Token scope",
+					"hint":   "当前 Token 必须包含 " + scope + "。本地签发与 scope 管理将在下一实现切片补齐。",
 					"href":   "/settings/user-tokens",
-					"reason": "当前访问令牌权限不足，不能执行这个 MCP 工具调用。",
+					"reason": "当前 User Token 权限不足，不能执行这个 MCP 工具调用。",
 				},
 			},
 		}

@@ -643,7 +643,7 @@ func readinessForAgent(
 			"callable":     "true only with a healthy availability signal or at least one successful run that is not currently unreachable",
 			"verified":     "true only when Skill Benchmark evidence exists",
 			"certified":    "true only after OpenLinker certification review",
-			"paid_enabled": "payments are not enabled in the current release",
+			"paid_enabled": "paid Agent invocation is not enabled",
 		},
 	}
 	if slug == "" {

@@ -29,7 +29,7 @@
 // 错误：service 层返回 *httpx.HTTPError，
 //   - agent 不存在 -> 404
 //   - agent 已下架 -> 403；private 仅 creator owner 可自测调用；认证状态不阻塞公开调用
-//   - 当前免费阶段不要求外部结算
+//   - Core runtime 不依赖商业结算服务
 //
 // Core runtime does not perform commercial settlement; financial run fields stay 0.
 //
@@ -1097,10 +1097,10 @@ func TestRun_EndpointReturnsInvalidJSON(t *testing.T) {
 }
 
 // ────────────────────────────────────────────────────────────
-// Run - 免费阶段财务字段
+// Run - 无商业结算时的财务字段
 // ────────────────────────────────────────────────────────────
 
-func TestRun_FreePhaseRecordsNoSettlement(t *testing.T) {
+func TestRun_RecordsNoSettlementWithoutSettlementService(t *testing.T) {
 	cases := []struct {
 		name  string
 		price int32
@@ -1141,7 +1141,7 @@ func TestRun_FreePhaseRecordsNoSettlement(t *testing.T) {
 // Run - 并发安全
 // ────────────────────────────────────────────────────────────
 
-func TestRun_ConcurrentFreeCallsDoNotRequireSettlement(t *testing.T) {
+func TestRun_ConcurrentCallsDoNotRequireSettlement(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
 

@@ -1,8 +1,8 @@
 # OpenLinker Core
 
-OpenLinker Core 是 OpenLinker 的开源后端，用于构建 AI Agent 注册中心、Agent
-市场、运行时网关和协议桥。你可以用它自托管 Agent 发现、Agent 调用、A2A 端点、
-MCP 工具、任务工作流、runtime WebSocket / pull 连接器，以及面向 SDK 的 API。
+OpenLinker Core 是用于注册、发现和运行 Agent 的开源控制面。一次自托管部署即可统一处理
+REST、SDK、MCP 和 A2A 调用，并把请求路由到公网 Endpoint、远程 MCP Server，或从本地、
+内网主动接入的 Agent。Core 带有独立 Web UI，数据和部署策略均由部署方管理。
 
 English documentation: [README.md](./README.md)
 
@@ -12,13 +12,17 @@ OpenLinker Core 目前仍是 pre-1.0。运行时模型已经可用，但 API 细
 数据库迁移和部署默认值仍可能调整。生产或长期部署请固定 commit / tag，并在升级前阅读
 [CHANGELOG.md](./CHANGELOG.md)。
 
+带 scope 的 User Token 属于开源 Core 的正式产品契约，用于用户侧 REST、SDK、MCP 和
+A2A 调用。当前版本的 `ol_user_*` 仍依赖可选外部验证器；本地签发与验证是下一项实现工作。
+
 ## 范围
 
 包含：
 
 - 用户认证和 JWT 会话
+- 用于用户侧 API 与协议调用的 User Token scope 契约
 - Agent 注册、可见性、分类、技能和 benchmark
-- 注册 token 与绑定 Agent 的 runtime token
+- 用于自注册和运行接入的 Agent Token
 - run 创建、状态、事件流、artifact 和消息
 - `direct_http`、`mcp_server`、`runtime_ws`、`runtime_pull` 调用模式
 - A2A JSON-RPC / HTTP+JSON、Agent Card 和可选 gRPC
@@ -26,18 +30,18 @@ OpenLinker Core 目前仍是 pre-1.0。运行时模型已经可用，但 API 细
 - 任务、工作流、交付、webhook 和本地管理员 API
 - 基于 Postgres / Redis 的自托管部署
 
-不包含：
+托管产品边界：
 
 - 钱包余额、扣费、提现和 Stripe 流程
 - 托管市场排序、商业 Dashboard 组合
-- Cloud-only User Token 产品面
+- 托管账号、令牌策略和商业访问 Dashboard
 - 官方认证、推荐和风控内部策略
 
-这些能力属于托管商业服务层，不应放进本仓库。
+这些服务保留在托管产品层，不会成为 Core 的运行依赖。
 
 ## 开源架构图
 
-开源仓库以 Core 作为共同的注册中心和运行时网关。托管部署可以在 Core API 边界接入
+开源仓库以 Core 作为共同的注册表和运行控制面。托管部署可以在 Core API 边界接入
 可选 bridge，但闭源产品模块不属于本图，也不应成为本仓库依赖。
 
 ```mermaid
@@ -126,7 +130,6 @@ make bootstrap-admin
 ```
 
 该命令是幂等的：如果配置邮箱已经存在，会把该用户提升为 admin 并更新密码。
-Core 不会创建 cloud-owned wallet 或 billing 行。
 
 首次登录后请立即修改默认密码。
 
@@ -166,13 +169,14 @@ LLM_COMPLETE_URL=http://internal-llm-proxy/complete
 
 `LLM_COMPLETE_URL` 为空时，方案 A 生效。方案 B 仅适用于 openlinker.ai 私有云部署。
 
-### 仅限云端的环境变量（自托管请留空）
+### 可选的托管桥接环境变量
 
-以下变量仅在 openlinker.ai 云端使用。自托管部署不应配置它们，留空是正确且完全支持的状态。
+以下变量用于把 Core 接到私有托管服务，不是本地 User Token 的实现。除非自托管部署明确运行了
+兼容的外部服务，否则应保持为空。
 
 | 变量 | 用途 | 自托管 |
 |------|------|------|
-| `USER_TOKEN_VERIFY_URL` | 将 `ol_user_*` token 验证转发给私有云服务 | 留空 — `ol_user_*` 远程鉴权不可用，JWT 与 Agent Token 正常 |
+| `USER_TOKEN_VERIFY_URL` | 当前版本把 `ol_user_*` 验证转发给外部服务 | 未使用桥接时留空；本地 User Token 签发与验证将单独加入 |
 | `OPENLINKER_INTERNAL_TOKEN` | Core 与私有云服务间的共享密钥 | 留空 |
 
 ## 常用命令
@@ -203,8 +207,8 @@ make runtime-loadtest  # 执行 runtime_ws/runtime_pull 压测检查
 
 ## 安全
 
-- 不要记录或暴露明文 runtime token。
-- 不要把 runtime token 传给后端子进程。
+- 不要记录或暴露明文 Agent Token。
+- 不要把 Agent Token 传给后端子进程。
 - 生产环境保持 `ALLOW_LOCAL_HTTP_ENDPOINTS=false`。
 - 公开 `direct_http` 和 `mcp_server` endpoint 必须使用 HTTPS。
 - 如果 token 被打印、提交或发给了错误边界，请立即轮换。

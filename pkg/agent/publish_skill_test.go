@@ -75,6 +75,26 @@ func TestServePublishAgentSkillIncludesCanonicalRuntimePullOnboarding(t *testing
 	assertContains(t, body, "OPENLINKER_API_BASE")
 }
 
+func TestPublicAgentSkillDocsUseCurrentCredentialNamesWithoutRoadmapCopy(t *testing.T) {
+	body := PublishAgentSkillMarkdown + "\n" + ConsumeAgentSkillMarkdown
+
+	assertContains(t, body, "OPENLINKER_USER_TOKEN")
+	assertContains(t, body, "OPENLINKER_AGENT_TOKEN")
+	assertContains(t, body, "ol_user_***")
+	assertContains(t, body, "ol_agent_***")
+
+	for _, unwanted := range []string{
+		"Phase 1",
+		"later actions",
+		"display-only",
+		"price fields",
+		"price_per_call_cents",
+		"in this release",
+	} {
+		assertNotContains(t, body, unwanted)
+	}
+}
+
 func assertContains(t *testing.T, body string, want string) {
 	t.Helper()
 	if !strings.Contains(body, want) {

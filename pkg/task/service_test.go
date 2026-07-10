@@ -292,10 +292,12 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"data"}, resp.Recommendations[0].Agent.Tags)
 	require.Len(t, resp.Recommendations[0].MatchedSkills, 2)
 	assert.Equal(t, "data/sql-query", resp.Recommendations[0].MatchedSkills[0].ID)
+	assert.Equal(t, "匹配 SQL 查询 + 数据分析", resp.Recommendations[0].Why)
 	assert.Equal(t, secondAgent.String(), resp.Recommendations[1].Agent.ID)
 	require.Len(t, resp.Recommendations[1].MatchedSkills, 1)
 	assert.Equal(t, "data/sql-query", resp.Recommendations[1].MatchedSkills[0].ID)
-	assert.Contains(t, resp.Recommendations[0].Why, "SQL 查询")
+	assert.Equal(t, "匹配 SQL 查询", resp.Recommendations[1].Why)
+	assert.NotContains(t, resp.Recommendations[1].Why, "数据分析")
 
 	var stored []uuid.UUID
 	var storedMCP []string
@@ -313,6 +315,8 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	require.Len(t, detail.Recommendations, 2)
 	assert.Equal(t, firstAgent.String(), detail.Recommendations[0].Agent.ID)
 	require.Len(t, detail.Recommendations[0].MatchedSkills, 2)
+	assert.Equal(t, "匹配 SQL 查询 + 数据分析", detail.Recommendations[0].Why)
+	assert.Equal(t, "匹配 SQL 查询", detail.Recommendations[1].Why)
 	assert.Equal(t, secondAgent.String(), detail.Recommendations[1].Agent.ID)
 	require.Len(t, detail.Recommendations[1].MatchedSkills, 1)
 
@@ -371,6 +375,7 @@ func TestRecommendPersistsPendingExplicitSkill(t *testing.T) {
 	assert.Empty(t, resp.Recommendations)
 	require.NotNil(t, resp.NextAction)
 	assert.Equal(t, "publish_task", resp.NextAction.Type)
+	assert.Equal(t, "no_public_agent", resp.NextAction.ReasonCode)
 
 	var parsed []string
 	var recommended []uuid.UUID

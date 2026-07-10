@@ -30,9 +30,9 @@ func NewHandler(svc *Service) *Handler {
 //
 //	POST /tasks/recommend       自然语言 → 推荐 Top3 Agent
 //	POST /tasks/:id/choose      用户选定推荐里某个 Agent
-//	POST /tasks/:id/publish     显式把私有推荐草稿发布到任务广场
+//	POST /tasks/:id/publish     为私有任务发布一段公开摘要
 //	POST /tasks/:id/unpublish   撤回公开任务，保留为私有历史
-//	POST /tasks/:id/claim       创作者用自己的 Agent 接入任务广场任务
+//	POST /tasks/:id/claim       Agent 所有者用自己的 Agent 接下任务广场中的任务
 //	POST /tasks/:id/run         从任务直接启动一次 Agent 运行
 //	POST /tasks/:id/complete    把成功 run 写回任务结果
 //	POST /tasks/:id/accept      任务发布者验收结果

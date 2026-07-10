@@ -613,7 +613,7 @@ func applyA2AContextMappingToAgentContext(ctx *AgentA2AContext, mapping db.A2ACo
 
 // Run 调用 Agent。
 //
-// 流程见 Service 注释。Core 不执行商业结算，因此 run 免费。
+// 流程见 Service 注释。Core 不执行商业结算；财务字段仅保留为外部兼容记录。
 //
 // source 标记调用来源：'web' / 'mcp' / 'api'，写入 runs.source 以便 /usage 分类显示。
 // 传空字符串时默认 'web'，便于旧调用方零修改。
@@ -668,7 +668,8 @@ func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunReques
 }
 
 // RunDelegated lets an authenticated Agent call another Agent through the platform.
-// Delegated runs are free until explicit user-approved billing exists.
+// Delegated runs do not create a separate cost record until an explicit,
+// user-approved settlement contract exists.
 func (s *Service) RunDelegated(ctx context.Context, userID uuid.UUID, delegation Delegation, req *RunRequest) (*RunResponse, error) {
 	invocation, resp, err := s.createRunningRun(ctx, userID, req, "api", createRunOptions{
 		delegation: &delegation,

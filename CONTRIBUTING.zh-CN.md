@@ -23,14 +23,14 @@ Core 必须保持不依赖托管云服务。
 
 可以放在这里：
 
-- 认证、会话、注册中心、run、runtime token、A2A、MCP、任务、工作流、交付、本地管理员 API
+- 认证、会话、User Token、Agent Token、注册中心、run、A2A、MCP、任务、工作流、交付、本地管理员 API
 - 支撑这些开源能力的迁移和存储
 - 描述开源 Core 行为的 SDK 契约更新
 
 不要放在这里：
 
 - 钱包余额、扣费、提现、Stripe、价格和计费
-- 托管市场排序、商业 Dashboard、Cloud-only 账户产品
+- 托管市场排序、商业 Dashboard 和托管账号产品
 - 私有风控、认证或推荐内部策略
 
 ## PR 要求
