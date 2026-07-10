@@ -657,7 +657,8 @@ func TestPublicTaskBoundariesAndCatalogFallback(t *testing.T) {
 	agentID := insertTaskAgent(t, pool, creatorID, "task-public-"+uuid.NewString()[:8], "approved")
 	insertTaskAgentSkills(t, pool, agentID, "data/sql-query")
 
-	longQuery := strings.TrimSpace(strings.Repeat("SQL task boundary ", 20))
+	privateTailMarker := "private-tail-" + uuid.NewString()
+	longQuery := strings.TrimSpace(strings.Repeat("SQL task boundary ", 20)) + " " + privateTailMarker
 	var taskID uuid.UUID
 	err := pool.QueryRow(context.Background(),
 		`INSERT INTO task_queries (user_id, query, parsed_skills, mcp_tools, recommended_agent_ids)
@@ -722,7 +723,7 @@ func TestPublicTaskBoundariesAndCatalogFallback(t *testing.T) {
 	assert.Equal(t, "missing/other,data/sql-query", multiSkillBoardPage.SkillFilter)
 	assert.Equal(t, []string{"missing/other", "data/sql-query"}, multiSkillBoardPage.SkillIDsFilter)
 
-	privateQuerySearch, err := svc.ListBoardPage(context.Background(), "SQL task boundary", "", "", "", "", 1, 10)
+	privateQuerySearch, err := svc.ListBoardPage(context.Background(), privateTailMarker, "", "", "", "", 1, 10)
 	require.NoError(t, err)
 	require.Empty(t, privateQuerySearch.Items)
 	assert.Equal(t, int32(0), privateQuerySearch.Total)
@@ -997,7 +998,7 @@ func TestRecommendRejectsUnknownAssociations(t *testing.T) {
 
 	_, err := svc.Recommend(context.Background(), userID, &task.RecommendRequest{
 		Query:    "请帮我做 SQL 查询和数据分析",
-		SkillIDs: []string{"missing/skill"},
+		SkillIDs: []string{"Missing Skill"},
 	})
 	assertTaskHTTPStatus(t, err, http.StatusUnprocessableEntity)
 

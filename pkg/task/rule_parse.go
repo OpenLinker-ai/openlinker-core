@@ -85,7 +85,12 @@ func tokenize(query string) []string {
 	)
 	flushAscii := func() {
 		if len(curAscii) > 0 {
-			add(string(curAscii))
+			// 英文冠词、代词及编号中的单字符很容易误命中 API、schema 等
+			// Skill 文案。只过滤单个 ASCII 字母或数字；中文由 curHan 处理，
+			// 其他非 ASCII 单字符仍保持原有匹配语义。
+			if len(curAscii) > 1 || curAscii[0] > unicode.MaxASCII {
+				add(string(curAscii))
+			}
 			curAscii = curAscii[:0]
 		}
 	}

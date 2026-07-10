@@ -55,8 +55,8 @@ func TestTaskActionHonorsResourceSpecificGrant(t *testing.T) {
 }
 
 func TestTokenizeAndRuleParse(t *testing.T) {
-	tokens := tokenize("SQL2 数据分析, SQL2!")
-	require.ElementsMatch(t, []string{"sql2", "数据分析", "数", "据", "分", "析"}, tokens)
+	tokens := tokenize("SQL2 R2 API a I 7 é 数据分析 中, SQL2!")
+	require.ElementsMatch(t, []string{"sql2", "r2", "api", "é", "数据分析", "数", "据", "分", "析", "中"}, tokens)
 
 	skills := []db.Skill{
 		{ID: "data/sql", Name: "SQL Query", Description: "schema analysis"},
@@ -70,6 +70,11 @@ func TestTokenizeAndRuleParse(t *testing.T) {
 	require.Empty(t, ruleParse("unknown", skills))
 	require.Empty(t, ruleParse("sql", nil))
 	require.Empty(t, ruleParse("", skills))
+
+	require.Empty(t, ruleParse("I need an Agent for a missing capability", []db.Skill{
+		{ID: "ops/web-scraping", Name: "网页抓取", Description: "抓取站点 / API / 监控 / 价格追踪"},
+		{ID: "data/sql-query", Name: "SQL 查询", Description: "自然语言转 SQL、慢查询优化、schema 解读"},
+	}))
 }
 
 func TestLLMParsingBuildsPromptFiltersAndLimits(t *testing.T) {

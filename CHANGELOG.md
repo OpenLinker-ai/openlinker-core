@@ -11,6 +11,24 @@ runtime protocol, and migration contract are declared stable.
 
 - Added automatic first-admin bootstrap on Core startup when no admin user
   exists, plus an idempotent `./api bootstrap-admin` command for manual repair.
+- Made Core the authoritative issuer, verifier, and lifecycle owner for
+  fine-grained User Tokens.
+- Added resource-scoped User Token grants across Agent, Run, Task, Workflow,
+  MCP, A2A, and Agent Token APIs.
+
+### Changed
+
+- Added migration 062 to adopt legacy User Token records in place while
+  preserving identifiers, hashes, prefixes, scopes, timestamps, usage, and
+  revocation state. Legacy bcrypt-backed tokens remain verifiable during the
+  compatibility window. Legacy `tasks:write` is narrowed to `tasks:create`; it
+  does not grant `tasks:publish`, `tasks:run`, `tasks:work`, or `tasks:review`.
+
+### Fixed
+
+- Ignored one-character ASCII letter and digit tokens in fallback Task Skill
+  parsing, preventing ordinary English prose from selecting unrelated Skills
+  while preserving Chinese single-character matching.
 
 ### Documentation
 
