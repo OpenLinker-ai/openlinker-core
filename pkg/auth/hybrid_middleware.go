@@ -11,7 +11,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
-// ApiKeyVerifier 抽象 User Token 鉴权能力，避免 auth import cloud token service 形成循环。
+// ApiKeyVerifier 抽象 User Token 鉴权能力，避免 auth 与具体 Token 存储或桥接实现耦合。
 //
 // 实现方（internal/apikey.Service）应在命中后异步刷新 last_used_at，
 // 失败时返回固定错误（不暴露内部细节）。

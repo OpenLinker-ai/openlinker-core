@@ -72,11 +72,12 @@ type Recommendation struct {
 
 // TaskNextAction 是推荐/详情页给人类和外部 Agent 的结构化下一步。
 type TaskNextAction struct {
-	Type   string `json:"type"`
-	Label  string `json:"label"`
-	Hint   string `json:"hint"`
-	Href   string `json:"href"`
-	Reason string `json:"reason"`
+	Type       string `json:"type"`
+	Label      string `json:"label"`
+	Hint       string `json:"hint"`
+	Href       string `json:"href"`
+	ReasonCode string `json:"reason_code,omitempty"`
+	Reason     string `json:"reason"`
 }
 
 // RecommendResponse 推荐响应。
@@ -99,12 +100,12 @@ type ChooseRequest struct {
 	AgentID uuid.UUID `json:"agent_id" validate:"required"`
 }
 
-// ClaimRequest 创作者用自己的 Agent 接入任务广场任务。
+// ClaimRequest 表示 Agent 所有者用自己的 Agent 接下任务广场中的任务。
 type ClaimRequest struct {
 	AgentID uuid.UUID `json:"agent_id" validate:"required"`
 }
 
-// PublishRequest 把私有推荐草稿显式发布到任务广场。
+// PublishRequest 为私有任务发布一段单独的公开摘要。
 type PublishRequest struct {
 	PublicSummary string `json:"public_summary,omitempty" validate:"omitempty,min=4,max=240"`
 }

@@ -480,7 +480,7 @@ type AgentSkill struct {
 // recommended_agent_ids 按推荐顺序保存（top 3）；chosen_agent_id 记录用户最终选择（可空）。
 // claimed_* / completion_* 让任务广场形成"接单 -> 运行 -> 结果回填"的最小闭环。
 // delivery_* / accepted_at / revision_* 记录任务交付、验收和修订状态。
-// visibility / public_summary / published_at 区分私有推荐草稿和显式公开任务。
+// visibility / public_summary / published_at 区分仅创建者可见的任务和已发布公开摘要的任务。
 type TaskQuery struct {
 	ID                  uuid.UUID   `db:"id" json:"id"`
 	UserID              uuid.UUID   `db:"user_id" json:"user_id"`

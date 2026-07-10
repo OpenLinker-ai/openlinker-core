@@ -257,8 +257,9 @@ func TestTaskDTOHelpers(t *testing.T) {
 	require.Equal(t, "needs_agent", taskStatus(&db.TaskQuery{}))
 	require.Equal(t, "open", taskStatus(&db.TaskQuery{RecommendedAgentIDs: []uuid.UUID{agentID}}))
 
-	action := nextActionForNeedsAgent(taskID, "no agent")
+	action := nextActionForNeedsAgent(taskID, "no_public_agent", "no agent")
 	require.Equal(t, "publish_task", action.Type)
+	require.Equal(t, "no_public_agent", action.ReasonCode)
 	require.Contains(t, action.Href, taskID.String())
 
 	ptr := copyStringPtr(&summary)
@@ -282,9 +283,8 @@ func TestTaskDTOHelpers(t *testing.T) {
 	require.Equal(t, []string{"data"}, agent.Tags)
 	agent.Tags[0] = "changed"
 	require.Equal(t, []string{"data"}, toAgentSummary(&db.GetAgentsByIDsRow{Agent: db.Agent{Tags: []string{"data"}}}).Tags)
-	require.Equal(t, "匹配 SQL + missing", buildWhy([]string{"data/sql", "missing"}, map[string]string{"data/sql": "SQL"}))
-	require.Equal(t, "", buildWhy(nil, nil))
-	require.Equal(t, map[string]string{"data/sql": "SQL"}, skillNameByID([]db.Skill{{ID: "data/sql", Name: "SQL"}}))
+	require.Equal(t, "匹配 SQL + missing", buildWhy([]SkillRef{{ID: "data/sql", Name: "SQL"}, {ID: "missing"}}))
+	require.Equal(t, "", buildWhy(nil))
 	require.Equal(t, []SkillRef{{ID: "missing", Name: "missing"}}, skillRefsForIDs([]string{"missing"}, nil))
 }
 

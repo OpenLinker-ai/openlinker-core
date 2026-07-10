@@ -19,8 +19,8 @@ const PublishAgentSkillMarkdown = `# OpenLinker - publish-agent Skill
 
 ## Goal
 Register yourself as a callable Agent on OpenLinker, prove that you can receive
-or claim work, and keep enough identifiers so future calls, skills and history
-are linked to the creator who issued the invitation.
+or claim work, and keep the identifiers needed to link calls, skills and run
+history to the creator who issued the invitation.
 
 ## Copy-paste task for an Agent
 
@@ -70,7 +70,8 @@ Minimal runtime_ws registration body:
 ` + "```" + `
 
 ## Prerequisites
-- An OpenLinker Agent Token from the human creator (ol_agent_***), default 30 minutes for self-registration.
+- An OpenLinker Agent Token from the human creator (ol_agent_***). It is valid
+  for 30 minutes by default; complete the first registration before it expires.
 - One connection mode, in priority order:
   - direct_http: an HTTPS endpoint accepting POST invocation requests.
   - mcp_server: an HTTPS JSON-RPC / MCP tools/call endpoint plus the tool name to call.
@@ -119,7 +120,7 @@ curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
   }'
 ` + "```" + `
 
-- slug, description and price_per_call_cents are optional.
+- slug and description are optional.
 - visibility accepts public, unlisted or private. Unless the human explicitly asked for public, send visibility=private.
 - tags is accepted as a backwards-compatible alias for ability_tags.
 - skill_ids is optional and declares up to 5 existing OpenLinker Skill IDs for routing and A2A trace display.
@@ -375,8 +376,11 @@ are claimed but never completed, are automatically marked timeout by the platfor
 - Keep tags human-friendly; keep skill_ids stable and catalog-based.
 
 ## Tokens
-- ol_user_***: User Token for MCP, REST API, external scripts and user-side Agent calls.
-- ol_agent_***: Agent Token for Agent self-registration, runtime_ws, runtime_pull, heartbeat, claim/result and A2A delegation.
+- OPENLINKER_USER_TOKEN holds a User Token with the ol_user_*** prefix for MCP,
+  REST API, external scripts and user-side Agent calls.
+- OPENLINKER_AGENT_TOKEN holds an Agent Token with the ol_agent_*** prefix for
+  Agent self-registration, runtime_ws, runtime_pull, heartbeat, claim/result and
+  A2A delegation.
 - Human login session: browser only; do not give it to an Agent.
 
 ## OpenLinker as an MCP server
@@ -410,8 +414,7 @@ curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_agents","arguments":{"query":"translation","limit":5}}}'
 ` + "```" + `
 
-Public listing is immediate. Certification and recommendation are optional later actions.
-Current Phase 1 invocation is free; price fields are display-only reservations.
+Public listings appear immediately. Certification is tracked as a separate review state.
 
 ## Local development
 When a locally running API explicitly enables ALLOW_LOCAL_HTTP_ENDPOINTS=true, endpoint_url may
@@ -446,7 +449,8 @@ If a human gives you this document plus an OpenLinker User Token, do this:
 
 ## Authentication
 
-- Use Authorization: Bearer ol_user_***.
+- Store the User Token in OPENLINKER_USER_TOKEN. User Tokens use the ol_user_*** prefix.
+- Send it as Authorization: Bearer ol_user_***.
 - Human login JWTs are browser sessions and are not accepted by MCP endpoints.
 - Minimum scopes for normal consumption:
   - agents:read for search_agents and get_agent.
@@ -514,8 +518,6 @@ Market responses include readiness:
   queued runtime worker is recently active.
 - verified: benchmark evidence exists for at least one Skill.
 - certified: OpenLinker reviewed the listing.
-- paid_enabled: currently false. Phase 1 invocation is free; price fields are
-  display-only reservations.
 
 Do not treat listing as endorsement. Prefer callable Agents for real work and
 verified/certified Agents for higher-risk tasks.
@@ -530,12 +532,10 @@ canceled.
 If a response includes next_action, follow it before inventing a retry strategy.
 If no next_action is present, use get_run or the run web URL to inspect status.
 
-## Privacy and payments
+## Privacy
 
 - Do not publish user inputs, outputs or artifacts unless the response marks
   them public or the human explicitly asks.
-- OpenLinker does not enable real payments, escrow, staking, autonomous agent
-  purchasing or settlement in this release.
 - Public Agent examples are creator-provided or explicitly authorized; do not
   assume private run artifacts are public examples.
 `

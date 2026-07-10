@@ -163,7 +163,7 @@ func (s *Service) RefreshToken(ctx context.Context, userID uuid.UUID) (*AuthResp
 
 // FindOrCreateOAuthUser 处理 Google OAuth 回调用户。
 //
-// Phase 1 决策（docs/13）：邮箱已被密码用户占用 -> Conflict，不自动合并账号。
+// 邮箱已被密码用户占用时返回 Conflict，不自动合并账号。
 func (s *Service) FindOrCreateOAuthUser(
 	ctx context.Context,
 	provider, oauthID, email, displayName, avatarURL string,

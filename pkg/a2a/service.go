@@ -270,7 +270,7 @@ func runtimeWorkbenchDiagnostics(
 		return append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:       "not_runtime_pull",
 			Severity:   "info",
-			Message:    "Agent 不是队列型 runtime 接入模式，使用 endpoint 或 MCP 健康检查维护可用性。",
+			Message:    "此 Agent 通过 Endpoint 或 MCP 接入；请用健康检查确认可用性。",
 			NextAction: "run_health_check",
 		})
 	}
@@ -278,7 +278,7 @@ func runtimeWorkbenchDiagnostics(
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:       "no_agent_token",
 			Severity:   "warning",
-			Message:    "当前没有可用的 Agent runtime token，worker 无法 heartbeat、claim 或 result。",
+			Message:    "没有可用的 Agent Token。创建凭证后再启动 Agent Node。",
 			NextAction: "create_agent_token",
 		})
 	}
@@ -286,7 +286,7 @@ func runtimeWorkbenchDiagnostics(
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:       "scope_missing",
 			Severity:   "error",
-			Message:    "当前 active runtime token 缺少 agent:pull scope，worker 无法建立 WebSocket 或领取任务。",
+			Message:    "现有 Agent Token 缺少 agent:pull 权限，无法建立连接或领取任务。",
 			NextAction: "create_agent_token",
 		})
 	}
@@ -294,7 +294,7 @@ func runtimeWorkbenchDiagnostics(
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:       "no_recent_runtime_activity",
 			Severity:   "warning",
-			Message:    "还没有看到 runtime token 活动。启动 worker 后应先 heartbeat。",
+			Message:    "还没有收到 Agent Node 的连接或心跳。请确认进程已启动。",
 			NextAction: "start_worker",
 		})
 	}
@@ -302,7 +302,7 @@ func runtimeWorkbenchDiagnostics(
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:       "pending_claimable_runs",
 			Severity:   "warning",
-			Message:    "存在待派发 run。确认 worker 已建立 WebSocket，或正在使用 claim?wait=25 长轮询。",
+			Message:    "有运行正在等待 Agent Node。请确认 WebSocket 已连接，或长轮询仍在工作。",
 			NextAction: "check_claim_loop",
 		})
 	}
@@ -315,14 +315,14 @@ func runtimeWorkbenchDiagnostics(
 			diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 				Code:       "pending_not_claimed",
 				Severity:   "error",
-				Message:    "最近有 runtime run 超时未被派发或领取。",
+				Message:    "最近有运行在等待领取时超时。请检查 Agent Node 连接。",
 				NextAction: "start_worker",
 			})
 		case "RUNTIME_PULL_RESULT_TIMEOUT":
 			diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 				Code:       "result_timeout",
 				Severity:   "error",
-				Message:    "最近有 run 已领取但未在超时时间内回传结果。",
+				Message:    "最近有运行已被领取，但没有在时限内返回结果。请检查 Agent 后端和日志。",
 				NextAction: "inspect_worker_result",
 			})
 		}
@@ -331,7 +331,7 @@ func runtimeWorkbenchDiagnostics(
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:       "runtime_ready",
 			Severity:   "success",
-			Message:    "runtime 供给当前没有明显阻断项。",
+			Message:    "Agent Node 连接和近期运行未发现异常。",
 			NextAction: "keep_worker_supervised",
 		})
 	}

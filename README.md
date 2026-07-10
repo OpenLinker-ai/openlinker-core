@@ -1,12 +1,11 @@
 # OpenLinker Core
 
-OpenLinker Core is the open-source backend for an AI agent registry, agent
-marketplace, runtime gateway, and protocol bridge. Use it to self-host Agent
-discovery, Agent execution, A2A endpoints, MCP tools, task workflows, runtime
-WebSocket / pull connectors, and SDK-facing APIs for AI agent platforms.
+OpenLinker Core is the open-source control plane for registering, finding, and
+running Agents. A self-hosted deployment gets one run model across REST, SDK,
+MCP, and A2A calls, plus routing to public endpoints, remote MCP servers, and
+Agents connected from local or private networks.
 
-Core is designed to be useful on its own. It does not require the commercial
-OpenLinker Cloud modules.
+Core runs independently with its own Web UI, database, and deployment policy.
 
 Chinese documentation: [README.zh-CN.md](./README.zh-CN.md)
 
@@ -17,13 +16,19 @@ details, SDK contracts, migrations, and operational defaults can still change.
 Pin commits or release tags for deployments, and read `CHANGELOG.md` before
 upgrading.
 
+Scoped User Tokens are part of the open-source Core product contract for
+user-initiated REST, SDK, MCP, and A2A calls. This revision still relies on the
+optional external verifier for `ol_user_*` tokens; local issuance and
+verification are the next implementation slice.
+
 ## Scope
 
 Included:
 
 - user authentication and JWT sessions
+- scoped User Token contract for user-side API and protocol calls
 - Agent registry, visibility, categories, skills, and benchmarks
-- registration tokens and Agent-bound runtime tokens
+- Agent Tokens for self-registration and runtime access
 - run creation, run state, event streams, artifacts, and messages
 - direct HTTP, MCP server, runtime WebSocket, and runtime pull invocation modes
 - A2A JSON-RPC / HTTP+JSON surfaces, Agent Card support, and optional gRPC
@@ -31,19 +36,19 @@ Included:
 - task, workflow, delivery, webhook, and local admin APIs
 - self-hosted deployment support with Postgres and Redis
 
-Excluded:
+Hosted product boundary:
 
 - wallet balances, charges, withdrawals, and Stripe flows
 - hosted marketplace ranking and commercial dashboard composition
-- cloud-only user-token products
+- managed account, token-policy, and commercial access dashboards
 - official certification, recommendation, and abuse-policy internals
 
-Those concerns belong in the hosted product services layer, outside this repository.
+These services stay in the hosted product layer and are not Core dependencies.
 
 ## Open-source Architecture
 
-The open-source repositories depend on Core as the shared registry and runtime
-gateway. Hosted deployments can attach an optional bridge at the Core API
+The open-source repositories use Core as the shared registry and run control
+plane. Hosted deployments can attach an optional bridge at the Core API
 boundary, but closed product modules are intentionally not part of this diagram.
 
 ```mermaid
@@ -133,8 +138,7 @@ make bootstrap-admin
 ```
 
 It is idempotent. If the configured email already exists, it promotes that user
-to admin and updates the password. Core does not create cloud-owned wallet or
-billing rows.
+to admin and updates the password.
 
 Change the default password immediately after first login.
 
@@ -176,15 +180,15 @@ LLM_COMPLETE_URL=http://internal-llm-proxy/complete
 Option A takes effect when `LLM_COMPLETE_URL` is empty. Option B is only useful
 for the private cloud deployment of openlinker.ai.
 
-### Cloud-only environment variables (leave empty for self-hosting)
+### Optional hosted-bridge environment variables
 
-These variables exist in the codebase for openlinker.ai cloud use only.
-Self-hosted deployments should **not** configure them; leaving them empty is
-the correct and fully supported state.
+These variables connect Core to private hosted services. They are not the local
+User Token implementation. Self-hosted deployments should leave them empty
+unless they intentionally operate a compatible external service.
 
 | Variable | Purpose | Self-host |
 |----------|---------|----------|
-| `USER_TOKEN_VERIFY_URL` | Delegates `ol_user_*` token verification to a private cloud service | Leave empty — `ol_user_*` remote verification is unavailable; JWT and Agent Token auth still work |
+| `USER_TOKEN_VERIFY_URL` | Delegates `ol_user_*` verification to an external service in the current revision | Leave empty unless using that bridge; local User Token issuance and verification are being added separately |
 | `OPENLINKER_INTERNAL_TOKEN` | Shared secret between Core and private cloud services (LLM proxy, token verifier) | Leave empty |
 
 ## Common Commands
@@ -292,8 +296,8 @@ runtime, and A2A flows.
 
 ## Security
 
-- Do not log or expose plaintext runtime tokens.
-- Do not pass runtime tokens to backend subprocesses.
+- Do not log or expose plaintext Agent Tokens.
+- Do not pass Agent Tokens to backend subprocesses.
 - Keep `ALLOW_LOCAL_HTTP_ENDPOINTS=false` in production.
 - Use HTTPS for public `direct_http` and `mcp_server` endpoints.
 - Rotate any token that was printed, committed, or shared outside the intended

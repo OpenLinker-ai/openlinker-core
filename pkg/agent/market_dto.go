@@ -26,7 +26,7 @@ type MarketListItem struct {
 
 // CreatorMini 列表 / 详情里嵌入的创作者轻量信息。
 //
-// Phase 1 只暴露 display_name，未来可加 avatar / verified 等字段。
+// 公开响应只包含创作者的 display_name。
 type CreatorMini struct {
 	DisplayName string `json:"display_name"`
 }
@@ -65,7 +65,7 @@ type Availability struct {
 // Readiness separates public listing/discovery from actual callability and trust.
 //
 // It is intentionally conservative: missing evidence is false/null, not a
-// positive badge. paid_enabled stays false until real payments are enabled.
+// positive badge. PaidEnabled reports whether paid invocation is available.
 type Readiness struct {
 	Listed                 bool              `json:"listed"`
 	Discoverable           bool              `json:"discoverable"`

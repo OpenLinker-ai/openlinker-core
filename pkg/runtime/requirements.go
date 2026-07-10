@@ -131,7 +131,7 @@ func requireTaskRunAssociation(task db.TaskQuery, userID, agentID uuid.UUID) err
 	}
 	if task.ClaimedAgentID != nil {
 		if *task.ClaimedAgentID != agentID {
-			return httpx.Conflict("run 的 Agent 与接入任务的 Agent 不一致")
+			return httpx.Conflict("run 的 Agent 与接任务时选择的 Agent 不一致")
 		}
 		return nil
 	}

@@ -2,8 +2,9 @@
 //
 // Pulls in only modules that live under openlinker-core/pkg/:
 // auth, agent, runtime, skill, task, mcp, delivery, webhook, user, and local
-// admin. Wallet, payment, hosted dashboard, and cloud user-token products live
-// outside core -- core is meant to be self-hostable without billing logic.
+// admin. Wallet, payment, hosted dashboard, and managed token-policy products
+// live outside Core. Local User Token issuance belongs to Core; it is separate
+// from billing logic.
 package main
 
 import (
@@ -104,13 +105,13 @@ func main() {
 		LLMClient:       buildLLMClient(cfg),
 		RuntimeLimiter:  runtimeLimiter,
 	}
-	log.Info().Msg("runtime billing disabled in core; runs are free")
+	log.Info().Msg("runtime billing is not part of core; run cost metadata is not settled")
 	if opts.LLMClient == nil {
 		log.Info().Msg("no llm client configured; task routing uses rule-based keyword fallback")
 	}
 	if verifier := auth.NewRemoteAPIKeyVerifier(cfg.UserTokenVerifyURL, cfg.InternalToken); verifier != nil {
 		opts.APIKeyVerifier = verifier
-		log.Info().Str("endpoint", cfg.UserTokenVerifyURL).Msg("remote user token verifier configured (openlinker.ai cloud only)")
+		log.Info().Str("endpoint", cfg.UserTokenVerifyURL).Msg("optional external user token verifier configured")
 	}
 	services := coreapi.Register(rootCtx, e, pool, cfg, opts)
 	shutdownA2AGRPC, err := coreapi.StartA2AGRPCServer(rootCtx, cfg, services, opts)
