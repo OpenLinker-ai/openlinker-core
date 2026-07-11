@@ -85,6 +85,10 @@ func TestRuntimeEventFingerprintRejectsNonIJSONAndMalformedRequests(t *testing.T
 		{name: "missing event id", mutate: func(req *RuntimeEventRequest) { req.ClientEventID = uuid.Nil }, wantErr: ErrInvalidRuntimeEvent},
 		{name: "sequence starts at one", mutate: func(req *RuntimeEventRequest) { req.ClientEventSeq = 0 }, wantErr: ErrInvalidRuntimeEvent},
 		{name: "invalid event type", mutate: func(req *RuntimeEventRequest) { req.EventType = "progress" }, wantErr: ErrInvalidRuntimeEvent},
+		{name: "completed is Core owned", mutate: func(req *RuntimeEventRequest) { req.EventType = "run.completed" }, wantErr: ErrInvalidRuntimeEvent},
+		{name: "failed is Core owned", mutate: func(req *RuntimeEventRequest) { req.EventType = "run.failed" }, wantErr: ErrInvalidRuntimeEvent},
+		{name: "canceled is Core owned", mutate: func(req *RuntimeEventRequest) { req.EventType = "run.canceled" }, wantErr: ErrInvalidRuntimeEvent},
+		{name: "stream gap is synthetic", mutate: func(req *RuntimeEventRequest) { req.EventType = "run.stream.gap" }, wantErr: ErrInvalidRuntimeEvent},
 		{name: "payload must be object", mutate: func(req *RuntimeEventRequest) { req.Payload = nil }, wantErr: ErrInvalidRuntimeEvent},
 		{name: "non finite number", mutate: func(req *RuntimeEventRequest) { req.Payload = map[string]any{"value": math.Inf(1)} }, wantErr: ErrInvalidRuntimeEvent},
 	}

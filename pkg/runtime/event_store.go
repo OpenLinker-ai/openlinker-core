@@ -163,6 +163,17 @@ const MaxRuntimeEventPayloadBytes = 4 * 1024 * 1024
 
 var runtimeEventTypePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
 
+// Runtime workers may report execution progress, but Core alone owns public
+// terminal events and the synthetic retention-gap marker. Accepting either
+// from a worker would let an untrusted executor forge lifecycle evidence (or
+// trip the terminal-event database invariant before Result finalization).
+var coreOwnedRuntimeEventTypes = map[string]struct{}{
+	"run.completed":  {},
+	"run.failed":     {},
+	"run.canceled":   {},
+	"run.stream.gap": {},
+}
+
 // RuntimeEventFingerprint computes the Core-owned payload fingerprint. The
 // stable client event ID and transport envelope are deliberately excluded so
 // callers cannot choose or spoof the digest domain.
@@ -700,6 +711,9 @@ func optionalRuntimeExecutorIdentityValid(nodeID, sessionID *uuid.UUID, workerID
 func validateRuntimeEventRequest(request RuntimeEventRequest) error {
 	if request.ClientEventID == uuid.Nil || request.ClientEventSeq < 1 ||
 		!runtimeEventTypePattern.MatchString(request.EventType) || request.Payload == nil {
+		return ErrInvalidRuntimeEvent
+	}
+	if _, coreOwned := coreOwnedRuntimeEventTypes[request.EventType]; coreOwned {
 		return ErrInvalidRuntimeEvent
 	}
 	return nil
