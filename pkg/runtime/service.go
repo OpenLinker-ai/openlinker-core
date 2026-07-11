@@ -111,6 +111,7 @@ type Service struct {
 	pullNotifier    *runtimePullNotifier
 	eventStore      *EventStore
 	resultFinalizer *ResultFinalizer
+	cancellationV2  *RuntimeCancellationCoordinator
 	effectWorker    *RunEffectWorker
 	bestEffortDBSem chan struct{}
 	tokenTouchMu    sync.Mutex
@@ -233,6 +234,7 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		httpClient:   endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
 	}
 	svc.resultFinalizer = NewResultFinalizer(pool, nil, nil)
+	svc.cancellationV2 = NewRuntimeCancellationCoordinator(pool)
 	svc.effectWorker = NewRunEffectWorker(queries, nil, nil)
 	return svc
 }
@@ -1596,8 +1598,55 @@ func (s *Service) attachRunEvidenceSummary(ctx context.Context, runID uuid.UUID,
 	resp.EvidenceSummary = summary
 }
 
-// CancelRun marks a running run as canceled. Only the run owner can cancel it.
+// CancelRun cancels a running Run owned by the requester. Runtime v2 uses the
+// durable cancellation coordinator; only pre-v2 rows use the legacy pipeline.
 func (s *Service) CancelRun(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
+	contractID, err := s.queries.GetRunRuntimeContractID(ctx, runID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("调用记录不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.CancelRun: GetRunRuntimeContractID")
+		return nil, httpx.Internal("查询调用记录失败")
+	}
+	if contractID == RuntimeContractID {
+		return s.cancelRuntimeV2(ctx, userID, runID)
+	}
+	if contractID != legacyRuntimeContractID {
+		log.Error().Str("run_id", runID.String()).Str("runtime_contract_id", contractID).
+			Msg("runtime.CancelRun: unsupported runtime contract")
+		return nil, httpx.Conflict("run 的运行时协议不受当前 Core 支持")
+	}
+	return s.cancelLegacyRun(ctx, userID, runID)
+}
+
+func (s *Service) cancelRuntimeV2(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
+	if s.cancellationV2 == nil {
+		return nil, httpx.Internal("取消服务暂不可用")
+	}
+	result, err := s.cancellationV2.CancelOwnedRun(ctx, userID, runID, "run canceled by user")
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrRuntimeCancellationNotFound):
+			return nil, httpx.NotFound("调用记录不存在")
+		case errors.Is(err, ErrRuntimeCancellationRunEnded):
+			return nil, httpx.Conflict("run 已结束，不能取消")
+		case errors.Is(err, ErrRuntimeCancellationInvalid):
+			return nil, httpx.BadRequest("取消原因不合法")
+		case IsRuntimeLeaseError(err, RuntimeLeaseErrorStaleLease):
+			return nil, httpx.Conflict("run 状态已变化，请重试")
+		default:
+			log.Error().Err(err).Str("run_id", runID.String()).Str("user_id", userID.String()).
+				Msg("runtime.CancelRun: durable runtime v2 cancellation")
+			return nil, httpx.Internal("取消调用失败")
+		}
+	}
+	resp := runToResponse(&result.Run)
+	s.attachRunRequirementEvidence(ctx, runID, resp)
+	return resp, nil
+}
+
+func (s *Service) cancelLegacyRun(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
 	const canceledMessage = "run canceled by user"
 	var canceled db.Run
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
