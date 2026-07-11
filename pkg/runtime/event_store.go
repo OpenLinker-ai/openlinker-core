@@ -105,10 +105,14 @@ type RuntimeAttemptIdentity struct {
 // RuntimeEventPrincipal is the already-authenticated execution principal.
 // EventStore never accepts a token or transport assertion in place of it.
 type RuntimeEventPrincipal struct {
-	AgentID          uuid.UUID
-	NodeID           *uuid.UUID
-	WorkerID         *string
-	RuntimeSessionID *uuid.UUID
+	AgentID                         uuid.UUID
+	CredentialID                    *uuid.UUID
+	NodeID                          *uuid.UUID
+	WorkerID                        *string
+	RuntimeSessionID                *uuid.UUID
+	CoreInstanceID                  *uuid.UUID
+	DeviceCertificateSerial         *string
+	DevicePublicKeyThumbprintSHA256 *string
 }
 
 // RuntimeEventRequest is the transport-neutral RunEventPayload body after its
@@ -225,9 +229,16 @@ func (s *EventStore) Append(
 	var ack RuntimeEventAck
 	err = pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
 		queries := db.New(tx)
+		lockedPrincipal, err := lockRuntimePrincipal(ctx, queries, principal)
+		if err != nil {
+			return err
+		}
 		run, err := lockRuntimeEventRun(ctx, queries, identity.RunID)
 		if err != nil {
 			return err
+		}
+		if !lockedPrincipal.validAt(run.databaseNow) {
+			return newRuntimeEventError(RuntimeEventErrorLeaseIdentityMismatch, nil)
 		}
 		// Ownership is checked before client_event_id lookup. Otherwise an
 		// authenticated Agent from another Run could use conflict/replay
@@ -247,8 +258,8 @@ func (s *EventStore) Append(
 			if !storedRuntimeEventMatches(stored, identity, request.ClientEventSeq, fingerprint) {
 				return newRuntimeEventError(RuntimeEventErrorIDConflict, nil)
 			}
-			if !runtimePrincipalMatchesAttempt(principal, stored.attempt) {
-				return newRuntimeEventError(RuntimeEventErrorLeaseIdentityMismatch, nil)
+			if _, err := authorizeRuntimeAttemptPrincipal(ctx, queries, principal, identity, stored.attempt, true); err != nil {
+				return err
 			}
 			ack = RuntimeEventAck{
 				ClientEventID:  request.ClientEventID,
@@ -283,10 +294,22 @@ func (s *EventStore) Append(
 			run.leaseID == nil || *run.leaseID != identity.LeaseID || run.fencingToken != identity.FencingToken {
 			return newRuntimeEventError(RuntimeEventErrorStaleLease, nil)
 		}
-		if !runtimeIdentityMatchesAttempt(identity, attempt) || !runtimePrincipalMatchesAttempt(principal, attempt) {
+		if !runtimeIdentityMatchesAttempt(identity, attempt) {
 			return newRuntimeEventError(RuntimeEventErrorLeaseIdentityMismatch, nil)
 		}
-		if !runtimeEventDeadlinesValid(run.databaseNow, run.runDeadlineAt, attempt.leaseExpiresAt, attempt.attemptDeadlineAt) {
+		authorization, err := authorizeRuntimeAttemptPrincipal(ctx, queries, principal, identity, attempt, false)
+		if err != nil {
+			return err
+		}
+		deadlinesValid := runtimeEventDeadlinesValid(run.databaseNow, run.runDeadlineAt, attempt.leaseExpiresAt, attempt.attemptDeadlineAt)
+		if authorization.resumed {
+			// A consumed spool-upload grant replaces the source Session lease
+			// only for persisted Event/Result upload. The Run fence and both
+			// execution deadlines remain authoritative.
+			deadlinesValid = run.databaseNow.Before(attempt.attemptDeadlineAt) &&
+				run.databaseNow.Before(run.runDeadlineAt)
+		}
+		if !deadlinesValid {
 			return newRuntimeEventError(RuntimeEventErrorLeaseExpired, nil)
 		}
 
@@ -457,6 +480,7 @@ type runtimeEventAttempt struct {
 	workerID          *string
 	runtimeSessionID  *uuid.UUID
 	nodeID            *uuid.UUID
+	credentialID      *uuid.UUID
 	acceptedAt        *time.Time
 	leaseExpiresAt    time.Time
 	attemptDeadlineAt time.Time
@@ -578,6 +602,7 @@ func runtimeEventAttemptFromDB(attempt db.RunAttempt) runtimeEventAttempt {
 		workerID:          attempt.RuntimeWorkerID,
 		runtimeSessionID:  attempt.RuntimeSessionID,
 		nodeID:            attempt.NodeID,
+		credentialID:      attempt.RuntimeTokenID,
 		acceptedAt:        attempt.AcceptedAt,
 		leaseExpiresAt:    attempt.LeaseExpiresAt,
 		attemptDeadlineAt: attempt.AttemptDeadlineAt,
@@ -659,6 +684,7 @@ func runtimePrincipalMatchesAttempt(principal RuntimeEventPrincipal, attempt run
 		return false
 	}
 	return optionalUUIDEqual(principal.NodeID, attempt.nodeID) &&
+		optionalUUIDEqual(principal.CredentialID, attempt.credentialID) &&
 		optionalUUIDEqual(principal.RuntimeSessionID, attempt.runtimeSessionID) &&
 		optionalStringEqual(principal.WorkerID, attempt.workerID) &&
 		runtimeExecutorIdentityShapeValid(attempt.executorType, principal.NodeID, principal.RuntimeSessionID, principal.WorkerID)
@@ -694,11 +720,27 @@ func validateRuntimeAttemptIdentity(identity RuntimeAttemptIdentity) error {
 }
 
 func validateRuntimeEventPrincipal(principal RuntimeEventPrincipal) error {
-	if principal.AgentID == uuid.Nil ||
-		!optionalRuntimeExecutorIdentityValid(principal.NodeID, principal.RuntimeSessionID, principal.WorkerID) {
+	if principal.AgentID == uuid.Nil || !runtimeEventPrincipalShapeValid(principal) {
 		return ErrInvalidRuntimeEvent
 	}
 	return nil
+}
+
+func runtimeEventPrincipalShapeValid(principal RuntimeEventPrincipal) bool {
+	none := principal.CredentialID == nil && principal.NodeID == nil && principal.WorkerID == nil &&
+		principal.RuntimeSessionID == nil && principal.CoreInstanceID == nil &&
+		principal.DeviceCertificateSerial == nil && principal.DevicePublicKeyThumbprintSHA256 == nil
+	if none {
+		return true
+	}
+	return principal.CredentialID != nil && *principal.CredentialID != uuid.Nil &&
+		principal.NodeID != nil && *principal.NodeID != uuid.Nil &&
+		principal.RuntimeSessionID != nil && *principal.RuntimeSessionID != uuid.Nil &&
+		principal.CoreInstanceID != nil && *principal.CoreInstanceID != uuid.Nil &&
+		principal.WorkerID != nil && *principal.WorkerID != "" && utf8.ValidString(*principal.WorkerID) &&
+		utf8.RuneCountInString(*principal.WorkerID) <= 200 &&
+		principal.DeviceCertificateSerial != nil && validCertificateSerial(*principal.DeviceCertificateSerial) &&
+		principal.DevicePublicKeyThumbprintSHA256 != nil && validSHA256Hex(*principal.DevicePublicKeyThumbprintSHA256)
 }
 
 func optionalRuntimeExecutorIdentityValid(nodeID, sessionID *uuid.UUID, workerID *string) bool {

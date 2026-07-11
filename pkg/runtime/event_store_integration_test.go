@@ -288,6 +288,8 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 	credentialID := uuid.New()
 	coreInstanceID := uuid.New()
 	workerID := "event-worker-" + uuid.NewString()[:8]
+	certificateSerial := strings.ReplaceAll(nodeID.String(), "-", "")
+	publicKeyThumbprint := fmt.Sprintf("%x", sha256.Sum256([]byte("event-store-node/"+nodeID.String())))
 	features := []string{
 		"lease_fence",
 		"assignment_confirm",
@@ -340,8 +342,8 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 			) VALUES ($1, 'Event Store Node', $2, $3, 'test-v2', 2,
 				'openlinker.runtime.v2', $4, $5, 1, 1, 'active', $6)`,
 			nodeID,
-			"serial-"+nodeID.String(),
-			"thumbprint-"+nodeID.String(),
+			certificateSerial,
+			publicKeyThumbprint,
 			contractDigest,
 			features,
 			databaseNow,
@@ -362,7 +364,7 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 			agentID,
 			credentialID,
 			workerID,
-			"serial-"+nodeID.String(),
+			certificateSerial,
 			contractDigest,
 			features,
 			coreInstanceID,
@@ -408,10 +410,12 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 				lease_id, fencing_token, runtime_token_id, runtime_worker_id,
 				runtime_session_id, node_id, offered_by_core_instance_id,
 				attached_core_instance_id, offered_at, offer_expires_at,
-				accepted_at, lease_expires_at, attempt_deadline_at
+				accepted_at, lease_expires_at, attempt_deadline_at,
+				slot_acquired_at, active_runtime_session_id
 			) VALUES (
 				$1, $2, $3, 1, 1, 'agent_node',
-				$4, 1, $5, $6, $7, $8, $9, $9, $10, $11, $10, $12, $13
+				$4, 1, $5, $6, $7, $8, $9, $9, $10, $11, $10, $12, $13,
+				$10, $7
 			)`,
 			attemptID,
 			runID,
@@ -480,10 +484,14 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 	return eventStoreFixture{
 		identity: identity,
 		principal: runtime.RuntimeEventPrincipal{
-			AgentID:          agentID,
-			NodeID:           &nodeID,
-			WorkerID:         &workerID,
-			RuntimeSessionID: &sessionID,
+			AgentID:                         agentID,
+			CredentialID:                    &credentialID,
+			NodeID:                          &nodeID,
+			WorkerID:                        &workerID,
+			RuntimeSessionID:                &sessionID,
+			CoreInstanceID:                  &coreInstanceID,
+			DeviceCertificateSerial:         &certificateSerial,
+			DevicePublicKeyThumbprintSHA256: &publicKeyThumbprint,
 		},
 		leaseExpiresAt: leaseExpiresAt,
 		credentialID:   credentialID,
@@ -516,7 +524,9 @@ func rotateEventStoreAttempt(t *testing.T, pool *pgxpool.Pool, fixture eventStor
 				result_id = $6,
 				result_fingerprint = $7,
 				result_classification = 'retryable_failure',
-				final_client_event_seq = last_client_event_seq
+				final_client_event_seq = last_client_event_seq,
+				slot_released_at = $5,
+				active_runtime_session_id = NULL
 			WHERE run_id = $1
 			  AND id = $2
 			  AND lease_id = $3
@@ -566,10 +576,12 @@ func rotateEventStoreAttempt(t *testing.T, pool *pgxpool.Pool, fixture eventStor
 				lease_id, fencing_token, runtime_token_id, runtime_worker_id,
 				runtime_session_id, node_id, offered_by_core_instance_id,
 				attached_core_instance_id, offered_at, offer_expires_at,
-				accepted_at, lease_expires_at, attempt_deadline_at
+				accepted_at, lease_expires_at, attempt_deadline_at,
+				slot_acquired_at, active_runtime_session_id
 			) VALUES (
 				$1, $2, $3, 2, 2, 'agent_node',
-				$4, 2, $5, $6, $7, $8, $9, $9, $10, $11, $10, $12, $13
+				$4, 2, $5, $6, $7, $8, $9, $9, $10, $11, $10, $12, $13,
+				$10, $7
 			)`,
 			newAttemptID,
 			fixture.identity.RunID,

@@ -70,6 +70,7 @@ func TestResultFinalizerConcurrentSuccessIsExactlyOnce(t *testing.T) {
 	require.Equal(t, workers-1, replayed)
 
 	assertFinalizerTerminalCounts(t, pool, fixture.identity.RunID, 1, 3, 0)
+	assertFinalizerCapacityReleased(t, pool, fixture)
 	var terminalPayload []byte
 	require.NoError(t, pool.QueryRow(context.Background(), `
 		SELECT payload FROM run_events
@@ -219,6 +220,7 @@ func TestResultFinalizerRetryScheduleAndRollbackAreAtomic(t *testing.T) {
 		require.True(t, second.Replayed)
 		require.Equal(t, first.NextAttemptAt, second.NextAttemptAt)
 		assertFinalizerTerminalCounts(t, pool, fixture.identity.RunID, 0, 0, 0)
+		assertFinalizerCapacityReleased(t, pool, fixture)
 	})
 
 	t.Run("planner failure rolls back Attempt and Run writes", func(t *testing.T) {
@@ -533,6 +535,25 @@ func assertFinalizerTerminalCounts(
 	}
 	require.Equal(t, effects, gotEffects)
 	require.Equal(t, deadLetters, gotDeadLetters)
+}
+
+func assertFinalizerCapacityReleased(t *testing.T, pool *pgxpool.Pool, fixture eventStoreFixture) {
+	t.Helper()
+	var slotReleasedAt *time.Time
+	var activeSessionID *uuid.UUID
+	var sessionInflight, nodeInflight int32
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT a.slot_released_at, a.active_runtime_session_id, s.inflight, n.inflight
+		FROM run_attempts a
+		JOIN runtime_sessions s ON s.runtime_session_id = a.runtime_session_id
+		JOIN runtime_nodes n ON n.node_id = a.node_id
+		WHERE a.run_id = $1 AND a.id = $2`, fixture.identity.RunID, fixture.identity.AttemptID).Scan(
+		&slotReleasedAt, &activeSessionID, &sessionInflight, &nodeInflight,
+	))
+	require.NotNil(t, slotReleasedAt)
+	require.Nil(t, activeSessionID)
+	require.Zero(t, sessionInflight)
+	require.Zero(t, nodeInflight)
 }
 
 func assertFinalizerAttemptStillExecuting(t *testing.T, pool *pgxpool.Pool, runID, attemptID uuid.UUID) {

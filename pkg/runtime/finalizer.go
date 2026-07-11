@@ -364,6 +364,10 @@ func (f *ResultFinalizer) finalizeTx(
 	request RuntimeResultRequest,
 	fingerprint []byte,
 ) (RuntimeResultAck, error) {
+	lockedPrincipal, err := lockRuntimePrincipal(ctx, queries, principal)
+	if err != nil {
+		return RuntimeResultAck{}, mapRuntimePrincipalErrorToResult(err)
+	}
 	locked, err := queries.LockRunForResultFinalization(ctx, request.AttemptIdentity.RunID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RuntimeResultAck{}, newRuntimeResultError(RuntimeResultErrorStaleLease, err)
@@ -378,6 +382,9 @@ func (f *ResultFinalizer) finalizeTx(
 	if principal.AgentID != run.agentID || request.AttemptIdentity.AgentID != run.agentID {
 		return RuntimeResultAck{}, newRuntimeResultError(RuntimeResultErrorLeaseIdentityMismatch, nil)
 	}
+	if !lockedPrincipal.validAt(run.databaseNow) {
+		return RuntimeResultAck{}, newRuntimeResultError(RuntimeResultErrorLeaseIdentityMismatch, nil)
+	}
 
 	attempt, err := queries.LockRunAttemptForResult(ctx, db.LockRunAttemptForResultParams{
 		RunID: run.id,
@@ -389,7 +396,7 @@ func (f *ResultFinalizer) finalizeTx(
 	if err != nil {
 		return RuntimeResultAck{}, err
 	}
-	if !runtimeResultAttemptMatches(principal, request.AttemptIdentity, attempt) {
+	if !runtimeResultIdentityMatchesAttempt(request.AttemptIdentity, attempt) {
 		return RuntimeResultAck{}, newRuntimeResultError(RuntimeResultErrorLeaseIdentityMismatch, nil)
 	}
 
@@ -399,6 +406,11 @@ func (f *ResultFinalizer) finalizeTx(
 		if *attempt.ResultID != request.ResultID ||
 			!runtimeResultFingerprintsEqual(attempt.ResultFingerprint, fingerprint) {
 			return RuntimeResultAck{}, newRuntimeResultError(RuntimeResultErrorResultIDConflict, nil)
+		}
+		if _, err := authorizeRuntimeAttemptPrincipal(
+			ctx, queries, principal, request.AttemptIdentity, runtimeEventAttemptFromDB(attempt), true,
+		); err != nil {
+			return RuntimeResultAck{}, mapRuntimePrincipalErrorToResult(err)
 		}
 		return runtimeResultAckFromStored(run, attempt, true)
 	}
@@ -424,6 +436,12 @@ func (f *ResultFinalizer) finalizeTx(
 	if !runtimeResultActiveAttemptMatches(run, request.AttemptIdentity, attempt) {
 		return RuntimeResultAck{}, newRuntimeResultError(RuntimeResultErrorStaleLease, nil)
 	}
+	authorization, err := authorizeRuntimeAttemptPrincipal(
+		ctx, queries, principal, request.AttemptIdentity, runtimeEventAttemptFromDB(attempt), false,
+	)
+	if err != nil {
+		return RuntimeResultAck{}, mapRuntimePrincipalErrorToResult(err)
+	}
 
 	deadlineExceeded := !run.databaseNow.Before(run.runDeadlineAt)
 	if request.FinalClientEventSeq < attempt.LastClientEventSeq {
@@ -433,7 +451,7 @@ func (f *ResultFinalizer) finalizeTx(
 		)
 	}
 	if !deadlineExceeded {
-		if !run.databaseNow.Before(attempt.LeaseExpiresAt) ||
+		if (!authorization.resumed && !run.databaseNow.Before(attempt.LeaseExpiresAt)) ||
 			!run.databaseNow.Before(attempt.AttemptDeadlineAt) {
 			return RuntimeResultAck{}, newRuntimeResultError(RuntimeResultErrorLeaseExpired, nil)
 		}
@@ -491,6 +509,9 @@ func (f *ResultFinalizer) finalizeTx(
 		return RuntimeResultAck{}, newRuntimeResultError(RuntimeResultErrorStaleLease, err)
 	}
 	if err != nil {
+		return RuntimeResultAck{}, err
+	}
+	if err := releaseRuntimeAttemptCapacity(ctx, queries, attempt); err != nil {
 		return RuntimeResultAck{}, err
 	}
 
@@ -698,11 +719,7 @@ func validateRuntimeResultClassification(
 	return fmt.Errorf("result classifier returned invalid classification %q for status %q", classification, request.Status)
 }
 
-func runtimeResultAttemptMatches(
-	principal RuntimeResultPrincipal,
-	identity RuntimeAttemptIdentity,
-	attempt db.RunAttempt,
-) bool {
+func runtimeResultIdentityMatchesAttempt(identity RuntimeAttemptIdentity, attempt db.RunAttempt) bool {
 	storedIdentity := RuntimeAttemptIdentity{
 		RunID:            attempt.RunID,
 		AttemptID:        attempt.ID,
@@ -715,10 +732,63 @@ func runtimeResultAttemptMatches(
 	}
 	wantDigest := runtimeAttemptIdentityDigest(identity)
 	storedDigest := runtimeAttemptIdentityDigest(storedIdentity)
-	if subtle.ConstantTimeCompare(wantDigest[:], storedDigest[:]) != 1 {
-		return false
+	return subtle.ConstantTimeCompare(wantDigest[:], storedDigest[:]) == 1
+}
+
+func mapRuntimePrincipalErrorToResult(err error) error {
+	if err == nil {
+		return nil
 	}
-	return runtimePrincipalMatchesAttempt(principal, runtimeEventAttemptFromDB(attempt))
+	if errors.Is(err, ErrInvalidRuntimeEvent) {
+		return newRuntimeResultError(RuntimeResultErrorValidationFailed, err)
+	}
+	var eventErr *RuntimeEventError
+	if errors.As(err, &eventErr) {
+		switch eventErr.Code {
+		case RuntimeEventErrorLeaseIdentityMismatch:
+			return newRuntimeResultError(RuntimeResultErrorLeaseIdentityMismatch, err)
+		case RuntimeEventErrorLeaseExpired:
+			return newRuntimeResultError(RuntimeResultErrorLeaseExpired, err)
+		case RuntimeEventErrorStaleLease:
+			return newRuntimeResultError(RuntimeResultErrorStaleLease, err)
+		}
+	}
+	return err
+}
+
+func releaseRuntimeAttemptCapacity(ctx context.Context, queries *db.Queries, attempt db.RunAttempt) error {
+	if attempt.ExecutorType != "agent_node" {
+		return nil
+	}
+	if attempt.SlotAcquiredAt == nil || attempt.ActiveRuntimeSessionID == nil || attempt.NodeID == nil {
+		return errors.New("agent_node Attempt is missing capacity identity")
+	}
+
+	// The Attempt row owns the capacity slot. Marking it released is the only
+	// operation that authorizes counter decrements, so retries and competing
+	// terminal paths cannot release the same slot twice.
+	capacity, err := queries.MarkRunAttemptCapacityReleased(ctx, db.MarkRunAttemptCapacityReleasedParams{
+		RunID:        attempt.RunID,
+		AttemptID:    attempt.ID,
+		LeaseID:      attempt.LeaseID,
+		FencingToken: attempt.FencingToken,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("agent_node Attempt capacity was already released or changed")
+	}
+	if err != nil {
+		return err
+	}
+	if capacity.RuntimeSessionID != *attempt.ActiveRuntimeSessionID || capacity.NodeID != *attempt.NodeID {
+		return errors.New("agent_node Attempt capacity owner changed")
+	}
+	if _, err := queries.ReleaseRuntimeSessionSlot(ctx, capacity.RuntimeSessionID); err != nil {
+		return err
+	}
+	if _, err := queries.ReleaseRuntimeNodeSlot(ctx, capacity.NodeID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func runtimeResultActiveAttemptMatches(run runtimeResultRun, identity RuntimeAttemptIdentity, attempt db.RunAttempt) bool {

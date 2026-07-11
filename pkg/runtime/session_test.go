@@ -130,8 +130,8 @@ func TestRuntimeSessionServiceCreateLocksPrincipalAndPersistsAuthenticatedIdenti
 		t.Fatalf("CreateOrAttachSession() error = %v", err)
 	}
 	wantOrder := []string{
-		"lock_session_identity", "get_session_for_update", "lock_sessions", "lock_nodes",
-		"lock_tokens", "lock_attachments", "get_node", "list_active", "create_session", "create_attachment",
+		"lock_session_identity", "lock_sessions", "lock_nodes", "lock_tokens",
+		"lock_attachments", "get_session_for_update", "get_node", "list_active", "create_session", "create_attachment",
 	}
 	if !reflect.DeepEqual(tx.operations, wantOrder) {
 		t.Fatalf("operation order = %#v, want %#v", tx.operations, wantOrder)
@@ -238,24 +238,42 @@ func TestRuntimeSessionServiceResolveHeartbeatAndCloseFailClosed(t *testing.T) {
 		fixture := newSessionFixture()
 		tx := newSessionTransactionFake(fixture)
 		repository := &sessionRepositoryFake{tx: tx, resolved: RuntimeSessionPrincipal{
-			RuntimeSessionID: fixture.request.RuntimeSessionID,
-			NodeID:           fixture.principal.Device.NodeID,
-			AgentID:          fixture.principal.AgentID,
-			CredentialID:     fixture.principal.CredentialID,
-			WorkerID:         fixture.request.WorkerID,
-			SessionEpoch:     fixture.request.SessionEpoch,
-			CoreInstanceID:   fixture.coreID,
-			Status:           "active",
-			DatabaseTime:     fixture.databaseNow,
+			RuntimeSessionID:                fixture.request.RuntimeSessionID,
+			NodeID:                          fixture.principal.Device.NodeID,
+			AgentID:                         fixture.principal.AgentID,
+			CredentialID:                    fixture.principal.CredentialID,
+			WorkerID:                        fixture.request.WorkerID,
+			SessionEpoch:                    fixture.request.SessionEpoch,
+			CoreInstanceID:                  fixture.coreID,
+			DeviceCertificateSerial:         fixture.principal.Device.CertificateSerial,
+			DevicePublicKeyThumbprintSHA256: fixture.principal.Device.PublicKeyThumbprintSHA256,
+			Status:                          "active",
+			DatabaseTime:                    fixture.databaseNow,
 		}}
 		service := newRuntimeSessionService(repository, fixture.coreID)
 		resolved, err := service.ResolveSessionPrincipal(context.Background(), fixture.principal, fixture.request.RuntimeSessionID)
-		if err != nil || resolved.EventPrincipal().AgentID != fixture.principal.AgentID {
+		eventPrincipal := resolved.EventPrincipal()
+		if err != nil || eventPrincipal.AgentID != fixture.principal.AgentID ||
+			eventPrincipal.CredentialID == nil || *eventPrincipal.CredentialID != fixture.principal.CredentialID ||
+			eventPrincipal.DeviceCertificateSerial == nil || *eventPrincipal.DeviceCertificateSerial != fixture.principal.Device.CertificateSerial {
 			t.Fatalf("ResolveSessionPrincipal() = %#v, %v", resolved, err)
 		}
 		if repository.resolveParams.CredentialID != fixture.principal.CredentialID ||
 			repository.resolveParams.CoreInstanceID != fixture.coreID {
 			t.Fatalf("resolve params = %#v", repository.resolveParams)
+		}
+
+		repository.workerResolved = resolved
+		workerResolved, err := service.ResolveWorkerSessionPrincipal(
+			context.Background(), fixture.principal, fixture.request.WorkerID,
+		)
+		if err != nil || workerResolved.RuntimeSessionID != fixture.request.RuntimeSessionID {
+			t.Fatalf("ResolveWorkerSessionPrincipal() = %#v, %v", workerResolved, err)
+		}
+		if repository.workerResolveParams.WorkerID != fixture.request.WorkerID ||
+			repository.workerResolveParams.CoreInstanceID != fixture.coreID ||
+			repository.workerResolveParams.CertificateSerial != fixture.principal.Device.CertificateSerial {
+			t.Fatalf("worker resolve params = %#v", repository.workerResolveParams)
 		}
 
 		repository.resolveErr = pgx.ErrNoRows
@@ -267,14 +285,16 @@ func TestRuntimeSessionServiceResolveHeartbeatAndCloseFailClosed(t *testing.T) {
 	t.Run("heartbeat uses stored DB timestamp and principal query", func(t *testing.T) {
 		fixture := newSessionFixture()
 		tx := newSessionTransactionFake(fixture)
-		repository := &sessionRepositoryFake{tx: tx, getSession: tx.session, heartbeat: tx.session}
-		repository.heartbeat.HeartbeatAt = fixture.databaseNow.Add(time.Second)
+		repository := &sessionRepositoryFake{tx: tx}
 		service := newRuntimeSessionService(repository, fixture.coreID)
 		state, err := service.HeartbeatSession(context.Background(), fixture.principal, fixture.request)
-		if err != nil || state.DatabaseTime != repository.heartbeat.HeartbeatAt {
+		if err != nil || state.DatabaseTime != fixture.databaseNow.Add(2*time.Second) {
 			t.Fatalf("HeartbeatSession() = %#v, %v", state, err)
 		}
-		repository.heartbeatErr = pgx.ErrNoRows
+		if tx.heartbeatNodeParams.DevicePublicKeyThumbprint != fixture.principal.Device.PublicKeyThumbprintSHA256 {
+			t.Fatalf("node heartbeat did not preserve authenticated device: %#v", tx.heartbeatNodeParams)
+		}
+		tx.heartbeatErr = pgx.ErrNoRows
 		if _, err = service.HeartbeatSession(context.Background(), fixture.principal, fixture.request); !IsRuntimeSessionError(err, RuntimeSessionErrorPrincipalInactive) {
 			t.Fatalf("inactive heartbeat error = %v", err)
 		}
@@ -369,33 +389,27 @@ func newSessionFixture() sessionFixture {
 }
 
 type sessionRepositoryFake struct {
-	tx              *sessionTransactionFake
-	getSession      db.RuntimeSession
-	getErr          error
-	heartbeat       db.RuntimeSession
-	heartbeatErr    error
-	heartbeatParams db.HeartbeatRuntimeSessionParams
-	resolved        RuntimeSessionPrincipal
-	resolveErr      error
-	resolveParams   runtimeSessionResolveParams
+	tx                  *sessionTransactionFake
+	resolved            RuntimeSessionPrincipal
+	resolveErr          error
+	resolveParams       runtimeSessionResolveParams
+	workerResolved      RuntimeSessionPrincipal
+	workerResolveErr    error
+	workerResolveParams runtimeWorkerSessionResolveParams
 }
 
 func (r *sessionRepositoryFake) WithTransaction(ctx context.Context, fn func(runtimeSessionTransaction) error) error {
 	return fn(r.tx)
 }
 
-func (r *sessionRepositoryFake) GetRuntimeSession(context.Context, uuid.UUID) (db.RuntimeSession, error) {
-	return r.getSession, r.getErr
-}
-
-func (r *sessionRepositoryFake) HeartbeatRuntimeSession(_ context.Context, params db.HeartbeatRuntimeSessionParams) (db.RuntimeSession, error) {
-	r.heartbeatParams = params
-	return r.heartbeat, r.heartbeatErr
-}
-
 func (r *sessionRepositoryFake) ResolveRuntimeSessionPrincipal(_ context.Context, params runtimeSessionResolveParams) (RuntimeSessionPrincipal, error) {
 	r.resolveParams = params
 	return r.resolved, r.resolveErr
+}
+
+func (r *sessionRepositoryFake) ResolveRuntimeWorkerSessionPrincipal(_ context.Context, params runtimeWorkerSessionResolveParams) (RuntimeSessionPrincipal, error) {
+	r.workerResolveParams = params
+	return r.workerResolved, r.workerResolveErr
 }
 
 type sessionTransactionFake struct {
@@ -410,6 +424,8 @@ type sessionTransactionFake struct {
 	createParams           db.CreateRuntimeSessionParams
 	claimParams            db.ClaimRuntimeSessionForCoreParams
 	heartbeatParams        db.HeartbeatRuntimeSessionParams
+	heartbeatNodeParams    db.HeartbeatRuntimeNodeParams
+	heartbeatErr           error
 	attachment             db.RuntimeSessionAttachment
 	createAttachmentParams db.CreateRuntimeSessionAttachmentParams
 }
@@ -498,6 +514,15 @@ func (f *sessionTransactionFake) GetRuntimeNode(context.Context, uuid.UUID) (db.
 	return f.node, nil
 }
 
+func (f *sessionTransactionFake) HeartbeatRuntimeNode(_ context.Context, params db.HeartbeatRuntimeNodeParams) (db.RuntimeNode, error) {
+	f.op("heartbeat_node")
+	f.heartbeatNodeParams = params
+	if f.heartbeatErr != nil {
+		return db.RuntimeNode{}, f.heartbeatErr
+	}
+	return f.node, nil
+}
+
 func (f *sessionTransactionFake) ListActiveRuntimeSessionsByNode(context.Context, uuid.UUID) ([]db.RuntimeSession, error) {
 	f.op("list_active")
 	return f.active, nil
@@ -528,6 +553,9 @@ func (f *sessionTransactionFake) ClaimRuntimeSessionForCore(_ context.Context, p
 func (f *sessionTransactionFake) HeartbeatRuntimeSession(_ context.Context, params db.HeartbeatRuntimeSessionParams) (db.RuntimeSession, error) {
 	f.op("heartbeat_session")
 	f.heartbeatParams = params
+	if f.heartbeatErr != nil {
+		return db.RuntimeSession{}, f.heartbeatErr
+	}
 	heartbeat := f.session
 	heartbeat.Status = "active"
 	heartbeat.AttachedCoreInstanceID = &f.fixture.coreID
