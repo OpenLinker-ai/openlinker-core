@@ -262,7 +262,8 @@ func (q *Queries) RedeemPendingAgentToken(ctx context.Context, arg RedeemPending
 const revokeAgentTokenForCreator = `-- name: RevokeAgentTokenForCreator :execrows
 UPDATE agent_tokens
 SET revoked_at = NOW(),
-    status = 'revoked'
+    status = 'revoked',
+    revocation_kind = 'manual'
 WHERE id = $1
   AND creator_user_id = $2
   AND revoked_at IS NULL`

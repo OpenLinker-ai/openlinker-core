@@ -93,21 +93,61 @@ type Agent struct {
 // 金额单位 cents（int32）：cost_cents = platform_fee_cents + creator_revenue_cents
 // input/output 是 JSONB（[]byte，原样透传）
 type Run struct {
-	ID                      uuid.UUID  `db:"id" json:"id"`
-	UserID                  uuid.UUID  `db:"user_id" json:"user_id"`
-	AgentID                 uuid.UUID  `db:"agent_id" json:"agent_id"`
-	Input                   []byte     `db:"input" json:"input"`
-	Output                  []byte     `db:"output" json:"output"`
-	Status                  string     `db:"status" json:"status"`
-	ErrorCode               *string    `db:"error_code" json:"error_code"`
-	ErrorMessage            *string    `db:"error_message" json:"error_message"`
-	CostCents               int32      `db:"cost_cents" json:"cost_cents"`
-	PlatformFeeCents        int32      `db:"platform_fee_cents" json:"platform_fee_cents"`
-	CreatorRevenueCents     int32      `db:"creator_revenue_cents" json:"creator_revenue_cents"`
-	DurationMs              *int32     `db:"duration_ms" json:"duration_ms"`
-	StartedAt               time.Time  `db:"started_at" json:"started_at"`
-	FinishedAt              *time.Time `db:"finished_at" json:"finished_at"`
-	Source                  string     `db:"source" json:"source"`
+	ID                          uuid.UUID  `db:"id" json:"id"`
+	UserID                      uuid.UUID  `db:"user_id" json:"user_id"`
+	AgentID                     uuid.UUID  `db:"agent_id" json:"agent_id"`
+	Input                       []byte     `db:"input" json:"input"`
+	Output                      []byte     `db:"output" json:"output"`
+	Status                      string     `db:"status" json:"status"`
+	ErrorCode                   *string    `db:"error_code" json:"error_code"`
+	ErrorMessage                *string    `db:"error_message" json:"error_message"`
+	CostCents                   int32      `db:"cost_cents" json:"cost_cents"`
+	PlatformFeeCents            int32      `db:"platform_fee_cents" json:"platform_fee_cents"`
+	CreatorRevenueCents         int32      `db:"creator_revenue_cents" json:"creator_revenue_cents"`
+	DurationMs                  *int32     `db:"duration_ms" json:"duration_ms"`
+	StartedAt                   time.Time  `db:"started_at" json:"started_at"`
+	FinishedAt                  *time.Time `db:"finished_at" json:"finished_at"`
+	Source                      string     `db:"source" json:"source"`
+	RuntimeContractID           string     `db:"runtime_contract_id" json:"runtime_contract_id"`
+	IdempotencyKeyHash          []byte     `db:"idempotency_key_hash" json:"-"`
+	IdempotencyFingerprint      []byte     `db:"idempotency_fingerprint" json:"-"`
+	ConnectionModeSnapshot      *string    `db:"connection_mode_snapshot" json:"connection_mode_snapshot"`
+	EndpointIdempotencySnapshot *bool      `db:"endpoint_idempotency_snapshot" json:"endpoint_idempotency_snapshot"`
+	DispatchState               string     `db:"dispatch_state" json:"dispatch_state"`
+	OfferCount                  int32      `db:"offer_count" json:"offer_count"`
+	MaxOfferCount               int32      `db:"max_offer_count" json:"max_offer_count"`
+	AttemptCount                int32      `db:"attempt_count" json:"attempt_count"`
+	MaxAttempts                 int32      `db:"max_attempts" json:"max_attempts"`
+	NextAttemptAt               *time.Time `db:"next_attempt_at" json:"next_attempt_at"`
+	DispatchDeadlineAt          *time.Time `db:"dispatch_deadline_at" json:"dispatch_deadline_at"`
+	RunDeadlineAt               *time.Time `db:"run_deadline_at" json:"run_deadline_at"`
+	LatestAttemptID             *uuid.UUID `db:"latest_attempt_id" json:"latest_attempt_id"`
+	ActiveAttemptID             *uuid.UUID `db:"active_attempt_id" json:"active_attempt_id"`
+	LeaseID                     *uuid.UUID `db:"lease_id" json:"lease_id"`
+	FencingToken                int64      `db:"fencing_token" json:"fencing_token"`
+	ExecutorType                *string    `db:"executor_type" json:"executor_type"`
+	ActiveCoreInstanceID        *uuid.UUID `db:"active_core_instance_id" json:"active_core_instance_id"`
+	RuntimeNodeID               *uuid.UUID `db:"runtime_node_id" json:"runtime_node_id"`
+	RuntimeWorkerID             *string    `db:"runtime_worker_id" json:"runtime_worker_id"`
+	RuntimeSessionID            *uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`
+	LeaseTokenID                *uuid.UUID `db:"lease_token_id" json:"lease_token_id"`
+	LeaseOfferedAt              *time.Time `db:"lease_offered_at" json:"lease_offered_at"`
+	LeaseAcceptedAt             *time.Time `db:"lease_accepted_at" json:"lease_accepted_at"`
+	LeaseExpiresAt              *time.Time `db:"lease_expires_at" json:"lease_expires_at"`
+	AttemptDeadlineAt           *time.Time `db:"attempt_deadline_at" json:"attempt_deadline_at"`
+	CancelRequestID             *uuid.UUID `db:"cancel_request_id" json:"cancel_request_id"`
+	CancelState                 *string    `db:"cancel_state" json:"cancel_state"`
+	CancelRequestedAt           *time.Time `db:"cancel_requested_at" json:"cancel_requested_at"`
+	CancelAcknowledgedAt        *time.Time `db:"cancel_acknowledged_at" json:"cancel_acknowledged_at"`
+	CancelReason                *string    `db:"cancel_reason" json:"cancel_reason"`
+	ResultID                    *uuid.UUID `db:"result_id" json:"result_id"`
+	ResultFingerprint           []byte     `db:"result_fingerprint" json:"-"`
+	TerminalEventID             *uuid.UUID `db:"terminal_event_id" json:"terminal_event_id"`
+	DeadLetteredAt              *time.Time `db:"dead_lettered_at" json:"dead_lettered_at"`
+	ReplayOfRunID               *uuid.UUID `db:"replay_of_run_id" json:"replay_of_run_id"`
+
+	// Deprecated: migration 063 removes these columns. They remain temporarily
+	// so the legacy claim query layer can be replaced in its dedicated task.
 	ClaimedByRuntimeTokenID *uuid.UUID `db:"claimed_by_runtime_token_id" json:"claimed_by_runtime_token_id"`
 	ClaimedAt               *time.Time `db:"claimed_at" json:"claimed_at"`
 }
@@ -117,13 +157,216 @@ type Run struct {
 // sequence 在单个 run 内递增，用于 SSE Last-Event-ID / 断线续传。
 // payload 是 JSONB 原始字节，调用方按 event_type 解析。
 type RunEvent struct {
-	ID          uuid.UUID  `db:"id" json:"id"`
-	RunID       uuid.UUID  `db:"run_id" json:"run_id"`
-	ParentRunID *uuid.UUID `db:"parent_run_id" json:"parent_run_id"`
-	Sequence    int32      `db:"sequence" json:"sequence"`
-	EventType   string     `db:"event_type" json:"event_type"`
-	Payload     []byte     `db:"payload" json:"payload"`
-	CreatedAt   time.Time  `db:"created_at" json:"created_at"`
+	ID                 uuid.UUID  `db:"id" json:"id"`
+	RunID              uuid.UUID  `db:"run_id" json:"run_id"`
+	ParentRunID        *uuid.UUID `db:"parent_run_id" json:"parent_run_id"`
+	Sequence           int32      `db:"sequence" json:"sequence"`
+	EventType          string     `db:"event_type" json:"event_type"`
+	Payload            []byte     `db:"payload" json:"payload"`
+	CreatedAt          time.Time  `db:"created_at" json:"created_at"`
+	ClientEventID      *uuid.UUID `db:"client_event_id" json:"client_event_id"`
+	ClientEventSeq     *int64     `db:"client_event_seq" json:"client_event_seq"`
+	PayloadFingerprint []byte     `db:"payload_fingerprint" json:"-"`
+	AttemptID          *uuid.UUID `db:"attempt_id" json:"attempt_id"`
+	AttemptNo          *int32     `db:"attempt_no" json:"attempt_no"`
+	FencingToken       *int64     `db:"fencing_token" json:"fencing_token"`
+}
+
+// RunAttempt is an immutable execution offer identity plus its lifecycle.
+type RunAttempt struct {
+	ID                      uuid.UUID  `db:"id" json:"id"`
+	RunID                   uuid.UUID  `db:"run_id" json:"run_id"`
+	AgentID                 uuid.UUID  `db:"agent_id" json:"agent_id"`
+	OfferNo                 int32      `db:"offer_no" json:"offer_no"`
+	AttemptNo               *int32     `db:"attempt_no" json:"attempt_no"`
+	ExecutorType            string     `db:"executor_type" json:"executor_type"`
+	LeaseID                 uuid.UUID  `db:"lease_id" json:"lease_id"`
+	FencingToken            int64      `db:"fencing_token" json:"fencing_token"`
+	RuntimeTokenID          *uuid.UUID `db:"runtime_token_id" json:"runtime_token_id"`
+	RuntimeWorkerID         *string    `db:"runtime_worker_id" json:"runtime_worker_id"`
+	RuntimeSessionID        *uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`
+	NodeID                  *uuid.UUID `db:"node_id" json:"node_id"`
+	OfferedByCoreInstanceID uuid.UUID  `db:"offered_by_core_instance_id" json:"offered_by_core_instance_id"`
+	AttachedCoreInstanceID  uuid.UUID  `db:"attached_core_instance_id" json:"attached_core_instance_id"`
+	OfferedAt               time.Time  `db:"offered_at" json:"offered_at"`
+	OfferExpiresAt          time.Time  `db:"offer_expires_at" json:"offer_expires_at"`
+	AcceptedAt              *time.Time `db:"accepted_at" json:"accepted_at"`
+	LastRenewedAt           *time.Time `db:"last_renewed_at" json:"last_renewed_at"`
+	LeaseExpiresAt          time.Time  `db:"lease_expires_at" json:"lease_expires_at"`
+	AttemptDeadlineAt       time.Time  `db:"attempt_deadline_at" json:"attempt_deadline_at"`
+	FinishedAt              *time.Time `db:"finished_at" json:"finished_at"`
+	Outcome                 *string    `db:"outcome" json:"outcome"`
+	ResultID                *uuid.UUID `db:"result_id" json:"result_id"`
+	ResultFingerprint       []byte     `db:"result_fingerprint" json:"-"`
+	ResultClassification    *string    `db:"result_classification" json:"result_classification"`
+	ResultAcknowledgedAt    *time.Time `db:"result_acknowledged_at" json:"result_acknowledged_at"`
+	LastClientEventSeq      int64      `db:"last_client_event_seq" json:"last_client_event_seq"`
+	FinalClientEventSeq     *int64     `db:"final_client_event_seq" json:"final_client_event_seq"`
+	ErrorCode               *string    `db:"error_code" json:"error_code"`
+	ErrorDetailRedacted     *string    `db:"error_detail_redacted" json:"error_detail_redacted"`
+	CreatedAt               time.Time  `db:"created_at" json:"created_at"`
+}
+
+type RunCancellation struct {
+	ID              uuid.UUID  `db:"id" json:"id"`
+	RunID           uuid.UUID  `db:"run_id" json:"run_id"`
+	TargetAttemptID *uuid.UUID `db:"target_attempt_id" json:"target_attempt_id"`
+	State           string     `db:"state" json:"state"`
+	RequestedByType string     `db:"requested_by_type" json:"requested_by_type"`
+	RequestedByID   uuid.UUID  `db:"requested_by_id" json:"requested_by_id"`
+	Reason          *string    `db:"reason" json:"reason"`
+	RequestedAt     time.Time  `db:"requested_at" json:"requested_at"`
+	DeliveredAt     *time.Time `db:"delivered_at" json:"delivered_at"`
+	StoppingAt      *time.Time `db:"stopping_at" json:"stopping_at"`
+	StoppedAt       *time.Time `db:"stopped_at" json:"stopped_at"`
+	AcknowledgedAt  *time.Time `db:"acknowledged_at" json:"acknowledged_at"`
+	ErrorCode       *string    `db:"error_code" json:"error_code"`
+	UpdatedAt       time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+type RunDeadLetter struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	RunID          uuid.UUID `db:"run_id" json:"run_id"`
+	FinalAttemptNo int32     `db:"final_attempt_no" json:"final_attempt_no"`
+	ReasonCode     string    `db:"reason_code" json:"reason_code"`
+	ReasonRedacted *string   `db:"reason_redacted" json:"reason_redacted"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+}
+
+type RuntimeSignalOutbox struct {
+	ID             uuid.UUID  `db:"id" json:"id"`
+	EventType      string     `db:"event_type" json:"event_type"`
+	AgentID        uuid.UUID  `db:"agent_id" json:"agent_id"`
+	RunID          *uuid.UUID `db:"run_id" json:"run_id"`
+	Payload        []byte     `db:"payload" json:"payload"`
+	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
+	AvailableAt    time.Time  `db:"available_at" json:"available_at"`
+	Status         string     `db:"status" json:"status"`
+	LeaseOwner     *uuid.UUID `db:"lease_owner" json:"lease_owner"`
+	LeaseExpiresAt *time.Time `db:"lease_expires_at" json:"lease_expires_at"`
+	PublishedAt    *time.Time `db:"published_at" json:"published_at"`
+	AttemptCount   int32      `db:"attempt_count" json:"attempt_count"`
+	LastError      *string    `db:"last_error" json:"last_error"`
+}
+
+type RunEffectOutbox struct {
+	ID              uuid.UUID  `db:"id" json:"id"`
+	RunID           uuid.UUID  `db:"run_id" json:"run_id"`
+	TerminalEventID uuid.UUID  `db:"terminal_event_id" json:"terminal_event_id"`
+	EffectType      string     `db:"effect_type" json:"effect_type"`
+	TargetKey       string     `db:"target_key" json:"target_key"`
+	Metadata        []byte     `db:"metadata" json:"metadata"`
+	Status          string     `db:"status" json:"status"`
+	AvailableAt     time.Time  `db:"available_at" json:"available_at"`
+	LeaseOwner      *uuid.UUID `db:"lease_owner" json:"lease_owner"`
+	LeaseExpiresAt  *time.Time `db:"lease_expires_at" json:"lease_expires_at"`
+	AttemptCount    int32      `db:"attempt_count" json:"attempt_count"`
+	MaxAttempts     int32      `db:"max_attempts" json:"max_attempts"`
+	CompletedAt     *time.Time `db:"completed_at" json:"completed_at"`
+	LastError       *string    `db:"last_error" json:"last_error"`
+	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
+}
+
+type RunAccountingLedger struct {
+	RunID             uuid.UUID `db:"run_id" json:"run_id"`
+	TerminalEventID   uuid.UUID `db:"terminal_event_id" json:"terminal_event_id"`
+	AgentID           uuid.UUID `db:"agent_id" json:"agent_id"`
+	SuccessDelta      int32     `db:"success_delta" json:"success_delta"`
+	RevenueDeltaCents int64     `db:"revenue_delta_cents" json:"revenue_delta_cents"`
+	CreatedAt         time.Time `db:"created_at" json:"created_at"`
+}
+
+type RuntimeSchemaContract struct {
+	SchemaVersion         int32     `db:"schema_version" json:"schema_version"`
+	MigrationName         string    `db:"migration_name" json:"migration_name"`
+	RuntimeContractID     string    `db:"runtime_contract_id" json:"runtime_contract_id"`
+	RuntimeContractDigest string    `db:"runtime_contract_digest" json:"runtime_contract_digest"`
+	AppliedAt             time.Time `db:"applied_at" json:"applied_at"`
+	IsCurrent             bool      `db:"is_current" json:"is_current"`
+}
+
+type RuntimeClusterControl struct {
+	SingletonID       int16      `db:"singleton_id" json:"singleton_id"`
+	Mode              string     `db:"mode" json:"mode"`
+	ExpectedReplicas  int32      `db:"expected_replicas" json:"expected_replicas"`
+	CutoverID         uuid.UUID  `db:"cutover_id" json:"cutover_id"`
+	DrainStartedAt    *time.Time `db:"drain_started_at" json:"drain_started_at"`
+	DrainDeadlineAt   *time.Time `db:"drain_deadline_at" json:"drain_deadline_at"`
+	HardMaintenanceAt time.Time  `db:"hard_maintenance_at" json:"hard_maintenance_at"`
+	ReopenedAt        *time.Time `db:"reopened_at" json:"reopened_at"`
+	Version           int64      `db:"version" json:"version"`
+	UpdatedByType     string     `db:"updated_by_type" json:"updated_by_type"`
+	UpdatedByID       *uuid.UUID `db:"updated_by_id" json:"updated_by_id"`
+	UpdatedAt         time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+type RuntimeClusterMember struct {
+	InstanceID            uuid.UUID `db:"instance_id" json:"instance_id"`
+	ReleaseVersion        string    `db:"release_version" json:"release_version"`
+	ReleaseCommit         string    `db:"release_commit" json:"release_commit"`
+	SchemaVersion         int32     `db:"schema_version" json:"schema_version"`
+	SchemaChecksum        string    `db:"schema_checksum" json:"schema_checksum"`
+	RuntimeContractID     string    `db:"runtime_contract_id" json:"runtime_contract_id"`
+	RuntimeContractDigest string    `db:"runtime_contract_digest" json:"runtime_contract_digest"`
+	StartedAt             time.Time `db:"started_at" json:"started_at"`
+	HeartbeatAt           time.Time `db:"heartbeat_at" json:"heartbeat_at"`
+	Draining              bool      `db:"draining" json:"draining"`
+	Ready                 bool      `db:"ready" json:"ready"`
+}
+
+type RuntimeNode struct {
+	NodeID                    uuid.UUID  `db:"node_id" json:"node_id"`
+	DisplayName               string     `db:"display_name" json:"display_name"`
+	DeviceCertificateSerial   string     `db:"device_certificate_serial" json:"device_certificate_serial"`
+	DevicePublicKeyThumbprint string     `db:"device_public_key_thumbprint" json:"device_public_key_thumbprint"`
+	NodeVersion               string     `db:"node_version" json:"node_version"`
+	ProtocolVersion           int32      `db:"protocol_version" json:"protocol_version"`
+	RuntimeContractID         string     `db:"runtime_contract_id" json:"runtime_contract_id"`
+	RuntimeContractDigest     string     `db:"runtime_contract_digest" json:"runtime_contract_digest"`
+	Features                  []string   `db:"features" json:"features"`
+	Capacity                  int32      `db:"capacity" json:"capacity"`
+	Inflight                  int32      `db:"inflight" json:"inflight"`
+	Status                    string     `db:"status" json:"status"`
+	LastSeenAt                *time.Time `db:"last_seen_at" json:"last_seen_at"`
+	DrainingAt                *time.Time `db:"draining_at" json:"draining_at"`
+	RevokedAt                 *time.Time `db:"revoked_at" json:"revoked_at"`
+	RevokeReason              *string    `db:"revoke_reason" json:"revoke_reason"`
+	CreatedAt                 time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt                 time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+type RuntimeSession struct {
+	RuntimeSessionID        uuid.UUID  `db:"runtime_session_id" json:"runtime_session_id"`
+	NodeID                  uuid.UUID  `db:"node_id" json:"node_id"`
+	AgentID                 uuid.UUID  `db:"agent_id" json:"agent_id"`
+	CredentialID            uuid.UUID  `db:"credential_id" json:"credential_id"`
+	WorkerID                string     `db:"worker_id" json:"worker_id"`
+	SessionEpoch            int64      `db:"session_epoch" json:"session_epoch"`
+	DeviceCertificateSerial string     `db:"device_certificate_serial" json:"device_certificate_serial"`
+	NodeVersion             string     `db:"node_version" json:"node_version"`
+	ProtocolVersion         int32      `db:"protocol_version" json:"protocol_version"`
+	RuntimeContractID       string     `db:"runtime_contract_id" json:"runtime_contract_id"`
+	RuntimeContractDigest   string     `db:"runtime_contract_digest" json:"runtime_contract_digest"`
+	Features                []string   `db:"features" json:"features"`
+	Capacity                int32      `db:"capacity" json:"capacity"`
+	Inflight                int32      `db:"inflight" json:"inflight"`
+	Status                  string     `db:"status" json:"status"`
+	AttachedCoreInstanceID  *uuid.UUID `db:"attached_core_instance_id" json:"attached_core_instance_id"`
+	ConnectedAt             time.Time  `db:"connected_at" json:"connected_at"`
+	HeartbeatAt             time.Time  `db:"heartbeat_at" json:"heartbeat_at"`
+	DisconnectedAt          *time.Time `db:"disconnected_at" json:"disconnected_at"`
+	CreatedAt               time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt               time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+type RuntimeSessionAttachment struct {
+	ID               uuid.UUID  `db:"id" json:"id"`
+	RuntimeSessionID uuid.UUID  `db:"runtime_session_id" json:"runtime_session_id"`
+	CoreInstanceID   uuid.UUID  `db:"core_instance_id" json:"core_instance_id"`
+	AttachmentKind   string     `db:"attachment_kind" json:"attachment_kind"`
+	AttachedAt       time.Time  `db:"attached_at" json:"attached_at"`
+	DetachedAt       *time.Time `db:"detached_at" json:"detached_at"`
+	DisconnectReason *string    `db:"disconnect_reason" json:"disconnect_reason"`
 }
 
 // RunArtifact 对应 run_artifacts 表。
@@ -393,19 +636,21 @@ type ProxyRunArtifact struct {
 // AgentToken 是统一 Agent 接入凭证。pending_registration 阶段 agent_id 为空；
 // 注册成功后同一 token 转为 active_runtime 并绑定单个 Agent。
 type AgentToken struct {
-	ID            uuid.UUID  `db:"id" json:"id"`
-	AgentID       *uuid.UUID `db:"agent_id" json:"agent_id"`
-	CreatorUserID uuid.UUID  `db:"creator_user_id" json:"creator_user_id"`
-	Name          string     `db:"name" json:"name"`
-	Prefix        string     `db:"prefix" json:"prefix"`
-	TokenHash     string     `db:"token_hash" json:"-"`
-	Scopes        []string   `db:"scopes" json:"scopes"`
-	Status        string     `db:"status" json:"status"`
-	ExpiresAt     *time.Time `db:"expires_at" json:"expires_at"`
-	RedeemedAt    *time.Time `db:"redeemed_at" json:"redeemed_at"`
-	LastUsedAt    *time.Time `db:"last_used_at" json:"last_used_at"`
-	RevokedAt     *time.Time `db:"revoked_at" json:"revoked_at"`
-	CreatedAt     time.Time  `db:"created_at" json:"created_at"`
+	ID                    uuid.UUID  `db:"id" json:"id"`
+	AgentID               *uuid.UUID `db:"agent_id" json:"agent_id"`
+	CreatorUserID         uuid.UUID  `db:"creator_user_id" json:"creator_user_id"`
+	Name                  string     `db:"name" json:"name"`
+	Prefix                string     `db:"prefix" json:"prefix"`
+	TokenHash             string     `db:"token_hash" json:"-"`
+	Scopes                []string   `db:"scopes" json:"scopes"`
+	Status                string     `db:"status" json:"status"`
+	ExpiresAt             *time.Time `db:"expires_at" json:"expires_at"`
+	RedeemedAt            *time.Time `db:"redeemed_at" json:"redeemed_at"`
+	LastUsedAt            *time.Time `db:"last_used_at" json:"last_used_at"`
+	RevokedAt             *time.Time `db:"revoked_at" json:"revoked_at"`
+	CreatedAt             time.Time  `db:"created_at" json:"created_at"`
+	RotationPredecessorID *uuid.UUID `db:"rotation_predecessor_id" json:"rotation_predecessor_id"`
+	RevocationKind        *string    `db:"revocation_kind" json:"revocation_kind"`
 }
 
 // AgentRuntimeToken 是绑定单个 Agent 的自动化调用凭证。
@@ -656,7 +901,7 @@ type DeliveryTarget struct {
 type RunDelivery struct {
 	ID             uuid.UUID  `db:"id" json:"id"`
 	RunID          uuid.UUID  `db:"run_id" json:"run_id"`
-	TargetID       uuid.UUID  `db:"target_id" json:"target_id"`
+	TargetID       *uuid.UUID `db:"target_id" json:"target_id"`
 	UserID         uuid.UUID  `db:"user_id" json:"user_id"`
 	TargetType     string     `db:"target_type" json:"target_type"`
 	TargetURL      string     `db:"target_url" json:"target_url"`
@@ -669,6 +914,7 @@ type RunDelivery struct {
 	NextRetryAt    *time.Time `db:"next_retry_at" json:"next_retry_at"`
 	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+	EffectOutboxID *uuid.UUID `db:"effect_outbox_id" json:"effect_outbox_id"`
 }
 
 // WebhookDelivery 对应 webhook_deliveries 表（投递日志）。
@@ -689,6 +935,7 @@ type WebhookDelivery struct {
 	NextRetryAt    *time.Time `db:"next_retry_at" json:"next_retry_at"`
 	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+	EffectOutboxID *uuid.UUID `db:"effect_outbox_id" json:"effect_outbox_id"`
 }
 
 // TaskCallbackSubscription 对应 task_callback_subscriptions 表。
@@ -727,6 +974,7 @@ type TaskCallbackDelivery struct {
 	DeliveredAt    *time.Time `db:"delivered_at" json:"delivered_at"`
 	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+	EffectOutboxID *uuid.UUID `db:"effect_outbox_id" json:"effect_outbox_id"`
 }
 
 // Workflow 对应 workflows 表。

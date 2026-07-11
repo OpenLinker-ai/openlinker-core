@@ -48,7 +48,8 @@ SELECT EXISTS(
 -- name: RevokeAgentRuntimeTokenForOwner :execrows
 UPDATE agent_tokens t
 SET revoked_at = NOW(),
-    status = 'revoked'
+    status = 'revoked',
+    revocation_kind = 'manual'
 FROM agents a
 WHERE t.id = $1
   AND t.agent_id = a.id

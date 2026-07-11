@@ -4178,7 +4178,7 @@ func runDeliveryRow(id, runID, targetID, userID uuid.UUID, now time.Time, status
 	return []any{
 		id,
 		runID,
-		targetID,
+		&targetID,
 		userID,
 		"webhook",
 		"https://example.com/hook",

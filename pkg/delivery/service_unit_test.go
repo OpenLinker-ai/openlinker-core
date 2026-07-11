@@ -143,7 +143,7 @@ func TestDeliveryTransforms(t *testing.T) {
 	item := toDeliveryItem(db.RunDelivery{
 		ID:             uuid.New(),
 		RunID:          runID,
-		TargetID:       targetID,
+		TargetID:       &targetID,
 		TargetType:     targetTypeWebhook,
 		TargetURL:      "https://example.com/hook",
 		Status:         "failed",
@@ -277,7 +277,7 @@ func TestDeliveryServiceTargetCRUDAndHistory(t *testing.T) {
 		updateTarget: target,
 		run:          db.Run{ID: runID, UserID: userID, Status: "success"},
 		deliveries: []db.RunDelivery{
-			{ID: uuid.New(), RunID: runID, TargetID: targetID, UserID: userID, TargetType: targetTypeWebhook, TargetURL: "https://example.com/hook", Status: "success", CreatedAt: now, UpdatedAt: now},
+			{ID: uuid.New(), RunID: runID, TargetID: &targetID, UserID: userID, TargetType: targetTypeWebhook, TargetURL: "https://example.com/hook", Status: "success", CreatedAt: now, UpdatedAt: now},
 		},
 	}
 	txRunner := &fakeDeliveryTxRunner{q: queries}
@@ -404,7 +404,7 @@ func TestDeliveryServiceEnqueueAndAttemptDelivery(t *testing.T) {
 		createDelivery: db.RunDelivery{
 			ID:         deliveryID,
 			RunID:      runID,
-			TargetID:   targetID,
+			TargetID:   &targetID,
 			UserID:     userID,
 			TargetType: targetTypeWebhook,
 			TargetURL:  "https://example.com/hook",
@@ -537,7 +537,7 @@ func TestDeliveryServiceDeliverRunSelectsExplicitAndDefaultTargets(t *testing.T)
 		createDelivery: db.RunDelivery{
 			ID:         uuid.New(),
 			RunID:      runID,
-			TargetID:   explicitTargetID,
+			TargetID:   &explicitTargetID,
 			UserID:     userID,
 			TargetType: targetTypeWebhook,
 			TargetURL:  "https://example.com/explicit",
@@ -567,7 +567,7 @@ func TestDeliveryServiceDeliverRunSelectsExplicitAndDefaultTargets(t *testing.T)
 		createDelivery: db.RunDelivery{
 			ID:         uuid.New(),
 			RunID:      runID,
-			TargetID:   defaultTargetID,
+			TargetID:   &defaultTargetID,
 			UserID:     userID,
 			TargetType: targetTypeSlack,
 			TargetURL:  "https://hooks.slack.com/services/T000/B000/secret",
@@ -633,7 +633,7 @@ func TestDeliveryServiceAutoEnqueueRetryAndProcessPending(t *testing.T) {
 		createDelivery: db.RunDelivery{
 			ID:         deliveryID,
 			RunID:      runID,
-			TargetID:   targetID,
+			TargetID:   &targetID,
 			UserID:     userID,
 			TargetType: targetTypeWebhook,
 			TargetURL:  "https://example.com/default",
@@ -1008,7 +1008,7 @@ func (q *fakeDeliveryQueries) CreateRunDelivery(_ context.Context, arg db.Create
 		q.createDelivery = db.RunDelivery{
 			ID:         uuid.New(),
 			RunID:      arg.RunID,
-			TargetID:   arg.TargetID,
+			TargetID:   &arg.TargetID,
 			UserID:     arg.UserID,
 			TargetType: arg.TargetType,
 			TargetURL:  arg.TargetURL,

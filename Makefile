@@ -1,4 +1,4 @@
-.PHONY: help dev build run bootstrap-admin test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status deps demo-a2a demo-a2a-live runtime-loadtest
+.PHONY: help dev build run bootstrap-admin test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status migration-063-test deps demo-a2a demo-a2a-live runtime-loadtest
 
 ENV_FILE ?= .env
 API_URL ?= http://localhost:8080
@@ -60,3 +60,6 @@ migrate-create: ## 创建 migration: make migrate-create name=add_xxx
 
 migrate-status: ## 查看版本
 	@. ./$(ENV_FILE) && $(MIGRATE) -database "$$DATABASE_URL" -path migrations version
+
+migration-063-test: ## 在一次性 PostgreSQL 16 中验证 063 升级、回退、阻断条件与不变量
+	./bin/test-migration-063.sh
