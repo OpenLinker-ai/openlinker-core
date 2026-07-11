@@ -323,7 +323,7 @@ CREATE TABLE runtime_nodes (
         CHECK (
             protocol_version = 2
             AND runtime_contract_id = 'openlinker.runtime.v2'
-            AND runtime_contract_digest = 'd83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f'
+            AND runtime_contract_digest = '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61'
         ),
     CONSTRAINT runtime_nodes_contract_digest
         CHECK (runtime_contract_digest ~ '^[a-f0-9]{64}$'),
@@ -411,7 +411,7 @@ CREATE TABLE runtime_sessions (
         CHECK (
             protocol_version = 2
             AND runtime_contract_id = 'openlinker.runtime.v2'
-            AND runtime_contract_digest = 'd83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f'
+            AND runtime_contract_digest = '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61'
         ),
     CONSTRAINT runtime_sessions_contract_digest
         CHECK (runtime_contract_digest ~ '^[a-f0-9]{64}$'),
@@ -3179,7 +3179,7 @@ INSERT INTO runtime_schema_contracts (
     63,
     '063_reliable_runtime_v2',
     'openlinker.runtime.v2',
-    'd83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f',
+    '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61',
     TRUE
 );
 

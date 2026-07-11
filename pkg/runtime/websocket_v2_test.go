@@ -476,6 +476,49 @@ func TestRuntimeV2WebSocketResumeEmitsOneCorrelatedDecisionPerAttempt(t *testing
 	require.Equal(t, 1, resume.callCount())
 }
 
+func TestRuntimeV2WebSocketCancelCommandRequiresCorrelatedDurableAck(t *testing.T) {
+	fixture := newRuntimeV2WSTestFixture()
+	identity := fixture.assignment().AttemptIdentity
+	cancellationID := uuid.New()
+	cancel := RunCancelPayload{
+		CancellationID:  cancellationID,
+		AttemptIdentity: identity,
+		ReasonCode:      runtimeCancellationReasonCode,
+		DeadlineAt:      fixture.now.Add(30 * time.Second),
+	}
+	raw, err := json.Marshal(cancel)
+	require.NoError(t, err)
+	fixture.cancellations.setCommand(PendingCommand{Type: RuntimeMessageRunCancel, Payload: raw})
+
+	server, target := fixture.server(t)
+	defer server.Close()
+	conn := dialRuntimeV2WS(t, target)
+	defer conn.Close()
+	hello := writeRuntimeV2WSHello(t, conn, fixture.hello)
+	ready := readRuntimeV2WSEnvelope(t, conn)
+	require.NoError(t, ValidateRuntimeReplyCorrelation(hello, ready))
+
+	command := readRuntimeV2WSEnvelope(t, conn)
+	require.Equal(t, RuntimeMessageRunCancel, command.Type)
+	require.Nil(t, command.ReplyToMessageID)
+	decoded, err := DecodeRuntimeMessagePayload[RunCancelPayload](command, RuntimeMessageRunCancel)
+	require.NoError(t, err)
+	require.Equal(t, cancel, decoded)
+
+	for _, state := range []RuntimeCancelState{RuntimeCancelStopping, RuntimeCancelStopped} {
+		ack, err := NewRuntimeTypedMessage(RuntimeMessageRunCancelAck, &command.MessageID, RunCancelAckPayload{
+			CancellationID:  cancellationID,
+			AttemptIdentity: identity,
+			CancelState:     state,
+		})
+		require.NoError(t, err)
+		require.NoError(t, conn.WriteJSON(ack))
+	}
+	require.Eventually(t, func() bool {
+		return fixture.cancellations.ackCallCount() == 2
+	}, 3*time.Second, 10*time.Millisecond)
+}
+
 type runtimeV2WSTestFixture struct {
 	now           time.Time
 	authenticated AuthenticatedRuntimePrincipal
@@ -489,6 +532,7 @@ type runtimeV2WSTestFixture struct {
 	events        *runtimeV2WSEventStoreFake
 	finalizer     *runtimeV2WSFinalizerFake
 	resume        RuntimeV2ResumeService
+	cancellations *runtimeV2WSCancellationServiceFake
 }
 
 func newRuntimeV2WSTestFixture() *runtimeV2WSTestFixture {
@@ -557,6 +601,9 @@ func newRuntimeV2WSTestFixture() *runtimeV2WSTestFixture {
 		leases:    &runtimeV2WSLeaseServiceFake{operations: operations},
 		events:    &runtimeV2WSEventStoreFake{},
 		finalizer: &runtimeV2WSFinalizerFake{},
+		cancellations: &runtimeV2WSCancellationServiceFake{
+			databaseTime: now,
+		},
 	}
 }
 
@@ -569,6 +616,7 @@ func (f *runtimeV2WSTestFixture) controller() *RuntimeV2HTTPController {
 		EventStore:          f.events,
 		Finalizer:           f.finalizer,
 		Resume:              f.resume,
+		Cancellations:       f.cancellations,
 	})
 }
 
@@ -922,6 +970,68 @@ type runtimeV2WSResumeServiceFake struct {
 	calls    int
 }
 
+type runtimeV2WSCancellationServiceFake struct {
+	mu           sync.Mutex
+	command      *PendingCommand
+	databaseTime time.Time
+	nextErr      error
+	ackState     RunCancellationState
+	ackErr       error
+	ackPayloads  []RunCancelAckPayload
+}
+
+func (f *runtimeV2WSCancellationServiceFake) NextCommand(
+	context.Context,
+	RuntimeSessionPrincipal,
+) (*PendingCommand, time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.command == nil {
+		return nil, f.databaseTime, f.nextErr
+	}
+	command := *f.command
+	command.Payload = append([]byte(nil), f.command.Payload...)
+	return &command, f.databaseTime, f.nextErr
+}
+
+func (f *runtimeV2WSCancellationServiceFake) PollCommands(
+	context.Context,
+	RuntimeSessionPrincipal,
+) (RuntimeCommandsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	commands := make([]PendingCommand, 0, 1)
+	if f.command != nil {
+		command := *f.command
+		command.Payload = append([]byte(nil), f.command.Payload...)
+		commands = append(commands, command)
+	}
+	return RuntimeCommandsResponse{Commands: commands, DatabaseTime: f.databaseTime}, f.nextErr
+}
+
+func (f *runtimeV2WSCancellationServiceFake) AckCancel(
+	_ context.Context,
+	_ RuntimeSessionPrincipal,
+	payload RunCancelAckPayload,
+) (RunCancellationState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ackPayloads = append(f.ackPayloads, payload)
+	return f.ackState, f.ackErr
+}
+
+func (f *runtimeV2WSCancellationServiceFake) setCommand(command PendingCommand) {
+	f.mu.Lock()
+	f.command = &command
+	f.mu.Unlock()
+}
+
+func (f *runtimeV2WSCancellationServiceFake) ackCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.ackPayloads)
+}
+
 func (f *runtimeV2WSResumeServiceFake) Resume(context.Context, RuntimeSessionPrincipal, RuntimeResumePayload) (RuntimeResumeResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -964,4 +1074,5 @@ var (
 	_ RuntimeV2EventStore          = (*runtimeV2WSEventStoreFake)(nil)
 	_ RuntimeV2ResultFinalizer     = (*runtimeV2WSFinalizerFake)(nil)
 	_ RuntimeV2ResumeService       = (*runtimeV2WSResumeServiceFake)(nil)
+	_ RuntimeV2CancellationService = (*runtimeV2WSCancellationServiceFake)(nil)
 )

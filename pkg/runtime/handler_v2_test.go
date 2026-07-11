@@ -38,6 +38,8 @@ func TestRuntimeV2ControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 		"POST /api/v1/agent-runtime/v2/runs/:id/events",
 		"POST /api/v1/agent-runtime/v2/runs/:id/result",
 		"POST /api/v1/agent-runtime/v2/runs/resume",
+		"POST /api/v1/agent-runtime/v2/runs/:id/cancel-ack",
+		"GET /api/v1/agent-runtime/v2/commands",
 		"POST /api/v1/agent-runtime/v2/call-agent",
 		"GET /api/v1/agent-runtime/v2/ws",
 	} {
@@ -376,6 +378,65 @@ func TestRuntimeV2CallAgentPreservesProofBodyAndAuthenticatesDeviceBeforeService
 	require.Equal(t, 1, fixture.delegation.calls)
 }
 
+func TestRuntimeV2CommandsBindExplicitSessionAndCancelAck(t *testing.T) {
+	fixture := newRuntimeV2HandlerFixture()
+	identity := fixture.attemptIdentity()
+	cancellationID := uuid.New()
+	cancel := RunCancelPayload{
+		CancellationID:  cancellationID,
+		AttemptIdentity: identity,
+		ReasonCode:      runtimeCancellationReasonCode,
+		DeadlineAt:      fixture.now.Add(30 * time.Second),
+	}
+	rawCancel, err := json.Marshal(cancel)
+	require.NoError(t, err)
+	fixture.cancellations.response = RuntimeCommandsResponse{
+		Commands:     []PendingCommand{{Type: RuntimeMessageRunCancel, Payload: rawCancel}},
+		DatabaseTime: fixture.now,
+	}
+
+	target := "/api/v1/agent-runtime/v2/commands?runtime_session_id=" +
+		fixture.acting.RuntimeSessionID.String() + "&wait=0"
+	recorder := serveRuntimeV2Raw(t, fixture.controller(), http.MethodGet, target, "")
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	require.Equal(t, fixture.acting.RuntimeSessionID, fixture.sessions.resolvedSessionID)
+	require.Equal(t, fixture.acting.RuntimeSessionID, fixture.cancellations.principal.RuntimeSessionID)
+	require.Equal(t, 1, fixture.cancellations.pollCalls)
+	var commands RuntimeCommandsResponse
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &commands))
+	require.Equal(t, fixture.cancellations.response, commands)
+
+	fixture.cancellations.state = RunCancellationState{
+		CancellationID: cancellationID,
+		CancelState:    RuntimeCancelStopped,
+		UpdatedAt:      fixture.now,
+	}
+	ack := RunCancelAckPayload{
+		CancellationID:  cancellationID,
+		AttemptIdentity: identity,
+		CancelState:     RuntimeCancelStopped,
+	}
+	recorder = serveRuntimeV2(
+		t, fixture.controller(), http.MethodPost,
+		"/api/v1/agent-runtime/v2/runs/"+identity.RunID.String()+"/cancel-ack", ack,
+	)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	require.Equal(t, ack, fixture.cancellations.ackPayload)
+	require.Equal(t, fixture.acting.RuntimeSessionID, fixture.cancellations.principal.RuntimeSessionID)
+
+	for _, invalidTarget := range []string{
+		"/api/v1/agent-runtime/v2/commands",
+		"/api/v1/agent-runtime/v2/commands?runtime_session_id=" + strings.ToUpper(fixture.acting.RuntimeSessionID.String()),
+		"/api/v1/agent-runtime/v2/commands?runtime_session_id=" + fixture.acting.RuntimeSessionID.String() + "&unknown=1",
+		"/api/v1/agent-runtime/v2/commands?runtime_session_id=" + fixture.acting.RuntimeSessionID.String() + "&wait=0&wait=1",
+	} {
+		recorder = serveRuntimeV2Raw(t, fixture.controller(), http.MethodGet, invalidTarget, "")
+		require.Equal(t, http.StatusUnprocessableEntity, recorder.Code, invalidTarget)
+		requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorValidationFailed)
+	}
+	require.Equal(t, 1, fixture.cancellations.pollCalls)
+}
+
 func TestRuntimeV2RejectsNonCanonicalAndConflictingIDsBeforeMutation(t *testing.T) {
 	fixture := newRuntimeV2HandlerFixture()
 	identity := fixture.attemptIdentity()
@@ -446,6 +507,8 @@ func TestMapRuntimeV2HTTPErrorUsesStableSessionLeaseAndStoreCodes(t *testing.T) 
 		{name: "lease expired", err: newRuntimeLeaseError(RuntimeLeaseErrorLeaseExpired, nil), code: RuntimeErrorLeaseExpired},
 		{name: "event conflict", err: newRuntimeEventError(RuntimeEventErrorIDConflict, nil), code: RuntimeErrorEventIDConflict},
 		{name: "idempotency reuse", err: httpx.NewError(http.StatusConflict, httpx.ErrorCode(RuntimeErrorIdempotencyKeyReused), "hidden"), code: RuntimeErrorIdempotencyKeyReused},
+		{name: "cancel not found", err: ErrRuntimeCancellationNotFound, code: RuntimeErrorNotFound},
+		{name: "cancel ended", err: ErrRuntimeCancellationRunEnded, code: RuntimeErrorRunAlreadyTerminal},
 		{name: "unknown", err: errors.New("database detail must stay hidden"), code: RuntimeErrorInternal},
 	}
 	for _, test := range tests {
@@ -469,6 +532,7 @@ type runtimeV2HandlerFixture struct {
 	finalizer     *runtimeV2ResultFinalizerFake
 	resume        *runtimeV2ResumeServiceFake
 	delegation    *runtimeV2DelegationServiceFake
+	cancellations *runtimeV2CancellationServiceFake
 }
 
 func newRuntimeV2HandlerFixture() *runtimeV2HandlerFixture {
@@ -510,6 +574,9 @@ func newRuntimeV2HandlerFixture() *runtimeV2HandlerFixture {
 		finalizer:  &runtimeV2ResultFinalizerFake{},
 		resume:     &runtimeV2ResumeServiceFake{},
 		delegation: &runtimeV2DelegationServiceFake{},
+		cancellations: &runtimeV2CancellationServiceFake{
+			databaseTime: now,
+		},
 	}
 	fixture.sessions.resolveResponse = acting
 	fixture.sessions.workerResolveResponse = acting
@@ -526,6 +593,7 @@ func (f *runtimeV2HandlerFixture) controller() *RuntimeV2HTTPController {
 		Finalizer:           f.finalizer,
 		Resume:              f.resume,
 		Delegation:          f.delegation,
+		Cancellations:       f.cancellations,
 	})
 }
 
@@ -762,6 +830,49 @@ type runtimeV2DelegationServiceFake struct {
 	calls         int
 }
 
+type runtimeV2CancellationServiceFake struct {
+	response     RuntimeCommandsResponse
+	databaseTime time.Time
+	err          error
+	state        RunCancellationState
+	principal    RuntimeSessionPrincipal
+	ackPayload   RunCancelAckPayload
+	pollCalls    int
+	ackCalls     int
+}
+
+func (f *runtimeV2CancellationServiceFake) NextCommand(
+	_ context.Context,
+	principal RuntimeSessionPrincipal,
+) (*PendingCommand, time.Time, error) {
+	f.principal = principal
+	if len(f.response.Commands) == 0 {
+		return nil, f.databaseTime, f.err
+	}
+	command := f.response.Commands[0]
+	return &command, f.response.DatabaseTime, f.err
+}
+
+func (f *runtimeV2CancellationServiceFake) PollCommands(
+	_ context.Context,
+	principal RuntimeSessionPrincipal,
+) (RuntimeCommandsResponse, error) {
+	f.pollCalls++
+	f.principal = principal
+	return f.response, f.err
+}
+
+func (f *runtimeV2CancellationServiceFake) AckCancel(
+	_ context.Context,
+	principal RuntimeSessionPrincipal,
+	payload RunCancelAckPayload,
+) (RunCancellationState, error) {
+	f.ackCalls++
+	f.principal = principal
+	f.ackPayload = payload
+	return f.state, f.err
+}
+
 func (f *runtimeV2DelegationServiceFake) CallAgent(
 	_ context.Context,
 	authorization RuntimeV2DelegationAuthorization,
@@ -797,4 +908,5 @@ var (
 	_ RuntimeV2ResultFinalizer     = (*runtimeV2ResultFinalizerFake)(nil)
 	_ RuntimeV2ResumeService       = (*runtimeV2ResumeServiceFake)(nil)
 	_ RuntimeV2DelegationAPI       = (*runtimeV2DelegationServiceFake)(nil)
+	_ RuntimeV2CancellationService = (*runtimeV2CancellationServiceFake)(nil)
 )

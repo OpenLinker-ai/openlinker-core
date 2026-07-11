@@ -238,6 +238,7 @@ func configureRuntimeV2(
 	coreInstanceID := uuid.New()
 	sessions := runtime.NewRuntimeSessionService(pool, coreInstanceID)
 	verifier := runtime.NewDBRuntimeNodeCredentialVerifier(pool)
+	cancellations := runtime.NewRuntimeCancellationCoordinator(pool)
 
 	var leases runtime.RuntimeV2LeaseService
 	var delegation runtime.RuntimeV2DelegationAPI
@@ -263,6 +264,7 @@ func configureRuntimeV2(
 		Finalizer:           runtime.NewResultFinalizer(pool, nil, nil),
 		Resume:              runtime.NewRuntimeResumeService(pool, coreInstanceID, 0),
 		Delegation:          delegation,
+		Cancellations:       cancellations,
 	})
 }
 

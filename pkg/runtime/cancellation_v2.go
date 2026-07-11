@@ -264,12 +264,19 @@ func (c *RuntimeCancellationCoordinator) NextCommand(
 			return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 		}
 
-		if cancellation.State == string(RuntimeCancelRequested) {
+		if cancellation.State == string(RuntimeCancelRequested) ||
+			cancellation.State == string(RuntimeCancelDelivered) ||
+			cancellation.State == string(RuntimeCancelStopping) {
+			nextState := cancellation.State
+			if nextState == string(RuntimeCancelRequested) {
+				nextState = string(RuntimeCancelDelivered)
+			}
 			cancellation, cancellationErr = tx.AdvanceRuntimeV2RunCancellation(ctx, db.AdvanceRuntimeV2RunCancellationParams{
-				NextState:      string(RuntimeCancelDelivered),
+				NextState:      nextState,
+				ErrorCode:      cancellation.ErrorCode,
 				RunID:          cancellation.RunID,
 				CancellationID: cancellation.ID,
-				ExpectedState:  string(RuntimeCancelRequested),
+				ExpectedState:  cancellation.State,
 			})
 			if cancellationErr != nil {
 				return cancellationErr

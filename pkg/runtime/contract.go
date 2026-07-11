@@ -3,7 +3,7 @@ package runtime
 const (
 	RuntimeProtocolVersion = 2
 	RuntimeContractID      = "openlinker.runtime.v2"
-	RuntimeContractDigest  = "d83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f"
+	RuntimeContractDigest  = "60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61"
 )
 
 var runtimeRequiredFeatures = [...]string{

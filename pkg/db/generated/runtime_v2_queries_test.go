@@ -526,7 +526,7 @@ func TestRuntimeV2OutboxLedgerAndDLQQueries(t *testing.T) {
 
 func TestRuntimeV2NodeSessionAndClusterQueries(t *testing.T) {
 	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
-	digest := "d83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f"
+	digest := "60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61"
 	features := []string{
 		"lease_fence", "assignment_confirm", "renew", "resume",
 		"event_ack", "result_ack", "cancel", "persistent_spool",

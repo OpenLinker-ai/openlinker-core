@@ -61,6 +61,12 @@ type RuntimeV2DelegationAPI interface {
 	CallAgent(context.Context, RuntimeV2DelegationAuthorization) (RunSummary, error)
 }
 
+type RuntimeV2CancellationService interface {
+	NextCommand(context.Context, RuntimeSessionPrincipal) (*PendingCommand, time.Time, error)
+	PollCommands(context.Context, RuntimeSessionPrincipal) (RuntimeCommandsResponse, error)
+	AckCancel(context.Context, RuntimeSessionPrincipal, RunCancelAckPayload) (RunCancellationState, error)
+}
+
 // RuntimeV2HTTPDependencies are deliberately narrow so the HTTP adapter has
 // no database access and cannot reconstruct trusted principals from JSON.
 type RuntimeV2HTTPDependencies struct {
@@ -72,6 +78,7 @@ type RuntimeV2HTTPDependencies struct {
 	Finalizer           RuntimeV2ResultFinalizer
 	Resume              RuntimeV2ResumeService
 	Delegation          RuntimeV2DelegationAPI
+	Cancellations       RuntimeV2CancellationService
 }
 
 // RuntimeV2HTTPController is the strict HTTP transport adapter for the durable
@@ -123,6 +130,8 @@ func (h *RuntimeV2HTTPController) Register(api *echo.Group) {
 	api.POST("/agent-runtime/v2/runs/:id/events", h.AppendEvent)
 	api.POST("/agent-runtime/v2/runs/:id/result", h.FinalizeResult)
 	api.POST("/agent-runtime/v2/runs/resume", h.ResumeRuns)
+	api.POST("/agent-runtime/v2/runs/:id/cancel-ack", h.AckCancel)
+	api.GET("/agent-runtime/v2/commands", h.PollCommands)
 	api.POST("/agent-runtime/v2/call-agent", h.CallAgent)
 	api.GET("/agent-runtime/v2/ws", h.WebSocket)
 }
@@ -452,6 +461,62 @@ func (h *RuntimeV2HTTPController) ResumeRuns(c echo.Context) error {
 	return writeRuntimeV2Payload(c, http.StatusOK, response)
 }
 
+// PollCommands long-polls commands for one explicit Session. A token and
+// device may legitimately own several worker Sessions, so resolving a command
+// poll from authentication alone would deliver work to an arbitrary process.
+func (h *RuntimeV2HTTPController) PollCommands(c echo.Context) error {
+	authenticated, transportErr := h.authenticate(c)
+	if transportErr != nil {
+		return writeRuntimeV2Error(c, transportErr)
+	}
+	if h.dependencies.Sessions == nil || h.dependencies.Cancellations == nil {
+		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+	}
+	sessionID, wait, err := parseRuntimeV2CommandsQuery(c.Request())
+	if err != nil {
+		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+	}
+	principal, err := h.resolveSession(c, authenticated, sessionID)
+	if err != nil {
+		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+	}
+	response, err := h.pollCommandsWithWait(c.Request().Context(), principal, wait)
+	if err != nil {
+		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+	}
+	return writeRuntimeV2Payload(c, http.StatusOK, response)
+}
+
+func (h *RuntimeV2HTTPController) AckCancel(c echo.Context) error {
+	authenticated, transportErr := h.authenticate(c)
+	if transportErr != nil {
+		return writeRuntimeV2Error(c, transportErr)
+	}
+	if h.dependencies.Sessions == nil || h.dependencies.Cancellations == nil {
+		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+	}
+	runID, err := parseRuntimeV2PathUUID(c.Param("id"))
+	if err != nil {
+		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+	}
+	payload, err := DecodeRuntimeBody[RunCancelAckPayload](c.Request().Body)
+	if err != nil {
+		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+	}
+	if payload.AttemptIdentity.RunID != runID {
+		return writeRuntimeV2Error(c, runtimeV2ValidationError())
+	}
+	principal, err := h.resolveSession(c, authenticated, payload.AttemptIdentity.RuntimeSessionID)
+	if err != nil {
+		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+	}
+	state, err := h.dependencies.Cancellations.AckCancel(c.Request().Context(), principal, payload)
+	if err != nil {
+		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+	}
+	return writeRuntimeV2Payload(c, http.StatusOK, state)
+}
+
 // CallAgent authenticates the mTLS Node and both assignment-scoped signed
 // capabilities before the exact request bytes are decoded as business input.
 // The invocation capability, not a long-lived Agent Token, is the Bearer
@@ -580,6 +645,34 @@ func (h *RuntimeV2HTTPController) claimWithWait(
 	}
 }
 
+func (h *RuntimeV2HTTPController) pollCommandsWithWait(
+	ctx context.Context,
+	principal RuntimeSessionPrincipal,
+	wait time.Duration,
+) (RuntimeCommandsResponse, error) {
+	response, err := h.dependencies.Cancellations.PollCommands(ctx, principal)
+	if err != nil || len(response.Commands) > 0 || wait == 0 {
+		return response, err
+	}
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	poll := time.NewTicker(200 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return RuntimeCommandsResponse{}, ctx.Err()
+		case <-deadline.C:
+			return response, nil
+		case <-poll.C:
+			response, err = h.dependencies.Cancellations.PollCommands(ctx, principal)
+			if err != nil || len(response.Commands) > 0 {
+				return response, err
+			}
+		}
+	}
+}
+
 func runtimeSessionRequestFromHello(hello RuntimeHelloPayload) RuntimeSessionRequest {
 	return RuntimeSessionRequest{
 		RuntimeSessionIdentity: RuntimeSessionIdentity{
@@ -700,6 +793,35 @@ func parseRuntimeV2Wait(raw string) (time.Duration, error) {
 	return time.Duration(seconds) * time.Second, nil
 }
 
+func parseRuntimeV2CommandsQuery(request *http.Request) (uuid.UUID, time.Duration, error) {
+	if request == nil || request.URL == nil {
+		return uuid.Nil, 0, runtimeV2ValidationError()
+	}
+	query := request.URL.Query()
+	for key, values := range query {
+		if (key != "runtime_session_id" && key != "wait") || len(values) != 1 {
+			return uuid.Nil, 0, runtimeV2ValidationError()
+		}
+	}
+	sessionValues, ok := query["runtime_session_id"]
+	if !ok || len(sessionValues) != 1 {
+		return uuid.Nil, 0, runtimeV2ValidationError()
+	}
+	sessionID, err := parseRuntimeV2PathUUID(sessionValues[0])
+	if err != nil {
+		return uuid.Nil, 0, err
+	}
+	waitValues, ok := query["wait"]
+	if !ok {
+		return sessionID, 0, nil
+	}
+	wait, err := parseRuntimeV2Wait(waitValues[0])
+	if err != nil {
+		return uuid.Nil, 0, err
+	}
+	return sessionID, wait, nil
+}
+
 func runtimeV2ValidationError() *RuntimeTransportError {
 	return NewRuntimeTransportError(RuntimeErrorValidationFailed, runtimeErrorDefaultMessage(RuntimeErrorValidationFailed))
 }
@@ -790,6 +912,15 @@ func mapRuntimeV2HTTPError(err error) *RuntimeTransportError {
 			code = RuntimeErrorInternal
 		}
 		return newRuntimeTransportError(code, runtimeErrorDefaultMessage(code), err)
+	}
+	if errors.Is(err, ErrRuntimeCancellationInvalid) {
+		return newRuntimeTransportError(RuntimeErrorValidationFailed, runtimeErrorDefaultMessage(RuntimeErrorValidationFailed), err)
+	}
+	if errors.Is(err, ErrRuntimeCancellationNotFound) {
+		return newRuntimeTransportError(RuntimeErrorNotFound, runtimeErrorDefaultMessage(RuntimeErrorNotFound), err)
+	}
+	if errors.Is(err, ErrRuntimeCancellationRunEnded) {
+		return newRuntimeTransportError(RuntimeErrorRunAlreadyTerminal, runtimeErrorDefaultMessage(RuntimeErrorRunAlreadyTerminal), err)
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		mapped := newRuntimeTransportError(RuntimeErrorServiceUnavailable, runtimeErrorDefaultMessage(RuntimeErrorServiceUnavailable), err)

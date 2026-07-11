@@ -79,6 +79,25 @@ func TestRuntimeCancellationPollUsesPrincipalRunAttemptCancellationLockOrder(t *
 	require.Equal(t, string(RuntimeCancelDelivered), fixture.tx.cancellation.State)
 }
 
+func TestRuntimeCancellationRedeliveryTouchesOrderingWithoutLosingState(t *testing.T) {
+	fixture := newRuntimeCancellationFixture(t)
+	fixture.tx.cancellation = deliveredRuntimeCancellation(fixture)
+	errorCode := "STOP_IN_PROGRESS"
+	fixture.tx.cancellation.State = string(RuntimeCancelStopping)
+	fixture.tx.cancellation.ErrorCode = &errorCode
+
+	response, err := fixture.coordinator.PollCommands(context.Background(), fixture.principal)
+	require.NoError(t, err)
+	require.Len(t, response.Commands, 1)
+	require.Equal(t, string(RuntimeCancelStopping), fixture.tx.cancellation.State)
+	require.NotNil(t, fixture.tx.cancellation.ErrorCode)
+	require.Equal(t, errorCode, *fixture.tx.cancellation.ErrorCode)
+	require.Equal(t, []string{
+		"lock_session", "lock_node", "lock_credential", "lock_command_run",
+		"lock_attempt", "lock_cancellation", "advance_cancellation", "mirror_cancellation",
+	}, fixture.tx.calls)
+}
+
 func TestRuntimeCancellationStoppingAckKeepsAttemptCapacity(t *testing.T) {
 	fixture := newRuntimeCancellationFixture(t)
 	fixture.tx.cancellation = deliveredRuntimeCancellation(fixture)

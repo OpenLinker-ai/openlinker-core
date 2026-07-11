@@ -50,7 +50,8 @@ func (h *RuntimeV2HTTPController) WebSocket(c echo.Context) error {
 		return writeRuntimeV2Error(c, transportErr)
 	}
 	if h == nil || h.dependencies.Sessions == nil || h.dependencies.Leases == nil ||
-		h.dependencies.EventStore == nil || h.dependencies.Finalizer == nil {
+		h.dependencies.EventStore == nil || h.dependencies.Finalizer == nil ||
+		h.dependencies.Cancellations == nil {
 		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
 	}
 	if !websocket.IsWebSocketUpgrade(c.Request()) {
@@ -93,6 +94,7 @@ type runtimeV2WSConnection struct {
 	operationMu   sync.Mutex
 	correlationMu sync.Mutex
 	assignments   map[uuid.UUID]runtimeV2WSAssignmentCorrelation
+	cancellations map[uuid.UUID]runtimeV2WSCancellationCorrelation
 }
 
 type runtimeV2WSWriteRequest struct {
@@ -105,6 +107,11 @@ type runtimeV2WSWriteRequest struct {
 type runtimeV2WSAssignmentCorrelation struct {
 	envelope RuntimeEnvelope
 	payload  RunAssignedPayload
+}
+
+type runtimeV2WSCancellationCorrelation struct {
+	envelope RuntimeEnvelope
+	payload  RunCancelPayload
 }
 
 func newRuntimeV2WSConnection(
@@ -124,6 +131,7 @@ func newRuntimeV2WSConnection(
 		writerDone:      make(chan struct{}),
 		maintenanceDone: make(chan struct{}),
 		assignments:     make(map[uuid.UUID]runtimeV2WSAssignmentCorrelation),
+		cancellations:   make(map[uuid.UUID]runtimeV2WSCancellationCorrelation),
 	}
 }
 
@@ -260,6 +268,8 @@ func (c *runtimeV2WSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 		err = c.handleRunEvent(envelope)
 	case RuntimeMessageRunResult:
 		err = c.handleRunResult(envelope)
+	case RuntimeMessageRunCancelAck:
+		err = c.handleRunCancelAck(envelope)
 	case RuntimeMessageResume:
 		err = c.handleResume(envelope)
 	default:
@@ -398,6 +408,22 @@ func (c *runtimeV2WSConnection) handleRunResult(envelope RuntimeEnvelope) error 
 	return sendRuntimeV2WSReply(c, envelope, RuntimeMessageRunResultAck, response)
 }
 
+func (c *runtimeV2WSConnection) handleRunCancelAck(envelope RuntimeEnvelope) error {
+	payload, err := DecodeRuntimeMessagePayload[RunCancelAckPayload](envelope, RuntimeMessageRunCancelAck)
+	if err != nil {
+		return err
+	}
+	correlation, err := c.cancellationCorrelation(envelope, payload)
+	if err != nil {
+		return err
+	}
+	if err = ValidateRuntimeReplyCorrelation(correlation.envelope, envelope); err != nil {
+		return err
+	}
+	_, err = c.controller.dependencies.Cancellations.AckCancel(c.ctx, c.sessionPrincipal, payload)
+	return err
+}
+
 func (c *runtimeV2WSConnection) handleResume(envelope RuntimeEnvelope) error {
 	if envelope.ReplyToMessageID != nil {
 		return runtimeV2ValidationError()
@@ -435,12 +461,14 @@ func (c *runtimeV2WSConnection) maintenanceLoop() {
 	defer claimTicker.Stop()
 	defer heartbeatTicker.Stop()
 
+	c.commandAndSend()
 	c.claimAndSend()
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
 		case <-claimTicker.C:
+			c.commandAndSend()
 			c.claimAndSend()
 		case <-heartbeatTicker.C:
 			if _, err := c.controller.dependencies.Sessions.HeartbeatSession(
@@ -450,6 +478,44 @@ func (c *runtimeV2WSConnection) maintenanceLoop() {
 				return
 			}
 		}
+	}
+}
+
+func (c *runtimeV2WSConnection) commandAndSend() {
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
+	command, _, err := c.controller.dependencies.Cancellations.NextCommand(c.ctx, c.sessionPrincipal)
+	if err != nil {
+		mapped := mapRuntimeV2HTTPError(err)
+		if _, fatal := RuntimeWebSocketCloseCode(mapped.Body.Code); fatal {
+			c.closeForError(mapped)
+		}
+		return
+	}
+	if command == nil {
+		return
+	}
+	decoded, err := DecodePendingCommand(*command)
+	if err != nil {
+		c.closeForError(runtimeV2WSOutboundError(err))
+		return
+	}
+	if decoded.Type != RuntimeMessageRunCancel || decoded.Cancel == nil {
+		c.closeForError(runtimeV2WSOutboundError(errors.New("unexpected runtime v2 websocket command type")))
+		return
+	}
+	if c.cancellationAlreadySent(*decoded.Cancel) {
+		return
+	}
+	message, envelope, err := newRuntimeV2WSTypedMessage(RuntimeMessageRunCancel, nil, *decoded.Cancel)
+	if err != nil {
+		c.closeForError(runtimeV2WSOutboundError(err))
+		return
+	}
+	c.recordCancellation(envelope, *decoded.Cancel)
+	if err = c.writeMessage(message); err != nil {
+		c.removeCancellationMessage(envelope.MessageID)
+		c.cancel()
 	}
 }
 
@@ -525,6 +591,56 @@ func (c *runtimeV2WSConnection) recordAssignment(envelope RuntimeEnvelope, paylo
 func (c *runtimeV2WSConnection) removeAssignmentMessage(messageID uuid.UUID) {
 	c.correlationMu.Lock()
 	delete(c.assignments, messageID)
+	c.correlationMu.Unlock()
+}
+
+func (c *runtimeV2WSConnection) cancellationCorrelation(
+	envelope RuntimeEnvelope,
+	payload RunCancelAckPayload,
+) (runtimeV2WSCancellationCorrelation, error) {
+	if envelope.ReplyToMessageID == nil {
+		return runtimeV2WSCancellationCorrelation{}, runtimeV2ValidationError()
+	}
+	c.correlationMu.Lock()
+	correlation, ok := c.cancellations[*envelope.ReplyToMessageID]
+	c.correlationMu.Unlock()
+	if !ok || correlation.payload.CancellationID != payload.CancellationID ||
+		correlation.payload.AttemptIdentity != payload.AttemptIdentity {
+		return runtimeV2WSCancellationCorrelation{}, runtimeV2ValidationError()
+	}
+	return correlation, nil
+}
+
+func (c *runtimeV2WSConnection) cancellationAlreadySent(payload RunCancelPayload) bool {
+	c.correlationMu.Lock()
+	defer c.correlationMu.Unlock()
+	for _, correlation := range c.cancellations {
+		if correlation.payload.CancellationID == payload.CancellationID &&
+			correlation.payload.AttemptIdentity == payload.AttemptIdentity {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *runtimeV2WSConnection) recordCancellation(envelope RuntimeEnvelope, payload RunCancelPayload) {
+	c.correlationMu.Lock()
+	if len(c.cancellations) >= RuntimeMaximumNodeCapacity {
+		for messageID := range c.cancellations {
+			delete(c.cancellations, messageID)
+			break
+		}
+	}
+	c.cancellations[envelope.MessageID] = runtimeV2WSCancellationCorrelation{
+		envelope: envelope,
+		payload:  payload,
+	}
+	c.correlationMu.Unlock()
+}
+
+func (c *runtimeV2WSConnection) removeCancellationMessage(messageID uuid.UUID) {
+	c.correlationMu.Lock()
+	delete(c.cancellations, messageID)
 	c.correlationMu.Unlock()
 }
 

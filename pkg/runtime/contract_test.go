@@ -215,6 +215,23 @@ func TestRuntimeV2ContractDefinesRecoveryAndCancellation(t *testing.T) {
 	require.NoError(t, json.Unmarshal(contract.Definitions["RuntimeErrorBody"], &runtimeError))
 	require.Equal(t, contract.StableErrorCodes, runtimeError.Properties.Code.Enum)
 	requireUniqueStrings(t, "stable error code", contract.StableErrorCodes)
+
+	var sessionQuery struct {
+		Type     string `json:"type"`
+		Format   string `json:"format"`
+		Required bool   `json:"required"`
+	}
+	for _, endpoint := range contract.Endpoints {
+		if endpoint.Path != "/api/v1/agent-runtime/v2/commands" {
+			continue
+		}
+		raw, ok := endpoint.Query["runtime_session_id"]
+		require.True(t, ok)
+		require.NoError(t, json.Unmarshal(raw, &sessionQuery))
+	}
+	require.Equal(t, "string", sessionQuery.Type)
+	require.Equal(t, "uuid", sessionQuery.Format)
+	require.True(t, sessionQuery.Required)
 }
 
 func TestRuntimeV2ContractRejectsLegacyRoutes(t *testing.T) {

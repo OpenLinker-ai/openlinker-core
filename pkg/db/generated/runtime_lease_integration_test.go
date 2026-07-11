@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const runtimeV2ContractDigest = "d83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f"
+const runtimeV2ContractDigest = "60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61"
 
 var runtimeV2RequiredFeatures = []string{
 	"lease_fence",

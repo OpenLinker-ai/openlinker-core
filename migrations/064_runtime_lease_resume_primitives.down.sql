@@ -27,7 +27,7 @@ BEGIN
         WHERE schema_version = 64
           AND migration_name = '064_runtime_lease_resume_primitives'
           AND runtime_contract_id = 'openlinker.runtime.v2'
-          AND runtime_contract_digest = 'd83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f'
+          AND runtime_contract_digest = '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61'
           AND is_current
     ) <> 1 OR (SELECT COUNT(*) FROM runtime_schema_contracts WHERE is_current) <> 1 THEN
         RAISE EXCEPTION 'migration 064 down requires the exact current schema contract 64';
@@ -150,7 +150,7 @@ SET schema_version = 63,
 WHERE schema_version = 64
   AND migration_name = '064_runtime_lease_resume_primitives'
   AND runtime_contract_id = 'openlinker.runtime.v2'
-  AND runtime_contract_digest = 'd83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f'
+  AND runtime_contract_digest = '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61'
   AND is_current;
 
 COMMIT;
