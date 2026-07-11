@@ -673,6 +673,23 @@ func TestCallAgentHandlerReturnsStableMissingIdempotencyError(t *testing.T) {
 	assert.Equal(t, httpx.ErrorCode(runtimepkg.IdempotencyErrorKeyRequired), httpErr.Code)
 }
 
+func TestLegacyCallAgentRouteRequiresRuntimeV2WithoutCallingService(t *testing.T) {
+	svc := newControlA2AService()
+	e := echo.New()
+	passthrough := func(next echo.HandlerFunc) echo.HandlerFunc { return next }
+	NewHandler(svc).Register(e.Group("/api/v1"), passthrough, passthrough)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/call-agent", strings.NewReader(`{"legacy":true}`))
+	req.Header.Set(echo.HeaderAuthorization, "Bearer must-not-be-validated")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUpgradeRequired, rec.Code)
+	var body map[string]map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "RUNTIME_CLIENT_UPGRADE_REQUIRED", body["error"]["code"])
+	require.Empty(t, svc.calls)
+}
+
 func TestA2ARunTaskArtifactAndEventMapping(t *testing.T) {
 	for _, tc := range []struct {
 		status string

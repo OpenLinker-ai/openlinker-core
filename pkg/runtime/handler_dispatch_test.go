@@ -12,10 +12,44 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/stretchr/testify/require"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
+
+func TestLegacyRuntimeRoutesRequireV2WithoutCallingService(t *testing.T) {
+	svc := &mockRuntimeService{}
+	e := echo.New()
+	NewHandler(svc).RegisterAgentRuntime(e.Group("/api/v1"))
+
+	runID := uuid.NewString()
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodPost, path: "/api/v1/agent-runtime/heartbeat"},
+		{method: http.MethodGet, path: "/api/v1/agent-runtime/runs/claim"},
+		{method: http.MethodPost, path: "/api/v1/agent-runtime/runs/" + runID + "/result"},
+		{method: http.MethodGet, path: "/api/v1/agent-runtime/ws"},
+	}
+	for _, test := range tests {
+		req := httptest.NewRequest(test.method, test.path, strings.NewReader(`{"legacy":true}`))
+		req.Header.Set(echo.HeaderAuthorization, "Bearer must-not-be-validated")
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusUpgradeRequired, rec.Code, test.method+" "+test.path)
+		var body map[string]map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.Equal(t, "RUNTIME_CLIENT_UPGRADE_REQUIRED", body["error"]["code"])
+	}
+
+	require.Empty(t, svc.validateRuntimeTokenPlaintext)
+	require.Empty(t, svc.heartbeatToken)
+	require.Empty(t, svc.claimToken)
+	require.Empty(t, svc.completeToken)
+	require.Empty(t, svc.wsToken)
+}
 
 func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
 	userID := uuid.New()

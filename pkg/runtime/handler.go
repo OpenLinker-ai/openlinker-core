@@ -131,10 +131,23 @@ func (h *Handler) CancelRun(c echo.Context) error {
 //	POST /agent-runtime/runs/:id/result  Agent 回传终态结果
 //	GET  /agent-runtime/ws               Agent 出站 WebSocket，平台实时下发 run
 func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
-	api.POST("/agent-runtime/heartbeat", h.PostAgentHeartbeat)
-	api.GET("/agent-runtime/runs/claim", h.ClaimRuntimePullRun)
-	api.POST("/agent-runtime/runs/:id/result", h.PostRuntimePullResult)
-	api.GET("/agent-runtime/ws", h.RuntimeWebSocket)
+	api.POST("/agent-runtime/heartbeat", RuntimeClientUpgradeRequired)
+	api.GET("/agent-runtime/runs/claim", RuntimeClientUpgradeRequired)
+	api.POST("/agent-runtime/runs/:id/result", RuntimeClientUpgradeRequired)
+	api.GET("/agent-runtime/ws", RuntimeClientUpgradeRequired)
+}
+
+// RuntimeClientUpgradeRequired is the only behavior exposed by pre-v2 runtime
+// routes. It runs before authentication, decoding, rate limiting, or any
+// service/database call, so an old client can never mutate v2 state.
+func RuntimeClientUpgradeRequired(c echo.Context) error {
+	return c.JSON(http.StatusUpgradeRequired, map[string]any{
+		"error": map[string]any{
+			"code":      "RUNTIME_CLIENT_UPGRADE_REQUIRED",
+			"message":   "Runtime protocol v2 is required",
+			"retryable": false,
+		},
+	})
 }
 
 // PostRun 调用 Agent。

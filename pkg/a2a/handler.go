@@ -64,7 +64,7 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.
 	creator.GET("/a2a-policy", h.GetCallPolicy)
 	creator.PUT("/a2a-policy", h.UpdateCallPolicy)
 
-	api.POST("/agent-runtime/call-agent", h.CallAgent)
+	api.POST("/agent-runtime/call-agent", runtime.RuntimeClientUpgradeRequired)
 	api.GET("/a2a/parents", h.ListParentRuns, queryMiddleware)
 	publicProtocol := api.Group("/a2a/agents/:slug")
 	publicProtocol.GET("/.well-known/agent-card.json", h.GetPublicAgentCardHTTP)
