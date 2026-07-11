@@ -187,6 +187,7 @@ SELECT r.id, r.user_id, r.agent_id, r.cost_cents, r.started_at,
 FROM runs r
 JOIN agents a ON a.id = r.agent_id
 WHERE r.status = 'running'
+  AND r.runtime_contract_id <> 'openlinker.runtime.v2'
   AND a.connection_mode IN ('runtime_pull', 'runtime_ws')
   AND (
     (r.claimed_at IS NULL AND r.started_at < $1)
