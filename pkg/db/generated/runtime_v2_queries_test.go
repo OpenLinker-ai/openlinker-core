@@ -88,6 +88,130 @@ func TestRuntimeV2AttemptAndCancellationQueries(t *testing.T) {
 	requireSQLName(t, dbtx.queryRowSQL, "CreateRunCancellation")
 }
 
+func TestResultFinalizationQueries(t *testing.T) {
+	now := time.Date(2026, 7, 11, 8, 30, 0, 0, time.UTC)
+	runID, userID, agentID := uuid.New(), uuid.New(), uuid.New()
+	attemptID, leaseID, coreID := uuid.New(), uuid.New(), uuid.New()
+	resultID, terminalEventID := uuid.New(), uuid.New()
+	attemptNo, finalSequence := int32(1), int64(4)
+	fence, durationMs := int64(7), int32(1234)
+	executorType, connectionMode := "agent_node", "runtime_ws"
+	workerID, classification, outcome := "worker-a", "success", "success"
+	fingerprint := []byte("0123456789abcdef0123456789abcdef")
+	acceptedAt, finishedAt := now.Add(-time.Minute), now
+
+	attemptValues := []any{
+		attemptID, runID, agentID, int32(1), &attemptNo, executorType,
+		leaseID, fence, (*uuid.UUID)(nil), &workerID, (*uuid.UUID)(nil),
+		(*uuid.UUID)(nil), coreID, coreID, now.Add(-2 * time.Minute),
+		now.Add(time.Minute), &acceptedAt, &acceptedAt, now.Add(time.Minute),
+		now.Add(2 * time.Minute), &finishedAt, &outcome, &resultID,
+		fingerprint, &classification, &finishedAt, finalSequence, &finalSequence,
+		(*string)(nil), (*string)(nil), now.Add(-2 * time.Minute),
+	}
+	dbtx := &fakeDBTX{row: fakeRow{values: attemptValues}}
+	q := New(dbtx)
+
+	lockedAttempt, err := q.LockRunAttemptForResult(context.Background(), LockRunAttemptForResultParams{
+		RunID: runID, ID: attemptID,
+	})
+	if err != nil || lockedAttempt.ID != attemptID || !strings.Contains(dbtx.queryRowSQL, "FOR UPDATE") {
+		t.Fatalf("LockRunAttemptForResult = %#v, %v", lockedAttempt, err)
+	}
+
+	dbtx.row = fakeRow{values: attemptValues}
+	byResult, err := q.GetRunAttemptByResultID(context.Background(), GetRunAttemptByResultIDParams{
+		RunID: runID, ResultID: resultID,
+	})
+	if err != nil || byResult.ResultID == nil || *byResult.ResultID != resultID {
+		t.Fatalf("GetRunAttemptByResultID = %#v, %v", byResult, err)
+	}
+
+	dbtx.row = fakeRow{values: attemptValues}
+	_, err = q.FinishRunAttempt(context.Background(), FinishRunAttemptParams{
+		RunID: runID, ID: attemptID, LeaseID: leaseID, FencingToken: fence,
+		Outcome: outcome, ResultID: resultID, ResultFingerprint: fingerprint,
+		ResultClassification: classification, FinalClientEventSeq: finalSequence,
+	})
+	if err != nil {
+		t.Fatalf("FinishRunAttempt = %v", err)
+	}
+	for _, guard := range []string{
+		"accepted_at IS NOT NULL", "finished_at IS NULL", "result_id IS NULL",
+		"result_acknowledged_at = clock_timestamp()",
+	} {
+		if !strings.Contains(dbtx.queryRowSQL, guard) {
+			t.Fatalf("FinishRunAttempt missing guard/write %q", guard)
+		}
+	}
+
+	runDeadline := now.Add(5 * time.Minute)
+	endpointIdempotent := true
+	runLockValues := []any{
+		runID, userID, agentID, "running", "executing", "openlinker.runtime.v2",
+		&connectionMode, &endpointIdempotent, []byte(nil), (*string)(nil),
+		(*string)(nil), int32(1), int32(3), &attemptID, &attemptID, &leaseID,
+		fence, (*uuid.UUID)(nil), &workerID, (*uuid.UUID)(nil), (*uuid.UUID)(nil),
+		&runDeadline, (*time.Time)(nil), (*uuid.UUID)(nil), []byte(nil),
+		(*uuid.UUID)(nil), (*time.Time)(nil), (*uuid.UUID)(nil), (*string)(nil),
+		int32(25), now.Add(-2 * time.Minute), (*time.Time)(nil), now,
+	}
+	dbtx.row = fakeRow{values: runLockValues}
+	lockedRun, err := q.LockRunForResultFinalization(context.Background(), runID)
+	if err != nil || lockedRun.ID != runID || lockedRun.DatabaseNow != now ||
+		!strings.Contains(dbtx.queryRowSQL, "FOR UPDATE") {
+		t.Fatalf("LockRunForResultFinalization = %#v, %v", lockedRun, err)
+	}
+
+	nextAttemptAt := now.Add(2 * time.Second)
+	dbtx.row = fakeRow{values: []any{
+		runID, "running", "retry_wait", &nextAttemptAt, (*uuid.UUID)(nil),
+		(*uuid.UUID)(nil), (*uuid.UUID)(nil), (*time.Time)(nil),
+	}}
+	retryRun, err := q.TransitionRunToRetryWait(context.Background(), TransitionRunToRetryWaitParams{
+		RunID: runID, AttemptID: attemptID, RetryAfterMs: 2_000,
+	})
+	if err != nil || retryRun.DispatchState != "retry_wait" ||
+		!strings.Contains(dbtx.queryRowSQL, "clock_timestamp() +") {
+		t.Fatalf("TransitionRunToRetryWait = %#v, %v", retryRun, err)
+	}
+
+	output := []byte(`{"answer":42}`)
+	dbtx.row = fakeRow{values: []any{
+		runID, "success", "terminal", output, (*string)(nil), (*string)(nil),
+		&durationMs, &finishedAt, (*time.Time)(nil), &resultID, fingerprint,
+		&terminalEventID, (*time.Time)(nil),
+	}}
+	finalized, err := q.FinalizeRunFromResult(context.Background(), FinalizeRunFromResultParams{
+		RunID: runID, AttemptID: attemptID, Status: "success", DispatchState: "terminal",
+		Output: output, ResultID: &resultID, ResultFingerprint: fingerprint,
+		DurationMs: durationMs, TerminalEventID: terminalEventID,
+	})
+	if err != nil || finalized.DurationMs == nil || *finalized.DurationMs != durationMs {
+		t.Fatalf("FinalizeRunFromResult = %#v, %v", finalized, err)
+	}
+	if len(dbtx.queryRowArgs) != 11 || dbtx.queryRowArgs[9] != durationMs ||
+		!strings.Contains(dbtx.queryRowSQL, "duration_ms = $10") {
+		t.Fatalf("FinalizeRunFromResult must persist request duration: args=%#v", dbtx.queryRowArgs)
+	}
+
+	eventValues := runEventRow(
+		terminalEventID, runID, nil, 5, "run.completed", []byte(`{"status":"success"}`), now,
+	)
+	dbtx.row = fakeRow{values: eventValues}
+	event, err := q.InsertTerminalRunEvent(context.Background(), InsertTerminalRunEventParams{
+		ID: terminalEventID, RunID: runID, EventType: "run.completed",
+		Payload: []byte(`{"status":"success"}`),
+	})
+	if err != nil || event.ID != terminalEventID || len(dbtx.queryRowArgs) != 5 {
+		t.Fatalf("InsertTerminalRunEvent = %#v, %v", event, err)
+	}
+	if !strings.Contains(dbtx.queryRowSQL, "INSERT INTO run_events") ||
+		!strings.Contains(dbtx.queryRowSQL, "SELECT $1, target_run.id") {
+		t.Fatal("InsertTerminalRunEvent must use the caller-supplied deterministic ID")
+	}
+}
+
 func TestRuntimeV2RunEventQueriesAndLockOrder(t *testing.T) {
 	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
 	runID, agentID, attemptID := uuid.New(), uuid.New(), uuid.New()
@@ -286,7 +410,7 @@ func TestRuntimeV2OutboxLedgerAndDLQQueries(t *testing.T) {
 	effectValues := []any{
 		effectID, runID, eventID, "delivery.webhook", "agent:" + agentID.String(),
 		[]byte(`{}`), "processing", now, &owner, ptrTime(now.Add(time.Minute)),
-		int32(1), int32(12), (*time.Time)(nil), (*string)(nil), now,
+		int32(1), int32(12), (*time.Time)(nil), (*time.Time)(nil), (*string)(nil), now,
 	}
 	dbtx.queryRows = &fakeRows{rows: [][]any{effectValues}}
 	effects, err := q.ClaimRunEffects(context.Background(), ClaimRunEffectsParams{
@@ -296,6 +420,80 @@ func TestRuntimeV2OutboxLedgerAndDLQQueries(t *testing.T) {
 		t.Fatalf("ClaimRunEffects = %#v, %v", effects, err)
 	}
 	requireSQLName(t, dbtx.querySQL, "ClaimRunEffects")
+
+	dbtx.row = fakeRow{values: effectValues}
+	createdEffect, err := q.CreateRunEffect(context.Background(), CreateRunEffectParams{
+		ID: effectID, RunID: runID, TerminalEventID: eventID,
+		EffectType: "delivery.webhook", TargetKey: "agent:" + agentID.String(),
+		Metadata: []byte(`{}`), MaxAttempts: 12,
+	})
+	if err != nil || createdEffect.ID != effectID {
+		t.Fatalf("CreateRunEffect = %#v, %v", createdEffect, err)
+	}
+	if !strings.Contains(dbtx.queryRowSQL, "DO NOTHING") || strings.Contains(dbtx.queryRowSQL, "DO UPDATE") {
+		t.Fatal("CreateRunEffect must not mutate the existing business-key row")
+	}
+
+	dbtx.row = fakeRow{values: effectValues}
+	byBusinessKey, err := q.GetRunEffectByBusinessKey(context.Background(), GetRunEffectByBusinessKeyParams{
+		RunID: runID, EffectType: "delivery.webhook", TargetKey: "agent:" + agentID.String(),
+	})
+	if err != nil || byBusinessKey.ID != effectID {
+		t.Fatalf("GetRunEffectByBusinessKey = %#v, %v", byBusinessKey, err)
+	}
+
+	dbtx.row = fakeRow{values: effectValues}
+	_, err = q.MarkRunEffectSucceeded(context.Background(), MarkRunEffectSucceededParams{
+		ID: effectID, LeaseOwner: owner, AttemptCount: 1,
+	})
+	if err != nil || !strings.Contains(dbtx.queryRowSQL, "attempt_count = $3") || len(dbtx.queryRowArgs) != 3 {
+		t.Fatalf("MarkRunEffectSucceeded fence = args:%#v sql:%s err:%v", dbtx.queryRowArgs, dbtx.queryRowSQL, err)
+	}
+
+	dbtx.row = fakeRow{values: effectValues}
+	_, err = q.RetryOrDeadLetterRunEffect(context.Background(), RetryOrDeadLetterRunEffectParams{
+		ID: effectID, LeaseOwner: owner, AttemptCount: 1,
+		RetryAfterMs: 2_000, LastError: "temporary failure",
+	})
+	if err != nil || !strings.Contains(dbtx.queryRowSQL, "clock_timestamp() +") ||
+		!strings.Contains(dbtx.queryRowSQL, "attempt_count = $3") || len(dbtx.queryRowArgs) != 5 {
+		t.Fatalf("RetryOrDeadLetterRunEffect = args:%#v sql:%s err:%v", dbtx.queryRowArgs, dbtx.queryRowSQL, err)
+	}
+
+	dbtx.row = fakeRow{values: effectValues}
+	_, err = q.DeadLetterRunEffect(context.Background(), DeadLetterRunEffectParams{
+		ID: effectID, LeaseOwner: owner, AttemptCount: 1, LastError: "permanent failure",
+	})
+	if err != nil || !strings.Contains(dbtx.queryRowSQL, "dead_lettered_at = clock_timestamp()") ||
+		!strings.Contains(dbtx.queryRowSQL, "attempt_count = $3") {
+		t.Fatalf("DeadLetterRunEffect = args:%#v sql:%s err:%v", dbtx.queryRowArgs, dbtx.queryRowSQL, err)
+	}
+
+	dbtx.queryRows = &fakeRows{rows: [][]any{effectValues}}
+	expiredEffects, err := q.DeadLetterExpiredRunEffectsAtLimit(context.Background())
+	if err != nil || len(expiredEffects) != 1 ||
+		!strings.Contains(dbtx.querySQL, "lease_expires_at <= clock_timestamp()") {
+		t.Fatalf("DeadLetterExpiredRunEffectsAtLimit = %#v, %v", expiredEffects, err)
+	}
+
+	actorID := uuid.New()
+	dbtx.row = fakeRow{values: effectValues}
+	_, err = q.ReplayRunEffect(context.Background(), ReplayRunEffectParams{
+		ID: effectID, ActorType: "admin", ActorID: &actorID, Reason: "operator approved replay",
+	})
+	if err != nil || !strings.Contains(dbtx.queryRowSQL, "INSERT INTO run_effect_replays") ||
+		!strings.Contains(dbtx.queryRowSQL, "FROM replay_audit") || len(dbtx.queryRowArgs) != 4 {
+		t.Fatalf("ReplayRunEffect audit = args:%#v sql:%s err:%v", dbtx.queryRowArgs, dbtx.queryRowSQL, err)
+	}
+
+	replayID := uuid.New()
+	dbtx.queryRows = &fakeRows{rows: [][]any{{
+		replayID, effectID, "admin", &actorID, "operator approved replay", now,
+	}}}
+	replays, err := q.ListRunEffectReplaysByEffect(context.Background(), effectID)
+	if err != nil || len(replays) != 1 || replays[0].ID != replayID {
+		t.Fatalf("ListRunEffectReplaysByEffect = %#v, %v", replays, err)
+	}
 
 	ledgerValues := []any{runID, eventID, agentID, int32(1), int64(25), now}
 	dbtx.row = fakeRow{values: ledgerValues}
@@ -317,6 +515,9 @@ func TestRuntimeV2OutboxLedgerAndDLQQueries(t *testing.T) {
 		t.Fatalf("CreateRunDeadLetter = %#v, %v", deadLetter, err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "CreateRunDeadLetter")
+	if !strings.Contains(dbtx.queryRowSQL, "DO NOTHING") || strings.Contains(dbtx.queryRowSQL, "DO UPDATE") {
+		t.Fatal("CreateRunDeadLetter must not perform a no-op update on conflict")
+	}
 }
 
 func TestRuntimeV2NodeSessionAndClusterQueries(t *testing.T) {

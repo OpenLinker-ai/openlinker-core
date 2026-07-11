@@ -805,6 +805,107 @@ END
 $$;
 SQL
 
+  psql_stdin --quiet <<'SQL'
+BEGIN;
+INSERT INTO runs (
+  id, user_id, agent_id, input, status, cost_cents,
+  platform_fee_cents, creator_revenue_cents, source,
+  idempotency_key_hash, idempotency_fingerprint,
+  connection_mode_snapshot, dispatch_deadline_at, run_deadline_at
+) VALUES (
+  '10000000-0000-4000-8000-0000000000e0',
+  '10000000-0000-4000-8000-000000000001',
+  '10000000-0000-4000-8000-000000000002',
+  '{"case":"deadline-wins-after-result"}', 'running', 100, 20, 80, 'api',
+  decode(repeat('e0', 32), 'hex'), decode(repeat('e1', 32), 'hex'),
+  'runtime_ws', transaction_timestamp() + interval '2 minutes',
+  transaction_timestamp() + interval '10 minutes'
+);
+
+INSERT INTO run_attempts (
+  id, run_id, agent_id, offer_no, attempt_no, executor_type,
+  lease_id, fencing_token, offered_by_core_instance_id,
+  attached_core_instance_id, offered_at, offer_expires_at, accepted_at,
+  lease_expires_at, attempt_deadline_at, finished_at, outcome,
+  result_id, result_fingerprint, result_classification,
+  result_acknowledged_at, last_client_event_seq, final_client_event_seq
+) VALUES (
+  '10000000-0000-4000-8000-0000000000e1',
+  '10000000-0000-4000-8000-0000000000e0',
+  '10000000-0000-4000-8000-000000000002',
+  1, 1, 'core_http',
+  '10000000-0000-4000-8000-0000000000e2', 1,
+  '10000000-0000-4000-8000-000000000007',
+  '10000000-0000-4000-8000-000000000007',
+  transaction_timestamp(), transaction_timestamp() + interval '30 seconds',
+  transaction_timestamp(), transaction_timestamp() + interval '60 seconds',
+  transaction_timestamp() + interval '5 minutes', transaction_timestamp(),
+  'timeout', '10000000-0000-4000-8000-0000000000e5',
+  decode(repeat('e5', 32), 'hex'), 'success', transaction_timestamp(), 1, 3
+);
+
+INSERT INTO run_events (
+  id, run_id, sequence, event_type, payload,
+  client_event_id, client_event_seq, payload_fingerprint,
+  attempt_id, attempt_no, fencing_token
+) VALUES (
+  '10000000-0000-4000-8000-0000000000e3',
+  '10000000-0000-4000-8000-0000000000e0',
+  1, 'run.progress', '{"progress":90}',
+  '10000000-0000-4000-8000-0000000000e6', 1,
+  decode(repeat('e6', 32), 'hex'),
+  '10000000-0000-4000-8000-0000000000e1', 1, 1
+);
+
+INSERT INTO run_events (id, run_id, sequence, event_type, payload)
+VALUES (
+  '10000000-0000-4000-8000-0000000000e4',
+  '10000000-0000-4000-8000-0000000000e0',
+  2, 'run.failed', '{"status":"timeout","terminal":true}'
+);
+
+INSERT INTO run_accounting_ledger (
+  run_id, terminal_event_id, agent_id, success_delta, revenue_delta_cents
+) VALUES (
+  '10000000-0000-4000-8000-0000000000e0',
+  '10000000-0000-4000-8000-0000000000e4',
+  '10000000-0000-4000-8000-000000000002', 0, 0
+);
+
+UPDATE runs
+SET status = 'timeout', dispatch_state = 'terminal',
+    error_code = 'RUN_DEADLINE_EXCEEDED', duration_ms = 9000,
+    finished_at = transaction_timestamp(), offer_count = 1,
+    attempt_count = 1, fencing_token = 1,
+    latest_attempt_id = '10000000-0000-4000-8000-0000000000e1',
+    terminal_event_id = '10000000-0000-4000-8000-0000000000e4'
+WHERE id = '10000000-0000-4000-8000-0000000000e0';
+
+SET CONSTRAINTS ALL IMMEDIATE;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM runs
+    WHERE id = '10000000-0000-4000-8000-0000000000e0'
+      AND (result_id IS NOT NULL OR result_fingerprint IS NOT NULL OR output IS NOT NULL)
+  ) OR NOT EXISTS (
+    SELECT 1
+    FROM run_attempts
+    WHERE id = '10000000-0000-4000-8000-0000000000e1'
+      AND outcome = 'timeout'
+      AND result_id = '10000000-0000-4000-8000-0000000000e5'
+      AND result_classification = 'success'
+      AND last_client_event_seq = 1
+      AND final_client_event_seq = 3
+  ) THEN
+    RAISE EXCEPTION 'deadline-wins Result evidence was not private to Attempt';
+  END IF;
+END
+$$;
+ROLLBACK;
+SQL
+
   LOCK_ORDER_OUTPUT_FILE="$(mktemp)"
   docker exec \
     --env PGAPPNAME="runtime-heartbeat-lock-order" \
@@ -1150,6 +1251,179 @@ SQL
        '10000000-0000-4000-8000-000000000030',
        'webhook.agent', 'wrong-terminal-event', '{}'
      )"
+  expect_sql_failure \
+    "run_effect_outbox_dead_letter_consistent" \
+    "UPDATE run_effect_outbox
+     SET status = 'dead_letter', completed_at = NULL
+     WHERE id = '10000000-0000-4000-8000-000000000042'"
+  expect_sql_failure \
+    "run_effect_outbox_last_error_len" \
+    "UPDATE run_effect_outbox
+     SET last_error = repeat('x', 501)
+     WHERE id = '10000000-0000-4000-8000-000000000042'"
+
+  psql_stdin --quiet <<'SQL'
+UPDATE run_effect_outbox
+SET status = 'processing', completed_at = NULL,
+    lease_owner = '10000000-0000-4000-8000-0000000000f1',
+    lease_expires_at = clock_timestamp() + interval '1 minute',
+    attempt_count = 2
+WHERE id = '10000000-0000-4000-8000-000000000042';
+
+DO $$
+DECLARE
+  stale_owner_rows INTEGER;
+  stale_attempt_rows INTEGER;
+BEGIN
+  UPDATE run_effect_outbox
+  SET status = 'dead_letter', lease_owner = NULL, lease_expires_at = NULL,
+      dead_lettered_at = clock_timestamp(), last_error = 'stale owner'
+  WHERE id = '10000000-0000-4000-8000-000000000042'
+    AND status = 'processing'
+    AND lease_owner = '10000000-0000-4000-8000-0000000000ff'
+    AND attempt_count = 2;
+  GET DIAGNOSTICS stale_owner_rows = ROW_COUNT;
+
+  UPDATE run_effect_outbox
+  SET status = 'dead_letter', lease_owner = NULL, lease_expires_at = NULL,
+      dead_lettered_at = clock_timestamp(), last_error = 'stale attempt'
+  WHERE id = '10000000-0000-4000-8000-000000000042'
+    AND status = 'processing'
+    AND lease_owner = '10000000-0000-4000-8000-0000000000f1'
+    AND attempt_count = 1;
+  GET DIAGNOSTICS stale_attempt_rows = ROW_COUNT;
+
+  IF stale_owner_rows <> 0 OR stale_attempt_rows <> 0 THEN
+    RAISE EXCEPTION 'stale effect worker bypassed owner/attempt fence';
+  END IF;
+END
+$$;
+
+UPDATE run_effect_outbox
+SET status = 'dead_letter', lease_owner = NULL, lease_expires_at = NULL,
+    completed_at = NULL, dead_lettered_at = clock_timestamp(),
+    last_error = 'permanent delivery failure'
+WHERE id = '10000000-0000-4000-8000-000000000042'
+  AND status = 'processing'
+  AND lease_owner = '10000000-0000-4000-8000-0000000000f1'
+  AND attempt_count = 2;
+SQL
+
+  expect_sql_failure \
+    "run_effect_replays_actor_type_valid" \
+    "WITH target AS (
+       SELECT id FROM run_effect_outbox
+       WHERE id = '10000000-0000-4000-8000-000000000042'
+         AND status = 'dead_letter'
+       FOR UPDATE
+     ), replay_audit AS (
+       INSERT INTO run_effect_replays (effect_outbox_id, actor_type, actor_id, reason)
+       SELECT id, '', NULL, 'operator replay' FROM target
+       RETURNING effect_outbox_id
+     )
+     UPDATE run_effect_outbox effect
+     SET status = 'pending', available_at = clock_timestamp(),
+         attempt_count = 0, dead_lettered_at = NULL, last_error = NULL
+     FROM replay_audit
+     WHERE effect.id = replay_audit.effect_outbox_id"
+  expect_sql_failure \
+    "run_effect_replays_reason_len" \
+    "WITH target AS (
+       SELECT id FROM run_effect_outbox
+       WHERE id = '10000000-0000-4000-8000-000000000042'
+         AND status = 'dead_letter'
+       FOR UPDATE
+     ), replay_audit AS (
+       INSERT INTO run_effect_replays (effect_outbox_id, actor_type, actor_id, reason)
+       SELECT id, 'admin', NULL, '   ' FROM target
+       RETURNING effect_outbox_id
+     )
+     UPDATE run_effect_outbox effect
+     SET status = 'pending', available_at = clock_timestamp(),
+         attempt_count = 0, dead_lettered_at = NULL, last_error = NULL
+     FROM replay_audit
+     WHERE effect.id = replay_audit.effect_outbox_id"
+
+  psql_stdin --quiet <<'SQL'
+WITH target AS (
+  SELECT id
+  FROM run_effect_outbox
+  WHERE id = '10000000-0000-4000-8000-000000000042'
+    AND status = 'dead_letter'
+  FOR UPDATE
+), replay_audit AS (
+  INSERT INTO run_effect_replays (effect_outbox_id, actor_type, actor_id, reason)
+  SELECT id, 'admin', '10000000-0000-4000-8000-000000000001',
+         'operator approved replay'
+  FROM target
+  RETURNING effect_outbox_id
+)
+UPDATE run_effect_outbox effect
+SET status = 'pending', available_at = clock_timestamp(),
+    lease_owner = NULL, lease_expires_at = NULL, attempt_count = 0,
+    completed_at = NULL, dead_lettered_at = NULL, last_error = NULL
+FROM replay_audit
+WHERE effect.id = replay_audit.effect_outbox_id;
+
+INSERT INTO run_effect_outbox (
+  id, run_id, terminal_event_id, effect_type, target_key, metadata, max_attempts
+) VALUES (
+  '10000000-0000-4000-8000-0000000000f2',
+  '10000000-0000-4000-8000-000000000010',
+  '10000000-0000-4000-8000-000000000041',
+  'webhook.agent', 'expired-at-limit', '{}', 1
+);
+UPDATE run_effect_outbox
+SET status = 'processing',
+    lease_owner = '10000000-0000-4000-8000-0000000000f3',
+    lease_expires_at = clock_timestamp() - interval '1 second',
+    attempt_count = 1
+WHERE id = '10000000-0000-4000-8000-0000000000f2';
+UPDATE run_effect_outbox
+SET status = 'dead_letter', lease_owner = NULL, lease_expires_at = NULL,
+    completed_at = NULL, dead_lettered_at = clock_timestamp(),
+    last_error = COALESCE(last_error, 'processing lease expired at retry limit')
+WHERE status = 'processing'
+  AND lease_expires_at <= clock_timestamp()
+  AND attempt_count >= max_attempts;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM run_effect_outbox
+    WHERE id = '10000000-0000-4000-8000-000000000042'
+      AND status = 'pending'
+      AND attempt_count = 0
+      AND dead_lettered_at IS NULL
+  ) OR (
+    SELECT COUNT(*)
+    FROM run_effect_replays
+    WHERE effect_outbox_id = '10000000-0000-4000-8000-000000000042'
+      AND actor_type = 'admin'
+      AND reason = 'operator approved replay'
+  ) <> 1 OR NOT EXISTS (
+    SELECT 1
+    FROM run_effect_outbox
+    WHERE id = '10000000-0000-4000-8000-0000000000f2'
+      AND status = 'dead_letter'
+      AND dead_lettered_at IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'effect dead-letter/replay lifecycle evidence is incomplete';
+  END IF;
+END
+$$;
+SQL
+
+  expect_sql_failure \
+    "Run effect replay audit is immutable" \
+    "UPDATE run_effect_replays
+     SET reason = 'rewritten replay reason'
+     WHERE effect_outbox_id = '10000000-0000-4000-8000-000000000042'"
+  expect_sql_failure \
+    "Run effect replay audit is immutable" \
+    "DELETE FROM run_effect_replays
+     WHERE effect_outbox_id = '10000000-0000-4000-8000-000000000042'"
   expect_sql_failure \
     "terminal Run accounting ledger is missing or inconsistent" \
     "BEGIN;

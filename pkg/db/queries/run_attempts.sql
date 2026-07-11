@@ -40,8 +40,22 @@ RETURNING *;
 -- name: GetRunAttemptByID :one
 SELECT * FROM run_attempts WHERE id = $1;
 
+-- name: LockRunAttemptForResult :one
+-- Result 事务已先锁 Run；这里锁定指定 Attempt，禁止反向取锁。
+SELECT *
+FROM run_attempts
+WHERE run_id = $1
+  AND id = $2
+FOR UPDATE;
+
 -- name: GetRunAttemptByLeaseID :one
 SELECT * FROM run_attempts WHERE lease_id = $1;
+
+-- name: GetRunAttemptByResultID :one
+SELECT *
+FROM run_attempts
+WHERE run_id = $1
+  AND result_id = $2;
 
 -- name: GetRunAttemptByIdentity :one
 SELECT *
@@ -114,12 +128,19 @@ SET finished_at = clock_timestamp(),
     result_classification = $8,
     final_client_event_seq = $9,
     error_code = $10,
-    error_detail_redacted = $11
+    error_detail_redacted = $11,
+    result_acknowledged_at = clock_timestamp()
 WHERE run_id = $1
   AND id = $2
   AND lease_id = $3
   AND fencing_token = $4
+  AND accepted_at IS NOT NULL
   AND finished_at IS NULL
+  AND result_id IS NULL
+  AND $6::uuid IS NOT NULL
+  AND $7::bytea IS NOT NULL
+  AND $8::text IS NOT NULL
+  AND $9::bigint IS NOT NULL
 RETURNING *;
 
 -- name: AcknowledgeRunAttemptResult :one

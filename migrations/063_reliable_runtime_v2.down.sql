@@ -37,6 +37,7 @@ LOCK TABLE run_cancellations IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE run_dead_letters IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE runtime_signal_outbox IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE run_effect_outbox IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE run_effect_replays IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE run_accounting_ledger IN ACCESS EXCLUSIVE MODE;
 
 DO $$
@@ -55,6 +56,7 @@ BEGIN
        OR EXISTS (SELECT 1 FROM run_dead_letters)
        OR EXISTS (SELECT 1 FROM runtime_signal_outbox)
        OR EXISTS (SELECT 1 FROM run_effect_outbox)
+       OR EXISTS (SELECT 1 FROM run_effect_replays)
        OR EXISTS (SELECT 1 FROM runtime_nodes)
        OR EXISTS (SELECT 1 FROM runtime_sessions)
        OR EXISTS (SELECT 1 FROM runtime_session_attachments)
@@ -118,6 +120,7 @@ DROP TRIGGER IF EXISTS run_effect_outbox_run_consistency ON run_effect_outbox;
 DROP TRIGGER IF EXISTS run_accounting_ledger_immutable ON run_accounting_ledger;
 DROP TRIGGER IF EXISTS run_dead_letters_immutable ON run_dead_letters;
 DROP TRIGGER IF EXISTS run_effect_outbox_identity_immutable ON run_effect_outbox;
+DROP TRIGGER IF EXISTS run_effect_replays_immutable ON run_effect_replays;
 DROP TRIGGER IF EXISTS runs_cancellation_summary_consistency ON runs;
 DROP TRIGGER IF EXISTS run_cancellations_run_summary_consistency ON run_cancellations;
 DROP TRIGGER IF EXISTS runs_v2_contract_identity ON runs;
@@ -143,6 +146,7 @@ DROP TRIGGER IF EXISTS agent_tokens_identity_and_lifecycle ON agent_tokens;
 DROP FUNCTION IF EXISTS enforce_run_active_attempt_consistency();
 DROP FUNCTION IF EXISTS enforce_run_terminal_artifact_immutable();
 DROP FUNCTION IF EXISTS enforce_run_effect_identity_immutable();
+DROP FUNCTION IF EXISTS enforce_run_effect_replay_immutable();
 DROP FUNCTION IF EXISTS enforce_run_terminal_artifacts_consistency();
 DROP FUNCTION IF EXISTS enforce_run_cancellation_summary_consistency();
 DROP FUNCTION IF EXISTS enforce_run_v2_contract_identity();
@@ -199,6 +203,7 @@ ALTER TABLE run_events
 DROP TABLE run_event_retention_watermarks;
 DROP TABLE run_dead_letters;
 DROP TABLE run_cancellations;
+DROP TABLE run_effect_replays;
 DROP TABLE run_effect_outbox;
 DROP TABLE runtime_signal_outbox;
 DROP TABLE run_accounting_ledger;

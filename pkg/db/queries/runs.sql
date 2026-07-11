@@ -212,10 +212,179 @@ ORDER BY r.started_at ASC
 LIMIT $2
 FOR UPDATE SKIP LOCKED;
 
+-- name: LockRunForResultFinalization :one
+-- Result 事务的首把锁。所有 deadline 判断使用同一行返回的数据库时钟，
+-- 后续固定按 Run -> Attempt -> Event advisory lock 顺序取锁。
+SELECT r.id, r.user_id, r.agent_id, r.status, r.dispatch_state,
+       r.runtime_contract_id, r.connection_mode_snapshot,
+       r.endpoint_idempotency_snapshot, r.output, r.error_code,
+       r.error_message, r.attempt_count, r.max_attempts,
+       r.latest_attempt_id, r.active_attempt_id, r.lease_id,
+       r.fencing_token, r.runtime_node_id, r.runtime_worker_id,
+       r.runtime_session_id, r.lease_token_id, r.run_deadline_at,
+       r.next_attempt_at, r.result_id, r.result_fingerprint,
+       r.terminal_event_id, r.dead_lettered_at, r.cancel_request_id,
+       r.cancel_state, r.creator_revenue_cents, r.started_at,
+       r.finished_at, clock_timestamp() AS database_now
+FROM runs r
+WHERE r.id = $1
+  AND r.runtime_contract_id = 'openlinker.runtime.v2'
+FOR UPDATE;
+
+-- name: TransitionRunToRetryWait :one
+-- Attempt 必须已在同一事务中保存 retryable Result。重试时间只接受延迟，
+-- 由数据库时钟一次性物化，Result 重放不得重新计算。
+UPDATE runs r
+SET status = 'running',
+    dispatch_state = 'retry_wait',
+    next_attempt_at = clock_timestamp() + ($3::bigint * INTERVAL '1 millisecond'),
+    active_attempt_id = NULL,
+    lease_id = NULL,
+    executor_type = NULL,
+    active_core_instance_id = NULL,
+    runtime_node_id = NULL,
+    runtime_worker_id = NULL,
+    runtime_session_id = NULL,
+    lease_token_id = NULL,
+    lease_offered_at = NULL,
+    lease_accepted_at = NULL,
+    lease_expires_at = NULL,
+    attempt_deadline_at = NULL,
+    error_code = NULL,
+    error_message = NULL
+FROM run_attempts a
+WHERE r.id = $1
+  AND r.status = 'running'
+  AND r.dispatch_state = 'executing'
+  AND r.active_attempt_id = $2
+  AND a.run_id = r.id
+  AND a.id = $2
+  AND a.finished_at IS NOT NULL
+  AND a.outcome = 'retryable_failure'
+  AND a.result_id IS NOT NULL
+  AND a.result_acknowledged_at IS NOT NULL
+  AND r.attempt_count < r.max_attempts
+  AND $3::bigint >= 0
+RETURNING r.id, r.status, r.dispatch_state, r.next_attempt_at,
+          r.active_attempt_id, r.result_id, r.terminal_event_id,
+          r.finished_at;
+
+-- name: FinalizeRunFromResult :one
+-- Attempt、terminal Event、ledger、DLQ/effects 必须由调用方在同一事务内写入。
+-- timeout 分支仅在 Attempt 保存 Result tuple，Run 不公开 result/output。
+UPDATE runs r
+SET status = $3,
+    dispatch_state = $4,
+    output = $5::jsonb,
+    error_code = $6,
+    error_message = $7,
+    duration_ms = $10,
+    finished_at = clock_timestamp(),
+    next_attempt_at = NULL,
+    active_attempt_id = NULL,
+    lease_id = NULL,
+    executor_type = NULL,
+    active_core_instance_id = NULL,
+    runtime_node_id = NULL,
+    runtime_worker_id = NULL,
+    runtime_session_id = NULL,
+    lease_token_id = NULL,
+    lease_offered_at = NULL,
+    lease_accepted_at = NULL,
+    lease_expires_at = NULL,
+    attempt_deadline_at = NULL,
+    result_id = $8,
+    result_fingerprint = $9,
+    terminal_event_id = $11,
+    dead_lettered_at = CASE
+        WHEN $4::text = 'dead_letter' THEN clock_timestamp()
+        ELSE NULL
+    END
+FROM run_attempts a
+WHERE r.id = $1
+  AND r.runtime_contract_id = 'openlinker.runtime.v2'
+  AND r.status = 'running'
+  AND r.dispatch_state = 'executing'
+  AND r.active_attempt_id = $2
+  AND a.run_id = r.id
+  AND a.id = $2
+  AND a.finished_at IS NOT NULL
+  AND a.result_id IS NOT NULL
+  AND a.result_acknowledged_at IS NOT NULL
+  AND $10::int >= 0
+  AND (
+      (
+          $3::text = 'success'
+          AND $4::text = 'terminal'
+          AND a.outcome = 'success'
+          AND $5::jsonb IS NOT NULL
+          AND $6::text IS NULL
+          AND $8::uuid IS NOT DISTINCT FROM a.result_id
+          AND $9::bytea IS NOT DISTINCT FROM a.result_fingerprint
+      )
+      OR (
+          $3::text = 'failed'
+          AND $4::text = 'terminal'
+          AND a.outcome = 'non_retryable_failure'
+          AND $5::jsonb IS NULL
+          AND $6::text IS NOT NULL
+          AND $8::uuid IS NOT DISTINCT FROM a.result_id
+          AND $9::bytea IS NOT DISTINCT FROM a.result_fingerprint
+      )
+      OR (
+          $3::text = 'failed'
+          AND $4::text = 'dead_letter'
+          AND a.outcome = 'retryable_failure'
+          AND $5::jsonb IS NULL
+          AND $6::text = 'RUNTIME_RETRY_EXHAUSTED'
+          AND $8::uuid IS NOT DISTINCT FROM a.result_id
+          AND $9::bytea IS NOT DISTINCT FROM a.result_fingerprint
+      )
+      OR (
+          $3::text = 'timeout'
+          AND $4::text = 'terminal'
+          AND a.outcome = 'timeout'
+          AND $5::jsonb IS NULL
+          AND $6::text IS NOT NULL
+          AND $8::uuid IS NULL
+          AND $9::bytea IS NULL
+      )
+  )
+RETURNING r.id, r.status, r.dispatch_state, r.output, r.error_code,
+          r.error_message, r.duration_ms, r.finished_at, r.next_attempt_at,
+          r.result_id, r.result_fingerprint, r.terminal_event_id,
+          r.dead_lettered_at;
+
 -- name: LockRunEventSequence :exec
 -- 在事务内按 run_id 串行化事件序列分配。调用方必须先锁定 Run 行，再执行本查询；
 -- 否则会与 Event INSERT 的 Run FK 或其他 Event writer 形成逆序锁依赖。
 SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text, 0));
+
+-- name: InsertTerminalRunEvent :one
+-- 调用方必须已经按 Run row -> advisory lock 顺序持锁。Event ID 由 Core
+-- 根据 Run ID 和公开终态确定性派生，不得由数据库随机生成。
+WITH target_run AS (
+    SELECT r.id
+    FROM runs r
+    WHERE r.id = $2::uuid
+      AND r.runtime_contract_id = 'openlinker.runtime.v2'
+),
+next_sequence AS (
+    SELECT COALESCE(MAX(e.sequence), 0)::int + 1 AS sequence
+    FROM run_events e
+    JOIN target_run r ON r.id = e.run_id
+)
+INSERT INTO run_events (
+    id, run_id, parent_run_id, sequence, event_type, payload
+)
+SELECT $1, target_run.id, $3, next_sequence.sequence, $4, $5
+FROM target_run, next_sequence
+RETURNING run_events.id, run_events.run_id, run_events.parent_run_id,
+          run_events.sequence, run_events.event_type, run_events.payload,
+          run_events.created_at, run_events.client_event_id,
+          run_events.client_event_seq, run_events.payload_fingerprint,
+          run_events.attempt_id, run_events.attempt_no,
+          run_events.fencing_token;
 
 -- name: LockRunForSystemEventAppend :one
 -- system Event 不需要 runtime Attempt 摘要，但必须与所有写入路径统一采用

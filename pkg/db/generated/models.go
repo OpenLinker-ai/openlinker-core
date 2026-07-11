@@ -273,8 +273,20 @@ type RunEffectOutbox struct {
 	AttemptCount    int32      `db:"attempt_count" json:"attempt_count"`
 	MaxAttempts     int32      `db:"max_attempts" json:"max_attempts"`
 	CompletedAt     *time.Time `db:"completed_at" json:"completed_at"`
+	DeadLetteredAt  *time.Time `db:"dead_lettered_at" json:"dead_lettered_at"`
 	LastError       *string    `db:"last_error" json:"last_error"`
 	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
+}
+
+// RunEffectReplay is the immutable operator audit record written whenever a
+// dead-letter effect is made eligible for delivery again.
+type RunEffectReplay struct {
+	ID             uuid.UUID  `db:"id" json:"id"`
+	EffectOutboxID uuid.UUID  `db:"effect_outbox_id" json:"effect_outbox_id"`
+	ActorType      string     `db:"actor_type" json:"actor_type"`
+	ActorID        *uuid.UUID `db:"actor_id" json:"actor_id"`
+	Reason         string     `db:"reason" json:"reason"`
+	ReplayedAt     time.Time  `db:"replayed_at" json:"replayed_at"`
 }
 
 type RunAccountingLedger struct {

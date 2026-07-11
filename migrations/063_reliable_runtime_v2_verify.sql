@@ -125,6 +125,7 @@ BEGIN
        OR EXISTS (SELECT 1 FROM run_dead_letters)
        OR EXISTS (SELECT 1 FROM runtime_signal_outbox)
        OR EXISTS (SELECT 1 FROM run_effect_outbox)
+       OR EXISTS (SELECT 1 FROM run_effect_replays)
        OR EXISTS (SELECT 1 FROM runtime_nodes)
        OR EXISTS (SELECT 1 FROM runtime_sessions)
        OR EXISTS (SELECT 1 FROM runtime_session_attachments)
@@ -230,6 +231,90 @@ BEGIN
         RAISE EXCEPTION 'Run event retention watermark constraints are mismatched';
     END IF;
 
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'run_effect_outbox'
+          AND column_name = 'dead_lettered_at'
+          AND data_type = 'timestamp with time zone'
+          AND is_nullable = 'YES'
+    ) THEN
+        RAISE EXCEPTION 'Run effect dead-letter timestamp column is missing or mismatched';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        WHERE c.conrelid = 'run_effect_outbox'::regclass
+          AND c.conname = 'run_effect_outbox_dead_letter_consistent'
+          AND c.contype = 'c'
+          AND c.convalidated
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        WHERE c.conrelid = 'run_effect_outbox'::regclass
+          AND c.conname = 'run_effect_outbox_last_error_len'
+          AND c.contype = 'c'
+          AND c.convalidated
+    ) THEN
+        RAISE EXCEPTION 'Run effect dead-letter constraints are missing or mismatched';
+    END IF;
+
+    IF to_regclass('run_effect_replays') IS NULL THEN
+        RAISE EXCEPTION 'Run effect replay audit table is missing';
+    END IF;
+
+    IF EXISTS (
+        SELECT required.column_name
+        FROM (VALUES
+            ('id', 'uuid', 'NO'),
+            ('effect_outbox_id', 'uuid', 'NO'),
+            ('actor_type', 'text', 'NO'),
+            ('actor_id', 'uuid', 'YES'),
+            ('reason', 'text', 'NO'),
+            ('replayed_at', 'timestamp with time zone', 'NO')
+        ) AS required(column_name, data_type, is_nullable)
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM information_schema.columns c
+            WHERE c.table_schema = current_schema()
+              AND c.table_name = 'run_effect_replays'
+              AND c.column_name = required.column_name
+              AND c.data_type = required.data_type
+              AND c.is_nullable = required.is_nullable
+        )
+    ) THEN
+        RAISE EXCEPTION 'Run effect replay audit columns are mismatched';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        WHERE c.conrelid = 'run_effect_replays'::regclass
+          AND c.conname = 'run_effect_replays_effect_fk'
+          AND c.contype = 'f'
+          AND c.confrelid = 'run_effect_outbox'::regclass
+          AND c.confdeltype = 'a'
+          AND c.convalidated
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        WHERE c.conrelid = 'run_effect_replays'::regclass
+          AND c.conname = 'run_effect_replays_actor_type_valid'
+          AND c.contype = 'c'
+          AND c.convalidated
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        WHERE c.conrelid = 'run_effect_replays'::regclass
+          AND c.conname = 'run_effect_replays_reason_len'
+          AND c.contype = 'c'
+          AND c.convalidated
+    ) THEN
+        RAISE EXCEPTION 'Run effect replay audit constraints are missing or mismatched';
+    END IF;
+
     IF to_regclass('idx_runs_runtime_pull_claim') IS NOT NULL
        OR to_regclass('idx_runs_runtime_claim_stale') IS NOT NULL
        OR to_regclass('idx_runs_runtime_claimed_token') IS NOT NULL THEN
@@ -251,6 +336,7 @@ BEGIN
               'run_dead_letters',
               'runtime_signal_outbox',
               'run_effect_outbox',
+              'run_effect_replays',
               'run_accounting_ledger',
               'runtime_schema_contracts',
               'runtime_cluster_control',
@@ -296,6 +382,7 @@ BEGIN
             'idx_runtime_signal_outbox_processing_expiry',
             'idx_run_effect_outbox_pending',
             'idx_run_effect_outbox_processing_expiry',
+            'idx_run_effect_replays_effect',
             'idx_runtime_sessions_active_worker'
         ]::TEXT[]) AS required(index_name)
         WHERE to_regclass(required.index_name) IS NULL
@@ -352,6 +439,7 @@ BEGIN
             ('run_accounting_ledger_immutable', 'run_accounting_ledger', 'enforce_run_terminal_artifact_immutable'),
             ('run_dead_letters_immutable', 'run_dead_letters', 'enforce_run_terminal_artifact_immutable'),
             ('run_effect_outbox_identity_immutable', 'run_effect_outbox', 'enforce_run_effect_identity_immutable'),
+            ('run_effect_replays_immutable', 'run_effect_replays', 'enforce_run_effect_replay_immutable'),
             ('runs_cancellation_summary_consistency', 'runs', 'enforce_run_cancellation_summary_consistency'),
             ('run_cancellations_run_summary_consistency', 'run_cancellations', 'enforce_run_cancellation_summary_consistency'),
             ('run_cancellations_state_forward_only', 'run_cancellations', 'enforce_run_cancellation_transition'),
@@ -385,6 +473,7 @@ BEGIN
                       'run_accounting_ledger_immutable',
                       'run_dead_letters_immutable',
                       'run_effect_outbox_identity_immutable',
+                      'run_effect_replays_immutable',
                       'run_cancellations_state_forward_only',
                       'runtime_sessions_identity_immutable',
                       'runtime_session_attachments_history',
@@ -458,6 +547,7 @@ WHERE schemaname = current_schema()
       'idx_run_attempts_unfinished_run',
       'idx_runtime_signal_outbox_pending',
       'idx_run_effect_outbox_pending',
+      'idx_run_effect_replays_effect',
       'idx_runtime_sessions_active_worker'
   )
 ORDER BY indexname;

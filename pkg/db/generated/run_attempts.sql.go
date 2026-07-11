@@ -110,12 +110,45 @@ func (q *Queries) GetRunAttemptByID(ctx context.Context, id uuid.UUID) (RunAttem
 	return attempt, err
 }
 
+const lockRunAttemptForResult = `-- name: LockRunAttemptForResult :one
+SELECT *
+FROM run_attempts
+WHERE run_id = $1 AND id = $2
+FOR UPDATE`
+
+type LockRunAttemptForResultParams struct {
+	RunID uuid.UUID `db:"run_id" json:"run_id"`
+	ID    uuid.UUID `db:"id" json:"id"`
+}
+
+func (q *Queries) LockRunAttemptForResult(ctx context.Context, arg LockRunAttemptForResultParams) (RunAttempt, error) {
+	var attempt RunAttempt
+	err := scanRunAttempt(q.db.QueryRow(ctx, lockRunAttemptForResult, arg.RunID, arg.ID), &attempt)
+	return attempt, err
+}
+
 const getRunAttemptByLeaseID = `-- name: GetRunAttemptByLeaseID :one
 SELECT * FROM run_attempts WHERE lease_id = $1`
 
 func (q *Queries) GetRunAttemptByLeaseID(ctx context.Context, leaseID uuid.UUID) (RunAttempt, error) {
 	var attempt RunAttempt
 	err := scanRunAttempt(q.db.QueryRow(ctx, getRunAttemptByLeaseID, leaseID), &attempt)
+	return attempt, err
+}
+
+const getRunAttemptByResultID = `-- name: GetRunAttemptByResultID :one
+SELECT *
+FROM run_attempts
+WHERE run_id = $1 AND result_id = $2`
+
+type GetRunAttemptByResultIDParams struct {
+	RunID    uuid.UUID `db:"run_id" json:"run_id"`
+	ResultID uuid.UUID `db:"result_id" json:"result_id"`
+}
+
+func (q *Queries) GetRunAttemptByResultID(ctx context.Context, arg GetRunAttemptByResultIDParams) (RunAttempt, error) {
+	var attempt RunAttempt
+	err := scanRunAttempt(q.db.QueryRow(ctx, getRunAttemptByResultID, arg.RunID, arg.ResultID), &attempt)
 	return attempt, err
 }
 
@@ -250,23 +283,26 @@ const finishRunAttempt = `-- name: FinishRunAttempt :one
 UPDATE run_attempts
 SET finished_at = clock_timestamp(), outcome = $5, result_id = $6,
     result_fingerprint = $7, result_classification = $8,
-    final_client_event_seq = $9, error_code = $10, error_detail_redacted = $11
+    final_client_event_seq = $9, error_code = $10, error_detail_redacted = $11,
+    result_acknowledged_at = clock_timestamp()
 WHERE run_id = $1 AND id = $2 AND lease_id = $3 AND fencing_token = $4
-  AND finished_at IS NULL
+  AND accepted_at IS NOT NULL AND finished_at IS NULL AND result_id IS NULL
+  AND $6::uuid IS NOT NULL AND $7::bytea IS NOT NULL
+  AND $8::text IS NOT NULL AND $9::bigint IS NOT NULL
 RETURNING *`
 
 type FinishRunAttemptParams struct {
-	RunID                uuid.UUID  `db:"run_id" json:"run_id"`
-	ID                   uuid.UUID  `db:"id" json:"id"`
-	LeaseID              uuid.UUID  `db:"lease_id" json:"lease_id"`
-	FencingToken         int64      `db:"fencing_token" json:"fencing_token"`
-	Outcome              string     `db:"outcome" json:"outcome"`
-	ResultID             *uuid.UUID `db:"result_id" json:"result_id"`
-	ResultFingerprint    []byte     `db:"result_fingerprint" json:"-"`
-	ResultClassification *string    `db:"result_classification" json:"result_classification"`
-	FinalClientEventSeq  *int64     `db:"final_client_event_seq" json:"final_client_event_seq"`
-	ErrorCode            *string    `db:"error_code" json:"error_code"`
-	ErrorDetailRedacted  *string    `db:"error_detail_redacted" json:"error_detail_redacted"`
+	RunID                uuid.UUID `db:"run_id" json:"run_id"`
+	ID                   uuid.UUID `db:"id" json:"id"`
+	LeaseID              uuid.UUID `db:"lease_id" json:"lease_id"`
+	FencingToken         int64     `db:"fencing_token" json:"fencing_token"`
+	Outcome              string    `db:"outcome" json:"outcome"`
+	ResultID             uuid.UUID `db:"result_id" json:"result_id"`
+	ResultFingerprint    []byte    `db:"result_fingerprint" json:"-"`
+	ResultClassification string    `db:"result_classification" json:"result_classification"`
+	FinalClientEventSeq  int64     `db:"final_client_event_seq" json:"final_client_event_seq"`
+	ErrorCode            *string   `db:"error_code" json:"error_code"`
+	ErrorDetailRedacted  *string   `db:"error_detail_redacted" json:"error_detail_redacted"`
 }
 
 func (q *Queries) FinishRunAttempt(ctx context.Context, arg FinishRunAttemptParams) (RunAttempt, error) {

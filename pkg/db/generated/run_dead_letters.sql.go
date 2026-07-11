@@ -16,7 +16,7 @@ func scanRunDeadLetter(row interface{ Scan(dest ...any) error }, d *RunDeadLette
 const createRunDeadLetter = `-- name: CreateRunDeadLetter :one
 INSERT INTO run_dead_letters (run_id, final_attempt_no, reason_code, reason_redacted)
 VALUES ($1, $2, $3, $4)
-ON CONFLICT (run_id) DO UPDATE SET run_id = run_dead_letters.run_id
+ON CONFLICT (run_id) DO NOTHING
 RETURNING *`
 
 type CreateRunDeadLetterParams struct {

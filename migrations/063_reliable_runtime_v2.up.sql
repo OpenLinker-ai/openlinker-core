@@ -600,7 +600,16 @@ CREATE TABLE run_attempts (
                 AND result_classification IS NOT NULL
                 AND final_client_event_seq IS NOT NULL
                 AND octet_length(result_fingerprint) = 32
-                AND final_client_event_seq = last_client_event_seq
+                AND (
+                    (
+                        outcome = 'timeout'
+                        AND final_client_event_seq >= last_client_event_seq
+                    )
+                    OR (
+                        outcome IS DISTINCT FROM 'timeout'
+                        AND final_client_event_seq = last_client_event_seq
+                    )
+                )
             )
         ),
     CONSTRAINT run_attempts_result_ack_consistent
@@ -659,9 +668,15 @@ CREATE TABLE run_attempts (
                     'offer_expired',
                     'lease_expired',
                     'canceled',
-                    'timeout',
                     'result_unknown'
                 ) THEN result_id IS NULL
+                WHEN outcome = 'timeout' THEN
+                    result_id IS NULL
+                    OR result_classification IN (
+                        'success',
+                        'retryable_failure',
+                        'non_retryable_failure'
+                    )
                 ELSE result_id IS NULL
             END
         ),
@@ -908,6 +923,7 @@ CREATE TABLE run_effect_outbox (
     attempt_count INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 12,
     completed_at TIMESTAMPTZ,
+    dead_lettered_at TIMESTAMPTZ,
     last_error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT run_effect_outbox_business_unique
@@ -935,6 +951,13 @@ CREATE TABLE run_effect_outbox (
             (status = 'succeeded' AND completed_at IS NOT NULL)
             OR (status <> 'succeeded' AND completed_at IS NULL)
         ),
+    CONSTRAINT run_effect_outbox_dead_letter_consistent
+        CHECK (
+            (status = 'dead_letter' AND dead_lettered_at IS NOT NULL)
+            OR (status <> 'dead_letter' AND dead_lettered_at IS NULL)
+        ),
+    CONSTRAINT run_effect_outbox_last_error_len
+        CHECK (last_error IS NULL OR char_length(last_error) <= 500),
     CONSTRAINT run_effect_outbox_attempts
         CHECK (
             attempt_count >= 0
@@ -950,6 +973,31 @@ CREATE INDEX idx_run_effect_outbox_pending
 CREATE INDEX idx_run_effect_outbox_processing_expiry
     ON run_effect_outbox (lease_expires_at, id)
     WHERE status = 'processing';
+
+CREATE TABLE run_effect_replays (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    effect_outbox_id UUID NOT NULL,
+    actor_type TEXT NOT NULL,
+    actor_id UUID,
+    reason TEXT NOT NULL,
+    replayed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT run_effect_replays_effect_fk
+        FOREIGN KEY (effect_outbox_id)
+        REFERENCES run_effect_outbox (id)
+        ON DELETE NO ACTION,
+    CONSTRAINT run_effect_replays_actor_type_valid
+        CHECK (
+            char_length(actor_type) BETWEEN 1 AND 100
+            AND actor_type ~ '^[a-z][a-z0-9_.-]*$'
+        ),
+    CONSTRAINT run_effect_replays_reason_len
+        CHECK (
+            char_length(BTRIM(reason)) BETWEEN 1 AND 500
+        )
+);
+
+CREATE INDEX idx_run_effect_replays_effect
+    ON run_effect_replays (effect_outbox_id, replayed_at DESC, id DESC);
 
 CREATE TABLE run_accounting_ledger (
     run_id UUID PRIMARY KEY,
@@ -2734,6 +2782,17 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER run_effect_outbox_identity_immutable
     BEFORE UPDATE OR DELETE ON run_effect_outbox
     FOR EACH ROW EXECUTE FUNCTION enforce_run_effect_identity_immutable();
+
+CREATE OR REPLACE FUNCTION enforce_run_effect_replay_immutable()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'Run effect replay audit is immutable';
+END
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER run_effect_replays_immutable
+    BEFORE UPDATE OR DELETE ON run_effect_replays
+    FOR EACH ROW EXECUTE FUNCTION enforce_run_effect_replay_immutable();
 
 CREATE OR REPLACE FUNCTION enforce_run_terminal_artifacts_consistency()
 RETURNS TRIGGER AS $$
