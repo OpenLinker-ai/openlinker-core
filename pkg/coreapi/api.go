@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
@@ -127,6 +128,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	runtimeSvc := runtime.NewService(pool, cfg)
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
 	runtimeHandler.SetEndpointLimiter(opts.RuntimeLimiter)
+	configureRuntimeV2(runtimeHandler, runtimeSvc, pool, cfg)
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
 	runtimeHandler.RegisterAgentRuntime(api)
 	agentSvc.SetDryRunner(runtimeSvc)
@@ -222,6 +224,42 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 		UserToken:   userTokenSvc,
 		UserStatus:  userStatusChecker,
 	}
+}
+
+func configureRuntimeV2(
+	handler *runtime.Handler,
+	tokenValidator runtime.RuntimeV2TokenValidator,
+	pool *pgxpool.Pool,
+	cfg *config.Config,
+) {
+	if handler == nil || tokenValidator == nil || pool == nil || cfg == nil {
+		return
+	}
+	coreInstanceID := uuid.New()
+	sessions := runtime.NewRuntimeSessionService(pool, coreInstanceID)
+	verifier := runtime.NewDBRuntimeNodeCredentialVerifier(pool)
+
+	var leases runtime.RuntimeV2LeaseService
+	signer, err := runtime.NewRuntimeInvocationSignerWithPrevious(
+		cfg.RuntimeInvocationSigningKeyID,
+		cfg.RuntimeInvocationSigningSecret,
+		cfg.RuntimeInvocationPreviousSigningKeyID,
+		cfg.RuntimeInvocationPreviousSigningSecret,
+	)
+	if err != nil {
+		log.Warn().Err(err).Msg("runtime v2 assignment capabilities are disabled")
+	} else {
+		leases = runtime.NewRuntimeLeaseService(pool, coreInstanceID, signer, runtime.DefaultRuntimeLeaseConfig())
+	}
+
+	handler.SetRuntimeV2Dependencies(runtime.RuntimeV2HTTPDependencies{
+		TokenValidator:      tokenValidator,
+		DeviceAuthenticator: runtime.NewMTLSRuntimeDeviceAuthenticator(verifier),
+		Sessions:            sessions,
+		Leases:              leases,
+		EventStore:          runtime.NewRuntimeEventStore(pool),
+		Finalizer:           runtime.NewResultFinalizer(pool, nil, nil),
+	})
 }
 
 // ConfigureGoth initializes OAuth providers and the cookie session store.

@@ -82,9 +82,15 @@ type Config struct {
 	RuntimeMTLSCertFile     string `envconfig:"RUNTIME_MTLS_CERT_FILE"`
 	RuntimeMTLSKeyFile      string `envconfig:"RUNTIME_MTLS_KEY_FILE"`
 	RuntimeMTLSClientCAFile string `envconfig:"RUNTIME_MTLS_CLIENT_CA_FILE"`
-	HTTPRateLimitRate       int    `envconfig:"HTTP_RATE_LIMIT_RATE" default:"50"`
-	HTTPRateLimitBurst      int    `envconfig:"HTTP_RATE_LIMIT_BURST" default:"200"`
-	HTTPRateLimitPeriodSec  int    `envconfig:"HTTP_RATE_LIMIT_PERIOD_SECONDS" default:"1"`
+	// Separate from JWT_SECRET so runtime capability key rotation cannot
+	// invalidate user sessions or reuse one key across protocols.
+	RuntimeInvocationSigningKeyID          string `envconfig:"RUNTIME_INVOCATION_SIGNING_KEY_ID" default:"current"`
+	RuntimeInvocationSigningSecret         string `envconfig:"RUNTIME_INVOCATION_SIGNING_SECRET"`
+	RuntimeInvocationPreviousSigningKeyID  string `envconfig:"RUNTIME_INVOCATION_PREVIOUS_SIGNING_KEY_ID"`
+	RuntimeInvocationPreviousSigningSecret string `envconfig:"RUNTIME_INVOCATION_PREVIOUS_SIGNING_SECRET"`
+	HTTPRateLimitRate                      int    `envconfig:"HTTP_RATE_LIMIT_RATE" default:"50"`
+	HTTPRateLimitBurst                     int    `envconfig:"HTTP_RATE_LIMIT_BURST" default:"200"`
+	HTTPRateLimitPeriodSec                 int    `envconfig:"HTTP_RATE_LIMIT_PERIOD_SECONDS" default:"1"`
 
 	// Agent availability monitor.
 	AvailabilityMonitorEnabled             bool `envconfig:"AVAILABILITY_MONITOR_ENABLED" default:"true"`

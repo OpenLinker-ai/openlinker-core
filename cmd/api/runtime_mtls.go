@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 const runtimeV2PathPrefix = "/api/v1/agent-runtime/v2/"
@@ -77,6 +78,14 @@ func validateRuntimeMTLSConfig(cfg *config.Config) error {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s is required when RUNTIME_MTLS_ENABLED=true", name)
 		}
+	}
+	if _, err := runtime.NewRuntimeInvocationSignerWithPrevious(
+		cfg.RuntimeInvocationSigningKeyID,
+		cfg.RuntimeInvocationSigningSecret,
+		cfg.RuntimeInvocationPreviousSigningKeyID,
+		cfg.RuntimeInvocationPreviousSigningSecret,
+	); err != nil {
+		return fmt.Errorf("RUNTIME_INVOCATION_SIGNING_SECRET is invalid: %w", err)
 	}
 	return nil
 }

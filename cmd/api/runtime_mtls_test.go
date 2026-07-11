@@ -21,12 +21,14 @@ import (
 func TestBuildRuntimeMTLSConfigRequiresVerifiedClientCertificates(t *testing.T) {
 	certFile, keyFile := writeRuntimeTestCertificate(t)
 	cfg := &config.Config{
-		Port:                    8080,
-		RuntimeMTLSEnabled:      true,
-		RuntimeMTLSPort:         8443,
-		RuntimeMTLSCertFile:     certFile,
-		RuntimeMTLSKeyFile:      keyFile,
-		RuntimeMTLSClientCAFile: certFile,
+		Port:                           8080,
+		RuntimeMTLSEnabled:             true,
+		RuntimeMTLSPort:                8443,
+		RuntimeMTLSCertFile:            certFile,
+		RuntimeMTLSKeyFile:             keyFile,
+		RuntimeMTLSClientCAFile:        certFile,
+		RuntimeInvocationSigningKeyID:  "current",
+		RuntimeInvocationSigningSecret: "runtime-test-signing-secret-00000000",
 	}
 	tlsConfig, err := buildRuntimeMTLSConfig(cfg)
 	if err != nil {
@@ -45,6 +47,14 @@ func TestRuntimeMTLSConfigAndPathFailClosed(t *testing.T) {
 	cfg.RuntimeMTLSPort = 8443
 	if err := validateRuntimeMTLSConfig(cfg); err == nil {
 		t.Fatal("missing certificate paths must fail")
+	}
+	cfg.RuntimeMTLSCertFile = "server.pem"
+	cfg.RuntimeMTLSKeyFile = "server-key.pem"
+	cfg.RuntimeMTLSClientCAFile = "client-ca.pem"
+	cfg.RuntimeInvocationSigningKeyID = "current"
+	cfg.RuntimeInvocationSigningSecret = "too-short"
+	if err := validateRuntimeMTLSConfig(cfg); err == nil {
+		t.Fatal("weak runtime invocation key must fail")
 	}
 
 	called := false
