@@ -45,6 +45,7 @@ type RuntimeV2LeaseService interface {
 	AckAssignment(context.Context, RuntimeSessionPrincipal, RunAssignmentAckPayload) (RunAssignmentConfirmedPayload, error)
 	RejectAssignment(context.Context, RuntimeSessionPrincipal, RunAssignmentRejectPayload) (RunAssignmentRejectedPayload, error)
 	RenewLease(context.Context, RuntimeSessionPrincipal, RunLeaseRenewPayload) (RunLeaseRenewedPayload, error)
+	ReleaseUnackedOffer(context.Context, RuntimeSessionPrincipal, ...string) error
 }
 
 type RuntimeV2EventStore interface {
@@ -64,6 +65,7 @@ type RuntimeV2HTTPDependencies struct {
 	Leases              RuntimeV2LeaseService
 	EventStore          RuntimeV2EventStore
 	Finalizer           RuntimeV2ResultFinalizer
+	Resume              RuntimeV2ResumeService
 }
 
 // RuntimeV2HTTPController is the strict HTTP transport adapter for the durable
@@ -114,6 +116,7 @@ func (h *RuntimeV2HTTPController) Register(api *echo.Group) {
 	api.POST("/agent-runtime/v2/runs/:id/lease-renew", h.RenewLease)
 	api.POST("/agent-runtime/v2/runs/:id/events", h.AppendEvent)
 	api.POST("/agent-runtime/v2/runs/:id/result", h.FinalizeResult)
+	api.GET("/agent-runtime/v2/ws", h.WebSocket)
 }
 
 func (h *RuntimeV2HTTPController) CreateSession(c echo.Context) error {

@@ -36,6 +36,7 @@ func TestRuntimeV2ControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 		"POST /api/v1/agent-runtime/v2/runs/:id/lease-renew",
 		"POST /api/v1/agent-runtime/v2/runs/:id/events",
 		"POST /api/v1/agent-runtime/v2/runs/:id/result",
+		"GET /api/v1/agent-runtime/v2/ws",
 	} {
 		require.True(t, routes[route], route)
 	}
@@ -618,6 +619,11 @@ func (f *runtimeV2LeaseServiceFake) RenewLease(_ context.Context, principal Runt
 	f.renewCalls++
 	f.lastPrincipal = principal
 	return f.renewResponse, f.renewErr
+}
+
+func (f *runtimeV2LeaseServiceFake) ReleaseUnackedOffer(_ context.Context, principal RuntimeSessionPrincipal, _ ...string) error {
+	f.lastPrincipal = principal
+	return nil
 }
 
 type runtimeV2EventStoreFake struct {
