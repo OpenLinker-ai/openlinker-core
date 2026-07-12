@@ -1291,11 +1291,17 @@ func TestRuntimeRoutes(t *testing.T) {
 		http.MethodGet + " /api/v1/admin/runtime/nodes",
 		http.MethodPost + " /api/v1/admin/runtime/nodes/:id/drain",
 		http.MethodPost + " /api/v1/admin/runtime/nodes/:id/revoke",
+	} {
+		require.True(t, routes[key], key)
+	}
+	for _, key := range []string{
 		http.MethodPost + " /api/v1/agent-runtime/heartbeat",
 		http.MethodGet + " /api/v1/agent-runtime/runs/claim",
 		http.MethodPost + " /api/v1/agent-runtime/runs/:id/result",
+		http.MethodGet + " /api/v1/agent-runtime/ws",
+		http.MethodPost + " /api/v1/agent-runtime/call-agent",
 	} {
-		require.True(t, routes[key], key)
+		require.False(t, routes[key], key)
 	}
 }
 

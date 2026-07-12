@@ -58,12 +58,6 @@ type runtimeContractManifest struct {
 		EmptyResponseStatus   *int                       `json:"empty_response_status,omitempty"`
 		ErrorResponseSchema   runtimeContractSchemaRef   `json:"error_response_schema"`
 	} `json:"endpoints"`
-	LegacyRoutes []struct {
-		HTTPMethod     string `json:"http_method"`
-		Path           string `json:"path"`
-		ResponseStatus int    `json:"response_status"`
-		ErrorCode      string `json:"error_code"`
-	} `json:"legacy_routes"`
 	StableErrorCodes []string                   `json:"stable_error_codes"`
 	Definitions      map[string]json.RawMessage `json:"$defs"`
 }
@@ -232,24 +226,6 @@ func TestRuntimeV2ContractDefinesRecoveryAndCancellation(t *testing.T) {
 	require.Equal(t, "string", sessionQuery.Type)
 	require.Equal(t, "uuid", sessionQuery.Format)
 	require.True(t, sessionQuery.Required)
-}
-
-func TestRuntimeV2ContractRejectsLegacyRoutes(t *testing.T) {
-	contract := decodeRuntimeContract(t)
-	keys := make([]string, 0, len(contract.LegacyRoutes))
-	for _, route := range contract.LegacyRoutes {
-		require.Equal(t, 426, route.ResponseStatus)
-		require.Equal(t, "RUNTIME_CLIENT_UPGRADE_REQUIRED", route.ErrorCode)
-		keys = append(keys, route.HTTPMethod+" "+route.Path)
-	}
-	requireUniqueStrings(t, "legacy route", keys)
-	require.ElementsMatch(t, []string{
-		"POST /api/v1/agent-runtime/heartbeat",
-		"GET /api/v1/agent-runtime/runs/claim",
-		"POST /api/v1/agent-runtime/runs/{id}/result",
-		"GET /api/v1/agent-runtime/ws",
-		"POST /api/v1/agent-runtime/call-agent",
-	}, keys)
 }
 
 func TestRuntimeV2ContractReferencesExistingDefinitions(t *testing.T) {

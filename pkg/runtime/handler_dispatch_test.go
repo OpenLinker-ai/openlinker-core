@@ -18,7 +18,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
-func TestLegacyRuntimeRoutesRequireV2WithoutCallingService(t *testing.T) {
+func TestLegacyRuntimeRoutesAreAbsentWithoutCallingService(t *testing.T) {
 	svc := &mockRuntimeService{}
 	e := echo.New()
 	NewHandler(svc).RegisterAgentRuntime(e.Group("/api/v1"))
@@ -39,10 +39,7 @@ func TestLegacyRuntimeRoutesRequireV2WithoutCallingService(t *testing.T) {
 		req.Header.Set(echo.HeaderAuthorization, "Bearer must-not-be-validated")
 		rec := httptest.NewRecorder()
 		e.ServeHTTP(rec, req)
-		require.Equal(t, http.StatusUpgradeRequired, rec.Code, test.method+" "+test.path)
-		var body map[string]map[string]any
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-		require.Equal(t, "RUNTIME_CLIENT_UPGRADE_REQUIRED", body["error"]["code"])
+		require.Equal(t, http.StatusNotFound, rec.Code, test.method+" "+test.path)
 	}
 
 	require.Empty(t, svc.validateRuntimeTokenPlaintext)

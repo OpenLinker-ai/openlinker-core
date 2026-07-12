@@ -256,35 +256,10 @@ func (h *Handler) RevokeRuntimeNode(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
-// RegisterAgentRuntime mounts runtime v2 plus explicit tombstones for every
-// pre-v2 transport. Tombstones intentionally run without authentication or
-// request decoding so old clients cannot mutate current runtime state.
-//
-//	POST /agent-runtime/heartbeat        retired v1 heartbeat
-//	GET  /agent-runtime/runs/claim       retired v1 long-poll claim
-//	POST /agent-runtime/runs/:id/result  retired v1 result submission
-//	GET  /agent-runtime/ws               retired v1 WebSocket
-//	POST /agent-runtime/call-agent       retired v1 delegation
+// RegisterAgentRuntime mounts only the runtime v2 transport. Pre-v2 paths are
+// deliberately absent so they resolve as ordinary 404 responses.
 func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
-	api.POST("/agent-runtime/heartbeat", RuntimeClientUpgradeRequired)
-	api.GET("/agent-runtime/runs/claim", RuntimeClientUpgradeRequired)
-	api.POST("/agent-runtime/runs/:id/result", RuntimeClientUpgradeRequired)
-	api.GET("/agent-runtime/ws", RuntimeClientUpgradeRequired)
-	api.POST("/agent-runtime/call-agent", RuntimeClientUpgradeRequired)
 	h.runtimeV2.Register(api)
-}
-
-// RuntimeClientUpgradeRequired is the only behavior exposed by pre-v2 runtime
-// routes. It runs before authentication, decoding, rate limiting, or any
-// service/database call, so an old client can never mutate v2 state.
-func RuntimeClientUpgradeRequired(c echo.Context) error {
-	return c.JSON(http.StatusUpgradeRequired, map[string]any{
-		"error": map[string]any{
-			"code":      "RUNTIME_CLIENT_UPGRADE_REQUIRED",
-			"message":   "Runtime protocol v2 is required",
-			"retryable": false,
-		},
-	})
 }
 
 // PostRun 调用 Agent。

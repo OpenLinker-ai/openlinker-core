@@ -377,38 +377,6 @@
       }
     }
   ],
-  "legacy_routes": [
-    {
-      "http_method": "POST",
-      "path": "/api/v1/agent-runtime/heartbeat",
-      "response_status": 426,
-      "error_code": "RUNTIME_CLIENT_UPGRADE_REQUIRED"
-    },
-    {
-      "http_method": "GET",
-      "path": "/api/v1/agent-runtime/runs/claim",
-      "response_status": 426,
-      "error_code": "RUNTIME_CLIENT_UPGRADE_REQUIRED"
-    },
-    {
-      "http_method": "POST",
-      "path": "/api/v1/agent-runtime/runs/{id}/result",
-      "response_status": 426,
-      "error_code": "RUNTIME_CLIENT_UPGRADE_REQUIRED"
-    },
-    {
-      "http_method": "GET",
-      "path": "/api/v1/agent-runtime/ws",
-      "response_status": 426,
-      "error_code": "RUNTIME_CLIENT_UPGRADE_REQUIRED"
-    },
-    {
-      "http_method": "POST",
-      "path": "/api/v1/agent-runtime/call-agent",
-      "response_status": 426,
-      "error_code": "RUNTIME_CLIENT_UPGRADE_REQUIRED"
-    }
-  ],
   "stable_error_codes": [
     "BAD_REQUEST",
     "UNAUTHORIZED",
