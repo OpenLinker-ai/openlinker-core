@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,22 +74,43 @@ func insertWebhookAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, s
 
 func insertWebhookRun(t *testing.T, pool *pgxpool.Pool, userID, agentID uuid.UUID) db.Run {
 	t.Helper()
-	runID := uuid.New()
+	runID, terminalEventID := uuid.New(), uuid.New()
 	duration := int32(42)
+	err := pgx.BeginTxFunc(context.Background(), pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(context.Background(), `SET LOCAL session_replication_role = replica`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(context.Background(), `
+INSERT INTO runs (
+    id, user_id, agent_id, input, output, status,
+    cost_cents, platform_fee_cents, creator_revenue_cents,
+    duration_ms, finished_at, runtime_contract_id, dispatch_state,
+    terminal_event_id
+) VALUES (
+    $1, $2, $3, '{"q":"hi"}', '{"text":"ok"}', 'success',
+    100, 25, 75, $4, NOW(), 'legacy.pre-v2', 'terminal', $5
+)`, runID, userID, agentID, duration, terminalEventID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(context.Background(), `
+INSERT INTO run_events (id, run_id, sequence, event_type, payload)
+VALUES ($1, $2, 1, 'run.succeeded', '{}'::jsonb)`, terminalEventID, runID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(context.Background(), `
+INSERT INTO run_accounting_ledger (
+    run_id, terminal_event_id, agent_id, success_delta, revenue_delta_cents
+) VALUES ($1, $2, $3, 1, 75)`, runID, terminalEventID, agentID)
+		return err
+	})
+	require.NoError(t, err)
 	var run db.Run
-	err := pool.QueryRow(context.Background(),
-		`INSERT INTO runs (
-			id, user_id, agent_id, input, output, status,
-			cost_cents, platform_fee_cents, creator_revenue_cents,
-			duration_ms, finished_at
-		) VALUES (
-			$1, $2, $3, '{"q":"hi"}', '{"text":"ok"}', 'success',
-			100, 25, 75, $4, NOW()
-		)
-		RETURNING id, user_id, agent_id, input, output, status, error_code,
+	err = pool.QueryRow(context.Background(),
+		`SELECT id, user_id, agent_id, input, output, status, error_code,
 		          error_message, cost_cents, platform_fee_cents, creator_revenue_cents,
-		          duration_ms, started_at, finished_at`,
-		runID, userID, agentID, duration).
+		          duration_ms, started_at, finished_at
+		 FROM runs WHERE id = $1`, runID).
 		Scan(
 			&run.ID,
 			&run.UserID,
@@ -252,7 +274,7 @@ func TestTaskCallbackSubscriptionDeliversSignedRunEvent(t *testing.T) {
 	require.NoError(t, json.Unmarshal(got.body, &payload))
 	assert.Equal(t, event.ID.String(), payload.EventID)
 	assert.Equal(t, run.ID.String(), payload.RunID)
-	assert.Equal(t, int32(1), payload.Sequence)
+	assert.Equal(t, int32(2), payload.Sequence)
 	assert.Equal(t, "success", payload.Payload["status"])
 
 	require.Eventually(t, func() bool {

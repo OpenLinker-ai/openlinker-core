@@ -104,6 +104,14 @@ RETURNING id, workflow_id, user_id, status, input, output, error_message,
           started_at, finished_at, created_at, updated_at,
           attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error;
 
+-- name: CreatePendingHostedWorkflowRun :one
+INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts)
+VALUES ($1, $2, $3, 'pending', $4, $5)
+ON CONFLICT (id) DO NOTHING
+RETURNING id, workflow_id, user_id, status, input, output, error_message,
+          started_at, finished_at, created_at, updated_at,
+          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error;
+
 -- name: MarkWorkflowRunSuccess :one
 UPDATE workflow_runs
 SET status = 'success',
@@ -184,6 +192,7 @@ SELECT id, workflow_id, user_id, status, input, output, error_message,
        attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error
 FROM workflow_runs
 WHERE workflow_id = $1
+  AND user_id = $7
   AND (
       $2::text = ''
       OR id::text ILIKE '%' || $2 || '%'
@@ -224,6 +233,7 @@ LIMIT $5 OFFSET $6;
 SELECT COUNT(*)::int
 FROM workflow_runs
 WHERE workflow_id = $1
+  AND user_id = $4
   AND (
       $2::text = ''
       OR id::text ILIKE '%' || $2 || '%'

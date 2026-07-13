@@ -319,6 +319,128 @@ func (s *Service) StartWorkflowRun(ctx context.Context, userID, workflowID uuid.
 	return &resp, nil
 }
 
+// ValidateHostedExecutionTarget verifies that a seller-owned workflow is safe
+// to expose as a service. Passing uuid.Nil to the existing Agent validator
+// intentionally requires every node to be public and callable, independent of
+// the eventual buyer.
+func (s *Service) ValidateHostedExecutionTarget(ctx context.Context, sellerID, workflowID uuid.UUID) (*HostedTargetValidation, error) {
+	result := &HostedTargetValidation{UnavailableReason: "not_found"}
+	w, nodes, err := s.getWorkflowForOwner(ctx, sellerID, workflowID)
+	if err != nil {
+		var he *httpx.HTTPError
+		if errors.As(err, &he) && he.Status < 500 {
+			return result, nil
+		}
+		return nil, err
+	}
+	result.TargetName = w.Name
+	if w.Status != "active" {
+		result.UnavailableReason = "not_active"
+		return result, nil
+	}
+	if len(nodes) == 0 {
+		result.UnavailableReason = "no_nodes"
+		return result, nil
+	}
+	if _, err := workflowGraphFromDefinition(w, nodes); err != nil {
+		var he *httpx.HTTPError
+		if errors.As(err, &he) && he.Status < 500 {
+			result.UnavailableReason = "invalid_definition"
+			return result, nil
+		}
+		return nil, err
+	}
+	if err := s.validateWorkflowStoredAgentsAvailable(ctx, uuid.Nil, nodes, true); err != nil {
+		var he *httpx.HTTPError
+		if errors.As(err, &he) && he.Status < 500 {
+			result.UnavailableReason = "nodes_unavailable"
+			return result, nil
+		}
+		return nil, err
+	}
+	result.Executable = true
+	result.UnavailableReason = ""
+	return result, nil
+}
+
+// StartHostedWorkflowRun keeps definition ownership and result ownership
+// separate: the seller owns the workflow, while the buyer owns the durable
+// workflow run and all child Runtime runs. externalOrderID is also the run ID,
+// making a retry after a process crash idempotent at the database boundary.
+func (s *Service) StartHostedWorkflowRun(
+	ctx context.Context,
+	sellerID, buyerID, workflowID, externalOrderID uuid.UUID,
+	input map[string]interface{},
+) (*WorkflowRunResponse, error) {
+	if s.runtime == nil {
+		return nil, httpx.Internal("workflow runtime 未配置")
+	}
+	if sellerID == uuid.Nil || buyerID == uuid.Nil || workflowID == uuid.Nil || externalOrderID == uuid.Nil {
+		return nil, httpx.BadRequest("Hosted workflow 执行参数无效")
+	}
+	w, nodes, err := s.getWorkflowForOwner(ctx, sellerID, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	if w.Status != "active" {
+		return nil, httpx.Conflict("workflow 当前不可执行")
+	}
+	if len(nodes) == 0 {
+		return nil, httpx.Conflict("workflow 没有可执行节点")
+	}
+	if _, err := workflowGraphFromDefinition(w, nodes); err != nil {
+		return nil, err
+	}
+	if err := s.validateWorkflowStoredAgentsAvailable(ctx, uuid.Nil, nodes, true); err != nil {
+		return nil, err
+	}
+	if input == nil {
+		input = map[string]interface{}{}
+	}
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return nil, httpx.BadRequest("input 不是合法 JSON")
+	}
+	run, err := s.queries.CreatePendingHostedWorkflowRun(ctx, db.CreatePendingHostedWorkflowRunParams{
+		ID:          externalOrderID,
+		WorkflowID:  workflowID,
+		UserID:      buyerID,
+		Input:       inputJSON,
+		MaxAttempts: defaultWorkflowRunMaxAttempts,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		run, err = s.queries.GetWorkflowRunByID(ctx, externalOrderID)
+		if err == nil && !hostedWorkflowRunMatches(run, workflowID, buyerID, input, defaultWorkflowRunMaxAttempts) {
+			return nil, httpx.Conflict("external_order_id 已用于其他 workflow 执行")
+		}
+	}
+	if err != nil {
+		log.Error().Err(err).Str("workflow_id", workflowID.String()).Str("external_order_id", externalOrderID.String()).Msg("workflow.StartHostedWorkflowRun")
+		return nil, httpx.Internal("创建 Hosted workflow_run 失败")
+	}
+	resp := workflowRunToResponse(run, nil)
+	return &resp, nil
+}
+
+func hostedWorkflowRunMatches(run db.WorkflowRun, workflowID, buyerID uuid.UUID, input map[string]interface{}, maxAttempts int32) bool {
+	if run.WorkflowID != workflowID || run.UserID != buyerID || run.MaxAttempts != maxAttempts {
+		return false
+	}
+	existing := map[string]interface{}{}
+	if len(run.Input) > 0 && json.Unmarshal(run.Input, &existing) != nil {
+		return false
+	}
+	if input == nil {
+		input = map[string]interface{}{}
+	}
+	normalizedInput := map[string]interface{}{}
+	encoded, err := json.Marshal(input)
+	if err != nil || json.Unmarshal(encoded, &normalizedInput) != nil {
+		return false
+	}
+	return reflect.DeepEqual(existing, normalizedInput)
+}
+
 func (s *Service) RetryWorkflowRun(ctx context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {
 	run, err := s.getWorkflowRunForOwner(ctx, userID, workflowRunID)
 	if err != nil {
@@ -609,6 +731,7 @@ func (s *Service) ListWorkflowRunsPage(ctx context.Context, userID, workflowID u
 		Sort:       sort,
 		Limit:      size,
 		Offset:     offset,
+		UserID:     userID,
 	})
 	if err != nil {
 		log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.ListWorkflowRuns")
@@ -618,6 +741,7 @@ func (s *Service) ListWorkflowRunsPage(ctx context.Context, userID, workflowID u
 		WorkflowID: workflowID,
 		Query:      query,
 		Status:     status,
+		UserID:     userID,
 	})
 	if err != nil {
 		log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.ListWorkflowRuns: count")

@@ -22,6 +22,15 @@ type RunWorkflowRequest struct {
 	MaxAttempts int32                  `json:"max_attempts,omitempty" validate:"omitempty,min=1,max=10"`
 }
 
+// HostedTargetValidation is the narrow Core result consumed by the Hosted
+// service marketplace. It deliberately carries no workflow definition or
+// endpoint details.
+type HostedTargetValidation struct {
+	TargetName        string `json:"target_name"`
+	Executable        bool   `json:"executable"`
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
+}
+
 type RerunWorkflowStepRequest struct {
 	NodeKey string `json:"node_key" validate:"required,min=1,max=80"`
 }

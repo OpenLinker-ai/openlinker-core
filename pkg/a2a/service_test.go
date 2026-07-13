@@ -58,6 +58,7 @@ WHERE singleton_id = 1`)
 		RunTimeoutSeconds:       15,
 		AllowLocalHTTPEndpoints: true,
 	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	return pool, a2a.NewService(pool, runtimeSvc), runtimeSvc
 }
 
@@ -147,6 +148,43 @@ func insertDelegatedRun(t *testing.T, pool *pgxpool.Pool, userID, childAgentID, 
 		childRunID, parentRunID, callerAgentID)
 	require.NoError(t, err)
 	return childRunID
+}
+
+func markRunLegacyTerminal(t *testing.T, pool *pgxpool.Pool, runID uuid.UUID, status string) {
+	t.Helper()
+	terminalEventID := uuid.New()
+	eventType := "run.succeeded"
+	if status != "success" {
+		eventType = "run.failed"
+	}
+	err := pgx.BeginTxFunc(context.Background(), pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(context.Background(), `SET LOCAL session_replication_role = replica`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(context.Background(), `
+UPDATE runs
+SET runtime_contract_id = 'legacy.pre-v2',
+    idempotency_key_hash = NULL,
+    idempotency_fingerprint = NULL,
+    connection_mode_snapshot = NULL,
+    endpoint_idempotency_snapshot = NULL,
+    dispatch_deadline_at = NULL,
+    run_deadline_at = NULL,
+    status = $2,
+    dispatch_state = 'terminal',
+    output = '{}'::jsonb,
+    duration_ms = 1,
+    finished_at = clock_timestamp(),
+    terminal_event_id = $3
+WHERE id = $1`, runID, status, terminalEventID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(context.Background(), `
+INSERT INTO run_events (id, run_id, sequence, event_type, payload)
+VALUES ($1, $2, 1, $3, '{}'::jsonb)`, terminalEventID, runID, eventType)
+		return err
+	})
+	require.NoError(t, err)
 }
 
 func makeRuntimePullAgent(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
@@ -315,17 +353,9 @@ func TestListParentRunsAggregatesRootContextAndChildrenTree(t *testing.T) {
 	childB := insertDelegatedRun(t, pool, owner, childBAgent, rootRun, rootAgent)
 	grandchild := insertDelegatedRun(t, pool, owner, grandchildAgent, childA, childAAgent)
 
-	_, err := pool.Exec(context.Background(),
-		`UPDATE runs
-		    SET status = CASE
-		      WHEN id = ANY($1::uuid[]) THEN 'success'
-		      ELSE status
-		    END
-		  WHERE id = ANY($2::uuid[])`,
-		[]uuid.UUID{childA, grandchild},
-		[]uuid.UUID{childA, childB, grandchild},
-	)
-	require.NoError(t, err)
+	markRunLegacyTerminal(t, pool, childA, "success")
+	markRunLegacyTerminal(t, pool, grandchild, "success")
+	var err error
 	for _, spec := range []struct {
 		runID         uuid.UUID
 		agentID       uuid.UUID
@@ -682,8 +712,9 @@ func TestProtocolMessageReusesProtocolTaskIDForContinuation(t *testing.T) {
 	assert.Equal(t, "ctx-multi", callA2AMetadata[1]["context_id"])
 	for _, input := range calls {
 		assert.NotContains(t, input, "a2a_message_id")
-		assert.NotContains(t, input, "a2a_context_id")
-		assert.NotContains(t, input, "a2a_task_id")
+		assert.Equal(t, "ctx-multi", input["a2a_context_id"])
+		assert.Equal(t, first.ID, input["a2a_task_id"])
+		assert.Equal(t, "ctx-multi", input["a2a_root_context_id"])
 		assert.NotContains(t, input, "a2a_reference_task_ids")
 	}
 

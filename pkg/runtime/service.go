@@ -2638,6 +2638,8 @@ func runToResponse(r *db.Run) *RunResponse {
 		RunID:                r.ID.String(),
 		AgentID:              r.AgentID.String(),
 		Status:               r.Status,
+		StartedAt:            r.StartedAt,
+		FinishedAt:           r.FinishedAt,
 		Source:               r.Source,
 		RuntimeContractID:    r.RuntimeContractID,
 		DispatchState:        r.DispatchState,

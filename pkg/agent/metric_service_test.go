@@ -144,12 +144,5 @@ func TestStartMetricWorkerAggregatesAndSweepsExpiredApprovals(t *testing.T) {
 // insertRun 直接 SQL 插一条 run，给 metric worker 测试用。
 func insertRun(t *testing.T, pool *pgxpool.Pool, userID, agentID uuid.UUID, status string, durationMs int32, startedAt time.Time) {
 	t.Helper()
-	finishedAt := startedAt.Add(time.Duration(durationMs) * time.Millisecond)
-	_, err := pool.Exec(context.Background(),
-		`INSERT INTO runs (id, user_id, agent_id, input, output, status,
-		                   cost_cents, platform_fee_cents, creator_revenue_cents,
-		                   duration_ms, started_at, finished_at)
-		 VALUES ($1, $2, $3, '{}'::jsonb, '{}'::jsonb, $4, 0, 0, 0, $5, $6, $7)`,
-		uuid.New(), userID, agentID, status, durationMs, startedAt, finishedAt)
-	require.NoError(t, err, "insert run")
+	insertLegacyTerminalRun(t, pool, userID, agentID, status, durationMs, 0, 0, 0, startedAt)
 }

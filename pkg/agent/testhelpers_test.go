@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -26,6 +27,50 @@ const truncateAll = "TRUNCATE runtime_signal_outbox, runtime_session_attachments
 
 const testDBOpTimeout = 30 * time.Second
 const agentTestAdvisoryLockID int64 = 270017
+
+func insertLegacyTerminalRun(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	userID, agentID uuid.UUID,
+	status string,
+	durationMs, costCents, platformFeeCents, creatorRevenueCents int32,
+	startedAt time.Time,
+) uuid.UUID {
+	t.Helper()
+	runID, terminalEventID := uuid.New(), uuid.New()
+	finishedAt := startedAt.Add(time.Duration(durationMs) * time.Millisecond)
+	eventType := "run.succeeded"
+	if status != "success" {
+		eventType = "run.failed"
+	}
+	err := pgx.BeginTxFunc(context.Background(), pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		// These metrics/listing fixtures represent immutable pre-v2 history. The
+		// current trigger deliberately rejects new legacy rows, so the fixture
+		// uses the same migration-only trigger bypass and writes a matching
+		// terminal event in one transaction.
+		if _, err := tx.Exec(context.Background(), `SET LOCAL session_replication_role = replica`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(context.Background(), `
+INSERT INTO runs (
+    id, user_id, agent_id, input, output, status,
+    cost_cents, platform_fee_cents, creator_revenue_cents,
+    duration_ms, started_at, finished_at, runtime_contract_id,
+    dispatch_state, terminal_event_id
+) VALUES (
+    $1, $2, $3, '{}'::jsonb, '{}'::jsonb, $4,
+    $5, $6, $7, $8, $9, $10, 'legacy.pre-v2', 'terminal', $11
+)`, runID, userID, agentID, status, costCents, platformFeeCents, creatorRevenueCents, durationMs, startedAt, finishedAt, terminalEventID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(context.Background(), `
+INSERT INTO run_events (id, run_id, sequence, event_type, payload, created_at)
+VALUES ($1, $2, 1, $3, '{}'::jsonb, $4)`, terminalEventID, runID, eventType, finishedAt)
+		return err
+	})
+	require.NoError(t, err, "insert legacy terminal run fixture")
+	return runID
+}
 
 // skipIfNoDB 检查 TEST_DATABASE_URL 环境变量；未设置则 skip 当前 test。
 // 返回 dsn 字符串，调用方可以用它再连一次（少见）。

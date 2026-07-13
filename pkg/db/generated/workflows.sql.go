@@ -274,6 +274,29 @@ func (q *Queries) CreatePendingWorkflowRun(ctx context.Context, arg CreatePendin
 	return r, err
 }
 
+const createPendingHostedWorkflowRun = `-- name: CreatePendingHostedWorkflowRun :one
+	INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts)
+	VALUES ($1, $2, $3, 'pending', $4, $5)
+	ON CONFLICT (id) DO NOTHING
+	RETURNING id, workflow_id, user_id, status, input, output, error_message,
+	          started_at, finished_at, created_at, updated_at,
+	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
+
+type CreatePendingHostedWorkflowRunParams struct {
+	ID          uuid.UUID `db:"id" json:"id"`
+	WorkflowID  uuid.UUID `db:"workflow_id" json:"workflow_id"`
+	UserID      uuid.UUID `db:"user_id" json:"user_id"`
+	Input       []byte    `db:"input" json:"input"`
+	MaxAttempts int32     `db:"max_attempts" json:"max_attempts"`
+}
+
+func (q *Queries) CreatePendingHostedWorkflowRun(ctx context.Context, arg CreatePendingHostedWorkflowRunParams) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, createPendingHostedWorkflowRun, arg.ID, arg.WorkflowID, arg.UserID, arg.Input, arg.MaxAttempts)
+	var r WorkflowRun
+	err := scanWorkflowRun(row, &r)
+	return r, err
+}
+
 const markWorkflowRunSuccess = `-- name: MarkWorkflowRunSuccess :one
 	UPDATE workflow_runs
 		SET status = 'success',
@@ -406,6 +429,7 @@ const listWorkflowRunsByWorkflow = `-- name: ListWorkflowRunsByWorkflow :many
 	       attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error
 	FROM workflow_runs
 	WHERE workflow_id = $1
+	  AND user_id = $7
 	  AND (
 	      $2::text = ''
 	      OR id::text ILIKE '%' || $2 || '%'
@@ -449,10 +473,11 @@ type ListWorkflowRunsByWorkflowParams struct {
 	Sort       string    `db:"sort" json:"sort"`
 	Limit      int32     `db:"limit" json:"limit"`
 	Offset     int32     `db:"offset" json:"offset"`
+	UserID     uuid.UUID `db:"user_id" json:"user_id"`
 }
 
 func (q *Queries) ListWorkflowRunsByWorkflow(ctx context.Context, arg ListWorkflowRunsByWorkflowParams) ([]WorkflowRun, error) {
-	rows, err := q.db.Query(ctx, listWorkflowRunsByWorkflow, arg.WorkflowID, arg.Query, arg.Status, arg.Sort, arg.Limit, arg.Offset)
+	rows, err := q.db.Query(ctx, listWorkflowRunsByWorkflow, arg.WorkflowID, arg.Query, arg.Status, arg.Sort, arg.Limit, arg.Offset, arg.UserID)
 	if err != nil {
 		return nil, err
 	}
@@ -472,6 +497,7 @@ const countWorkflowRunsByWorkflow = `-- name: CountWorkflowRunsByWorkflow :one
 	SELECT COUNT(*)::int
 	FROM workflow_runs
 	WHERE workflow_id = $1
+	  AND user_id = $4
 	  AND (
 	      $2::text = ''
 	      OR id::text ILIKE '%' || $2 || '%'
@@ -500,10 +526,11 @@ type CountWorkflowRunsByWorkflowParams struct {
 	WorkflowID uuid.UUID `db:"workflow_id" json:"workflow_id"`
 	Query      string    `db:"query" json:"query"`
 	Status     string    `db:"status" json:"status"`
+	UserID     uuid.UUID `db:"user_id" json:"user_id"`
 }
 
 func (q *Queries) CountWorkflowRunsByWorkflow(ctx context.Context, arg CountWorkflowRunsByWorkflowParams) (int32, error) {
-	row := q.db.QueryRow(ctx, countWorkflowRunsByWorkflow, arg.WorkflowID, arg.Query, arg.Status)
+	row := q.db.QueryRow(ctx, countWorkflowRunsByWorkflow, arg.WorkflowID, arg.Query, arg.Status, arg.UserID)
 	var count int32
 	err := row.Scan(&count)
 	return count, err

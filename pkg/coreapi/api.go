@@ -29,6 +29,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/mcp"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/registry"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/servicebridge"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/skill"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/task"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/userdash"
@@ -46,22 +47,23 @@ type Options struct {
 }
 
 type Services struct {
-	Auth        *auth.Service
-	Admin       *coreadmin.Service
-	AgentMarket *agent.MarketService
-	Agent       *agent.Service
-	Skill       *skill.Service
-	Runtime     *runtime.Service
-	Webhook     *webhook.Service
-	A2A         *a2a.Service
-	Workflow    *workflow.Service
-	Registry    *registry.Service
-	Benchmark   *skill.BenchmarkService
-	Task        *task.Service
-	MCP         *mcp.Service
-	Delivery    *delivery.Service
-	UserToken   *usertoken.Service
-	UserStatus  auth.UserStatusChecker
+	Auth          *auth.Service
+	Admin         *coreadmin.Service
+	AgentMarket   *agent.MarketService
+	Agent         *agent.Service
+	Skill         *skill.Service
+	Runtime       *runtime.Service
+	Webhook       *webhook.Service
+	A2A           *a2a.Service
+	Workflow      *workflow.Service
+	ServiceBridge *servicebridge.Service
+	Registry      *registry.Service
+	Benchmark     *skill.BenchmarkService
+	Task          *task.Service
+	MCP           *mcp.Service
+	Delivery      *delivery.Service
+	UserToken     *usertoken.Service
+	UserStatus    auth.UserStatusChecker
 }
 
 // Register mounts all core-owned HTTP routes and starts core-owned workers.
@@ -173,6 +175,8 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	workflowSvc := workflow.NewService(pool, runtimeSvc)
 	workflowHandler := workflow.NewHandler(workflowSvc)
 	workflowHandler.RegisterProtected(api, hybridMw)
+	serviceBridgeSvc := servicebridge.NewService(agentSvc, runtimeSvc, workflowSvc, servicebridge.NewSQLStore(pool))
+	servicebridge.NewHandler(serviceBridgeSvc, cfg.InternalToken).Register(e)
 	if cfg.WorkflowRunWorkerEnabled {
 		go workflow.StartRunWorker(rootCtx, workflowSvc, workflow.RunWorkerConfig{
 			Interval:   time.Duration(cfg.WorkflowRunWorkerIntervalSeconds) * time.Second,
@@ -215,22 +219,23 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	}
 
 	return &Services{
-		Auth:        authSvc,
-		AgentMarket: agentMarketSvc,
-		Admin:       adminSvc,
-		Agent:       agentSvc,
-		Skill:       skillSvc,
-		Runtime:     runtimeSvc,
-		Webhook:     webhookSvc,
-		A2A:         a2aSvc,
-		Workflow:    workflowSvc,
-		Registry:    registrySvc,
-		Benchmark:   benchmarkSvc,
-		Task:        taskSvc,
-		MCP:         mcpSvc,
-		Delivery:    deliverySvc,
-		UserToken:   userTokenSvc,
-		UserStatus:  userStatusChecker,
+		Auth:          authSvc,
+		AgentMarket:   agentMarketSvc,
+		Admin:         adminSvc,
+		Agent:         agentSvc,
+		Skill:         skillSvc,
+		Runtime:       runtimeSvc,
+		Webhook:       webhookSvc,
+		A2A:           a2aSvc,
+		Workflow:      workflowSvc,
+		ServiceBridge: serviceBridgeSvc,
+		Registry:      registrySvc,
+		Benchmark:     benchmarkSvc,
+		Task:          taskSvc,
+		MCP:           mcpSvc,
+		Delivery:      deliverySvc,
+		UserToken:     userTokenSvc,
+		UserStatus:    userStatusChecker,
 	}
 }
 

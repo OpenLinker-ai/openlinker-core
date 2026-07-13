@@ -166,7 +166,7 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		t.Fatalf("Register returned nil services")
 	}
 	if services.Auth == nil || services.Admin == nil || services.AgentMarket == nil || services.Agent == nil || services.Skill == nil ||
-		services.Runtime == nil || services.Webhook == nil || services.A2A == nil || services.Workflow == nil ||
+		services.Runtime == nil || services.Webhook == nil || services.A2A == nil || services.Workflow == nil || services.ServiceBridge == nil ||
 		services.Registry == nil || services.Benchmark == nil || services.Task == nil || services.MCP == nil ||
 		services.Delivery == nil || services.UserToken == nil {
 		t.Fatalf("Register returned incomplete services: %#v", services)
@@ -187,6 +187,9 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		"PATCH /api/v1/user-tokens/:id",
 		"DELETE /api/v1/user-tokens/:id",
 		"POST /internal/user-tokens/introspect",
+		"POST /internal/hosted/service-targets/validate",
+		"POST /internal/hosted/service-executions",
+		"GET /internal/hosted/service-executions/:external_order_id",
 		"GET /api/v1/agents",
 		"POST /api/v1/creator/agents",
 		"GET /api/v1/admin/summary",

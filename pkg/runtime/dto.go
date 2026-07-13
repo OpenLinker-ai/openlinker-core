@@ -122,6 +122,8 @@ type RunResponse struct {
 	ErrorMsg             string                          `json:"error_message,omitempty"`
 	CostCents            int32                           `json:"cost_cents"`
 	DurationMs           int32                           `json:"duration_ms"`
+	StartedAt            time.Time                       `json:"started_at"`
+	FinishedAt           *time.Time                      `json:"finished_at,omitempty"`
 	Source               string                          `json:"source,omitempty"`
 	RuntimeContractID    string                          `json:"runtime_contract_id"`
 	DispatchState        string                          `json:"dispatch_state"`

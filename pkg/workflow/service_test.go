@@ -63,6 +63,7 @@ func TestWorkflowRunExecutesAgentNodesAndPersistsChildRuns(t *testing.T) {
 		RunTimeoutSeconds:       5,
 		AllowLocalHTTPEndpoints: true,
 	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
@@ -196,6 +197,7 @@ func TestWorkflowStartRejectsAgentThatBecameUncallable(t *testing.T) {
 		RunTimeoutSeconds:       5,
 		AllowLocalHTTPEndpoints: true,
 	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
 		Name: "Stale workflow",
@@ -284,6 +286,7 @@ func TestWorkflowRunExecutesIndependentBranchesInParallelAndAggregatesOutputs(t 
 		RunTimeoutSeconds:       5,
 		AllowLocalHTTPEndpoints: true,
 	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
@@ -394,6 +397,7 @@ func TestWorkflowParallelBranchFailureCancelsSiblingHTTPRun(t *testing.T) {
 		RunTimeoutSeconds:       10,
 		AllowLocalHTTPEndpoints: true,
 	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
@@ -477,6 +481,7 @@ func TestRerunWorkflowStepReusesUnaffectedStepsAndComparesRuns(t *testing.T) {
 		RunTimeoutSeconds:       5,
 		AllowLocalHTTPEndpoints: true,
 	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
@@ -561,6 +566,7 @@ func TestStartWorkflowRunQueuesAndWorkerExecutes(t *testing.T) {
 		RunTimeoutSeconds:       5,
 		AllowLocalHTTPEndpoints: true,
 	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
@@ -630,6 +636,7 @@ func TestStartRunWorkerProcessesPendingRunsInBurst(t *testing.T) {
 		RunTimeoutSeconds:       5,
 		AllowLocalHTTPEndpoints: true,
 	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
 	created, err := svc.CreateWorkflow(ctx, userID, &workflow.CreateWorkflowRequest{
@@ -707,6 +714,7 @@ func TestPauseResumeWorkflowRunControlsWorkerClaim(t *testing.T) {
 		RunTimeoutSeconds:       5,
 		AllowLocalHTTPEndpoints: true,
 	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
@@ -779,6 +787,7 @@ func TestCancelRunningWorkflowRunPreventsSuccessOverwrite(t *testing.T) {
 		RunTimeoutSeconds:       5,
 		AllowLocalHTTPEndpoints: true,
 	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
@@ -854,6 +863,7 @@ func TestWorkflowWorkerRequeuesStaleRunAndCleansRetrySteps(t *testing.T) {
 		RunTimeoutSeconds:       5,
 		AllowLocalHTTPEndpoints: true,
 	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
@@ -914,6 +924,7 @@ func TestRetryWorkflowRunCreatesNewPendingRun(t *testing.T) {
 		RunTimeoutSeconds:       5,
 		AllowLocalHTTPEndpoints: true,
 	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{

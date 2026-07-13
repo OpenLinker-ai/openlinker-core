@@ -45,9 +45,11 @@ func TestServiceBridgesMarketRuntimeAndRunReads(t *testing.T) {
 	agentID := insertMCPAgent(t, pool, creatorID, "mcp-bridge-agent", "MCP Bridge Agent", server.URL, []string{"data", "sql"})
 	insertMCPAgentSkills(t, pool, agentID, "data/sql-query")
 
+	runtimeSvc := runtime.NewService(pool, &config.Config{RunTimeoutSeconds: 5, AllowLocalHTTPEndpoints: true})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := NewService(
 		agent.NewMarketService(pool),
-		runtime.NewService(pool, &config.Config{RunTimeoutSeconds: 5, AllowLocalHTTPEndpoints: true}),
+		runtimeSvc,
 		nil,
 	)
 

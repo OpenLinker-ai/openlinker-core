@@ -2467,6 +2467,25 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 		t.Fatalf("CreatePendingWorkflowRun scan = %#v", run)
 	}
 
+	dbtx.row = fakeRow{values: runValues}
+	hostedRun, err := q.CreatePendingHostedWorkflowRun(context.Background(), CreatePendingHostedWorkflowRunParams{
+		ID:          runID,
+		WorkflowID:  workflowID,
+		UserID:      userID,
+		Input:       []byte(`{"prompt":"go"}`),
+		MaxAttempts: 3,
+	})
+	if err != nil {
+		t.Fatalf("CreatePendingHostedWorkflowRun error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreatePendingHostedWorkflowRun")
+	if hostedRun.ID != runID {
+		t.Fatalf("CreatePendingHostedWorkflowRun scan = %#v", hostedRun)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID, workflowID, userID, []byte(`{"prompt":"go"}`), int32(3)}) {
+		t.Fatalf("CreatePendingHostedWorkflowRun args = %#v", dbtx.queryRowArgs)
+	}
+
 	successRunValues := append([]any{}, runValues...)
 	successRunValues[3] = "success"
 	successRunValues[8] = &finishedAt
@@ -2577,6 +2596,7 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 		Sort:       "created_desc",
 		Limit:      10,
 		Offset:     20,
+		UserID:     userID,
 	})
 	if err != nil {
 		t.Fatalf("ListWorkflowRunsByWorkflow error = %v", err)
@@ -2585,7 +2605,7 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	if len(runs) != 1 || runs[0].ID != runID {
 		t.Fatalf("ListWorkflowRunsByWorkflow scan = %#v", runs)
 	}
-	if !reflect.DeepEqual(dbtx.queryArgs, []any{workflowID, "extract", "success", "created_desc", int32(10), int32(20)}) {
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{workflowID, "extract", "success", "created_desc", int32(10), int32(20), userID}) {
 		t.Fatalf("ListWorkflowRunsByWorkflow args = %#v", dbtx.queryArgs)
 	}
 
@@ -2594,12 +2614,13 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 		WorkflowID: workflowID,
 		Query:      "extract",
 		Status:     "success",
+		UserID:     userID,
 	})
 	if err != nil || count != 8 {
 		t.Fatalf("CountWorkflowRunsByWorkflow = %d, %v", count, err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "CountWorkflowRunsByWorkflow")
-	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{workflowID, "extract", "success"}) {
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{workflowID, "extract", "success", userID}) {
 		t.Fatalf("CountWorkflowRunsByWorkflow args = %#v", dbtx.queryRowArgs)
 	}
 

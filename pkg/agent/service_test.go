@@ -783,14 +783,7 @@ func TestListMyAgentsPageDefaultsToNewestFirst(t *testing.T) {
 	olderAgent, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("older-page")))
 	require.NoError(t, err)
 	olderAgentID := uuid.MustParse(olderAgent.ID)
-	_, err = pool.Exec(ctx,
-		`INSERT INTO runs (
-			user_id, agent_id, input, output, status,
-			cost_cents, platform_fee_cents, creator_revenue_cents,
-			duration_ms, started_at, finished_at
-		) VALUES ($1, $2, '{}'::jsonb, '{}'::jsonb, 'success', 10, 2, 8, 12, NOW(), NOW())`,
-		uid, olderAgentID)
-	require.NoError(t, err)
+	insertLegacyTerminalRun(t, pool, uid, olderAgentID, "success", 12, 10, 2, 8, time.Now())
 
 	time.Sleep(10 * time.Millisecond)
 	newerAgent, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("newer-page")))
