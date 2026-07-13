@@ -659,7 +659,7 @@ func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
 	_, err := pool.Exec(ctx, `UPDATE agents SET connection_mode = 'runtime' WHERE id = $1`, agentID)
 	require.NoError(t, err)
 
-	tokenID, nodeID, sessionID := uuid.New(), uuid.New(), uuid.New()
+	tokenID, nodeID, sessionID, attachmentID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	workerID := uuid.NewString()
 	certificateSerial := hex.EncodeToString(nodeID[:])
 	thumbprintDigest := sha256.Sum256(nodeID[:])
@@ -700,8 +700,8 @@ func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
 	require.NoError(t, err)
 	_, err = fixtureTx.Exec(ctx, `
 		INSERT INTO runtime_session_attachments (
-			runtime_session_id, core_instance_id, attachment_kind
-		) VALUES ($1, $2, 'connected')`, sessionID, coreID)
+			id, runtime_session_id, core_instance_id, attachment_kind
+		) VALUES ($1, $2, $3, 'connected')`, attachmentID, sessionID, coreID)
 	require.NoError(t, err)
 	require.NoError(t, fixtureTx.Commit(ctx))
 
@@ -723,6 +723,7 @@ func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
 		WorkerID:                        workerID,
 		SessionEpoch:                    1,
 		CoreInstanceID:                  coreID,
+		AttachmentID:                    attachmentID,
 		DeviceCertificateSerial:         certificateSerial,
 		DevicePublicKeyThumbprintSHA256: thumbprint,
 		Status:                          "active",

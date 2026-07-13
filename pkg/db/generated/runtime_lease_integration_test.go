@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const runtimeV2ContractDigest = "fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53"
+const runtimeV2ContractDigest = "3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9"
 
 var runtimeV2RequiredFeatures = []string{
 	"lease_fence",
@@ -43,6 +43,80 @@ func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {
 
 	fixture := newRuntimeLeaseFixture()
 	insertRuntimeLeaseFixture(t, ctx, pool, fixture)
+
+	t.Run("stale attachment generation is fenced after reattach commits", func(t *testing.T) {
+		oldAttachment, err := New(pool).GetActiveRuntimeSessionAttachment(ctx, fixture.sourceSessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		rotateTx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rotateQueries := New(rotateTx)
+		if _, err = rotateQueries.GetRuntimeSessionForUpdate(ctx, fixture.sourceSessionID); err != nil {
+			_ = rotateTx.Rollback(ctx)
+			t.Fatal(err)
+		}
+		reason := "test transport reattached"
+		if _, err = rotateQueries.CloseRuntimeSessionAttachment(ctx, CloseRuntimeSessionAttachmentParams{
+			RuntimeSessionID: fixture.sourceSessionID,
+			CoreInstanceID:   fixture.coreID,
+			AttachmentID:     oldAttachment.ID,
+			DisconnectReason: &reason,
+		}); err != nil {
+			_ = rotateTx.Rollback(ctx)
+			t.Fatal(err)
+		}
+		newAttachment, err := rotateQueries.CreateRuntimeSessionAttachment(ctx, CreateRuntimeSessionAttachmentParams{
+			RuntimeSessionID: fixture.sourceSessionID,
+			CoreInstanceID:   fixture.coreID,
+			AttachmentKind:   "resumed",
+		})
+		if err != nil {
+			_ = rotateTx.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if err = rotateTx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		staleTx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = staleTx.Rollback(ctx) }()
+		staleQueries := New(staleTx)
+		if _, err = staleQueries.LockRuntimeSessionForPrincipalValidation(ctx, LockRuntimeSessionForPrincipalValidationParams{
+			RuntimeSessionID: fixture.sourceSessionID, NodeID: fixture.nodeID, AgentID: fixture.agentID,
+			CredentialID: fixture.tokenID, WorkerID: fixture.workerID, AttachedCoreInstanceID: &fixture.coreID,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = staleQueries.LockRuntimeNodeForPrincipalValidation(ctx, LockRuntimeNodeForPrincipalValidationParams{
+			NodeID: fixture.nodeID, DeviceCertificateSerial: fixture.certificateSerial,
+			DevicePublicKeyThumbprint: fixture.thumbprint,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		agentID := fixture.agentID
+		if _, err = staleQueries.LockRuntimeCredentialForPrincipalValidation(ctx, LockRuntimeCredentialForPrincipalValidationParams{
+			CredentialID: fixture.tokenID, AgentID: &agentID,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = staleQueries.LockRuntimeSessionAttachmentForPrincipalValidation(ctx, LockRuntimeSessionAttachmentForPrincipalValidationParams{
+			AttachmentID: oldAttachment.ID, RuntimeSessionID: fixture.sourceSessionID, CoreInstanceID: fixture.coreID,
+		}); !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("stale attachment lock error = %v", err)
+		}
+		if _, err = staleQueries.LockRuntimeSessionAttachmentForPrincipalValidation(ctx, LockRuntimeSessionAttachmentForPrincipalValidationParams{
+			AttachmentID: newAttachment.ID, RuntimeSessionID: fixture.sourceSessionID, CoreInstanceID: fixture.coreID,
+		}); err != nil {
+			t.Fatalf("current attachment lock error = %v", err)
+		}
+	})
 
 	t.Run("offer and exact mirror", func(t *testing.T) {
 		tx, err := pool.Begin(ctx)
@@ -457,6 +531,11 @@ func lockRuntimeFixturePrincipal(t *testing.T, ctx context.Context, q *Queries, 
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := q.LockRuntimeSessionAttachmentForPrincipalValidation(ctx, LockRuntimeSessionAttachmentForPrincipalValidationParams{
+		AttachmentID: resolved.AttachmentID, RuntimeSessionID: sessionID, CoreInstanceID: f.coreID,
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func moveRuntimeFixtureToReplacementSession(t *testing.T, ctx context.Context, pool *pgxpool.Pool, f runtimeLeaseFixture) {
@@ -470,9 +549,14 @@ func moveRuntimeFixtureToReplacementSession(t *testing.T, ctx context.Context, p
 	if _, err := q.GetRuntimeSessionForUpdate(ctx, f.sourceSessionID); err != nil {
 		t.Fatal(err)
 	}
+	attachment, err := q.GetActiveRuntimeSessionAttachment(ctx, f.sourceSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	disconnectReason := "test process restart"
 	if _, err := q.CloseRuntimeSessionAttachment(ctx, CloseRuntimeSessionAttachmentParams{
 		RuntimeSessionID: f.sourceSessionID, CoreInstanceID: f.coreID,
+		AttachmentID:     attachment.ID,
 		DisconnectReason: &disconnectReason,
 	}); err != nil {
 		t.Fatal(err)

@@ -33,7 +33,7 @@ WITH active_runtime_agents AS (
       AND s.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
       AND s.protocol_version = 2
       AND s.runtime_contract_id = 'openlinker.runtime.v2'
-      AND s.runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
+      AND s.runtime_contract_digest = '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9'
       AND s.features @> ARRAY[
           'lease_fence',
           'assignment_confirm',
@@ -312,7 +312,7 @@ WITH active_runtime_agents AS (
       AND s.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
       AND s.protocol_version = 2
       AND s.runtime_contract_id = 'openlinker.runtime.v2'
-      AND s.runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
+      AND s.runtime_contract_digest = '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9'
       AND s.features @> ARRAY[
           'lease_fence',
           'assignment_confirm',

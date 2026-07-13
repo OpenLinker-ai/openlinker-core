@@ -426,7 +426,8 @@ func validateRuntimeHello(value RuntimeHelloPayload) error {
 }
 
 func validateRuntimeReady(value RuntimeReadyPayload) error {
-	if !validRequiredString(value.CoreInstanceID, 200) || value.OfferTTLSeconds < 1 || value.LeaseTTLSeconds < 1 || value.DatabaseTime.IsZero() {
+	if !validRequiredString(value.CoreInstanceID, 200) || value.AttachmentID == uuid.Nil ||
+		value.OfferTTLSeconds < 1 || value.LeaseTTLSeconds < 1 || value.DatabaseTime.IsZero() {
 		return runtimeValidationError("invalid runtime ready payload", nil)
 	}
 	seen := make(map[string]struct{}, len(value.Features))

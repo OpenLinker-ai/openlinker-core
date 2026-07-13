@@ -60,6 +60,16 @@ WHERE t.id = sqlc.arg(credential_id)
   AND t.scopes @> ARRAY['agent:pull']::text[]
 FOR SHARE OF t;
 
+-- name: LockRuntimeSessionAttachmentForPrincipalValidation :one
+SELECT id, runtime_session_id, core_instance_id, attachment_kind,
+       attached_at, detached_at, disconnect_reason
+FROM runtime_session_attachments
+WHERE id = sqlc.arg(attachment_id)
+  AND runtime_session_id = sqlc.arg(runtime_session_id)
+  AND core_instance_id = sqlc.arg(core_instance_id)
+  AND detached_at IS NULL
+FOR UPDATE;
+
 -- name: LockRuntimeSessionForOfferRelease :one
 -- Disconnect cleanup may run only after Session close committed. Preserve the
 -- global Session -> Node -> Token lock order while accepting either the still
@@ -90,16 +100,22 @@ WHERE s.runtime_session_id = sqlc.arg(runtime_session_id)
       OR (
           s.status IN ('offline', 'closed')
           AND s.attached_core_instance_id IS NULL
-          AND EXISTS (
-              SELECT 1
-              FROM runtime_session_attachments detached
-              WHERE detached.runtime_session_id = s.runtime_session_id
-                AND detached.core_instance_id = sqlc.arg(core_instance_id)
-                AND detached.detached_at IS NOT NULL
-          )
       )
   )
 FOR UPDATE OF s;
+
+-- name: LockRuntimeSessionAttachmentForOfferRelease :one
+SELECT id, runtime_session_id, core_instance_id, attachment_kind,
+       attached_at, detached_at, disconnect_reason
+FROM runtime_session_attachments
+WHERE id = sqlc.arg(attachment_id)
+  AND runtime_session_id = sqlc.arg(runtime_session_id)
+  AND core_instance_id = sqlc.arg(core_instance_id)
+  AND (
+      (sqlc.arg(detached)::boolean AND detached_at IS NOT NULL)
+      OR (NOT sqlc.arg(detached)::boolean AND detached_at IS NULL)
+  )
+FOR UPDATE;
 
 -- name: GetExistingUnacceptedRunOfferForSession :one
 WITH existing_offer AS MATERIALIZED (

@@ -212,12 +212,13 @@ type RuntimeSessionIdentity struct {
 // RuntimeSessionRequest is the transport-neutral hello/session request.
 type RuntimeSessionRequest struct {
 	RuntimeSessionIdentity
-	NodeVersion           string   `json:"node_version"`
-	ProtocolVersion       int32    `json:"protocol_version"`
-	RuntimeContractID     string   `json:"runtime_contract_id"`
-	RuntimeContractDigest string   `json:"runtime_contract_digest"`
-	Features              []string `json:"features"`
-	Capacity              int32    `json:"capacity"`
+	NodeVersion           string    `json:"node_version"`
+	ProtocolVersion       int32     `json:"protocol_version"`
+	RuntimeContractID     string    `json:"runtime_contract_id"`
+	RuntimeContractDigest string    `json:"runtime_contract_digest"`
+	Features              []string  `json:"features"`
+	Capacity              int32     `json:"capacity"`
+	AttachmentID          uuid.UUID `json:"-"`
 }
 
 // RuntimeSessionHeartbeatRequest repeats immutable contract identity so a
@@ -228,8 +229,9 @@ type RuntimeSessionHeartbeatRequest = RuntimeSessionRequest
 // Status is either offline (reconnectable) or closed (permanent).
 type RuntimeSessionCloseRequest struct {
 	RuntimeSessionIdentity
-	Status string `json:"status"`
-	Reason string `json:"reason"`
+	Status       string    `json:"status"`
+	Reason       string    `json:"reason"`
+	AttachmentID uuid.UUID `json:"-"`
 }
 
 // RuntimeSessionState is durable state returned after transaction commit.
@@ -253,6 +255,7 @@ type RuntimeSessionPrincipal struct {
 	WorkerID                        string
 	SessionEpoch                    int64
 	CoreInstanceID                  uuid.UUID
+	AttachmentID                    uuid.UUID
 	DeviceCertificateSerial         string
 	DevicePublicKeyThumbprintSHA256 string
 	Status                          string
@@ -265,6 +268,7 @@ func (p RuntimeSessionPrincipal) EventPrincipal() RuntimeEventPrincipal {
 	workerID := p.WorkerID
 	credentialID := p.CredentialID
 	coreInstanceID := p.CoreInstanceID
+	attachmentID := p.AttachmentID
 	certificateSerial := p.DeviceCertificateSerial
 	publicKeyThumbprint := p.DevicePublicKeyThumbprintSHA256
 	return RuntimeEventPrincipal{
@@ -274,6 +278,7 @@ func (p RuntimeSessionPrincipal) EventPrincipal() RuntimeEventPrincipal {
 		WorkerID:                        &workerID,
 		RuntimeSessionID:                &sessionID,
 		CoreInstanceID:                  &coreInstanceID,
+		AttachmentID:                    &attachmentID,
 		DeviceCertificateSerial:         &certificateSerial,
 		DevicePublicKeyThumbprintSHA256: &publicKeyThumbprint,
 	}
@@ -449,7 +454,6 @@ func (s *RuntimeSessionService) CreateOrAttachSession(
 	if s == nil || s.repository == nil || s.coreInstanceID == uuid.Nil {
 		return RuntimeSessionState{}, newRuntimeSessionError(RuntimeSessionErrorValidationFailed, nil)
 	}
-
 	var state RuntimeSessionState
 	err = s.repository.WithTransaction(ctx, func(tx runtimeSessionTransaction) error {
 		if lockErr := tx.LockSessionIdentity(ctx, normalized.RuntimeSessionID); lockErr != nil {
@@ -608,14 +612,31 @@ func (s *RuntimeSessionService) attachExistingSession(
 	}
 
 	if !wasOffline {
-		attachment, attachmentErr := tx.GetActiveRuntimeSessionAttachment(ctx, existing.RuntimeSessionID)
+		previous, attachmentErr := tx.GetActiveRuntimeSessionAttachment(ctx, existing.RuntimeSessionID)
 		if attachmentErr != nil {
 			return attachmentErr
 		}
-		if attachment.CoreInstanceID != s.coreInstanceID {
+		if previous.CoreInstanceID != s.coreInstanceID {
 			return newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
 		}
-		*state = runtimeSessionState(claimed, &attachment, true, false)
+		reason := "transport reattached"
+		if _, attachmentErr = tx.CloseRuntimeSessionAttachment(ctx, db.CloseRuntimeSessionAttachmentParams{
+			RuntimeSessionID: existing.RuntimeSessionID,
+			CoreInstanceID:   s.coreInstanceID,
+			AttachmentID:     previous.ID,
+			DisconnectReason: &reason,
+		}); attachmentErr != nil {
+			return attachmentErr
+		}
+		attachment, attachmentErr := tx.CreateRuntimeSessionAttachment(ctx, db.CreateRuntimeSessionAttachmentParams{
+			RuntimeSessionID: claimed.RuntimeSessionID,
+			CoreInstanceID:   s.coreInstanceID,
+			AttachmentKind:   "resumed",
+		})
+		if attachmentErr != nil {
+			return attachmentErr
+		}
+		*state = runtimeSessionState(claimed, &attachment, false, true)
 		return nil
 	}
 
@@ -643,6 +664,9 @@ func (s *RuntimeSessionService) HeartbeatSession(
 	if s == nil || s.repository == nil || s.coreInstanceID == uuid.Nil {
 		return RuntimeSessionState{}, newRuntimeSessionError(RuntimeSessionErrorValidationFailed, nil)
 	}
+	if normalized.AttachmentID == uuid.Nil {
+		return RuntimeSessionState{}, newRuntimeSessionError(RuntimeSessionErrorValidationFailed, nil)
+	}
 
 	var state RuntimeSessionState
 	err = s.repository.WithTransaction(ctx, func(tx runtimeSessionTransaction) error {
@@ -665,6 +689,16 @@ func (s *RuntimeSessionService) HeartbeatSession(
 			return validateErr
 		}
 		if existing.AttachedCoreInstanceID == nil || *existing.AttachedCoreInstanceID != s.coreInstanceID {
+			return newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
+		}
+		attachment, attachmentErr := tx.GetActiveRuntimeSessionAttachment(ctx, existing.RuntimeSessionID)
+		if attachmentErr != nil {
+			if errors.Is(attachmentErr, pgx.ErrNoRows) {
+				return newRuntimeSessionError(RuntimeSessionErrorNotAttached, attachmentErr)
+			}
+			return attachmentErr
+		}
+		if attachment.CoreInstanceID != s.coreInstanceID || attachment.ID != normalized.AttachmentID {
 			return newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
 		}
 		if _, heartbeatErr := tx.HeartbeatRuntimeNode(ctx, db.HeartbeatRuntimeNodeParams{
@@ -699,7 +733,7 @@ func (s *RuntimeSessionService) HeartbeatSession(
 			}
 			return heartbeatErr
 		}
-		state = runtimeSessionState(heartbeat, nil, false, false)
+		state = runtimeSessionState(heartbeat, &attachment, false, false)
 		return nil
 	})
 	return state, err
@@ -720,6 +754,9 @@ func (s *RuntimeSessionService) CloseSession(
 		return RuntimeSessionState{}, newRuntimeSessionError(RuntimeSessionErrorValidationFailed, nil)
 	}
 	if s == nil || s.repository == nil || s.coreInstanceID == uuid.Nil {
+		return RuntimeSessionState{}, newRuntimeSessionError(RuntimeSessionErrorValidationFailed, nil)
+	}
+	if request.AttachmentID == uuid.Nil {
 		return RuntimeSessionState{}, newRuntimeSessionError(RuntimeSessionErrorValidationFailed, nil)
 	}
 
@@ -761,11 +798,22 @@ func (s *RuntimeSessionService) CloseSession(
 		if existing.AttachedCoreInstanceID == nil || *existing.AttachedCoreInstanceID != s.coreInstanceID {
 			return newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
 		}
+		activeAttachment, err := tx.GetActiveRuntimeSessionAttachment(ctx, existing.RuntimeSessionID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return newRuntimeSessionError(RuntimeSessionErrorNotAttached, err)
+			}
+			return err
+		}
+		if activeAttachment.CoreInstanceID != s.coreInstanceID || request.AttachmentID != activeAttachment.ID {
+			return newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
+		}
 
 		reason := request.Reason
 		attachment, err := tx.CloseRuntimeSessionAttachment(ctx, db.CloseRuntimeSessionAttachmentParams{
 			RuntimeSessionID: existing.RuntimeSessionID,
 			CoreInstanceID:   s.coreInstanceID,
+			AttachmentID:     activeAttachment.ID,
 			DisconnectReason: &reason,
 		})
 		if err != nil {
@@ -1089,6 +1137,7 @@ type runtimeSessionTransaction interface {
 	CreateRuntimeSessionAttachment(context.Context, db.CreateRuntimeSessionAttachmentParams) (db.RuntimeSessionAttachment, error)
 	CloseRuntimeSessionAttachment(context.Context, db.CloseRuntimeSessionAttachmentParams) (db.RuntimeSessionAttachment, error)
 	CloseRuntimeSession(context.Context, db.CloseRuntimeSessionParams) (db.RuntimeSession, error)
+	CloseStaleRuntimeSession(context.Context, db.CloseStaleRuntimeSessionParams) (db.RuntimeSession, error)
 }
 
 type postgresRuntimeSessionRepository struct {
@@ -1125,6 +1174,7 @@ SELECT s.runtime_session_id,
        s.attached_core_instance_id,
 	   s.device_certificate_serial,
 	   n.device_public_key_thumbprint,
+	   a.id,
        s.status,
        clock_timestamp()
 FROM runtime_sessions s
@@ -1173,6 +1223,7 @@ WHERE s.runtime_session_id = $1
 		&principal.CoreInstanceID,
 		&principal.DeviceCertificateSerial,
 		&principal.DevicePublicKeyThumbprintSHA256,
+		&principal.AttachmentID,
 		&principal.Status,
 		&principal.DatabaseTime,
 	)
@@ -1205,9 +1256,24 @@ func (r *postgresRuntimeSessionRepository) ResolveRuntimeWorkerSessionPrincipal(
 		CoreInstanceID:                  row.AttachedCoreInstanceID,
 		DeviceCertificateSerial:         row.DeviceCertificateSerial,
 		DevicePublicKeyThumbprintSHA256: row.DevicePublicKeyThumbprint,
+		AttachmentID:                    row.AttachmentID,
 		Status:                          row.Status,
 		DatabaseTime:                    row.DatabaseNow,
 	}, nil
+}
+
+func (r *postgresRuntimeSessionRepository) ListStaleRuntimeSessionCandidates(
+	ctx context.Context,
+	heartbeatTTL time.Duration,
+	limit int,
+) ([]db.RuntimeSession, error) {
+	if r == nil || r.queries == nil {
+		return nil, fmt.Errorf("runtime session repository is not configured")
+	}
+	return r.queries.ListStaleRuntimeSessionCandidates(ctx, db.ListStaleRuntimeSessionCandidatesParams{
+		HeartbeatTTLMS: heartbeatTTL.Milliseconds(),
+		CandidateLimit: int32(limit),
+	})
 }
 
 type postgresRuntimeSessionTransaction struct {
@@ -1286,6 +1352,10 @@ func (t *postgresRuntimeSessionTransaction) CloseRuntimeSessionAttachment(ctx co
 
 func (t *postgresRuntimeSessionTransaction) CloseRuntimeSession(ctx context.Context, params db.CloseRuntimeSessionParams) (db.RuntimeSession, error) {
 	return t.queries.CloseRuntimeSession(ctx, params)
+}
+
+func (t *postgresRuntimeSessionTransaction) CloseStaleRuntimeSession(ctx context.Context, params db.CloseStaleRuntimeSessionParams) (db.RuntimeSession, error) {
+	return t.queries.CloseStaleRuntimeSession(ctx, params)
 }
 
 type runtimeNodeCredentialQueries interface {

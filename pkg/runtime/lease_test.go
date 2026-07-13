@@ -21,7 +21,7 @@ func TestRuntimeLeaseClaimUsesGlobalLockAndCapacityOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, assigned)
 	require.Equal(t, []string{
-		"cluster_gate", "lock_session", "lock_node", "lock_credential", "existing_offer", "lock_candidate",
+		"cluster_gate", "lock_session", "lock_node", "lock_credential", "lock_attachment", "existing_offer", "lock_candidate",
 		"claim_session_slot", "claim_node_slot", "create_offer", "mirror_offer",
 	}, fixture.tx.calls)
 	require.NotEqual(t, uuid.Nil, assigned.AttemptIdentity.AttemptID)
@@ -80,7 +80,7 @@ func TestRuntimeLeaseExpiredOfferIsReleasedBeforeNextCandidate(t *testing.T) {
 	require.Equal(t, 1, fixture.tx.resetCalls)
 	require.Equal(t, 1, fixture.tx.signalCalls)
 	require.Equal(t, []string{
-		"cluster_gate", "lock_session", "lock_node", "lock_credential", "existing_offer",
+		"cluster_gate", "lock_session", "lock_node", "lock_credential", "lock_attachment", "existing_offer",
 		"finish_offer", "mark_capacity_released", "release_session_slot", "release_node_slot",
 		"reset_run", "create_signal", "lock_candidate", "claim_session_slot", "claim_node_slot",
 		"create_offer", "mirror_offer",
@@ -98,7 +98,7 @@ func TestRuntimeLeaseClaimCapacityFailureRollsBackSessionReservation(t *testing.
 	require.Zero(t, fixture.tx.nodeInflight)
 	require.False(t, fixture.repository.committed)
 	require.Equal(t, []string{
-		"cluster_gate", "lock_session", "lock_node", "lock_credential", "existing_offer", "lock_candidate",
+		"cluster_gate", "lock_session", "lock_node", "lock_credential", "lock_attachment", "existing_offer", "lock_candidate",
 		"claim_session_slot", "claim_node_slot",
 	}, fixture.tx.calls)
 }
@@ -153,7 +153,7 @@ func TestRuntimeLeaseAckFirstConfirmationAndReplay(t *testing.T) {
 	require.Equal(t, fixture.databaseNow.Add(time.Minute), confirmed.LeaseExpiresAt)
 	require.Equal(t, 1, fixture.tx.confirmCalls)
 	require.Equal(t, 1, fixture.tx.mirrorConfirmCalls)
-	require.Equal(t, []string{"lock_session", "lock_node", "lock_credential", "lock_run", "lock_attempt", "confirm", "mirror_confirm"}, fixture.tx.calls)
+	require.Equal(t, []string{"lock_session", "lock_node", "lock_credential", "lock_attachment", "lock_run", "lock_attempt", "confirm", "mirror_confirm"}, fixture.tx.calls)
 
 	fixture.tx.calls = nil
 	attemptNo := int32(1)
@@ -170,7 +170,7 @@ func TestRuntimeLeaseAckFirstConfirmationAndReplay(t *testing.T) {
 	require.Equal(t, confirmed, replayed)
 	require.Equal(t, 1, fixture.tx.confirmCalls, "accepted ACK replay must not increment attempt_count twice")
 	require.Equal(t, 1, fixture.tx.mirrorConfirmCalls)
-	require.Equal(t, []string{"lock_session", "lock_node", "lock_credential", "lock_run", "lock_attempt"}, fixture.tx.calls)
+	require.Equal(t, []string{"lock_session", "lock_node", "lock_credential", "lock_attachment", "lock_run", "lock_attempt"}, fixture.tx.calls)
 }
 
 func TestRuntimeLeaseAckRejectsExpiredOfferUsingDatabaseClock(t *testing.T) {
@@ -211,7 +211,7 @@ func TestRuntimeLeaseRejectIsIdempotentAndReleasesCapacityOnce(t *testing.T) {
 	require.Equal(t, 1, fixture.tx.capacityReleaseCASCalls)
 	require.Equal(t, 1, fixture.tx.signalCalls)
 	require.Equal(t, []string{
-		"lock_session", "lock_node", "lock_credential", "lock_run", "lock_attempt",
+		"lock_session", "lock_node", "lock_credential", "lock_attachment", "lock_run", "lock_attempt",
 		"finish_offer", "mark_capacity_released", "release_session_slot", "release_node_slot",
 		"reset_run", "create_signal",
 	}, fixture.tx.calls)
@@ -299,7 +299,7 @@ func TestRuntimeLeaseSessionCloseReleasesOnlyUnacceptedOfferAfterOfflineCommit(t
 	require.Equal(t, 1, fixture.tx.finishCalls)
 	require.Equal(t, 1, fixture.tx.resetCalls)
 	require.Equal(t, []string{
-		"lock_offer_release_session", "lock_node", "lock_credential", "existing_offer",
+		"lock_offer_release_session", "lock_node", "lock_credential", "lock_offer_release_attachment", "existing_offer",
 		"finish_offer", "mark_capacity_released", "release_session_slot", "release_node_slot",
 		"reset_run", "create_signal",
 	}, fixture.tx.calls)
@@ -359,6 +359,7 @@ func newRuntimeLeaseFixture(t *testing.T) *runtimeLeaseFixture {
 		WorkerID:                        "worker-a",
 		SessionEpoch:                    7,
 		CoreInstanceID:                  coreID,
+		AttachmentID:                    uuid.New(),
 		DeviceCertificateSerial:         "abc123",
 		DevicePublicKeyThumbprintSHA256: fmt.Sprintf("%064x", 42),
 		Status:                          "active",
@@ -542,6 +543,21 @@ func (f *runtimeLeaseTransactionFake) LockRuntimeSessionForOfferRelease(_ contex
 		DeviceCertificateSerial: f.principal.DeviceCertificateSerial, Status: status,
 		AttachedCoreInstanceID: attachedCoreID, HeartbeatAt: f.databaseNow, DatabaseNow: f.databaseNow,
 	}, nil
+}
+
+func (f *runtimeLeaseTransactionFake) LockRuntimeSessionAttachmentForPrincipalValidation(_ context.Context, params db.LockRuntimeSessionAttachmentForPrincipalValidationParams) (db.RuntimeSessionAttachment, error) {
+	f.call("lock_attachment")
+	return db.RuntimeSessionAttachment{ID: params.AttachmentID, RuntimeSessionID: params.RuntimeSessionID, CoreInstanceID: params.CoreInstanceID}, nil
+}
+
+func (f *runtimeLeaseTransactionFake) LockRuntimeSessionAttachmentForOfferRelease(_ context.Context, params db.LockRuntimeSessionAttachmentForOfferReleaseParams) (db.RuntimeSessionAttachment, error) {
+	f.call("lock_offer_release_attachment")
+	attachment := db.RuntimeSessionAttachment{ID: params.AttachmentID, RuntimeSessionID: params.RuntimeSessionID, CoreInstanceID: params.CoreInstanceID}
+	if params.Detached {
+		detachedAt := f.databaseNow
+		attachment.DetachedAt = &detachedAt
+	}
+	return attachment, nil
 }
 
 func (f *runtimeLeaseTransactionFake) LockRuntimeNodeForPrincipalValidation(_ context.Context, _ db.LockRuntimeNodeForPrincipalValidationParams) (db.LockRuntimeNodeForPrincipalValidationRow, error) {

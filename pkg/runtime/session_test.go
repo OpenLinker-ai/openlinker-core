@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,18 +182,17 @@ func TestRuntimeSessionServiceHardMaintenanceRejectsOnlyNewSession(t *testing.T)
 	}
 }
 
-func TestRuntimeSessionServiceReconnectIsIdempotentAndOfflineResumeAppendsAttachment(t *testing.T) {
+func TestRuntimeSessionServiceReconnectRotatesAttachmentGeneration(t *testing.T) {
 	t.Parallel()
 
 	for _, test := range []struct {
 		name           string
 		status         string
 		attached       bool
-		wantReplayed   bool
 		wantResumed    bool
 		wantAttachKind string
 	}{
-		{name: "same active attachment replay", status: "active", attached: true, wantReplayed: true},
+		{name: "same active session gets a new attachment", status: "active", attached: true, wantResumed: true, wantAttachKind: "resumed"},
 		{name: "offline reconnect", status: "offline", wantResumed: true, wantAttachKind: "resumed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -206,12 +206,16 @@ func TestRuntimeSessionServiceReconnectIsIdempotentAndOfflineResumeAppendsAttach
 			repository := &sessionRepositoryFake{tx: tx}
 			service := newRuntimeSessionService(repository, fixture.coreID)
 
+			previousAttachmentID := tx.attachment.ID
 			state, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request)
 			if err != nil {
 				t.Fatalf("CreateOrAttachSession() error = %v", err)
 			}
-			if state.Replayed != test.wantReplayed || state.Resumed != test.wantResumed {
+			if state.Replayed || state.Resumed != test.wantResumed {
 				t.Fatalf("state = %#v", state)
+			}
+			if state.Attachment == nil || state.Attachment.ID == previousAttachmentID {
+				t.Fatalf("attachment generation was not rotated: previous=%s state=%#v", previousAttachmentID, state)
 			}
 			if test.wantAttachKind != "" && tx.createAttachmentParams.AttachmentKind != test.wantAttachKind {
 				t.Fatalf("attachment kind = %q", tx.createAttachmentParams.AttachmentKind)
@@ -275,6 +279,7 @@ func TestRuntimeSessionServiceResolveHeartbeatAndCloseFailClosed(t *testing.T) {
 			WorkerID:                        fixture.request.WorkerID,
 			SessionEpoch:                    fixture.request.SessionEpoch,
 			CoreInstanceID:                  fixture.coreID,
+			AttachmentID:                    tx.attachment.ID,
 			DeviceCertificateSerial:         fixture.principal.Device.CertificateSerial,
 			DevicePublicKeyThumbprintSHA256: fixture.principal.Device.PublicKeyThumbprintSHA256,
 			Status:                          "active",
@@ -317,7 +322,9 @@ func TestRuntimeSessionServiceResolveHeartbeatAndCloseFailClosed(t *testing.T) {
 		tx := newSessionTransactionFake(fixture)
 		repository := &sessionRepositoryFake{tx: tx}
 		service := newRuntimeSessionService(repository, fixture.coreID)
-		state, err := service.HeartbeatSession(context.Background(), fixture.principal, fixture.request)
+		heartbeat := fixture.request
+		heartbeat.AttachmentID = tx.attachment.ID
+		state, err := service.HeartbeatSession(context.Background(), fixture.principal, heartbeat)
 		if err != nil || state.DatabaseTime != fixture.databaseNow.Add(2*time.Second) {
 			t.Fatalf("HeartbeatSession() = %#v, %v", state, err)
 		}
@@ -325,7 +332,7 @@ func TestRuntimeSessionServiceResolveHeartbeatAndCloseFailClosed(t *testing.T) {
 			t.Fatalf("node heartbeat did not preserve authenticated device: %#v", tx.heartbeatNodeParams)
 		}
 		tx.heartbeatErr = pgx.ErrNoRows
-		if _, err = service.HeartbeatSession(context.Background(), fixture.principal, fixture.request); !IsRuntimeSessionError(err, RuntimeSessionErrorPrincipalInactive) {
+		if _, err = service.HeartbeatSession(context.Background(), fixture.principal, heartbeat); !IsRuntimeSessionError(err, RuntimeSessionErrorPrincipalInactive) {
 			t.Fatalf("inactive heartbeat error = %v", err)
 		}
 	})
@@ -338,6 +345,7 @@ func TestRuntimeSessionServiceResolveHeartbeatAndCloseFailClosed(t *testing.T) {
 			RuntimeSessionIdentity: fixture.request.RuntimeSessionIdentity,
 			Status:                 "offline",
 			Reason:                 "transport disconnected",
+			AttachmentID:           tx.attachment.ID,
 		})
 		if err != nil || state.Session.Status != "offline" {
 			t.Fatalf("CloseSession() = %#v, %v", state, err)
@@ -345,6 +353,29 @@ func TestRuntimeSessionServiceResolveHeartbeatAndCloseFailClosed(t *testing.T) {
 		wantTail := []string{"close_attachment", "close_session"}
 		if len(tx.operations) < 2 || !reflect.DeepEqual(tx.operations[len(tx.operations)-2:], wantTail) {
 			t.Fatalf("close operation order = %#v", tx.operations)
+		}
+	})
+
+	t.Run("stale attachment cleanup cannot close a replacement transport", func(t *testing.T) {
+		fixture := newSessionFixture()
+		tx := newSessionTransactionFake(fixture)
+		service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+		staleAttachmentID := tx.attachment.ID
+		state, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request)
+		if err != nil || state.Attachment == nil || state.Attachment.ID == staleAttachmentID {
+			t.Fatalf("replacement attach = %#v, %v", state, err)
+		}
+		_, err = service.CloseSession(context.Background(), fixture.principal, RuntimeSessionCloseRequest{
+			RuntimeSessionIdentity: fixture.request.RuntimeSessionIdentity,
+			Status:                 "offline",
+			Reason:                 "stale websocket cleanup",
+			AttachmentID:           staleAttachmentID,
+		})
+		if !IsRuntimeSessionError(err, RuntimeSessionErrorNotAttached) {
+			t.Fatalf("stale cleanup error = %v", err)
+		}
+		if tx.closeSessionCalls != 0 {
+			t.Fatalf("stale cleanup closed the replacement Session %d time(s)", tx.closeSessionCalls)
 		}
 	})
 }
@@ -419,6 +450,8 @@ func newSessionFixture() sessionFixture {
 }
 
 type sessionRepositoryFake struct {
+	txMu                sync.Mutex
+	staleMu             sync.Mutex
 	tx                  *sessionTransactionFake
 	resolved            RuntimeSessionPrincipal
 	resolveErr          error
@@ -426,10 +459,24 @@ type sessionRepositoryFake struct {
 	workerResolved      RuntimeSessionPrincipal
 	workerResolveErr    error
 	workerResolveParams runtimeWorkerSessionResolveParams
+	staleCandidates     []db.RuntimeSession
+	staleListErr        error
+	staleTTL            time.Duration
+	staleLimit          int
 }
 
 func (r *sessionRepositoryFake) WithTransaction(ctx context.Context, fn func(runtimeSessionTransaction) error) error {
+	r.txMu.Lock()
+	defer r.txMu.Unlock()
 	return fn(r.tx)
+}
+
+func (r *sessionRepositoryFake) ListStaleRuntimeSessionCandidates(_ context.Context, ttl time.Duration, limit int) ([]db.RuntimeSession, error) {
+	r.staleMu.Lock()
+	defer r.staleMu.Unlock()
+	r.staleTTL = ttl
+	r.staleLimit = limit
+	return append([]db.RuntimeSession(nil), r.staleCandidates...), r.staleListErr
 }
 
 func (r *sessionRepositoryFake) ResolveRuntimeSessionPrincipal(_ context.Context, params runtimeSessionResolveParams) (RuntimeSessionPrincipal, error) {
@@ -460,6 +507,8 @@ type sessionTransactionFake struct {
 	heartbeatErr           error
 	attachment             db.RuntimeSessionAttachment
 	createAttachmentParams db.CreateRuntimeSessionAttachmentParams
+	closeAttachmentParams  db.CloseRuntimeSessionAttachmentParams
+	closeSessionCalls      int
 }
 
 func newSessionTransactionFake(fixture sessionFixture) *sessionTransactionFake {
@@ -611,21 +660,45 @@ func (f *sessionTransactionFake) CreateRuntimeSessionAttachment(_ context.Contex
 	f.op("create_attachment")
 	f.createAttachmentParams = params
 	attachment := f.attachment
+	attachment.ID = uuid.New()
 	attachment.AttachmentKind = params.AttachmentKind
+	attachment.AttachedAt = attachment.AttachedAt.Add(time.Second)
+	f.attachment = attachment
 	return attachment, nil
 }
 
-func (f *sessionTransactionFake) CloseRuntimeSessionAttachment(_ context.Context, _ db.CloseRuntimeSessionAttachmentParams) (db.RuntimeSessionAttachment, error) {
+func (f *sessionTransactionFake) CloseRuntimeSessionAttachment(_ context.Context, params db.CloseRuntimeSessionAttachmentParams) (db.RuntimeSessionAttachment, error) {
 	f.op("close_attachment")
+	f.closeAttachmentParams = params
+	if params.AttachmentID != f.attachment.ID {
+		return db.RuntimeSessionAttachment{}, pgx.ErrNoRows
+	}
 	return f.attachment, nil
 }
 
 func (f *sessionTransactionFake) CloseRuntimeSession(_ context.Context, params db.CloseRuntimeSessionParams) (db.RuntimeSession, error) {
 	f.op("close_session")
+	f.closeSessionCalls++
 	closed := f.session
 	closed.Status = params.Status
 	closed.AttachedCoreInstanceID = nil
 	closed.HeartbeatAt = f.fixture.databaseNow.Add(2 * time.Second)
+	return closed, nil
+}
+
+func (f *sessionTransactionFake) CloseStaleRuntimeSession(_ context.Context, params db.CloseStaleRuntimeSessionParams) (db.RuntimeSession, error) {
+	f.op("close_stale_session")
+	if f.session.RuntimeSessionID != params.RuntimeSessionID ||
+		!f.session.HeartbeatAt.Equal(params.HeartbeatAt) ||
+		f.session.AttachedCoreInstanceID == nil ||
+		*f.session.AttachedCoreInstanceID != params.CoreInstanceID ||
+		(f.session.Status != "active" && f.session.Status != "draining") {
+		return db.RuntimeSession{}, pgx.ErrNoRows
+	}
+	closed := f.session
+	closed.Status = "offline"
+	closed.AttachedCoreInstanceID = nil
+	f.session = closed
 	return closed, nil
 }
 

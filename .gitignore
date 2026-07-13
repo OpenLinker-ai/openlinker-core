@@ -5,7 +5,8 @@
 !.env.example
 
 # Build outputs
-bin/
+bin/*
+!bin/test-migration-*.sh
 tmp/
 /api
 coverage.out

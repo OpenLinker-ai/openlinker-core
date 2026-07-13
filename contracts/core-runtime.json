@@ -218,6 +218,9 @@
       "client_method": "heartbeatRuntimeSession",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/sessions/{id}/heartbeat",
+      "required_headers": [
+        "OpenLinker-Runtime-Attachment"
+      ],
       "request_body_schema": {
         "$ref": "#/$defs/RuntimeHelloPayload"
       },
@@ -232,6 +235,9 @@
       "client_method": "closeRuntimeSession",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/sessions/{id}/close",
+      "required_headers": [
+        "OpenLinker-Runtime-Attachment"
+      ],
       "request_body_schema": {
         "$ref": "#/$defs/RuntimeSessionCloseRequest"
       },
@@ -244,6 +250,9 @@
       "client_method": "claimRuntimeRun",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/runs/claim",
+      "required_headers": [
+        "OpenLinker-Runtime-Attachment"
+      ],
       "query": {
         "wait": {
           "type": "integer",
@@ -266,6 +275,9 @@
       "client_method": "ackRuntimeAssignment",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/runs/{id}/assignment-ack",
+      "required_headers": [
+        "OpenLinker-Runtime-Attachment"
+      ],
       "request_body_schema": {
         "$ref": "#/$defs/RunAssignmentAckPayload"
       },
@@ -280,6 +292,9 @@
       "client_method": "rejectRuntimeAssignment",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/runs/{id}/assignment-reject",
+      "required_headers": [
+        "OpenLinker-Runtime-Attachment"
+      ],
       "request_body_schema": {
         "$ref": "#/$defs/RunAssignmentRejectPayload"
       },
@@ -294,6 +309,9 @@
       "client_method": "renewRuntimeLease",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/runs/{id}/lease-renew",
+      "required_headers": [
+        "OpenLinker-Runtime-Attachment"
+      ],
       "request_body_schema": {
         "$ref": "#/$defs/RunLeaseRenewPayload"
       },
@@ -308,6 +326,9 @@
       "client_method": "sendRuntimeEvent",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/runs/{id}/events",
+      "required_headers": [
+        "OpenLinker-Runtime-Attachment"
+      ],
       "request_body_schema": {
         "$ref": "#/$defs/RunEventPayload"
       },
@@ -322,6 +343,9 @@
       "client_method": "completeRuntimeRun",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/runs/{id}/result",
+      "required_headers": [
+        "OpenLinker-Runtime-Attachment"
+      ],
       "request_body_schema": {
         "$ref": "#/$defs/RunResultPayload"
       },
@@ -336,6 +360,9 @@
       "client_method": "resumeRuntimeRuns",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/runs/resume",
+      "required_headers": [
+        "OpenLinker-Runtime-Attachment"
+      ],
       "request_body_schema": {
         "$ref": "#/$defs/RuntimeResumePayload"
       },
@@ -350,6 +377,9 @@
       "client_method": "ackRuntimeCancel",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/runs/{id}/cancel-ack",
+      "required_headers": [
+        "OpenLinker-Runtime-Attachment"
+      ],
       "request_body_schema": {
         "$ref": "#/$defs/RunCancelAckPayload"
       },
@@ -364,6 +394,9 @@
       "client_method": "pollRuntimeCommands",
       "http_method": "GET",
       "path": "/api/v1/agent-runtime/commands",
+      "required_headers": [
+        "OpenLinker-Runtime-Attachment"
+      ],
       "query": {
         "runtime_session_id": {
           "type": "string",
@@ -794,6 +827,7 @@
       "additionalProperties": false,
       "required": [
         "core_instance_id",
+        "attachment_id",
         "features",
         "offer_ttl_seconds",
         "lease_ttl_seconds",
@@ -804,6 +838,10 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 200
+        },
+        "attachment_id": {
+          "type": "string",
+          "format": "uuid"
         },
         "features": {
           "type": "array",

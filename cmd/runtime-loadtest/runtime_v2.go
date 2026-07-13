@@ -237,7 +237,7 @@ func (m *runtimeV2Metrics) report(cfg config) map[string]any {
 		"runtime_contract_id":     openlinker.RuntimeContractID,
 		"runtime_contract_digest": openlinker.RuntimeContractDigest,
 		"required_features":       openlinker.RuntimeRequiredFeatures(),
-		"transport_policy":        "websocket_primary_pull_v2_fallback",
+		"transport_policy":        "ws_primary_long_poll_fallback",
 		"scenarios":               append([]string(nil), cfg.Scenarios...),
 		"scenario_assertions":     assertions,
 		"all_assertions_passed":   allAssertionsPassed,
@@ -275,7 +275,7 @@ func (m *runtimeV2Metrics) scenarioAssertionsLocked(cfg config) (map[string]any,
 	}
 	ws := m.transport(transportWS)
 	pull := m.transport(transportPull)
-	add("runtime_v2_ready", ws.Ready+pull.Ready > 0 && m.journalWrites > 0 && m.journalErrors == 0,
+	add("runtime_ready", ws.Ready+pull.Ready > 0 && m.journalWrites > 0 && m.journalErrors == 0,
 		map[string]int{"ws": ws.Ready, "pull": pull.Ready, "journal_writes": m.journalWrites, "journal_errors": m.journalErrors})
 	if cfg.hasScenario("ws-only") {
 		add("ws_only", ws.Offers > 0 && pull.Connections == 0, map[string]int{"ws_offers": ws.Offers, "pull_connections": pull.Connections})
@@ -497,7 +497,7 @@ func newRuntimeEndpoint(cfg config, origin, token string, metrics *runtimeV2Metr
 		origin,
 		openlinker.WithAgentToken(token),
 		openlinker.WithHTTPClient(httpClient),
-		openlinker.WithSDKAgent("openlinker-runtime-loadtest/reliable-run-v2"),
+		openlinker.WithSDKAgent("openlinker-runtime-loadtest/reliable-run"),
 	)
 	if err != nil {
 		transport.CloseIdleConnections()

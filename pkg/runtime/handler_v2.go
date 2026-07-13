@@ -15,7 +15,10 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
-const runtimeV2TokenScope = "agent:pull"
+const (
+	runtimeV2TokenScope       = "agent:pull"
+	RuntimeAttachmentIDHeader = "OpenLinker-Runtime-Attachment"
+)
 
 // RuntimeTokenValidator authenticates the Agent half of a runtime principal.
 // Implementations must check revocation, expiry, and the requested scope.
@@ -186,8 +189,14 @@ func (h *RuntimeHTTPController) HeartbeatSession(c echo.Context) error {
 	if hello.RuntimeSessionID != sessionID {
 		return writeRuntimeV2Error(c, runtimeV2ValidationError())
 	}
+	attachmentID, err := runtimeAttachmentIDFromRequest(c.Request())
+	if err != nil {
+		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+	}
+	request := runtimeSessionRequestFromHello(hello)
+	request.AttachmentID = attachmentID
 	state, err := h.dependencies.Sessions.HeartbeatSession(
-		c.Request().Context(), principal, runtimeSessionRequestFromHello(hello),
+		c.Request().Context(), principal, request,
 	)
 	if err != nil {
 		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
@@ -599,12 +608,19 @@ func (h *RuntimeHTTPController) resolveSession(
 	authenticated AuthenticatedRuntimePrincipal,
 	sessionID uuid.UUID,
 ) (RuntimeSessionPrincipal, error) {
+	attachmentID, err := runtimeAttachmentIDFromRequest(c.Request())
+	if err != nil {
+		return RuntimeSessionPrincipal{}, err
+	}
 	principal, err := h.dependencies.Sessions.ResolveSessionPrincipal(c.Request().Context(), authenticated, sessionID)
 	if err != nil {
 		return RuntimeSessionPrincipal{}, err
 	}
 	if err = validateRuntimeV2ResolvedSession(authenticated, principal); err != nil {
 		return RuntimeSessionPrincipal{}, err
+	}
+	if principal.AttachmentID != attachmentID {
+		return RuntimeSessionPrincipal{}, newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
 	}
 	return principal, nil
 }
@@ -614,6 +630,10 @@ func (h *RuntimeHTTPController) resolveEventResultSession(
 	authenticated AuthenticatedRuntimePrincipal,
 	workerID string,
 ) (RuntimeSessionPrincipal, error) {
+	attachmentID, err := runtimeAttachmentIDFromRequest(c.Request())
+	if err != nil {
+		return RuntimeSessionPrincipal{}, err
+	}
 	principal, err := h.dependencies.Sessions.ResolveWorkerSessionPrincipal(
 		c.Request().Context(), authenticated, workerID,
 	)
@@ -624,6 +644,9 @@ func (h *RuntimeHTTPController) resolveEventResultSession(
 	// immutable source Attempt and durable resume-grant checks downstream.
 	if err = validateRuntimeV2ResolvedSession(authenticated, principal); err != nil {
 		return RuntimeSessionPrincipal{}, err
+	}
+	if principal.AttachmentID != attachmentID {
+		return RuntimeSessionPrincipal{}, newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
 	}
 	return principal, nil
 }
@@ -705,11 +728,13 @@ func runtimeSessionRequestFromHello(hello RuntimeHelloPayload) RuntimeSessionReq
 }
 
 func runtimeReadyFromSessionState(state RuntimeSessionState) (RuntimeReadyPayload, error) {
-	if state.Session.AttachedCoreInstanceID == nil || *state.Session.AttachedCoreInstanceID == uuid.Nil || state.DatabaseTime.IsZero() {
+	if state.Session.AttachedCoreInstanceID == nil || *state.Session.AttachedCoreInstanceID == uuid.Nil ||
+		state.Attachment == nil || state.Attachment.ID == uuid.Nil || state.DatabaseTime.IsZero() {
 		return RuntimeReadyPayload{}, errors.New("invalid committed runtime session state")
 	}
 	ready := RuntimeReadyPayload{
 		CoreInstanceID:  state.Session.AttachedCoreInstanceID.String(),
+		AttachmentID:    state.Attachment.ID,
 		Features:        RuntimeRequiredFeatures(),
 		OfferTTLSeconds: RuntimeOfferTTLSeconds,
 		LeaseTTLSeconds: RuntimeLeaseTTLSeconds,
@@ -735,6 +760,10 @@ func decodeRuntimeSessionClose(req *http.Request, principal AuthenticatedRuntime
 	if req == nil {
 		return RuntimeSessionCloseRequest{}, runtimeV2ValidationError()
 	}
+	attachmentID, err := runtimeAttachmentIDFromRequest(req)
+	if err != nil {
+		return RuntimeSessionCloseRequest{}, err
+	}
 	raw, err := readRuntimeJSON(req.Body)
 	if err != nil {
 		return RuntimeSessionCloseRequest{}, err
@@ -751,8 +780,9 @@ func decodeRuntimeSessionClose(req *http.Request, principal AuthenticatedRuntime
 			WorkerID:         payload.WorkerID,
 			SessionEpoch:     payload.SessionEpoch,
 		},
-		Status: payload.Status,
-		Reason: payload.Reason,
+		Status:       payload.Status,
+		Reason:       payload.Reason,
+		AttachmentID: attachmentID,
 	}
 	if err = validateRuntimeSessionIdentity(principal, request.RuntimeSessionIdentity); err != nil {
 		return RuntimeSessionCloseRequest{}, err
@@ -767,13 +797,32 @@ func decodeRuntimeSessionClose(req *http.Request, principal AuthenticatedRuntime
 func validateRuntimeV2ResolvedSession(authenticated AuthenticatedRuntimePrincipal, principal RuntimeSessionPrincipal) error {
 	if principal.RuntimeSessionID == uuid.Nil || principal.NodeID != authenticated.Device.NodeID ||
 		principal.AgentID != authenticated.AgentID || principal.CredentialID != authenticated.CredentialID ||
-		principal.WorkerID == "" || principal.SessionEpoch < 1 || principal.CoreInstanceID == uuid.Nil ||
+		principal.WorkerID == "" || principal.SessionEpoch < 1 || principal.CoreInstanceID == uuid.Nil || principal.AttachmentID == uuid.Nil ||
 		(principal.Status != "active" && principal.Status != "draining") || principal.DatabaseTime.IsZero() ||
 		!constantTimeStringEqual(principal.DeviceCertificateSerial, authenticated.Device.CertificateSerial) ||
 		!constantTimeStringEqual(principal.DevicePublicKeyThumbprintSHA256, authenticated.Device.PublicKeyThumbprintSHA256) {
 		return newRuntimeSessionError(RuntimeSessionErrorAuthenticationFailed, nil)
 	}
 	return nil
+}
+
+func runtimeAttachmentIDFromRequest(req *http.Request) (uuid.UUID, error) {
+	if req == nil {
+		return uuid.Nil, runtimeV2ValidationError()
+	}
+	values := req.Header.Values(RuntimeAttachmentIDHeader)
+	if len(values) != 1 {
+		return uuid.Nil, runtimeV2ValidationError()
+	}
+	raw := values[0]
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return uuid.Nil, runtimeV2ValidationError()
+	}
+	attachmentID, err := uuid.Parse(raw)
+	if err != nil || attachmentID == uuid.Nil || attachmentID.String() != raw {
+		return uuid.Nil, runtimeV2ValidationError()
+	}
+	return attachmentID, nil
 }
 
 func parseRuntimeV2PathUUID(raw string) (uuid.UUID, error) {

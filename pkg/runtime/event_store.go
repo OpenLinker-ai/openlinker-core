@@ -111,6 +111,7 @@ type RuntimeEventPrincipal struct {
 	WorkerID                        *string
 	RuntimeSessionID                *uuid.UUID
 	CoreInstanceID                  *uuid.UUID
+	AttachmentID                    *uuid.UUID
 	DeviceCertificateSerial         *string
 	DevicePublicKeyThumbprintSHA256 *string
 }
@@ -729,6 +730,7 @@ func validateRuntimeEventPrincipal(principal RuntimeEventPrincipal) error {
 func runtimeEventPrincipalShapeValid(principal RuntimeEventPrincipal) bool {
 	none := principal.CredentialID == nil && principal.NodeID == nil && principal.WorkerID == nil &&
 		principal.RuntimeSessionID == nil && principal.CoreInstanceID == nil &&
+		principal.AttachmentID == nil &&
 		principal.DeviceCertificateSerial == nil && principal.DevicePublicKeyThumbprintSHA256 == nil
 	if none {
 		return true
@@ -737,6 +739,7 @@ func runtimeEventPrincipalShapeValid(principal RuntimeEventPrincipal) bool {
 		principal.NodeID != nil && *principal.NodeID != uuid.Nil &&
 		principal.RuntimeSessionID != nil && *principal.RuntimeSessionID != uuid.Nil &&
 		principal.CoreInstanceID != nil && *principal.CoreInstanceID != uuid.Nil &&
+		principal.AttachmentID != nil && *principal.AttachmentID != uuid.Nil &&
 		principal.WorkerID != nil && *principal.WorkerID != "" && utf8.ValidString(*principal.WorkerID) &&
 		utf8.RuneCountInString(*principal.WorkerID) <= 200 &&
 		principal.DeviceCertificateSerial != nil && validCertificateSerial(*principal.DeviceCertificateSerial) &&

@@ -482,13 +482,18 @@ func runtimeCancellationSessionPrincipal(
 	}
 	require.NoError(t, pool.QueryRow(context.Background(), `
 		SELECT s.session_epoch, s.device_certificate_serial,
-		       n.device_public_key_thumbprint, s.status, clock_timestamp()
+		       n.device_public_key_thumbprint, attachment.id, s.status, clock_timestamp()
 		FROM runtime_sessions s
 		JOIN runtime_nodes n ON n.node_id = s.node_id
+		JOIN runtime_session_attachments attachment
+		  ON attachment.runtime_session_id = s.runtime_session_id
+		 AND attachment.core_instance_id = s.attached_core_instance_id
+		 AND attachment.detached_at IS NULL
 		WHERE s.runtime_session_id = $1`, principal.RuntimeSessionID).Scan(
 		&principal.SessionEpoch,
 		&principal.DeviceCertificateSerial,
 		&principal.DevicePublicKeyThumbprintSHA256,
+		&principal.AttachmentID,
 		&principal.Status,
 		&principal.DatabaseTime,
 	))

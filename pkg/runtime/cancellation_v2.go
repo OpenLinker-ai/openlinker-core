@@ -1171,6 +1171,10 @@ func (t *postgresRuntimeCancellationTransaction) LockRuntimeNodeForPrincipalVali
 func (t *postgresRuntimeCancellationTransaction) LockRuntimeCredentialForPrincipalValidation(ctx context.Context, params db.LockRuntimeCredentialForPrincipalValidationParams) (db.LockRuntimeCredentialForPrincipalValidationRow, error) {
 	return t.queries.LockRuntimeCredentialForPrincipalValidation(ctx, params)
 }
+
+func (t *postgresRuntimeCancellationTransaction) LockRuntimeSessionAttachmentForPrincipalValidation(ctx context.Context, params db.LockRuntimeSessionAttachmentForPrincipalValidationParams) (db.RuntimeSessionAttachment, error) {
+	return t.queries.LockRuntimeSessionAttachmentForPrincipalValidation(ctx, params)
+}
 func (t *postgresRuntimeCancellationTransaction) LockRunForResultFinalization(ctx context.Context, id uuid.UUID) (db.LockRunForResultFinalizationRow, error) {
 	return t.queries.LockRunForResultFinalization(ctx, id)
 }

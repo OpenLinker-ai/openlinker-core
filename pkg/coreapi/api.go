@@ -301,6 +301,7 @@ func configureRuntimeV2(
 		rootCtx,
 		runtime.NewRuntimeDeadlineReconciler(pool, nil),
 		cancellations,
+		runtime.NewRuntimeSessionReaper(pool, runtime.DefaultRuntimeLeaseConfig().HeartbeatTTL),
 		runtime.RuntimeMaintenanceWorkerConfig{},
 	)
 	if signalBus != nil {

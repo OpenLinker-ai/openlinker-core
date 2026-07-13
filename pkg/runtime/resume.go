@@ -612,6 +612,13 @@ func (s *RuntimeResumeService) lockTargetPrincipal(
 		*credential.AgentID != target.AgentID {
 		return lockedRuntimeResumePrincipal{}, newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 	}
+	if _, err = tx.LockRuntimeSessionAttachmentForPrincipalValidation(ctx, db.LockRuntimeSessionAttachmentForPrincipalValidationParams{
+		AttachmentID:     target.AttachmentID,
+		RuntimeSessionID: target.RuntimeSessionID,
+		CoreInstanceID:   coreInstanceID,
+	}); err != nil {
+		return lockedRuntimeResumePrincipal{}, runtimeResumePrincipalLockError(err)
+	}
 	locked := lockedRuntimeResumePrincipal{credential: credential}
 	if !locked.validAt(credential.DatabaseNow) {
 		return lockedRuntimeResumePrincipal{}, newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
@@ -633,7 +640,7 @@ func (s *RuntimeResumeService) validateResume(
 	if s == nil || s.repository == nil || s.coreInstanceID == uuid.Nil ||
 		target.RuntimeSessionID == uuid.Nil || target.NodeID == uuid.Nil ||
 		target.AgentID == uuid.Nil || target.CredentialID == uuid.Nil ||
-		target.SessionEpoch < 1 || target.CoreInstanceID != s.coreInstanceID ||
+		target.AttachmentID == uuid.Nil || target.SessionEpoch < 1 || target.CoreInstanceID != s.coreInstanceID ||
 		!validRuntimeIdentityText(target.WorkerID, 1, maxRuntimeSessionWorkerIDRunes) ||
 		!validCertificateSerial(target.DeviceCertificateSerial) ||
 		!validSHA256Hex(target.DevicePublicKeyThumbprintSHA256) ||
@@ -671,6 +678,7 @@ type runtimeResumeTransaction interface {
 	LockRuntimeSessionForPrincipalValidation(context.Context, db.LockRuntimeSessionForPrincipalValidationParams) (db.LockRuntimeSessionForPrincipalValidationRow, error)
 	LockRuntimeNodeForPrincipalValidation(context.Context, db.LockRuntimeNodeForPrincipalValidationParams) (db.LockRuntimeNodeForPrincipalValidationRow, error)
 	LockRuntimeCredentialForPrincipalValidation(context.Context, db.LockRuntimeCredentialForPrincipalValidationParams) (db.LockRuntimeCredentialForPrincipalValidationRow, error)
+	LockRuntimeSessionAttachmentForPrincipalValidation(context.Context, db.LockRuntimeSessionAttachmentForPrincipalValidationParams) (db.RuntimeSessionAttachment, error)
 	LockRunForLeaseMutation(context.Context, uuid.UUID) (db.LockRunForLeaseMutationRow, error)
 	LockRunAttemptForResult(context.Context, db.LockRunAttemptForResultParams) (db.RunAttempt, error)
 	GetRunAttemptByResultID(context.Context, db.GetRunAttemptByResultIDParams) (db.RunAttempt, error)
@@ -704,6 +712,10 @@ type postgresRuntimeResumeTransaction struct {
 
 func (t *postgresRuntimeResumeTransaction) LockRuntimeSessionForPrincipalValidation(ctx context.Context, params db.LockRuntimeSessionForPrincipalValidationParams) (db.LockRuntimeSessionForPrincipalValidationRow, error) {
 	return t.queries.LockRuntimeSessionForPrincipalValidation(ctx, params)
+}
+
+func (t *postgresRuntimeResumeTransaction) LockRuntimeSessionAttachmentForPrincipalValidation(ctx context.Context, params db.LockRuntimeSessionAttachmentForPrincipalValidationParams) (db.RuntimeSessionAttachment, error) {
+	return t.queries.LockRuntimeSessionAttachmentForPrincipalValidation(ctx, params)
 }
 
 func (t *postgresRuntimeResumeTransaction) LockRuntimeNodeForPrincipalValidation(ctx context.Context, params db.LockRuntimeNodeForPrincipalValidationParams) (db.LockRuntimeNodeForPrincipalValidationRow, error) {

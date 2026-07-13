@@ -39,7 +39,7 @@ func TestLockRuntimePrincipalUsesFixedOrderAndDatabaseExpiry(t *testing.T) {
 
 	locked, err := lockRuntimePrincipal(context.Background(), fake, principal)
 	require.NoError(t, err)
-	require.Equal(t, []string{"session", "node", "credential"}, fake.calls)
+	require.Equal(t, []string{"session", "node", "credential", "attachment"}, fake.calls)
 	require.True(t, locked.validAt(now))
 	require.False(t, locked.validAt(expiresAt), "credential expiry is exclusive")
 }
@@ -70,6 +70,7 @@ func runtimeNodePrincipalFixture() RuntimeEventPrincipal {
 	nodeID := uuid.New()
 	sessionID := uuid.New()
 	coreID := uuid.New()
+	attachmentID := uuid.New()
 	workerID := "worker-a"
 	serial := "abc123"
 	thumbprint := repeatedHex("a")
@@ -80,6 +81,7 @@ func runtimeNodePrincipalFixture() RuntimeEventPrincipal {
 		WorkerID:                        &workerID,
 		RuntimeSessionID:                &sessionID,
 		CoreInstanceID:                  &coreID,
+		AttachmentID:                    &attachmentID,
 		DeviceCertificateSerial:         &serial,
 		DevicePublicKeyThumbprintSHA256: &thumbprint,
 	}
@@ -108,6 +110,14 @@ func (f *runtimePrincipalLockFake) LockRuntimeNodeForPrincipalValidation(context
 func (f *runtimePrincipalLockFake) LockRuntimeCredentialForPrincipalValidation(context.Context, db.LockRuntimeCredentialForPrincipalValidationParams) (db.LockRuntimeCredentialForPrincipalValidationRow, error) {
 	f.calls = append(f.calls, "credential")
 	return f.credential, f.credentialErr
+}
+
+func (f *runtimePrincipalLockFake) LockRuntimeSessionAttachmentForPrincipalValidation(_ context.Context, params db.LockRuntimeSessionAttachmentForPrincipalValidationParams) (db.RuntimeSessionAttachment, error) {
+	f.calls = append(f.calls, "attachment")
+	return db.RuntimeSessionAttachment{
+		ID: params.AttachmentID, RuntimeSessionID: params.RuntimeSessionID,
+		CoreInstanceID: params.CoreInstanceID,
+	}, nil
 }
 
 var _ runtimePrincipalLockQueries = (*runtimePrincipalLockFake)(nil)

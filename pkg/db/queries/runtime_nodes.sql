@@ -33,7 +33,7 @@ SELECT EXISTS (
       AND s.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
       AND s.protocol_version = 2
       AND s.runtime_contract_id = 'openlinker.runtime.v2'
-      AND s.runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
+      AND s.runtime_contract_digest = '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9'
       AND s.features @> ARRAY[
           'lease_fence',
           'assignment_confirm',
@@ -80,12 +80,17 @@ SELECT s.runtime_session_id, s.node_id, s.agent_id, s.credential_id,
        s.device_certificate_serial, n.device_public_key_thumbprint,
        s.node_version, s.protocol_version, s.runtime_contract_id,
        s.runtime_contract_digest, s.features, s.status, s.heartbeat_at,
+       attachment.id AS attachment_id,
        clock_timestamp() AS database_now
 FROM runtime_sessions s
 JOIN runtime_nodes n ON n.node_id = s.node_id
 JOIN agent_tokens t
   ON t.id = s.credential_id
  AND t.agent_id = s.agent_id
+JOIN runtime_session_attachments attachment
+  ON attachment.runtime_session_id = s.runtime_session_id
+ AND attachment.core_instance_id = s.attached_core_instance_id
+ AND attachment.detached_at IS NULL
 WHERE s.node_id = sqlc.arg(node_id)
   AND s.agent_id = sqlc.arg(agent_id)
   AND s.credential_id = sqlc.arg(credential_id)
@@ -523,7 +528,7 @@ WHERE node_id = $1
   AND status IN ('active', 'draining')
 ORDER BY heartbeat_at DESC, runtime_session_id ASC;
 
--- name: ListStaleRuntimeSessionsForUpdate :many
+-- name: ListStaleRuntimeSessionCandidates :many
 SELECT runtime_session_id, node_id, agent_id, credential_id, worker_id,
        session_epoch, device_certificate_serial, node_version,
        protocol_version, runtime_contract_id, runtime_contract_digest,
@@ -531,10 +536,9 @@ SELECT runtime_session_id, node_id, agent_id, credential_id, worker_id,
        connected_at, heartbeat_at, disconnected_at, created_at, updated_at
 FROM runtime_sessions
 WHERE status IN ('active', 'draining')
-  AND heartbeat_at < $1
+  AND heartbeat_at < clock_timestamp() - (sqlc.arg(heartbeat_ttl_ms)::bigint * INTERVAL '1 millisecond')
 ORDER BY heartbeat_at ASC, runtime_session_id ASC
-LIMIT $2
-FOR UPDATE SKIP LOCKED;
+LIMIT sqlc.arg(candidate_limit);
 
 -- name: ClaimRuntimeSessionForCore :one
 WITH candidate AS (
@@ -698,6 +702,7 @@ SET status = 'offline',
     updated_at = clock_timestamp()
 WHERE runtime_session_id = $1
   AND heartbeat_at = $2
+  AND attached_core_instance_id = $3
   AND status IN ('active', 'draining')
 RETURNING runtime_session_id, node_id, agent_id, credential_id, worker_id,
           session_epoch, device_certificate_serial, node_version,
@@ -745,9 +750,10 @@ ORDER BY attached_at ASC, id ASC;
 -- name: CloseRuntimeSessionAttachment :one
 UPDATE runtime_session_attachments
 SET detached_at = clock_timestamp(),
-    disconnect_reason = $3
+    disconnect_reason = $4
 WHERE runtime_session_id = $1
   AND core_instance_id = $2
+  AND id = $3
   AND detached_at IS NULL
 RETURNING id, runtime_session_id, core_instance_id, attachment_kind,
           attached_at, detached_at, disconnect_reason;

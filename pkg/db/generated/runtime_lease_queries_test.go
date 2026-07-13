@@ -47,6 +47,14 @@ func TestRuntimePrincipalValidationUsesStagedBlockingLocks(t *testing.T) {
 				"FOR SHARE OF t",
 			},
 		},
+		{
+			name:  "attachment fourth",
+			query: lockRuntimeSessionAttachmentForPrincipalValidation,
+			want: []string{
+				"id = $1", "runtime_session_id = $2", "core_instance_id = $3",
+				"detached_at IS NULL", "FOR UPDATE",
+			},
+		},
 	} {
 		check := check
 		t.Run(check.name, func(t *testing.T) {
@@ -97,12 +105,13 @@ func TestResolveRuntimeWorkerSessionPrincipalIsFailClosed(t *testing.T) {
 	now := time.Date(2026, 7, 11, 15, 0, 0, 0, time.UTC)
 	sessionID, nodeID, agentID := uuid.New(), uuid.New(), uuid.New()
 	credentialID, coreID := uuid.New(), uuid.New()
+	attachmentID := uuid.New()
 	features := append([]string(nil), runtimeV2RequiredFeatures...)
 	dbtx := &fakeDBTX{row: fakeRow{values: []any{
 		sessionID, nodeID, agentID, credentialID, "worker-resolve", int64(7), coreID,
 		"cert-resolve", "spki-resolve", "v2", int32(2),
 		"openlinker.runtime.v2", runtimeV2ContractDigest, features,
-		"active", now, now,
+		"active", now, attachmentID, now,
 	}}}
 	q := New(dbtx)
 	principal, err := q.ResolveRuntimeWorkerSessionPrincipal(context.Background(), ResolveRuntimeWorkerSessionPrincipalParams{
@@ -110,7 +119,8 @@ func TestResolveRuntimeWorkerSessionPrincipalIsFailClosed(t *testing.T) {
 		WorkerID: "worker-resolve", DeviceCertificateSerial: "cert-resolve",
 		DevicePublicKeyThumbprint: "spki-resolve", CoreInstanceID: coreID,
 	})
-	if err != nil || principal.RuntimeSessionID != sessionID || principal.SessionEpoch != 7 || principal.DatabaseNow != now {
+	if err != nil || principal.RuntimeSessionID != sessionID || principal.SessionEpoch != 7 ||
+		principal.AttachmentID != attachmentID || principal.DatabaseNow != now {
 		t.Fatalf("ResolveRuntimeWorkerSessionPrincipal = %#v, %v", principal, err)
 	}
 	if len(dbtx.queryRowArgs) != 7 || dbtx.queryRowArgs[6] != coreID {
@@ -124,12 +134,19 @@ func TestRuntimeOfferReleaseSupportsOnlyExactDetachedSession(t *testing.T) {
 	for _, fragment := range []string{
 		"s.status IN ('offline', 'closed')",
 		"s.attached_core_instance_id IS NULL",
-		"detached.core_instance_id = $6",
-		"detached.detached_at IS NOT NULL",
 		"FOR UPDATE OF s",
 	} {
 		if !strings.Contains(lockRuntimeSessionForOfferRelease, fragment) {
 			t.Fatalf("LockRuntimeSessionForOfferRelease missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"id = $1", "runtime_session_id = $2", "core_instance_id = $3",
+		"$4::boolean AND detached_at IS NOT NULL",
+		"NOT $4::boolean AND detached_at IS NULL", "FOR UPDATE",
+	} {
+		if !strings.Contains(lockRuntimeSessionAttachmentForOfferRelease, fragment) {
+			t.Fatalf("LockRuntimeSessionAttachmentForOfferRelease missing %q", fragment)
 		}
 	}
 	for _, fragment := range []string{

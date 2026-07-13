@@ -568,6 +568,15 @@ func (s *RuntimeLeaseService) lockOfferReleasePrincipal(
 	if node.NodeID != principal.NodeID || credential.AgentID == nil || *credential.AgentID != principal.AgentID {
 		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 	}
+	_, err = tx.LockRuntimeSessionAttachmentForOfferRelease(ctx, db.LockRuntimeSessionAttachmentForOfferReleaseParams{
+		AttachmentID:     principal.AttachmentID,
+		RuntimeSessionID: principal.RuntimeSessionID,
+		CoreInstanceID:   s.coreInstanceID,
+		Detached:         session.Status == "offline" || session.Status == "closed",
+	})
+	if err != nil {
+		return principalLockError(err)
+	}
 	return nil
 }
 
@@ -575,6 +584,7 @@ type lockedRuntimeLeasePrincipal struct {
 	session    db.LockRuntimeSessionForPrincipalValidationRow
 	node       db.LockRuntimeNodeForPrincipalValidationRow
 	credential db.LockRuntimeCredentialForPrincipalValidationRow
+	attachment db.RuntimeSessionAttachment
 }
 
 func (s *RuntimeLeaseService) lockPrincipal(
@@ -616,7 +626,15 @@ func (s *RuntimeLeaseService) lockPrincipal(
 	if credential.AgentID == nil || *credential.AgentID != principal.AgentID || node.NodeID != principal.NodeID {
 		return lockedRuntimeLeasePrincipal{}, newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 	}
-	return lockedRuntimeLeasePrincipal{session: session, node: node, credential: credential}, nil
+	attachment, err := tx.LockRuntimeSessionAttachmentForPrincipalValidation(ctx, db.LockRuntimeSessionAttachmentForPrincipalValidationParams{
+		AttachmentID:     principal.AttachmentID,
+		RuntimeSessionID: principal.RuntimeSessionID,
+		CoreInstanceID:   coreInstanceID,
+	})
+	if err != nil {
+		return lockedRuntimeLeasePrincipal{}, principalLockError(err)
+	}
+	return lockedRuntimeLeasePrincipal{session: session, node: node, credential: credential, attachment: attachment}, nil
 }
 
 func principalLockError(err error) error {
@@ -629,7 +647,8 @@ func principalLockError(err error) error {
 func (s *RuntimeLeaseService) validateOperation(principal RuntimeSessionPrincipal) error {
 	if s == nil || s.repository == nil || s.coreInstanceID == uuid.Nil ||
 		principal.RuntimeSessionID == uuid.Nil || principal.NodeID == uuid.Nil || principal.AgentID == uuid.Nil ||
-		principal.CredentialID == uuid.Nil || principal.SessionEpoch < 1 || principal.CoreInstanceID != s.coreInstanceID ||
+		principal.CredentialID == uuid.Nil || principal.AttachmentID == uuid.Nil ||
+		principal.SessionEpoch < 1 || principal.CoreInstanceID != s.coreInstanceID ||
 		!validRuntimeIdentityText(principal.WorkerID, 1, maxRuntimeSessionWorkerIDRunes) ||
 		!validCertificateSerial(principal.DeviceCertificateSerial) ||
 		!validSHA256Hex(principal.DevicePublicKeyThumbprintSHA256) || !validRuntimeLeaseConfig(s.config) {
@@ -1048,6 +1067,8 @@ type runtimeLeaseTransaction interface {
 	RequireRuntimeClusterOperation(context.Context, RuntimeClusterOperation) error
 	LockRuntimeSessionForPrincipalValidation(context.Context, db.LockRuntimeSessionForPrincipalValidationParams) (db.LockRuntimeSessionForPrincipalValidationRow, error)
 	LockRuntimeSessionForOfferRelease(context.Context, db.LockRuntimeSessionForOfferReleaseParams) (db.LockRuntimeSessionForOfferReleaseRow, error)
+	LockRuntimeSessionAttachmentForPrincipalValidation(context.Context, db.LockRuntimeSessionAttachmentForPrincipalValidationParams) (db.RuntimeSessionAttachment, error)
+	LockRuntimeSessionAttachmentForOfferRelease(context.Context, db.LockRuntimeSessionAttachmentForOfferReleaseParams) (db.RuntimeSessionAttachment, error)
 	LockRuntimeNodeForPrincipalValidation(context.Context, db.LockRuntimeNodeForPrincipalValidationParams) (db.LockRuntimeNodeForPrincipalValidationRow, error)
 	LockRuntimeCredentialForPrincipalValidation(context.Context, db.LockRuntimeCredentialForPrincipalValidationParams) (db.LockRuntimeCredentialForPrincipalValidationRow, error)
 	GetExistingUnacceptedRunOfferForSession(context.Context, db.GetExistingUnacceptedRunOfferForSessionParams) (db.GetExistingUnacceptedRunOfferForSessionRow, error)
@@ -1102,6 +1123,14 @@ func (t *postgresRuntimeLeaseTransaction) LockRuntimeSessionForPrincipalValidati
 }
 func (t *postgresRuntimeLeaseTransaction) LockRuntimeSessionForOfferRelease(ctx context.Context, params db.LockRuntimeSessionForOfferReleaseParams) (db.LockRuntimeSessionForOfferReleaseRow, error) {
 	return t.queries.LockRuntimeSessionForOfferRelease(ctx, params)
+}
+
+func (t *postgresRuntimeLeaseTransaction) LockRuntimeSessionAttachmentForPrincipalValidation(ctx context.Context, params db.LockRuntimeSessionAttachmentForPrincipalValidationParams) (db.RuntimeSessionAttachment, error) {
+	return t.queries.LockRuntimeSessionAttachmentForPrincipalValidation(ctx, params)
+}
+
+func (t *postgresRuntimeLeaseTransaction) LockRuntimeSessionAttachmentForOfferRelease(ctx context.Context, params db.LockRuntimeSessionAttachmentForOfferReleaseParams) (db.RuntimeSessionAttachment, error) {
+	return t.queries.LockRuntimeSessionAttachmentForOfferRelease(ctx, params)
 }
 func (t *postgresRuntimeLeaseTransaction) LockRuntimeNodeForPrincipalValidation(ctx context.Context, params db.LockRuntimeNodeForPrincipalValidationParams) (db.LockRuntimeNodeForPrincipalValidationRow, error) {
 	return t.queries.LockRuntimeNodeForPrincipalValidation(ctx, params)

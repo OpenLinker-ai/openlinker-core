@@ -67,7 +67,7 @@ func TestRuntimeCancellationPollUsesPrincipalRunAttemptCancellationLockOrder(t *
 	require.Len(t, response.Commands, 1)
 	require.Equal(t, fixture.databaseNow, response.DatabaseTime)
 	require.Equal(t, []string{
-		"lock_session", "lock_node", "lock_credential", "lock_command_run",
+		"lock_session", "lock_node", "lock_credential", "lock_attachment", "lock_command_run",
 		"lock_attempt", "lock_cancellation", "advance_cancellation", "mirror_cancellation",
 	}, fixture.tx.calls)
 
@@ -93,7 +93,7 @@ func TestRuntimeCancellationRedeliveryTouchesOrderingWithoutLosingState(t *testi
 	require.NotNil(t, fixture.tx.cancellation.ErrorCode)
 	require.Equal(t, errorCode, *fixture.tx.cancellation.ErrorCode)
 	require.Equal(t, []string{
-		"lock_session", "lock_node", "lock_credential", "lock_command_run",
+		"lock_session", "lock_node", "lock_credential", "lock_attachment", "lock_command_run",
 		"lock_attempt", "lock_cancellation", "advance_cancellation", "mirror_cancellation",
 	}, fixture.tx.calls)
 }
@@ -110,7 +110,7 @@ func TestRuntimeCancellationStoppingAckKeepsAttemptCapacity(t *testing.T) {
 	require.Equal(t, int32(1), fixture.tx.sessionInflight)
 	require.Equal(t, int32(1), fixture.tx.nodeInflight)
 	require.Equal(t, []string{
-		"lock_session", "lock_node", "lock_credential", "lock_run", "lock_attempt",
+		"lock_session", "lock_node", "lock_credential", "lock_attachment", "lock_run", "lock_attempt",
 		"lock_cancellation", "advance_cancellation", "mirror_cancellation",
 	}, fixture.tx.calls)
 }
@@ -128,7 +128,7 @@ func TestRuntimeCancellationStoppedAckReleasesCapacityExactlyOnce(t *testing.T) 
 	require.Equal(t, 1, fixture.tx.finishCalls)
 	require.Equal(t, 1, fixture.tx.capacityCASCalls)
 	require.Equal(t, []string{
-		"lock_session", "lock_node", "lock_credential", "lock_run", "lock_attempt",
+		"lock_session", "lock_node", "lock_credential", "lock_attachment", "lock_run", "lock_attempt",
 		"lock_cancellation", "advance_cancellation", "finish_attempt", "capacity_cas",
 		"release_session", "release_node", "mirror_cancellation",
 	}, fixture.tx.calls)
@@ -241,6 +241,7 @@ func newRuntimeCancellationFixture(t *testing.T) *runtimeCancellationFixture {
 	principal := RuntimeSessionPrincipal{
 		RuntimeSessionID: sessionID, NodeID: nodeID, AgentID: agentID, CredentialID: credentialID,
 		WorkerID: workerID, SessionEpoch: 5, CoreInstanceID: coreID,
+		AttachmentID:            uuid.New(),
 		DeviceCertificateSerial: "abc123", DevicePublicKeyThumbprintSHA256: runtimeCancellationSHA256Fixture(),
 		Status: "active", DatabaseTime: databaseNow,
 	}
@@ -390,6 +391,11 @@ func (f *runtimeCancellationTransactionFake) LockRuntimeCredentialForPrincipalVa
 	return db.LockRuntimeCredentialForPrincipalValidationRow{
 		ID: f.principal.CredentialID, AgentID: &agentID, Status: "active_runtime", DatabaseNow: f.databaseNow,
 	}, nil
+}
+
+func (f *runtimeCancellationTransactionFake) LockRuntimeSessionAttachmentForPrincipalValidation(_ context.Context, params db.LockRuntimeSessionAttachmentForPrincipalValidationParams) (db.RuntimeSessionAttachment, error) {
+	f.call("lock_attachment")
+	return db.RuntimeSessionAttachment{ID: params.AttachmentID, RuntimeSessionID: params.RuntimeSessionID, CoreInstanceID: params.CoreInstanceID}, nil
 }
 
 func (f *runtimeCancellationTransactionFake) LockRunForResultFinalization(_ context.Context, _ uuid.UUID) (db.LockRunForResultFinalizationRow, error) {

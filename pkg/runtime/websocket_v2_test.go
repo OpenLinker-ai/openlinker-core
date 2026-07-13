@@ -74,6 +74,26 @@ func TestRuntimeV2WebSocketHelloReadyAndDisconnectOrder(t *testing.T) {
 	require.Equal(t, "SESSION_DISCONNECTED", fixture.leases.releaseReason())
 }
 
+func TestRuntimeV2WebSocketMaintenanceStopsBeforeUsingReplacementAttachment(t *testing.T) {
+	fixture := newRuntimeV2WSTestFixture()
+	server, target := fixture.server(t)
+	defer server.Close()
+	conn := dialRuntimeV2WS(t, target)
+	defer conn.Close()
+
+	writeRuntimeV2WSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeV2WSEnvelope(t, conn).Type)
+	fixture.sessions.replaceAttachment()
+	fixture.wakeHub.Wake(fixture.principal.AgentID)
+
+	requireRuntimeV2WSCloseCode(t, conn, RuntimeWSCloseSessionConflict)
+	require.Eventually(t, func() bool {
+		return len(fixture.operations.snapshot()) >= 1
+	}, 3*time.Second, 10*time.Millisecond)
+	require.Equal(t, []string{"stale_close_session"}, fixture.operations.snapshot())
+	require.Empty(t, fixture.leases.releaseReason())
+}
+
 func TestRuntimeV2WebSocketWakeDeliversAssignmentBeforePollTick(t *testing.T) {
 	fixture := newRuntimeV2WSTestFixture()
 	server, target := fixture.server(t)
@@ -538,6 +558,44 @@ func TestRuntimeV2WebSocketCancelCommandRequiresCorrelatedDurableAck(t *testing.
 	}, 3*time.Second, 10*time.Millisecond)
 }
 
+func TestRuntimeV2WebSocketTerminalCancelAckReleasesCorrelation(t *testing.T) {
+	fixture := newRuntimeV2WSTestFixture()
+	identity := fixture.assignment().AttemptIdentity
+	cancel := RunCancelPayload{
+		CancellationID:  uuid.New(),
+		AttemptIdentity: identity,
+		ReasonCode:      runtimeCancellationReasonCode,
+		DeadlineAt:      fixture.now.Add(30 * time.Second),
+	}
+	_, commandEnvelope, err := newRuntimeV2WSTypedMessage(RuntimeMessageRunCancel, nil, cancel)
+	require.NoError(t, err)
+	connection := &runtimeV2WSConnection{
+		controller:       fixture.controller(),
+		ctx:              context.Background(),
+		sessionPrincipal: fixture.principal,
+		cancellations:    make(map[uuid.UUID]runtimeV2WSCancellationCorrelation),
+	}
+	connection.recordCancellation(commandEnvelope, cancel)
+
+	for _, state := range []RuntimeCancelState{RuntimeCancelStopping, RuntimeCancelStopped} {
+		_, ackEnvelope, ackErr := newRuntimeV2WSTypedMessage(RuntimeMessageRunCancelAck, &commandEnvelope.MessageID, RunCancelAckPayload{
+			CancellationID:  cancel.CancellationID,
+			AttemptIdentity: identity,
+			CancelState:     state,
+		})
+		require.NoError(t, ackErr)
+		require.NoError(t, connection.handleRunCancelAck(ackEnvelope))
+		connection.correlationMu.Lock()
+		correlationCount := len(connection.cancellations)
+		connection.correlationMu.Unlock()
+		if state == RuntimeCancelStopping {
+			require.Equal(t, 1, correlationCount)
+		} else {
+			require.Zero(t, correlationCount)
+		}
+	}
+}
+
 type runtimeV2WSTestFixture struct {
 	now           time.Time
 	authenticated AuthenticatedRuntimePrincipal
@@ -567,6 +625,7 @@ func newRuntimeV2WSTestFixture() *runtimeV2WSTestFixture {
 			PublicKeyThumbprintSHA256:    strings.Repeat("b", 64),
 		},
 	}
+	attachmentID := uuid.New()
 	principal := RuntimeSessionPrincipal{
 		RuntimeSessionID:                uuid.New(),
 		NodeID:                          authenticated.Device.NodeID,
@@ -575,6 +634,7 @@ func newRuntimeV2WSTestFixture() *runtimeV2WSTestFixture {
 		WorkerID:                        "worker-ws-1",
 		SessionEpoch:                    3,
 		CoreInstanceID:                  uuid.New(),
+		AttachmentID:                    attachmentID,
 		DeviceCertificateSerial:         authenticated.Device.CertificateSerial,
 		DevicePublicKeyThumbprintSHA256: authenticated.Device.PublicKeyThumbprintSHA256,
 		Status:                          "active",
@@ -603,6 +663,13 @@ func newRuntimeV2WSTestFixture() *runtimeV2WSTestFixture {
 			Status:                 "active",
 			AttachedCoreInstanceID: &coreID,
 			HeartbeatAt:            now,
+		},
+		Attachment: &db.RuntimeSessionAttachment{
+			ID:               attachmentID,
+			RuntimeSessionID: principal.RuntimeSessionID,
+			CoreInstanceID:   principal.CoreInstanceID,
+			AttachmentKind:   "connected",
+			AttachedAt:       now,
 		},
 		DatabaseTime: now,
 	}
@@ -802,11 +869,31 @@ func (f *runtimeV2WSSessionServiceFake) CloseSession(_ context.Context, _ Authen
 	f.closeRequest = request
 	err := f.closeErr
 	state := f.state
+	stale := state.Attachment != nil && request.AttachmentID != state.Attachment.ID
 	f.mu.Unlock()
 	if f.operations != nil {
-		f.operations.append("close_session")
+		if stale {
+			f.operations.append("stale_close_session")
+		} else {
+			f.operations.append("close_session")
+		}
+	}
+	if stale {
+		return RuntimeSessionState{}, newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
 	}
 	return state, err
+}
+
+func (f *runtimeV2WSSessionServiceFake) replaceAttachment() uuid.UUID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	replacement := uuid.New()
+	f.principal.AttachmentID = replacement
+	if f.state.Attachment == nil {
+		f.state.Attachment = &db.RuntimeSessionAttachment{}
+	}
+	f.state.Attachment.ID = replacement
+	return replacement
 }
 
 func (f *runtimeV2WSSessionServiceFake) ResolveSessionPrincipal(context.Context, AuthenticatedRuntimePrincipal, uuid.UUID) (RuntimeSessionPrincipal, error) {

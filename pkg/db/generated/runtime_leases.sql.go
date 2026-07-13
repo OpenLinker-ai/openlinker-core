@@ -838,6 +838,37 @@ func (q *Queries) LockRuntimeCredentialForPrincipalValidation(ctx context.Contex
 	return i, err
 }
 
+const lockRuntimeSessionAttachmentForPrincipalValidation = `-- name: LockRuntimeSessionAttachmentForPrincipalValidation :one
+SELECT id, runtime_session_id, core_instance_id, attachment_kind,
+       attached_at, detached_at, disconnect_reason
+FROM runtime_session_attachments
+WHERE id = $1
+  AND runtime_session_id = $2
+  AND core_instance_id = $3
+  AND detached_at IS NULL
+FOR UPDATE`
+
+type LockRuntimeSessionAttachmentForPrincipalValidationParams struct {
+	AttachmentID     uuid.UUID `db:"attachment_id" json:"attachment_id"`
+	RuntimeSessionID uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`
+	CoreInstanceID   uuid.UUID `db:"core_instance_id" json:"core_instance_id"`
+}
+
+func (q *Queries) LockRuntimeSessionAttachmentForPrincipalValidation(ctx context.Context, arg LockRuntimeSessionAttachmentForPrincipalValidationParams) (RuntimeSessionAttachment, error) {
+	row := q.db.QueryRow(ctx, lockRuntimeSessionAttachmentForPrincipalValidation, arg.AttachmentID, arg.RuntimeSessionID, arg.CoreInstanceID)
+	var attachment RuntimeSessionAttachment
+	err := row.Scan(
+		&attachment.ID,
+		&attachment.RuntimeSessionID,
+		&attachment.CoreInstanceID,
+		&attachment.AttachmentKind,
+		&attachment.AttachedAt,
+		&attachment.DetachedAt,
+		&attachment.DisconnectReason,
+	)
+	return attachment, err
+}
+
 const lockRuntimeSessionForOfferRelease = `-- name: LockRuntimeSessionForOfferRelease :one
 SELECT s.runtime_session_id, s.node_id, s.agent_id, s.credential_id,
        s.worker_id, s.session_epoch, s.device_certificate_serial,
@@ -862,13 +893,6 @@ WHERE s.runtime_session_id = $1
       OR (
           s.status IN ('offline', 'closed')
           AND s.attached_core_instance_id IS NULL
-          AND EXISTS (
-              SELECT 1
-              FROM runtime_session_attachments detached
-              WHERE detached.runtime_session_id = s.runtime_session_id
-                AND detached.core_instance_id = $6
-                AND detached.detached_at IS NOT NULL
-          )
       )
   )
 FOR UPDATE OF s
@@ -943,6 +967,41 @@ func (q *Queries) LockRuntimeSessionForOfferRelease(ctx context.Context, arg Loc
 		&i.DatabaseNow,
 	)
 	return i, err
+}
+
+const lockRuntimeSessionAttachmentForOfferRelease = `-- name: LockRuntimeSessionAttachmentForOfferRelease :one
+SELECT id, runtime_session_id, core_instance_id, attachment_kind,
+       attached_at, detached_at, disconnect_reason
+FROM runtime_session_attachments
+WHERE id = $1
+  AND runtime_session_id = $2
+  AND core_instance_id = $3
+  AND (
+      ($4::boolean AND detached_at IS NOT NULL)
+      OR (NOT $4::boolean AND detached_at IS NULL)
+  )
+FOR UPDATE`
+
+type LockRuntimeSessionAttachmentForOfferReleaseParams struct {
+	AttachmentID     uuid.UUID `db:"attachment_id" json:"attachment_id"`
+	RuntimeSessionID uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`
+	CoreInstanceID   uuid.UUID `db:"core_instance_id" json:"core_instance_id"`
+	Detached         bool      `db:"detached" json:"detached"`
+}
+
+func (q *Queries) LockRuntimeSessionAttachmentForOfferRelease(ctx context.Context, arg LockRuntimeSessionAttachmentForOfferReleaseParams) (RuntimeSessionAttachment, error) {
+	row := q.db.QueryRow(ctx, lockRuntimeSessionAttachmentForOfferRelease, arg.AttachmentID, arg.RuntimeSessionID, arg.CoreInstanceID, arg.Detached)
+	var attachment RuntimeSessionAttachment
+	err := row.Scan(
+		&attachment.ID,
+		&attachment.RuntimeSessionID,
+		&attachment.CoreInstanceID,
+		&attachment.AttachmentKind,
+		&attachment.AttachedAt,
+		&attachment.DetachedAt,
+		&attachment.DisconnectReason,
+	)
+	return attachment, err
 }
 
 const lockRuntimeNodeForPrincipalValidation = `-- name: LockRuntimeNodeForPrincipalValidation :one

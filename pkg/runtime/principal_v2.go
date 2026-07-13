@@ -13,11 +13,12 @@ import (
 
 // runtimePrincipalLockQueries is intentionally shared by claim, lease,
 // Event, and Result transactions. Every Runtime Worker write must acquire these
-// locks in Session -> Node -> Credential order before it locks a Run.
+// locks in Session -> Node -> Credential -> Attachment order before it locks a Run.
 type runtimePrincipalLockQueries interface {
 	LockRuntimeSessionForPrincipalValidation(context.Context, db.LockRuntimeSessionForPrincipalValidationParams) (db.LockRuntimeSessionForPrincipalValidationRow, error)
 	LockRuntimeNodeForPrincipalValidation(context.Context, db.LockRuntimeNodeForPrincipalValidationParams) (db.LockRuntimeNodeForPrincipalValidationRow, error)
 	LockRuntimeCredentialForPrincipalValidation(context.Context, db.LockRuntimeCredentialForPrincipalValidationParams) (db.LockRuntimeCredentialForPrincipalValidationRow, error)
+	LockRuntimeSessionAttachmentForPrincipalValidation(context.Context, db.LockRuntimeSessionAttachmentForPrincipalValidationParams) (db.RuntimeSessionAttachment, error)
 }
 
 type lockedRuntimePrincipal struct {
@@ -25,6 +26,7 @@ type lockedRuntimePrincipal struct {
 	session       db.LockRuntimeSessionForPrincipalValidationRow
 	node          db.LockRuntimeNodeForPrincipalValidationRow
 	credential    db.LockRuntimeCredentialForPrincipalValidationRow
+	attachment    db.RuntimeSessionAttachment
 }
 
 func lockRuntimePrincipal(
@@ -66,7 +68,15 @@ func lockRuntimePrincipal(
 	if err != nil {
 		return lockedRuntimePrincipal{}, normalizeRuntimePrincipalLockError(err)
 	}
-	locked := lockedRuntimePrincipal{nodePrincipal: true, session: session, node: node, credential: credential}
+	attachment, err := queries.LockRuntimeSessionAttachmentForPrincipalValidation(ctx, db.LockRuntimeSessionAttachmentForPrincipalValidationParams{
+		AttachmentID:     *principal.AttachmentID,
+		RuntimeSessionID: *principal.RuntimeSessionID,
+		CoreInstanceID:   *principal.CoreInstanceID,
+	})
+	if err != nil {
+		return lockedRuntimePrincipal{}, normalizeRuntimePrincipalLockError(err)
+	}
+	locked := lockedRuntimePrincipal{nodePrincipal: true, session: session, node: node, credential: credential, attachment: attachment}
 	if !locked.matches(principal) {
 		return lockedRuntimePrincipal{}, newRuntimeEventError(RuntimeEventErrorLeaseIdentityMismatch, nil)
 	}
@@ -82,12 +92,14 @@ func normalizeRuntimePrincipalLockError(err error) error {
 
 func (p lockedRuntimePrincipal) matches(principal RuntimeEventPrincipal) bool {
 	return principal.CredentialID != nil && principal.NodeID != nil && principal.WorkerID != nil &&
-		principal.RuntimeSessionID != nil && principal.CoreInstanceID != nil &&
+		principal.RuntimeSessionID != nil && principal.CoreInstanceID != nil && principal.AttachmentID != nil &&
 		principal.DeviceCertificateSerial != nil && principal.DevicePublicKeyThumbprintSHA256 != nil &&
 		p.session.RuntimeSessionID == *principal.RuntimeSessionID &&
 		p.session.NodeID == *principal.NodeID && p.session.AgentID == principal.AgentID &&
 		p.session.CredentialID == *principal.CredentialID && p.session.WorkerID == *principal.WorkerID &&
 		p.session.AttachedCoreInstanceID != nil && *p.session.AttachedCoreInstanceID == *principal.CoreInstanceID &&
+		p.attachment.ID == *principal.AttachmentID && p.attachment.RuntimeSessionID == *principal.RuntimeSessionID &&
+		p.attachment.CoreInstanceID == *principal.CoreInstanceID && p.attachment.DetachedAt == nil &&
 		p.node.NodeID == *principal.NodeID &&
 		p.node.DeviceCertificateSerial == *principal.DeviceCertificateSerial &&
 		p.node.DevicePublicKeyThumbprint == *principal.DevicePublicKeyThumbprintSHA256 &&

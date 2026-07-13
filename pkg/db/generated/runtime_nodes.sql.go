@@ -136,7 +136,7 @@ SELECT EXISTS (
       AND s.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
       AND s.protocol_version = 2
       AND s.runtime_contract_id = 'openlinker.runtime.v2'
-      AND s.runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
+      AND s.runtime_contract_digest = '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9'
       AND s.features @> ARRAY[
           'lease_fence', 'assignment_confirm', 'renew', 'resume',
           'event_ack', 'result_ack', 'cancel', 'persistent_spool'
@@ -180,12 +180,17 @@ SELECT s.runtime_session_id, s.node_id, s.agent_id, s.credential_id,
        s.device_certificate_serial, n.device_public_key_thumbprint,
        s.node_version, s.protocol_version, s.runtime_contract_id,
        s.runtime_contract_digest, s.features, s.status, s.heartbeat_at,
+       attachment.id AS attachment_id,
        clock_timestamp() AS database_now
 FROM runtime_sessions s
 JOIN runtime_nodes n ON n.node_id = s.node_id
 JOIN agent_tokens t
   ON t.id = s.credential_id
  AND t.agent_id = s.agent_id
+JOIN runtime_session_attachments attachment
+  ON attachment.runtime_session_id = s.runtime_session_id
+ AND attachment.core_instance_id = s.attached_core_instance_id
+ AND attachment.detached_at IS NULL
 WHERE s.node_id = $1
   AND s.agent_id = $2
   AND s.credential_id = $3
@@ -237,6 +242,7 @@ type ResolveRuntimeWorkerSessionPrincipalRow struct {
 	Features                  []string  `db:"features" json:"features"`
 	Status                    string    `db:"status" json:"status"`
 	HeartbeatAt               time.Time `db:"heartbeat_at" json:"heartbeat_at"`
+	AttachmentID              uuid.UUID `db:"attachment_id" json:"attachment_id"`
 	DatabaseNow               time.Time `db:"database_now" json:"database_now"`
 }
 
@@ -268,6 +274,7 @@ func (q *Queries) ResolveRuntimeWorkerSessionPrincipal(ctx context.Context, arg 
 		&principal.Features,
 		&principal.Status,
 		&principal.HeartbeatAt,
+		&principal.AttachmentID,
 		&principal.DatabaseNow,
 	)
 	return principal, err
@@ -1250,7 +1257,7 @@ func (q *Queries) ListActiveRuntimeSessionsByNode(ctx context.Context, nodeID uu
 	return items, rows.Err()
 }
 
-const listStaleRuntimeSessionsForUpdate = `-- name: ListStaleRuntimeSessionsForUpdate :many
+const listStaleRuntimeSessionCandidates = `-- name: ListStaleRuntimeSessionCandidates :many
 SELECT runtime_session_id, node_id, agent_id, credential_id, worker_id,
        session_epoch, device_certificate_serial, node_version,
        protocol_version, runtime_contract_id, runtime_contract_digest,
@@ -1258,18 +1265,17 @@ SELECT runtime_session_id, node_id, agent_id, credential_id, worker_id,
        connected_at, heartbeat_at, disconnected_at, created_at, updated_at
 FROM runtime_sessions
 WHERE status IN ('active', 'draining')
-  AND heartbeat_at < $1
+  AND heartbeat_at < clock_timestamp() - ($1::bigint * INTERVAL '1 millisecond')
 ORDER BY heartbeat_at ASC, runtime_session_id ASC
-LIMIT $2
-FOR UPDATE SKIP LOCKED`
+LIMIT $2`
 
-type ListStaleRuntimeSessionsForUpdateParams struct {
-	StaleBefore time.Time `db:"stale_before" json:"stale_before"`
-	Limit       int32     `db:"limit" json:"limit"`
+type ListStaleRuntimeSessionCandidatesParams struct {
+	HeartbeatTTLMS int64 `db:"heartbeat_ttl_ms" json:"heartbeat_ttl_ms"`
+	CandidateLimit int32 `db:"candidate_limit" json:"candidate_limit"`
 }
 
-func (q *Queries) ListStaleRuntimeSessionsForUpdate(ctx context.Context, arg ListStaleRuntimeSessionsForUpdateParams) ([]RuntimeSession, error) {
-	rows, err := q.db.Query(ctx, listStaleRuntimeSessionsForUpdate, arg.StaleBefore, arg.Limit)
+func (q *Queries) ListStaleRuntimeSessionCandidates(ctx context.Context, arg ListStaleRuntimeSessionCandidatesParams) ([]RuntimeSession, error) {
+	rows, err := q.db.Query(ctx, listStaleRuntimeSessionCandidates, arg.HeartbeatTTLMS, arg.CandidateLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -1551,6 +1557,7 @@ SET status = 'offline',
     updated_at = clock_timestamp()
 WHERE runtime_session_id = $1
   AND heartbeat_at = $2
+  AND attached_core_instance_id = $3
   AND status IN ('active', 'draining')
 RETURNING runtime_session_id, node_id, agent_id, credential_id, worker_id,
           session_epoch, device_certificate_serial, node_version,
@@ -1561,10 +1568,11 @@ RETURNING runtime_session_id, node_id, agent_id, credential_id, worker_id,
 type CloseStaleRuntimeSessionParams struct {
 	RuntimeSessionID uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`
 	HeartbeatAt      time.Time `db:"heartbeat_at" json:"heartbeat_at"`
+	CoreInstanceID   uuid.UUID `db:"core_instance_id" json:"core_instance_id"`
 }
 
 func (q *Queries) CloseStaleRuntimeSession(ctx context.Context, arg CloseStaleRuntimeSessionParams) (RuntimeSession, error) {
-	row := q.db.QueryRow(ctx, closeStaleRuntimeSession, arg.RuntimeSessionID, arg.HeartbeatAt)
+	row := q.db.QueryRow(ctx, closeStaleRuntimeSession, arg.RuntimeSessionID, arg.HeartbeatAt, arg.CoreInstanceID)
 	var session RuntimeSession
 	err := scanRuntimeSession(row, &session)
 	return session, err
@@ -1676,9 +1684,10 @@ func (q *Queries) ListActiveRuntimeSessionAttachmentsByCore(ctx context.Context,
 const closeRuntimeSessionAttachment = `-- name: CloseRuntimeSessionAttachment :one
 UPDATE runtime_session_attachments
 SET detached_at = clock_timestamp(),
-    disconnect_reason = $3
+    disconnect_reason = $4
 WHERE runtime_session_id = $1
   AND core_instance_id = $2
+  AND id = $3
   AND detached_at IS NULL
 RETURNING id, runtime_session_id, core_instance_id, attachment_kind,
           attached_at, detached_at, disconnect_reason`
@@ -1686,6 +1695,7 @@ RETURNING id, runtime_session_id, core_instance_id, attachment_kind,
 type CloseRuntimeSessionAttachmentParams struct {
 	RuntimeSessionID uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`
 	CoreInstanceID   uuid.UUID `db:"core_instance_id" json:"core_instance_id"`
+	AttachmentID     uuid.UUID `db:"attachment_id" json:"attachment_id"`
 	DisconnectReason *string   `db:"disconnect_reason" json:"disconnect_reason"`
 }
 
@@ -1693,6 +1703,7 @@ func (q *Queries) CloseRuntimeSessionAttachment(ctx context.Context, arg CloseRu
 	row := q.db.QueryRow(ctx, closeRuntimeSessionAttachment,
 		arg.RuntimeSessionID,
 		arg.CoreInstanceID,
+		arg.AttachmentID,
 		arg.DisconnectReason,
 	)
 	var attachment RuntimeSessionAttachment

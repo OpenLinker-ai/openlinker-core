@@ -1,4 +1,4 @@
-.PHONY: help dev build run bootstrap-admin runtime-node-issue runtime-node-inspect test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status migration-063-test migration-069-test migration-070-test deps runtime-loadtest
+.PHONY: help dev build run bootstrap-admin runtime-node-issue runtime-node-inspect test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status migration-063-test migration-069-test migration-070-test migration-071-test deps runtime-loadtest
 
 ENV_FILE ?= .env
 API_URL ?= http://localhost:8080
@@ -69,3 +69,6 @@ migration-069-test: ## 在一次性 PostgreSQL 16 中验证 Runtime 统一入口
 
 migration-070-test: ## 在一次性 PostgreSQL 16 中验证 SDK-first Runtime 边界硬切、回退与阻断条件
 	./bin/test-migration-070.sh
+
+migration-071-test: ## 在一次性 PostgreSQL 16 中验证 Runtime attachment generation 升级、回退与阻断条件
+	./bin/test-migration-071.sh

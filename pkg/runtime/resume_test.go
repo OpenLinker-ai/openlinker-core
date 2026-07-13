@@ -28,7 +28,7 @@ func TestRuntimeResumeSameSessionContinuesOnlyLiveAttempt(t *testing.T) {
 		RuntimeActionUploadResult,
 	}, response.Decisions[0].AllowedActions)
 	require.Equal(t, []string{
-		"lock_session", "lock_node", "lock_credential",
+		"lock_session", "lock_node", "lock_credential", "lock_attachment",
 		"lock_run:" + fixture.identity.RunID.String(),
 		"lock_attempt:" + fixture.identity.AttemptID.String(),
 	}, fixture.tx.calls)
@@ -342,6 +342,7 @@ func newRuntimeResumeFixture(t *testing.T) *runtimeResumeFixture {
 		WorkerID:                        "worker-resume-a",
 		SessionEpoch:                    3,
 		CoreInstanceID:                  coreID,
+		AttachmentID:                    uuid.New(),
 		DeviceCertificateSerial:         "abc123",
 		DevicePublicKeyThumbprintSHA256: fmt.Sprintf("%064x", 42),
 		Status:                          "active",
@@ -507,6 +508,11 @@ func (f *runtimeResumeTransactionFake) LockRuntimeCredentialForPrincipalValidati
 		ID: f.target.CredentialID, AgentID: &agentID, Status: "active_runtime",
 		Scopes: []string{"agent:pull"}, DatabaseNow: f.now,
 	}, nil
+}
+
+func (f *runtimeResumeTransactionFake) LockRuntimeSessionAttachmentForPrincipalValidation(_ context.Context, params db.LockRuntimeSessionAttachmentForPrincipalValidationParams) (db.RuntimeSessionAttachment, error) {
+	f.call("lock_attachment")
+	return db.RuntimeSessionAttachment{ID: params.AttachmentID, RuntimeSessionID: params.RuntimeSessionID, CoreInstanceID: params.CoreInstanceID}, nil
 }
 
 func (f *runtimeResumeTransactionFake) LockRunForLeaseMutation(_ context.Context, id uuid.UUID) (db.LockRunForLeaseMutationRow, error) {

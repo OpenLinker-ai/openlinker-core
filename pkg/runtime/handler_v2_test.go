@@ -19,6 +19,8 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
+const runtimeV2TestAttachmentID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
 func TestRuntimeV2ControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 	e := echo.New()
 	NewRuntimeHTTPController(RuntimeHTTPDependencies{}).Register(e.Group("/api/v1"))
@@ -116,6 +118,7 @@ func TestRuntimeV2CreateSessionAuthenticatesThenMapsFormalHello(t *testing.T) {
 	var ready RuntimeReadyPayload
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &ready))
 	require.Equal(t, fixture.acting.CoreInstanceID.String(), ready.CoreInstanceID)
+	require.Equal(t, fixture.acting.AttachmentID, ready.AttachmentID)
 	require.Equal(t, RuntimeRequiredFeatures(), ready.Features)
 	require.Equal(t, int64(RuntimeOfferTTLSeconds), ready.OfferTTLSeconds)
 	require.Equal(t, int64(RuntimeLeaseTTLSeconds), ready.LeaseTTLSeconds)
@@ -513,6 +516,49 @@ func TestRuntimeV2RejectsNonCanonicalAndConflictingIDsBeforeMutation(t *testing.
 	require.Equal(t, 0, fixture.leases.ackCalls)
 }
 
+func TestRuntimeV2PullAttachmentHeaderIsCanonicalAndGenerationBound(t *testing.T) {
+	fixture := newRuntimeV2HandlerFixture()
+	controller := fixture.controller()
+	claim := RuntimeClaimRequest{RuntimeSessionID: fixture.acting.RuntimeSessionID, Capacity: 1, Inflight: 0}
+	body, err := json.Marshal(claim)
+	require.NoError(t, err)
+
+	serve := func(headers ...string) *httptest.ResponseRecorder {
+		e := echo.New()
+		controller.Register(e.Group("/api/v1"))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/runs/claim", strings.NewReader(string(body)))
+		req.Header.Set(echo.HeaderAuthorization, "Bearer runtime-secret")
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		for _, header := range headers {
+			req.Header.Add(RuntimeAttachmentIDHeader, header)
+		}
+		recorder := httptest.NewRecorder()
+		e.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	for _, header := range []string{"", " " + runtimeV2TestAttachmentID, strings.ToUpper(runtimeV2TestAttachmentID)} {
+		recorder := serve(header)
+		require.Equal(t, http.StatusUnprocessableEntity, recorder.Code, recorder.Body.String())
+		requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorValidationFailed)
+	}
+	require.Zero(t, fixture.leases.claimCalls)
+
+	recorder := serve(uuid.NewString())
+	require.Equal(t, http.StatusConflict, recorder.Code, recorder.Body.String())
+	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorSessionConflict)
+	require.Zero(t, fixture.leases.claimCalls)
+
+	recorder = serve(runtimeV2TestAttachmentID, uuid.NewString())
+	require.Equal(t, http.StatusUnprocessableEntity, recorder.Code, recorder.Body.String())
+	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorValidationFailed)
+	require.Zero(t, fixture.leases.claimCalls)
+
+	recorder = serve(runtimeV2TestAttachmentID)
+	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+	require.Equal(t, 1, fixture.leases.claimCalls)
+}
+
 func TestRuntimeV2WaitAndMissingDependenciesFailClosed(t *testing.T) {
 	fixture := newRuntimeV2HandlerFixture()
 	claim := RuntimeClaimRequest{RuntimeSessionID: fixture.acting.RuntimeSessionID, Capacity: 1, Inflight: 0}
@@ -593,6 +639,7 @@ func newRuntimeV2HandlerFixture() *runtimeV2HandlerFixture {
 		WorkerID:                        "worker-installation-1",
 		SessionEpoch:                    7,
 		CoreInstanceID:                  uuid.New(),
+		AttachmentID:                    uuid.MustParse(runtimeV2TestAttachmentID),
 		DeviceCertificateSerial:         authenticated.Device.CertificateSerial,
 		DevicePublicKeyThumbprintSHA256: authenticated.Device.PublicKeyThumbprintSHA256,
 		Status:                          "active",
@@ -651,6 +698,12 @@ func (f *runtimeV2HandlerFixture) hello() RuntimeHelloPayload {
 
 func (f *runtimeV2HandlerFixture) sessionState() RuntimeSessionState {
 	coreID := f.acting.CoreInstanceID
+	attachment := db.RuntimeSessionAttachment{
+		ID:               f.acting.AttachmentID,
+		RuntimeSessionID: f.acting.RuntimeSessionID,
+		CoreInstanceID:   coreID,
+		AttachedAt:       f.now,
+	}
 	return RuntimeSessionState{
 		Session: db.RuntimeSession{
 			RuntimeSessionID:       f.acting.RuntimeSessionID,
@@ -664,6 +717,7 @@ func (f *runtimeV2HandlerFixture) sessionState() RuntimeSessionState {
 			AttachedCoreInstanceID: &coreID,
 			HeartbeatAt:            f.now,
 		},
+		Attachment:   &attachment,
 		DatabaseTime: f.now,
 	}
 }
@@ -695,6 +749,10 @@ func serveRuntimeV2Raw(t *testing.T, controller *RuntimeHTTPController, method, 
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
 	req.Header.Set(echo.HeaderAuthorization, "Bearer runtime-secret")
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	if strings.SplitN(target, "?", 2)[0] != "/api/v1/agent-runtime/sessions" &&
+		strings.SplitN(target, "?", 2)[0] != runtimeV2CallAgentPath {
+		req.Header.Set(RuntimeAttachmentIDHeader, runtimeV2TestAttachmentID)
+	}
 	recorder := httptest.NewRecorder()
 	e.ServeHTTP(recorder, req)
 	return recorder

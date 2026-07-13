@@ -87,7 +87,9 @@ type runtimeV2WSConnection struct {
 	cleanupOnce     sync.Once
 
 	sessionRequest     RuntimeSessionRequest
+	sessionState       RuntimeSessionState
 	sessionPrincipal   RuntimeSessionPrincipal
+	attachmentID       uuid.UUID
 	attached           bool
 	maintenanceStarted bool
 	connectionID       string
@@ -173,13 +175,23 @@ func (c *runtimeV2WSConnection) run() {
 		c.replyErrorAndMaybeClose(helloEnvelope, err, true)
 		return
 	}
+	if state.Attachment == nil || state.Attachment.ID == uuid.Nil {
+		c.replyErrorAndMaybeClose(helloEnvelope, newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil), true)
+		return
+	}
 	c.attached = true
+	c.sessionState = state
+	c.attachmentID = state.Attachment.ID
+	c.sessionRequest.AttachmentID = c.attachmentID
 	c.controller.refreshPresence(c.ctx, state, c.connectionID)
 	principal, err := c.controller.dependencies.Sessions.ResolveSessionPrincipal(
 		c.ctx, c.authenticated, hello.RuntimeSessionID,
 	)
 	if err == nil {
 		err = validateRuntimeV2ResolvedSession(c.authenticated, principal)
+	}
+	if err == nil && principal.AttachmentID != c.attachmentID {
+		err = newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
 	}
 	if err != nil {
 		c.replyErrorAndMaybeClose(helloEnvelope, err, true)
@@ -297,7 +309,8 @@ func (c *runtimeV2WSConnection) refreshSession() error {
 	if principal.RuntimeSessionID != c.sessionPrincipal.RuntimeSessionID ||
 		principal.WorkerID != c.sessionPrincipal.WorkerID ||
 		principal.SessionEpoch != c.sessionPrincipal.SessionEpoch ||
-		principal.CoreInstanceID != c.sessionPrincipal.CoreInstanceID {
+		principal.CoreInstanceID != c.sessionPrincipal.CoreInstanceID ||
+		principal.AttachmentID != c.attachmentID {
 		return newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
 	}
 	return nil
@@ -424,6 +437,9 @@ func (c *runtimeV2WSConnection) handleRunCancelAck(envelope RuntimeEnvelope) err
 		return err
 	}
 	_, err = c.controller.dependencies.Cancellations.AckCancel(c.ctx, c.sessionPrincipal, payload)
+	if err == nil && runtimeCancellationAckFinalState(payload.CancelState) {
+		c.removeCancellationMessage(*envelope.ReplyToMessageID)
+	}
 	return err
 }
 
@@ -464,6 +480,9 @@ func (c *runtimeV2WSConnection) maintenanceLoop() {
 	defer claimTicker.Stop()
 	defer heartbeatTicker.Stop()
 
+	if !c.refreshMaintenanceSession() {
+		return
+	}
 	c.commandAndSend()
 	c.claimAndSend()
 	for {
@@ -475,12 +494,21 @@ func (c *runtimeV2WSConnection) maintenanceLoop() {
 		case <-c.ctx.Done():
 			return
 		case <-claimTicker.C:
+			if !c.refreshMaintenanceSession() {
+				return
+			}
 			c.commandAndSend()
 			c.claimAndSend()
 		case <-wake:
+			if !c.refreshMaintenanceSession() {
+				return
+			}
 			c.commandAndSend()
 			c.claimAndSend()
 		case <-heartbeatTicker.C:
+			if !c.refreshMaintenanceSession() {
+				return
+			}
 			state, err := c.controller.dependencies.Sessions.HeartbeatSession(
 				c.ctx, c.authenticated, c.sessionRequest,
 			)
@@ -491,6 +519,14 @@ func (c *runtimeV2WSConnection) maintenanceLoop() {
 			c.controller.refreshPresence(c.ctx, state, c.connectionID)
 		}
 	}
+}
+
+func (c *runtimeV2WSConnection) refreshMaintenanceSession() bool {
+	if err := c.refreshSession(); err != nil {
+		c.closeForError(mapRuntimeV2HTTPError(err))
+		return false
+	}
+	return true
 }
 
 func (c *runtimeV2WSConnection) commandAndSend() {
@@ -822,6 +858,7 @@ func (c *runtimeV2WSConnection) cleanup() {
 		}
 		if c.attached {
 			closeCtx, closeCancel := context.WithTimeout(context.Background(), runtimeV2WSCleanupTimeout)
+			detached := false
 			state, closeErr := c.controller.dependencies.Sessions.CloseSession(
 				closeCtx,
 				c.authenticated,
@@ -829,18 +866,22 @@ func (c *runtimeV2WSConnection) cleanup() {
 					RuntimeSessionIdentity: c.sessionRequest.RuntimeSessionIdentity,
 					Status:                 "offline",
 					Reason:                 "websocket disconnected",
+					AttachmentID:           c.attachmentID,
 				},
 			)
 			if closeErr != nil {
-				log.Warn().Err(closeErr).Msg("Runtime websocket close Session")
+				if !IsRuntimeSessionError(closeErr, RuntimeSessionErrorNotAttached) {
+					log.Warn().Err(closeErr).Msg("Runtime websocket close Session")
+				}
 			} else {
-				c.controller.removePresence(closeCtx, state, c.connectionID)
+				detached = !state.Replayed
 			}
+			c.controller.removePresence(closeCtx, c.sessionState, c.connectionID)
 			closeCancel()
 			// This call is deliberately after durable detach/offline evidence.
 			// Lease implementations must use the exact offline cleanup path: only
 			// an unaccepted offer may be released; executing Attempts are untouched.
-			if c.sessionPrincipal.RuntimeSessionID != uuid.Nil {
+			if detached && c.sessionPrincipal.RuntimeSessionID != uuid.Nil {
 				releaseCtx, releaseCancel := context.WithTimeout(context.Background(), runtimeV2WSCleanupTimeout)
 				if releaseErr := c.controller.dependencies.Leases.ReleaseUnackedOffer(
 					releaseCtx, c.sessionPrincipal, "SESSION_DISCONNECTED",

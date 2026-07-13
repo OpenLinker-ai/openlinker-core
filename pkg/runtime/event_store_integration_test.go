@@ -296,6 +296,45 @@ func TestEventStoreReliableAppendAndContinuity(t *testing.T) {
 	})
 }
 
+func TestRuntimeSessionReaperClosesCrashedPullGenerationWithoutFinishingAttempt(t *testing.T) {
+	pool := setupTestDB(t)
+	requireReliableRuntimeV2Schema(t, pool)
+	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
+	require.NotNil(t, fixture.identity.RuntimeSessionID)
+	sessionID := *fixture.identity.RuntimeSessionID
+
+	_, err := pool.Exec(context.Background(), `
+		UPDATE runtime_sessions
+		SET heartbeat_at = clock_timestamp() - INTERVAL '10 minutes'
+		WHERE runtime_session_id = $1`, sessionID)
+	require.NoError(t, err)
+
+	reaped, err := runtime.NewRuntimeSessionReaper(pool, time.Minute).ReapStaleSessions(context.Background(), 32)
+	require.NoError(t, err)
+	require.Equal(t, 1, reaped)
+
+	var sessionStatus, dispatchState string
+	var attachedCoreID *uuid.UUID
+	var detachedAt *time.Time
+	var attemptFinishedAt *time.Time
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT session.status, session.attached_core_instance_id,
+		       attachment.detached_at, run.dispatch_state, attempt.finished_at
+		FROM runtime_sessions session
+		JOIN runtime_session_attachments attachment
+		  ON attachment.runtime_session_id = session.runtime_session_id
+		JOIN runs run ON run.id = $2
+		JOIN run_attempts attempt ON attempt.id = $3
+		WHERE session.runtime_session_id = $1`,
+		sessionID, fixture.identity.RunID, fixture.identity.AttemptID,
+	).Scan(&sessionStatus, &attachedCoreID, &detachedAt, &dispatchState, &attemptFinishedAt))
+	require.Equal(t, "offline", sessionStatus)
+	require.Nil(t, attachedCoreID)
+	require.NotNil(t, detachedAt)
+	require.Equal(t, "executing", dispatchState)
+	require.Nil(t, attemptFinishedAt)
+}
+
 func eventStoreRequest(sequence int64) runtime.RuntimeEventRequest {
 	return runtime.RuntimeEventRequest{
 		ClientEventID:  uuid.New(),
@@ -326,6 +365,7 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 	leaseID := uuid.New()
 	nodeID := uuid.New()
 	sessionID := uuid.New()
+	attachmentID := uuid.New()
 	credentialID := uuid.New()
 	coreInstanceID := uuid.New()
 	workerID := "event-worker-" + uuid.NewString()[:8]
@@ -415,8 +455,8 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 		}
 		if _, err := tx.Exec(context.Background(), `
 			INSERT INTO runtime_session_attachments (
-				runtime_session_id, core_instance_id, attachment_kind, attached_at
-			) VALUES ($1, $2, 'connected', $3)`, sessionID, coreInstanceID, databaseNow); err != nil {
+				id, runtime_session_id, core_instance_id, attachment_kind, attached_at
+			) VALUES ($1, $2, $3, 'connected', $4)`, attachmentID, sessionID, coreInstanceID, databaseNow); err != nil {
 			return fmt.Errorf("insert event-store session attachment: %w", err)
 		}
 
@@ -531,6 +571,7 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 			WorkerID:                        &workerID,
 			RuntimeSessionID:                &sessionID,
 			CoreInstanceID:                  &coreInstanceID,
+			AttachmentID:                    &attachmentID,
 			DeviceCertificateSerial:         &certificateSerial,
 			DevicePublicKeyThumbprintSHA256: &publicKeyThumbprint,
 		},

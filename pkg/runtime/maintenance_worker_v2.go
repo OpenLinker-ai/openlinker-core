@@ -22,6 +22,10 @@ type runtimeV2CancellationReapWorker interface {
 	ReapExpiredCancellations(context.Context, int) (int, error)
 }
 
+type runtimeSessionReapWorker interface {
+	ReapStaleSessions(context.Context, int) (int, error)
+}
+
 // RuntimeMaintenanceWorkerConfig bounds every tick so a large stale queue
 // cannot monopolize a Core process. A full batch triggers a small, bounded
 // catch-up loop; the next tick continues any remaining work.
@@ -29,17 +33,20 @@ type RuntimeMaintenanceWorkerConfig struct {
 	Interval              time.Duration
 	ReconcileBatchSize    int
 	CancellationBatchSize int
+	SessionBatchSize      int
 	MaxCatchUpBatches     int
 }
 
 type RuntimeMaintenanceResult struct {
 	ReconcileBatches    int
 	CancellationBatches int
+	SessionBatches      int
 	Reconciled          int
 	Requeued            int
 	TimedOut            int
 	DeadLettered        int
 	CancellationsReaped int
+	SessionsReaped      int
 }
 
 func normalizeRuntimeMaintenanceWorkerConfig(cfg RuntimeMaintenanceWorkerConfig) RuntimeMaintenanceWorkerConfig {
@@ -51,6 +58,9 @@ func normalizeRuntimeMaintenanceWorkerConfig(cfg RuntimeMaintenanceWorkerConfig)
 	}
 	if cfg.CancellationBatchSize <= 0 || cfg.CancellationBatchSize > maxRuntimeCancellationReapBatch {
 		cfg.CancellationBatchSize = defaultRuntimeV2MaintenanceBatchSize
+	}
+	if cfg.SessionBatchSize <= 0 || cfg.SessionBatchSize > maxRuntimeSessionReapBatch {
+		cfg.SessionBatchSize = defaultRuntimeV2MaintenanceBatchSize
 	}
 	if cfg.MaxCatchUpBatches <= 0 || cfg.MaxCatchUpBatches > 32 {
 		cfg.MaxCatchUpBatches = defaultRuntimeV2MaintenanceCatchUpRuns
@@ -65,6 +75,7 @@ func RunRuntimeMaintenanceOnce(
 	ctx context.Context,
 	reconciler runtimeV2DeadlineReconcileWorker,
 	cancellations runtimeV2CancellationReapWorker,
+	sessions runtimeSessionReapWorker,
 	cfg RuntimeMaintenanceWorkerConfig,
 ) (RuntimeMaintenanceResult, error) {
 	cfg = normalizeRuntimeMaintenanceWorkerConfig(cfg)
@@ -116,6 +127,27 @@ func RunRuntimeMaintenanceOnce(
 		}
 	}
 
+	if sessions == nil {
+		errs = append(errs, ErrRuntimeSessionReaperNotConfigured)
+	} else {
+		for batch := 0; batch < cfg.MaxCatchUpBatches; batch++ {
+			if err := ctx.Err(); err != nil {
+				errs = append(errs, err)
+				break
+			}
+			reaped, err := sessions.ReapStaleSessions(ctx, cfg.SessionBatchSize)
+			result.SessionBatches++
+			result.SessionsReaped += reaped
+			if err != nil {
+				errs = append(errs, err)
+				break
+			}
+			if reaped < cfg.SessionBatchSize {
+				break
+			}
+		}
+	}
+
 	return result, errors.Join(errs...)
 }
 
@@ -126,22 +158,24 @@ func StartRuntimeMaintenanceWorker(
 	ctx context.Context,
 	reconciler runtimeV2DeadlineReconcileWorker,
 	cancellations runtimeV2CancellationReapWorker,
+	sessions runtimeSessionReapWorker,
 	cfg RuntimeMaintenanceWorkerConfig,
 ) {
 	cfg = normalizeRuntimeMaintenanceWorkerConfig(cfg)
 	run := func() {
-		result, err := RunRuntimeMaintenanceOnce(ctx, reconciler, cancellations, cfg)
+		result, err := RunRuntimeMaintenanceOnce(ctx, reconciler, cancellations, sessions, cfg)
 		if err != nil && ctx.Err() == nil {
 			log.Error().Err(err).Msg("Runtime maintenance pass failed")
 			return
 		}
-		if result.Reconciled > 0 || result.CancellationsReaped > 0 {
+		if result.Reconciled > 0 || result.CancellationsReaped > 0 || result.SessionsReaped > 0 {
 			log.Info().
 				Int("reconciled", result.Reconciled).
 				Int("requeued", result.Requeued).
 				Int("timed_out", result.TimedOut).
 				Int("dead_lettered", result.DeadLettered).
 				Int("cancellations_reaped", result.CancellationsReaped).
+				Int("sessions_reaped", result.SessionsReaped).
 				Msg("Runtime maintenance pass committed")
 		}
 	}
