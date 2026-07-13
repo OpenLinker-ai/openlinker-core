@@ -16,7 +16,7 @@ LOCK TABLE runtime_cluster_members IN ACCESS EXCLUSIVE MODE;
 DO $$
 DECLARE
     old_digest CONSTANT TEXT := '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f';
-    new_digest CONSTANT TEXT := '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de';
+    new_digest CONSTANT TEXT := 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53';
 BEGIN
     IF EXISTS (SELECT 1 FROM runtime_cluster_members) THEN
         RAISE EXCEPTION 'migration 069 rollback requires zero registered Core cluster members';
@@ -62,7 +62,7 @@ SET detached_at = clock_timestamp(),
     disconnect_reason = 'runtime entry contract rollback'
 FROM runtime_sessions session
 WHERE session.runtime_session_id = attachment.runtime_session_id
-  AND session.runtime_contract_digest = '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de'
+  AND session.runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
   AND session.status IN ('active', 'draining')
   AND attachment.detached_at IS NULL;
 
@@ -72,7 +72,7 @@ SET status = 'closed',
     disconnected_at = COALESCE(disconnected_at, clock_timestamp()),
     heartbeat_at = GREATEST(heartbeat_at, clock_timestamp()),
     updated_at = clock_timestamp()
-WHERE runtime_contract_digest = '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de'
+WHERE runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
   AND status IN ('active', 'draining');
 
 SET CONSTRAINTS ALL IMMEDIATE;
@@ -86,7 +86,7 @@ SET is_current = FALSE
 WHERE schema_version = 69
   AND migration_name = '069_runtime_entry_discovery'
   AND runtime_contract_id = 'openlinker.runtime.v2'
-  AND runtime_contract_digest = '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de'
+  AND runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
   AND is_current;
 
 UPDATE runtime_schema_contracts
@@ -101,7 +101,7 @@ UPDATE runtime_nodes
 SET runtime_contract_digest = '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f',
     updated_at = clock_timestamp()
 WHERE status <> 'revoked'
-  AND runtime_contract_digest = '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de';
+  AND runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53';
 
 SET CONSTRAINTS ALL IMMEDIATE;
 SET CONSTRAINTS ALL DEFERRED;
@@ -119,7 +119,7 @@ ALTER TABLE runtime_nodes
                  AND runtime_contract_digest IN (
                     '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61',
                     '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f',
-                    '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de'
+                    'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
                  ))
             )
         );
@@ -137,7 +137,7 @@ ALTER TABLE runtime_sessions
                  AND runtime_contract_digest IN (
                     '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61',
                     '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f',
-                    '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de'
+                    'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
                  ))
             )
         );

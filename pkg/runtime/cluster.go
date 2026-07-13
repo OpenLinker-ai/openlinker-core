@@ -26,7 +26,7 @@ const (
 	// RuntimeSchemaChecksum is SHA-256 over the canonical current schema
 	// contract tuple:
 	// 69:069_runtime_entry_discovery:<contract id>:<contract digest>.
-	RuntimeSchemaChecksum = "30cc32ed144fd53a83f45123ad672d530654f7a2493314e6f2f08c925418d545"
+	RuntimeSchemaChecksum = "793bd58888a749e4e1c73e5ebe74a6a476ad2e6dd35d38d76a426e6f15c79978"
 
 	RuntimeClusterModeNormal          RuntimeClusterMode = "normal"
 	RuntimeClusterModeDraining        RuntimeClusterMode = "draining"

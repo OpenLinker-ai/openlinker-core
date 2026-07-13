@@ -4669,7 +4669,7 @@ func TestPublicMarketCallableQueriesUseDurableRuntimeV2Truth(t *testing.T) {
 			"s.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'",
 			"s.protocol_version = 2",
 			"s.runtime_contract_id = 'openlinker.runtime.v2'",
-			"s.runtime_contract_digest = '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de'",
+			"s.runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'",
 			"'persistent_spool'",
 			"n.status IN ('active', 'draining')",
 			"n.revoked_at IS NULL",

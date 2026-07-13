@@ -69,7 +69,7 @@ func TestHasActiveRuntimeV2SessionForAgentAgainstPostgres(t *testing.T) {
 			last_seen_at
 		) VALUES ($1, 'Signal Node', $2, $3, 'test-v2', 2,
 			'openlinker.runtime.v2',
-			'052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de',
+			'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53',
 			$4, 4, clock_timestamp() - INTERVAL '46 seconds')`,
 		nodeID, nodeID.String(), "sha256:"+nodeID.String(), features); err != nil {
 		t.Fatalf("insert node: %v", err)
@@ -82,7 +82,7 @@ func TestHasActiveRuntimeV2SessionForAgentAgainstPostgres(t *testing.T) {
 			features, capacity, status, attached_core_instance_id, heartbeat_at
 		) VALUES ($1, $2, $3, $4, 'worker-signal', 1, $5, 'test-v2', 2,
 			'openlinker.runtime.v2',
-			'052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de',
+			'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53',
 			$6, 4, 'active', $7, clock_timestamp() - INTERVAL '46 seconds')`,
 		sessionID, nodeID, agentID, tokenID, nodeID.String(), features, coreID); err != nil {
 		t.Fatalf("insert session: %v", err)

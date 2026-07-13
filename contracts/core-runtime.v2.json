@@ -215,6 +215,32 @@
       }
     },
     {
+      "client_method": "heartbeatRuntimeSession",
+      "http_method": "POST",
+      "path": "/api/v1/agent-runtime/sessions/{id}/heartbeat",
+      "request_body_schema": {
+        "$ref": "#/$defs/RuntimeHelloPayload"
+      },
+      "success_response_schema": {
+        "$ref": "#/$defs/RuntimeReadyPayload"
+      },
+      "error_response_schema": {
+        "$ref": "#/$defs/RuntimeError"
+      }
+    },
+    {
+      "client_method": "closeRuntimeSession",
+      "http_method": "POST",
+      "path": "/api/v1/agent-runtime/sessions/{id}/close",
+      "request_body_schema": {
+        "$ref": "#/$defs/RuntimeSessionCloseRequest"
+      },
+      "empty_response_status": 204,
+      "error_response_schema": {
+        "$ref": "#/$defs/RuntimeError"
+      }
+    },
+    {
       "client_method": "claimRuntimeRun",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/runs/claim",
@@ -794,6 +820,50 @@
         },
         "database_time": {
           "$ref": "#/$defs/Timestamp"
+        }
+      }
+    },
+    "RuntimeSessionCloseRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "agent_id",
+        "worker_id",
+        "runtime_session_id",
+        "session_epoch",
+        "status",
+        "reason"
+      ],
+      "properties": {
+        "node_id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "worker_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "runtime_session_id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "session_epoch": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "offline",
+            "closed"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
         }
       }
     },

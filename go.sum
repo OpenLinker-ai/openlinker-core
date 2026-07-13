@@ -4,8 +4,8 @@ github.com/Azure/go-ansiterm v0.0.0-20230124172434-306776ec8161 h1:L/gRVlceqvL25
 github.com/Azure/go-ansiterm v0.0.0-20230124172434-306776ec8161/go.mod h1:xomTg63KZ2rFqZQzSB4Vz2SUXa1BpHTVz9L5PTmPC4E=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
-github.com/OpenLinker-ai/openlinker-go v0.1.43-0.20260713092536-976a34b0e683 h1:Q1E8/Pr18qVk5zuDY5Zz0Gjwfyy0CJ0Kl5wLas/0bkc=
-github.com/OpenLinker-ai/openlinker-go v0.1.43-0.20260713092536-976a34b0e683/go.mod h1:hZI+rinQqwQC5NH+RVIfbA/nmn5UWAOYMRA6cyOiKT4=
+github.com/OpenLinker-ai/openlinker-go v0.1.43-0.20260713100327-2ab750706b7e h1:5Uu8TZMklX6tCHiQBSCltwnpe6IWFXIrw/AW2eWGJBQ=
+github.com/OpenLinker-ai/openlinker-go v0.1.43-0.20260713100327-2ab750706b7e/go.mod h1:hZI+rinQqwQC5NH+RVIfbA/nmn5UWAOYMRA6cyOiKT4=
 github.com/alicebob/miniredis/v2 v2.35.0 h1:QwLphYqCEAo1eu1TqPRN2jgVMPBweeQcR21jeqDCONI=
 github.com/alicebob/miniredis/v2 v2.35.0/go.mod h1:TcL7YfarKPGDAthEtl5NBeHZfeUQj6OXMm/+iu5cLMM=
 github.com/bsm/ginkgo/v2 v2.12.0 h1:Ny8MWAHyOepLGlLKYmXG4IEkioBysk6GpaRTLC8zwWs=

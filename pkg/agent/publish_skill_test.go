@@ -73,7 +73,10 @@ func TestServePublishAgentSkillIncludesDiscoveredCanonicalRuntimeOnboarding(t *t
 	assertContains(t, body, "CONNECT ${RUNTIME_ORIGIN}/api/v1/agent-runtime/ws")
 	assertContains(t, body, "POST /api/v1/agent-runtime/runs/claim")
 	assertContains(t, body, "Runtime Session")
-	assertContains(t, body, "run.assignment_confirmed")
+	assertContains(t, body, "run.assignment.ack")
+	assertContains(t, body, "run.assignment.confirmed")
+	assertContains(t, body, "run.event.ack")
+	assertContains(t, body, "run.result.ack")
 	assertContains(t, body, "matching ACK")
 	assertContains(t, body, "WebSocket and long polling")
 	assertContains(t, body, `"connection_mode": "agent_node"`)
@@ -85,6 +88,10 @@ func TestServePublishAgentSkillIncludesDiscoveredCanonicalRuntimeOnboarding(t *t
 	assertNotContains(t, strings.ToLower(body), "runtime v2")
 	assertNotContains(t, strings.ToLower(body), "pull v2")
 	assertNotContains(t, body, "/api/v1/agent-runtime/v2")
+	assertNotContains(t, body, "run.assignment_ack")
+	assertNotContains(t, body, "run.assignment_confirmed")
+	assertNotContains(t, body, "run.event_ack")
+	assertNotContains(t, body, "run.result_ack")
 }
 
 func TestConsumeAgentSkillKeepsTasksPrivate(t *testing.T) {

@@ -2,7 +2,7 @@ DO $$
 DECLARE
     previous_digest CONSTANT TEXT := '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61';
     old_digest CONSTANT TEXT := '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f';
-    new_digest CONSTANT TEXT := '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de';
+    new_digest CONSTANT TEXT := 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53';
     node_constraint TEXT;
     session_constraint TEXT;
 BEGIN

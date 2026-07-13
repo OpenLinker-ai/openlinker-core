@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -54,7 +55,7 @@ type runtimeContractManifest struct {
 		Query                 map[string]json.RawMessage `json:"query,omitempty"`
 		RequiredHeaders       []string                   `json:"required_headers,omitempty"`
 		RequestBodySchema     *runtimeContractSchemaRef  `json:"request_body_schema,omitempty"`
-		SuccessResponseSchema runtimeContractSchemaRef   `json:"success_response_schema"`
+		SuccessResponseSchema *runtimeContractSchemaRef  `json:"success_response_schema,omitempty"`
 		EmptyResponseStatus   *int                       `json:"empty_response_status,omitempty"`
 		ErrorResponseSchema   runtimeContractSchemaRef   `json:"error_response_schema"`
 	} `json:"endpoints"`
@@ -129,20 +130,49 @@ func TestRuntimeV2ContractCoversWireProtocol(t *testing.T) {
 	}, messageTypes)
 
 	endpointKeys := make([]string, 0, len(contract.Endpoints))
+	foundHeartbeat := false
+	foundClose := false
 	for _, endpoint := range contract.Endpoints {
 		require.NotEmpty(t, endpoint.ClientMethod)
 		require.True(t, strings.HasPrefix(endpoint.Path, "/api/v1/agent-runtime/"), endpoint.Path)
 		require.NotContains(t, endpoint.Path, "/agent-runtime/v2/")
-		requireDefinitionRef(t, contract.Definitions, endpoint.SuccessResponseSchema.Ref)
+		require.True(t, endpoint.SuccessResponseSchema != nil || endpoint.EmptyResponseStatus != nil, endpoint.Path)
+		if endpoint.SuccessResponseSchema != nil {
+			requireDefinitionRef(t, contract.Definitions, endpoint.SuccessResponseSchema.Ref)
+		}
 		requireDefinitionRef(t, contract.Definitions, endpoint.ErrorResponseSchema.Ref)
 		if endpoint.RequestBodySchema != nil {
 			requireDefinitionRef(t, contract.Definitions, endpoint.RequestBodySchema.Ref)
 		}
+		switch endpoint.Path {
+		case "/api/v1/agent-runtime/sessions/{id}/heartbeat":
+			foundHeartbeat = true
+			require.Equal(t, "heartbeatRuntimeSession", endpoint.ClientMethod)
+			require.Equal(t, http.MethodPost, endpoint.HTTPMethod)
+			require.NotNil(t, endpoint.RequestBodySchema)
+			require.Equal(t, "#/$defs/RuntimeHelloPayload", endpoint.RequestBodySchema.Ref)
+			require.NotNil(t, endpoint.SuccessResponseSchema)
+			require.Equal(t, "#/$defs/RuntimeReadyPayload", endpoint.SuccessResponseSchema.Ref)
+			require.Nil(t, endpoint.EmptyResponseStatus)
+		case "/api/v1/agent-runtime/sessions/{id}/close":
+			foundClose = true
+			require.Equal(t, "closeRuntimeSession", endpoint.ClientMethod)
+			require.Equal(t, http.MethodPost, endpoint.HTTPMethod)
+			require.NotNil(t, endpoint.RequestBodySchema)
+			require.Equal(t, "#/$defs/RuntimeSessionCloseRequest", endpoint.RequestBodySchema.Ref)
+			require.Nil(t, endpoint.SuccessResponseSchema)
+			require.NotNil(t, endpoint.EmptyResponseStatus)
+			require.Equal(t, http.StatusNoContent, *endpoint.EmptyResponseStatus)
+		}
 		endpointKeys = append(endpointKeys, endpoint.HTTPMethod+" "+endpoint.Path)
 	}
+	require.True(t, foundHeartbeat)
+	require.True(t, foundClose)
 	requireUniqueStrings(t, "endpoint", endpointKeys)
 	require.ElementsMatch(t, []string{
 		"POST /api/v1/agent-runtime/sessions",
+		"POST /api/v1/agent-runtime/sessions/{id}/heartbeat",
+		"POST /api/v1/agent-runtime/sessions/{id}/close",
 		"POST /api/v1/agent-runtime/runs/claim",
 		"POST /api/v1/agent-runtime/runs/{id}/assignment-ack",
 		"POST /api/v1/agent-runtime/runs/{id}/assignment-reject",
@@ -162,6 +192,7 @@ func TestRuntimeV2ContractDefinesRecoveryAndCancellation(t *testing.T) {
 		"AttemptIdentity",
 		"EventRange",
 		"RuntimeError",
+		"RuntimeSessionCloseRequest",
 		"RunResultPayload",
 		"RunResultAckPayload",
 		"RunCancelPayload",
@@ -200,6 +231,35 @@ func TestRuntimeV2ContractDefinesRecoveryAndCancellation(t *testing.T) {
 		"result_already_acked",
 		"lease_revoked",
 	}, resumeDecision.Enum)
+
+	var closeRequest struct {
+		AdditionalProperties *bool `json:"additionalProperties"`
+		Required             []string
+		Properties           map[string]struct {
+			Ref       string   `json:"$ref"`
+			Type      string   `json:"type"`
+			MinLength int      `json:"minLength"`
+			MaxLength int      `json:"maxLength"`
+			Enum      []string `json:"enum"`
+		} `json:"properties"`
+	}
+	require.NoError(t, json.Unmarshal(contract.Definitions["RuntimeSessionCloseRequest"], &closeRequest))
+	require.NotNil(t, closeRequest.AdditionalProperties)
+	require.False(t, *closeRequest.AdditionalProperties)
+	require.ElementsMatch(t, []string{
+		"node_id", "agent_id", "worker_id", "runtime_session_id", "session_epoch", "status", "reason",
+	}, closeRequest.Required)
+	require.Equal(t, "#/$defs/UUID", closeRequest.Properties["node_id"].Ref)
+	require.Equal(t, "#/$defs/UUID", closeRequest.Properties["agent_id"].Ref)
+	require.Equal(t, "#/$defs/UUID", closeRequest.Properties["runtime_session_id"].Ref)
+	require.Equal(t, "#/$defs/PositiveInteger", closeRequest.Properties["session_epoch"].Ref)
+	require.Equal(t, "string", closeRequest.Properties["worker_id"].Type)
+	require.Equal(t, 1, closeRequest.Properties["worker_id"].MinLength)
+	require.Equal(t, 200, closeRequest.Properties["worker_id"].MaxLength)
+	require.Equal(t, []string{"offline", "closed"}, closeRequest.Properties["status"].Enum)
+	require.Equal(t, "string", closeRequest.Properties["reason"].Type)
+	require.Equal(t, 1, closeRequest.Properties["reason"].MinLength)
+	require.Equal(t, 200, closeRequest.Properties["reason"].MaxLength)
 
 	var runtimeError struct {
 		Properties struct {

@@ -279,10 +279,10 @@ TLS: Core-issued client certificate + pinned Core CA
 client -> runtime.hello (Session identity, contract digest, required features, capacity)
 server -> runtime.ready
 server -> run.assigned (Attempt identity, fencing token, lease, invocation capability)
-client -> run.assignment_ack
-server -> run.assignment_confirmed
+client -> run.assignment.ack
+server -> run.assignment.confirmed
 client -> run.event / run.result
-server -> run.event_ack / run.result_ack
+server -> run.event.ack / run.result.ack
 ` + "```" + `
 
 The connection is Agent-initiated, so it works behind NAT. Keep it supervised and
@@ -325,7 +325,7 @@ WebSocket and long polling both require a Core-issued mTLS device identity and a
 Agent Token with agent:pull. They are two transports inside the same agent_node
 connection mode, not separate marketplace modes. The OpenLinker Runtime reliability contract is:
 1. Persist Session and accepted Attempt identity before acknowledging work.
-2. Do not execute until run.assignment_confirmed.
+2. Do not execute until run.assignment.confirmed.
 3. Renew only the current fenced lease; a stale fence must stop execution.
 4. Persist each Event and Result before sending it, and delete it only after the matching ACK.
 5. Resume unfinished Attempts after reconnect or transport switching; never restart accepted work just because WebSocket dropped.

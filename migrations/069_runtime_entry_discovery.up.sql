@@ -16,7 +16,7 @@ LOCK TABLE runtime_cluster_members IN ACCESS EXCLUSIVE MODE;
 DO $$
 DECLARE
     old_digest CONSTANT TEXT := '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f';
-    new_digest CONSTANT TEXT := '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de';
+    new_digest CONSTANT TEXT := 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53';
 BEGIN
     IF EXISTS (SELECT 1 FROM runtime_cluster_members) THEN
         RAISE EXCEPTION 'migration 069 requires zero registered Core cluster members';
@@ -132,7 +132,7 @@ INSERT INTO runtime_schema_contracts (
     69,
     '069_runtime_entry_discovery',
     'openlinker.runtime.v2',
-    '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de',
+    'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53',
     TRUE
 )
 ON CONFLICT (schema_version) DO NOTHING;
@@ -142,11 +142,11 @@ SET is_current = TRUE
 WHERE schema_version = 69
   AND migration_name = '069_runtime_entry_discovery'
   AND runtime_contract_id = 'openlinker.runtime.v2'
-  AND runtime_contract_digest = '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de'
+  AND runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
   AND NOT is_current;
 
 UPDATE runtime_nodes
-SET runtime_contract_digest = '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de',
+SET runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53',
     updated_at = clock_timestamp()
 WHERE status <> 'revoked'
   AND runtime_contract_digest = '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f';
@@ -161,13 +161,13 @@ ALTER TABLE runtime_nodes
             AND runtime_contract_id = 'openlinker.runtime.v2'
             AND (
                 (status IN ('active', 'draining')
-                 AND runtime_contract_digest = '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de')
+                 AND runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53')
                 OR
                 (status = 'revoked'
                  AND runtime_contract_digest IN (
                     '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61',
                     '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f',
-                    '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de'
+                    'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
                  ))
             )
         );
@@ -179,13 +179,13 @@ ALTER TABLE runtime_sessions
             AND runtime_contract_id = 'openlinker.runtime.v2'
             AND (
                 (status IN ('active', 'draining')
-                 AND runtime_contract_digest = '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de')
+                 AND runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53')
                 OR
                 (status IN ('offline', 'revoked', 'closed')
                  AND runtime_contract_digest IN (
                     '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61',
                     '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f',
-                    '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de'
+                    'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
                  ))
             )
         );

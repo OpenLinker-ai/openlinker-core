@@ -8,7 +8,8 @@ POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16}"
 CONTAINER_NAME="openlinker-migration-069-${PPID}-$$"
 DATABASE_NAME="openlinker"
 OLD_DIGEST="857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f"
-NEW_DIGEST="052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de"
+NEW_DIGEST="fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53"
+UNKNOWN_DIGEST="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 
 cleanup() {
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -58,6 +59,13 @@ psql_stdin() {
 psql_command() {
   docker exec --env PGOPTIONS="-c client_min_messages=warning" "$CONTAINER_NAME" \
     psql -X -v ON_ERROR_STOP=1 -U postgres -d "$DATABASE_NAME" "$@"
+}
+
+reset_database() {
+  docker exec "$CONTAINER_NAME" \
+    psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres --quiet \
+      -c "DROP DATABASE IF EXISTS $DATABASE_NAME WITH (FORCE)" \
+      -c "CREATE DATABASE $DATABASE_NAME"
 }
 
 run_migration() {
@@ -242,8 +250,111 @@ psql_command --quiet -c "
 expect_apply_failure "migration 069 requires zero registered Core cluster members"
 psql_command --quiet -c "DELETE FROM runtime_cluster_members" >/dev/null
 
-echo "[069] close old Session and activate canonical entry contract"
+echo "[069] fail closed when a migration lock cannot be acquired"
+docker exec \
+  --env PGOPTIONS="-c client_min_messages=warning" \
+  --env PGAPPNAME="migration-069-lock-holder" \
+  "$CONTAINER_NAME" \
+  psql -X -v ON_ERROR_STOP=1 -U postgres -d "$DATABASE_NAME" \
+  -c "BEGIN; LOCK TABLE runtime_session_attachments IN ACCESS SHARE MODE; SELECT pg_sleep(30); COMMIT;" \
+  >/dev/null 2>&1 &
+lock_holder_pid=$!
+for _ in $(seq 1 100); do
+  if [[ "$(psql_command --tuples-only --no-align -c "
+    SELECT COUNT(*)
+    FROM pg_stat_activity
+    WHERE datname = current_database()
+      AND application_name = 'migration-069-lock-holder'
+      AND state = 'active'
+  ")" == "1" ]]; then
+    break
+  fi
+  sleep 0.1
+done
+[[ "$(psql_command --tuples-only --no-align -c "
+  SELECT COUNT(*)
+  FROM pg_stat_activity
+  WHERE datname = current_database()
+    AND application_name = 'migration-069-lock-holder'
+    AND state = 'active'
+")" == "1" ]] || fail "lock holder did not become active"
+expect_apply_failure "canceling statement due to lock timeout"
+psql_command --quiet -c "
+  SELECT pg_terminate_backend(pid)
+  FROM pg_stat_activity
+  WHERE datname = current_database()
+    AND application_name = 'migration-069-lock-holder'
+" >/dev/null
+wait "$lock_holder_pid" 2>/dev/null || true
+
 insert_principals
+
+echo "[069] fail closed while a Run is still running"
+psql_command --quiet -c "
+  INSERT INTO runs (
+    id, user_id, agent_id, input, status, cost_cents,
+    platform_fee_cents, creator_revenue_cents, source,
+    idempotency_key_hash, idempotency_fingerprint,
+    connection_mode_snapshot, dispatch_deadline_at, run_deadline_at
+  ) VALUES (
+    '69000000-0000-4000-8000-000000000040',
+    '69000000-0000-4000-8000-000000000001',
+    '69000000-0000-4000-8000-000000000002',
+    '{\"case\":\"migration-069-running\"}', 'running', 0, 0, 0, 'api',
+    decode(repeat('11', 32), 'hex'), decode(repeat('22', 32), 'hex'),
+    'agent_node', clock_timestamp() + interval '2 minutes',
+    clock_timestamp() + interval '10 minutes'
+  )" >/dev/null
+expect_apply_failure "migration 069 requires zero running Runs"
+reset_database
+apply_through_068
+insert_principals
+
+echo "[069] fail closed on a conflicting schema 69 identity"
+psql_command --quiet -c "
+  INSERT INTO runtime_schema_contracts (
+    schema_version, migration_name, runtime_contract_id,
+    runtime_contract_digest, is_current
+  ) VALUES (
+    69, '069_conflicting_fixture', 'openlinker.runtime.v2',
+    '$UNKNOWN_DIGEST', FALSE
+  )" >/dev/null
+expect_apply_failure "migration 069 found a conflicting historical schema contract 69"
+psql_command --quiet -c "DELETE FROM runtime_schema_contracts WHERE schema_version = 69" >/dev/null
+
+echo "[069] fail closed on an unknown Runtime principal digest"
+psql_stdin --quiet <<SQL
+ALTER TABLE runtime_nodes DROP CONSTRAINT runtime_nodes_contract_current;
+INSERT INTO runtime_schema_contracts (
+  schema_version, migration_name, runtime_contract_id,
+  runtime_contract_digest, is_current
+) VALUES (
+  969, '969_unknown_digest_fixture', 'openlinker.runtime.v2',
+  '$UNKNOWN_DIGEST', FALSE
+);
+INSERT INTO runtime_nodes (
+  node_id, display_name, device_certificate_serial,
+  device_public_key_thumbprint, node_version, protocol_version,
+  runtime_contract_id, runtime_contract_digest, features, capacity,
+  status, revoked_at
+) VALUES (
+  '69000000-0000-4000-8000-000000000041',
+  'Unknown Digest Fixture', 'serial-migration-069-unknown',
+  'thumbprint-migration-069-unknown', '0.2.0-test', 2,
+  'openlinker.runtime.v2', '$UNKNOWN_DIGEST',
+  ARRAY[
+    'lease_fence', 'assignment_confirm', 'renew', 'resume',
+    'event_ack', 'result_ack', 'cancel', 'persistent_spool'
+  ],
+  0, 'revoked', clock_timestamp()
+);
+SQL
+expect_apply_failure "migration 069 found an unknown Runtime contract identity"
+reset_database
+apply_through_068
+insert_principals
+
+echo "[069] close old Session and activate canonical entry contract"
 insert_session "10" "$OLD_DIGEST"
 apply_069
 verify_069
