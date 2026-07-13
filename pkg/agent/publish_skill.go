@@ -261,6 +261,11 @@ and explicit non-production examples. RuntimeContext.Emit and
 RuntimeContext.CallAgent are the handler-safe paths for progress and delegated
 Agent calls.
 
+Transport accepts ` + "`auto`" + `, ` + "`ws`" + ` or ` + "`pull`" + `. Keep ` + "`auto`" + ` unless the deployment must
+pin one transport: the SDK starts with WebSocket, falls back to ` + "`pull`" + ` when
+WebSocket is unavailable, and probes WebSocket recovery while ` + "`pull`" + ` continues
+serving work.
+
 The SDK reliability contract is:
 1. Persist an assignment before ACK and never call the handler before confirmation.
 2. Renew only the current fenced lease; stale identities fail closed.
