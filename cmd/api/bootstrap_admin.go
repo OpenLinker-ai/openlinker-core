@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	localBootstrapAdminEmail         = "admin@openlinker.local"
+	localBootstrapAdminEmail         = "admin@openlinker.ai"
 	localBootstrapAdminPassword      = "openlinker-admin"
 	defaultBootstrapAdminDisplayName = "OpenLinker Admin"
 	bootstrapAdminBcryptCost         = 12
@@ -112,6 +112,11 @@ func normalizeBootstrapAdminConfig(cfg bootstrapAdminConfig, requireDatabaseURL 
 	if parsedEmail.Address != cfg.Email {
 		return bootstrapAdminConfig{}, errors.New("admin email must be a plain email address")
 	}
+	domain := cfg.Email[strings.LastIndexByte(cfg.Email, '@')+1:]
+	if !isLocalBootstrapEnvironment(cfg.Environment) &&
+		(domain == "local" || strings.HasSuffix(domain, ".local")) {
+		return bootstrapAdminConfig{}, errors.New("OPENLINKER_BOOTSTRAP_ADMIN_EMAIL must not use a .local domain outside local/development/test")
+	}
 	minimumPasswordLength := 12
 	if isLocalBootstrapEnvironment(cfg.Environment) {
 		minimumPasswordLength = 8
@@ -167,15 +172,6 @@ type bootstrapAdminDB interface {
 }
 
 func autoBootstrapAdminIfNeeded(ctx context.Context, dbtx bootstrapAdminDB, environment string) error {
-	hasAdmin, err := hasBootstrapAdmin(ctx, dbtx)
-	if err != nil {
-		return err
-	}
-	if hasAdmin {
-		log.Info().Msg("admin bootstrap skipped; admin user already exists")
-		return nil
-	}
-
 	cfg, err := resolveBootstrapAdminConfig(bootstrapAdminConfig{
 		Environment: environment,
 		Email:       strings.TrimSpace(os.Getenv("OPENLINKER_BOOTSTRAP_ADMIN_EMAIL")),
@@ -184,6 +180,15 @@ func autoBootstrapAdminIfNeeded(ctx context.Context, dbtx bootstrapAdminDB, envi
 	}, false)
 	if err != nil {
 		return err
+	}
+
+	hasAdmin, err := hasBootstrapAdmin(ctx, dbtx)
+	if err != nil {
+		return err
+	}
+	if hasAdmin {
+		log.Info().Msg("admin bootstrap skipped; admin user already exists")
+		return nil
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(cfg.Password), bootstrapAdminBcryptCost)

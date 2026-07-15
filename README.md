@@ -134,16 +134,17 @@ After migrations are applied, Core checks whether any active admin user exists.
 In `local`, `dev`, `development`, or `test`, it can create the local bootstrap
 admin during normal API startup:
 
-- Email: `admin@openlinker.local`
+- Email: `admin@openlinker.ai`
 - Display name: `OpenLinker Admin`
 - Local-only password: `openlinker-admin`
 
-For every other `ENV` value, including staging and production, a database with
-no active admin starts only when both `OPENLINKER_BOOTSTRAP_ADMIN_EMAIL` and
-`OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD` are explicitly set. The password must be
-12–72 bytes and cannot equal the local default. Missing or unsafe bootstrap
-credentials fail startup closed. If an active admin already exists, bootstrap
-is skipped and no password is reset.
+For every other `ENV` value, including staging and production, both
+`OPENLINKER_BOOTSTRAP_ADMIN_EMAIL` and
+`OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD` must be explicitly set before Core checks
+for an existing admin. The password must be 12–72 bytes and cannot equal the
+local default; the email must not use a `.local` domain. Missing or unsafe
+bootstrap credentials fail startup closed. If an active admin already exists,
+bootstrap is skipped after validation and no password is reset.
 
 The manual repair command remains available:
 

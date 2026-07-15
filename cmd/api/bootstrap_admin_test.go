@@ -1,6 +1,21 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/jackc/pgx/v5"
+)
+
+type unexpectedBootstrapAdminDB struct{}
+
+func (unexpectedBootstrapAdminDB) Begin(context.Context) (pgx.Tx, error) {
+	panic("bootstrap admin DB must not be used before config validation")
+}
+
+func (unexpectedBootstrapAdminDB) QueryRow(context.Context, string, ...any) pgx.Row {
+	panic("bootstrap admin DB must not be used before config validation")
+}
 
 func TestParseBootstrapAdminConfigDefaults(t *testing.T) {
 	cfg, err := parseBootstrapAdminConfig(nil, func(key string) string {
@@ -18,11 +33,61 @@ func TestParseBootstrapAdminConfigDefaults(t *testing.T) {
 	if cfg.Email != localBootstrapAdminEmail {
 		t.Fatalf("Email = %q, want %q", cfg.Email, localBootstrapAdminEmail)
 	}
+	if cfg.Email != "admin@openlinker.ai" {
+		t.Fatalf("Email = %q, want branded bootstrap email", cfg.Email)
+	}
 	if cfg.Password != localBootstrapAdminPassword {
 		t.Fatalf("Password = %q, want default password", cfg.Password)
 	}
 	if cfg.DisplayName != defaultBootstrapAdminDisplayName {
 		t.Fatalf("DisplayName = %q, want %q", cfg.DisplayName, defaultBootstrapAdminDisplayName)
+	}
+}
+
+func TestParseBootstrapAdminConfigRejectsLocalDomainOutsideDevelopment(t *testing.T) {
+	for _, email := range []string{
+		"admin@openlinker.local",
+		"ADMIN@OPENLINKER.LOCAL",
+		"admin@local",
+		"admin@internal.openlinker.local",
+	} {
+		t.Run(email, func(t *testing.T) {
+			env := map[string]string{
+				"ENV":                                 "production",
+				"DATABASE_URL":                        "postgres://dev:dev@localhost/openlinker?sslmode=disable",
+				"OPENLINKER_BOOTSTRAP_ADMIN_EMAIL":    email,
+				"OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD": "private-password",
+			}
+			_, err := parseBootstrapAdminConfig(nil, func(key string) string { return env[key] })
+			if err == nil || err.Error() != "OPENLINKER_BOOTSTRAP_ADMIN_EMAIL must not use a .local domain outside local/development/test" {
+				t.Fatalf("local domain error = %v", err)
+			}
+		})
+	}
+}
+
+func TestParseBootstrapAdminConfigAllowsLocalDomainInDevelopment(t *testing.T) {
+	env := map[string]string{
+		"ENV":                                 "development",
+		"DATABASE_URL":                        "postgres://dev:dev@localhost/openlinker?sslmode=disable",
+		"OPENLINKER_BOOTSTRAP_ADMIN_EMAIL":    "admin@openlinker.local",
+		"OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD": localBootstrapAdminPassword,
+	}
+	cfg, err := parseBootstrapAdminConfig(nil, func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatalf("development config error = %v", err)
+	}
+	if cfg.Email != "admin@openlinker.local" {
+		t.Fatalf("Email = %q, want explicit development email", cfg.Email)
+	}
+}
+
+func TestAutoBootstrapAdminValidatesConfigBeforeExistingAdminLookup(t *testing.T) {
+	t.Setenv("OPENLINKER_BOOTSTRAP_ADMIN_EMAIL", "admin@openlinker.local")
+	t.Setenv("OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD", "private-password")
+	err := autoBootstrapAdminIfNeeded(context.Background(), unexpectedBootstrapAdminDB{}, "production")
+	if err == nil || err.Error() != "OPENLINKER_BOOTSTRAP_ADMIN_EMAIL must not use a .local domain outside local/development/test" {
+		t.Fatalf("bootstrap config error = %v", err)
 	}
 }
 

@@ -126,14 +126,15 @@ HA 实例退出就绪状态，但不会停止 PostgreSQL reconcile。
 应用 migration 后，Core 会在正常 API 启动时检查是否已经存在 active admin。在
 `local`、`dev`、`development` 或 `test` 环境中，可以自动创建本地初始化管理员：
 
-- 邮箱：`admin@openlinker.local`
+- 邮箱：`admin@openlinker.ai`
 - 显示名：`OpenLinker Admin`
 - 仅限本地环境的密码：`openlinker-admin`
 
-其他所有 `ENV`（包括 staging 和 production）在没有 active admin 时，必须显式设置
-`OPENLINKER_BOOTSTRAP_ADMIN_EMAIL` 和 `OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD`。
-密码长度必须为 12–72 bytes，且不能等于本地默认密码；缺少或使用不安全配置时 Core
-会直接拒绝启动。只要数据库里已有 active admin，就会跳过 bootstrap，不会重置密码。
+其他所有 `ENV`（包括 staging 和 production）必须显式设置
+`OPENLINKER_BOOTSTRAP_ADMIN_EMAIL` 和 `OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD`，
+Core 会先校验这些值，再检查是否已有 active admin。密码长度必须为 12–72 bytes，且不能
+等于本地默认密码；邮箱不得使用 `.local` 域名。缺少或使用不安全配置时 Core 会直接拒绝
+启动。数据库里已有 active admin 时，会在校验通过后跳过 bootstrap，不会重置密码。
 
 手动修复命令仍然保留：
 
