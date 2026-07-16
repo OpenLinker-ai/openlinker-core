@@ -103,7 +103,7 @@ func TestRuntimeReportPinsPublishedContract(t *testing.T) {
 	if got := report["runtime_contract_id"]; got != "openlinker.runtime.v2" {
 		t.Fatalf("contract ID = %v", got)
 	}
-	if got := report["runtime_contract_digest"]; got != "3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9" {
+	if got := report["runtime_contract_digest"]; got != "4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481" {
 		t.Fatalf("contract digest = %v", got)
 	}
 }

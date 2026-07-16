@@ -1152,6 +1152,7 @@ func TestRuntimeRoutes(t *testing.T) {
 		http.MethodGet + " /api/v1/admin/runtime/dead-letters",
 		http.MethodGet + " /api/v1/admin/runtime/nodes",
 		http.MethodPost + " /api/v1/admin/runtime/nodes/:id/drain",
+		http.MethodPost + " /api/v1/admin/runtime/nodes/:id/activate",
 		http.MethodPost + " /api/v1/admin/runtime/nodes/:id/revoke",
 		http.MethodPost + " /api/v1/agent-runtime/runs/:id/result",
 		http.MethodGet + " /api/v1/agent-runtime/ws",

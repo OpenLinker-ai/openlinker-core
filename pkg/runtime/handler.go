@@ -89,6 +89,7 @@ func (h *Handler) RegisterAdmin(api *echo.Group, jwtMw, adminMw echo.MiddlewareF
 	api.GET("/admin/runtime/dead-letters", h.ListRuntimeDeadLetters, jwtMw, adminMw)
 	api.GET("/admin/runtime/nodes", h.ListRuntimeNodes, jwtMw, adminMw)
 	api.POST("/admin/runtime/nodes/:id/drain", h.DrainRuntimeNode, jwtMw, adminMw)
+	api.POST("/admin/runtime/nodes/:id/activate", h.ActivateRuntimeNode, jwtMw, adminMw)
 	api.POST("/admin/runtime/nodes/:id/revoke", h.RevokeRuntimeNode, jwtMw, adminMw)
 }
 
@@ -221,6 +222,24 @@ func (h *Handler) DrainRuntimeNode(c echo.Context) error {
 		return httpx.ServiceUnavailable("Runtime Node 管理能力不可用")
 	}
 	resp, err := drainer.DrainRuntimeNode(c.Request().Context(), nodeID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) ActivateRuntimeNode(c echo.Context) error {
+	nodeID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	activator, ok := h.svc.(interface {
+		ActivateRuntimeNode(context.Context, uuid.UUID) (*RuntimeNodeListItem, error)
+	})
+	if !ok {
+		return httpx.ServiceUnavailable("Runtime Node 管理能力不可用")
+	}
+	resp, err := activator.ActivateRuntimeNode(c.Request().Context(), nodeID)
 	if err != nil {
 		return err
 	}

@@ -16,7 +16,7 @@ func TestRuntimeSupportedWireGenerationRingIsBounded(t *testing.T) {
 	require.False(t, runtimeWireContractSupported("857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f"))
 	require.False(t, runtimeWireContractSupported(strings.Repeat("f", 64)))
 	require.False(t, runtimeWireContractAllowsMissingAttachment(RuntimeContractDigest))
-	require.True(t, runtimeWireContractAllowsMissingAttachment(runtimePreviousContractDigest))
+	require.False(t, runtimeWireContractAllowsMissingAttachment(runtimePreviousContractDigest))
 }
 
 func TestCurrentRuntimeWireCompatibilityReturnsImmutableTwoGenerationSnapshot(t *testing.T) {

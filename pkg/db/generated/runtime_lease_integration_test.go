@@ -26,6 +26,7 @@ var runtimeRequiredFeatures = []string{
 	"result_ack",
 	"cancel",
 	"persistent_spool",
+	"session_drain",
 }
 
 func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {

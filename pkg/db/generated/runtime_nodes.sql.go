@@ -1358,8 +1358,15 @@ WITH candidate AS (
 UPDATE runtime_sessions s
 SET status = CASE
         WHEN candidate.node_status = 'draining' OR s.status = 'draining'
+             OR s.drain_requested_at IS NOT NULL
             THEN 'draining'
         ELSE 'active'
+    END,
+    capacity = CASE
+        WHEN candidate.node_status = 'draining' OR s.status = 'draining'
+             OR s.drain_requested_at IS NOT NULL
+            THEN 0
+        ELSE s.capacity
     END,
     attached_core_instance_id = $7,
     heartbeat_at = clock_timestamp(),
@@ -1406,7 +1413,10 @@ SET node_version = $3,
     runtime_contract_id = $5,
     runtime_contract_digest = $6,
     features = $7,
-    capacity = GREATEST($8, inflight),
+    capacity = CASE
+        WHEN status = 'draining' OR drain_requested_at IS NOT NULL THEN 0
+        ELSE GREATEST($8, inflight)
+    END,
     heartbeat_at = clock_timestamp(),
     updated_at = clock_timestamp()
 WHERE runtime_session_id = $1
@@ -1549,7 +1559,15 @@ func (q *Queries) ReleaseRuntimeSessionSlot(ctx context.Context, runtimeSessionI
 
 const markRuntimeSessionDraining = `-- name: MarkRuntimeSessionDraining :one
 UPDATE runtime_sessions
-SET status = 'draining',
+SET drain_requested_at = COALESCE(drain_requested_at, clock_timestamp()),
+    drain_deadline_at = COALESCE(
+        drain_deadline_at,
+        clock_timestamp() + ($3::bigint * INTERVAL '1 millisecond')
+    ),
+    drain_reason_code = COALESCE(drain_reason_code, 'SERVER_REQUESTED'),
+    resume_capacity = COALESCE(resume_capacity, capacity),
+    status = 'draining',
+    capacity = 0,
     updated_at = clock_timestamp()
 WHERE runtime_session_id = $1
   AND attached_core_instance_id = $2
@@ -1563,10 +1581,11 @@ RETURNING runtime_session_id, node_id, agent_id, credential_id, worker_id,
 type MarkRuntimeSessionDrainingParams struct {
 	RuntimeSessionID uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`
 	CoreInstanceID   uuid.UUID `db:"core_instance_id" json:"core_instance_id"`
+	DrainDeadlineMS  int64     `db:"drain_deadline_ms" json:"drain_deadline_ms"`
 }
 
 func (q *Queries) MarkRuntimeSessionDraining(ctx context.Context, arg MarkRuntimeSessionDrainingParams) (RuntimeSession, error) {
-	row := q.db.QueryRow(ctx, markRuntimeSessionDraining, arg.RuntimeSessionID, arg.CoreInstanceID)
+	row := q.db.QueryRow(ctx, markRuntimeSessionDraining, arg.RuntimeSessionID, arg.CoreInstanceID, arg.DrainDeadlineMS)
 	var session RuntimeSession
 	err := scanRuntimeSession(row, &session)
 	return session, err
@@ -1575,7 +1594,10 @@ func (q *Queries) MarkRuntimeSessionDraining(ctx context.Context, arg MarkRuntim
 const closeRuntimeSession = `-- name: CloseRuntimeSession :one
 UPDATE runtime_sessions
 SET status = $3,
-    capacity = GREATEST(capacity, inflight),
+    capacity = CASE
+        WHEN drain_requested_at IS NOT NULL THEN 0
+        ELSE GREATEST(capacity, inflight)
+    END,
     attached_core_instance_id = NULL,
     disconnected_at = clock_timestamp(),
     updated_at = clock_timestamp()
@@ -1605,7 +1627,10 @@ func (q *Queries) CloseRuntimeSession(ctx context.Context, arg CloseRuntimeSessi
 const closeStaleRuntimeSession = `-- name: CloseStaleRuntimeSession :one
 UPDATE runtime_sessions
 SET status = 'offline',
-    capacity = GREATEST(capacity, inflight),
+    capacity = CASE
+        WHEN drain_requested_at IS NOT NULL THEN 0
+        ELSE GREATEST(capacity, inflight)
+    END,
     attached_core_instance_id = NULL,
     disconnected_at = clock_timestamp(),
     updated_at = clock_timestamp()

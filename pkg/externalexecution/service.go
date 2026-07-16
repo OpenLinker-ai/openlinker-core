@@ -30,9 +30,13 @@ type agentService interface {
 
 type runtimeService interface {
 	LookupRunByCreationRequest(context.Context, uuid.UUID, *runtime.RunRequest, string) (*runtime.RunResponse, bool, error)
+	LookupRunByCreationIdentity(context.Context, uuid.UUID, []byte, []byte) (*runtime.RunResponse, bool, error)
 	StartRun(context.Context, uuid.UUID, *runtime.RunRequest, string) (*runtime.RunResponse, error)
+	StartExternalRun(context.Context, uuid.UUID, *runtime.RunRequest, string, runtime.ExternalExecutionLaunchFence) (*runtime.RunResponse, error)
 	GetRun(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error)
 	ListRunArtifacts(context.Context, uuid.UUID, uuid.UUID) ([]runtime.RunArtifactResponse, error)
+	CancelRun(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error)
+	GetRunCancellationEvidence(context.Context, uuid.UUID, uuid.UUID) (runtime.RunCancellationEvidence, error)
 }
 
 type WorkflowTargetValidation struct {
@@ -45,8 +49,12 @@ type WorkflowTargetValidation struct {
 type workflowService interface {
 	ValidateExternalExecutionTarget(context.Context, uuid.UUID, uuid.UUID) (*WorkflowTargetValidation, error)
 	LookupExternalExecutionWorkflowRun(context.Context, string, uuid.UUID, uuid.UUID, uuid.UUID, map[string]interface{}) (*workflow.WorkflowRunResponse, bool, error)
+	LookupExternalExecutionWorkflowRunByIdentity(context.Context, string, uuid.UUID, uuid.UUID, uuid.UUID) (*workflow.WorkflowRunResponse, bool, error)
 	StartExternalWorkflowRun(context.Context, string, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, map[string]interface{}) (*workflow.WorkflowRunResponse, error)
+	StartExternalExecutionWorkflowRunWithFence(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, map[string]interface{}, workflow.ExternalExecutionLaunchFence) (*workflow.WorkflowRunResponse, error)
 	GetWorkflowRun(context.Context, uuid.UUID, uuid.UUID) (*workflow.WorkflowRunResponse, error)
+	CancelExternalWorkflowRun(context.Context, uuid.UUID, uuid.UUID, string) (*workflow.WorkflowRunResponse, workflow.CancellationEvidence, error)
+	GetWorkflowCancellationEvidence(context.Context, uuid.UUID, uuid.UUID) (workflow.CancellationEvidence, error)
 }
 
 type Service struct {
@@ -198,6 +206,12 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 			TraceID:                   parsed.traceID,
 		})
 		if err != nil {
+			if errors.Is(err, ErrExecutionCanceled) {
+				return nil, externalExecutionCanceledError()
+			}
+			if errors.Is(err, ErrExecutionIdentityConflict) {
+				return nil, httpx.Conflict("external_request_id 已绑定其他 actor")
+			}
 			return nil, httpx.Internal("保存外部执行幂等记录失败")
 		}
 	} else if err != nil {
@@ -206,11 +220,11 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 	if !executionRecordMatches(record, parsed, fingerprint) {
 		return nil, httpx.Conflict("external_request_id 已用于不同的执行请求")
 	}
-	if response, complete, replayErr := s.responseForReservedRecord(ctx, record); complete || replayErr != nil {
-		return response, replayErr
-	}
 	if rejectionErr := executionStartRejection(record); rejectionErr != nil {
 		return nil, rejectionErr
+	}
+	if response, complete, replayErr := s.responseForReservedRecord(ctx, record); complete || replayErr != nil {
+		return response, replayErr
 	}
 	switch record.StartState {
 	case startStateAuthorized:
@@ -220,6 +234,17 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 		}
 		if recovered {
 			return response, nil
+		}
+	case startStateLaunching:
+		response, recovered, recoveryErr := s.lookupAndAttachLaunchingExecution(ctx, record, parsed)
+		if recoveryErr != nil {
+			return nil, recoveryErr
+		}
+		if recovered {
+			return response, nil
+		}
+		if record.StartLeaseUntil != nil && record.StartLeaseUntil.After(time.Now()) {
+			return nil, httpx.ServiceUnavailable("外部执行正在启动，请重试")
 		}
 	case startStatePending, startStateEvaluating:
 	default:
@@ -237,6 +262,27 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 		return nil, httpx.Internal("外部执行授权缺少目标所有者快照")
 	}
 	parsed.targetOwnerUserID = *record.AuthorizedTargetOwnerID
+	launchToken := uuid.New()
+	launchRecord, claimed, err := s.store.ClaimLaunch(
+		ctx, parsed.callerServiceID, parsed.externalRequestID, launchToken, startLaunchLease,
+	)
+	if err != nil {
+		return nil, httpx.Internal("竞争外部执行 launch fence 失败")
+	}
+	if !claimed {
+		if rejectionErr := executionStartRejection(launchRecord); rejectionErr != nil {
+			return nil, rejectionErr
+		}
+		response, recovered, recoveryErr := s.lookupAndAttachLaunchingExecution(ctx, launchRecord, parsed)
+		if recoveryErr != nil {
+			return nil, recoveryErr
+		}
+		if recovered {
+			return response, nil
+		}
+		return nil, httpx.ServiceUnavailable("外部执行 launch fence 正在确认，请重试")
+	}
+	record = launchRecord
 
 	var executionID uuid.UUID
 	var executionKind string
@@ -246,8 +292,14 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 		if requestErr != nil {
 			return nil, requestErr
 		}
-		started, err := s.runtime.StartRun(ctx, parsed.actorUserID, runRequest, source)
+		started, err := s.runtime.StartExternalRun(ctx, parsed.actorUserID, runRequest, source, runtime.ExternalExecutionLaunchFence{
+			CallerServiceID: parsed.callerServiceID, ExternalRequestID: parsed.externalRequestID,
+			ActorUserID: parsed.actorUserID, LaunchToken: launchToken,
+		})
 		if err != nil {
+			if errors.Is(err, runtime.ErrExternalExecutionLaunchFenceRejected) {
+				return nil, s.launchFenceFailure(ctx, parsed)
+			}
 			return nil, httpx.ServiceUnavailable("Runtime 启动状态正在确认，请重试")
 		}
 		executionID, err = uuid.Parse(started.RunID)
@@ -256,8 +308,17 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 		}
 		executionKind = "run"
 	case TargetTypeWorkflow:
-		started, err := s.workflows.StartExternalWorkflowRun(ctx, parsed.callerServiceID, parsed.targetOwnerUserID, parsed.actorUserID, parsed.targetID, parsed.externalRequestID, parsed.input)
+		started, err := s.workflows.StartExternalExecutionWorkflowRunWithFence(
+			ctx, parsed.targetOwnerUserID, parsed.actorUserID, parsed.targetID, parsed.input,
+			workflow.ExternalExecutionLaunchFence{
+				CallerServiceID: parsed.callerServiceID, ExternalRequestID: parsed.externalRequestID,
+				ActorUserID: parsed.actorUserID, LaunchToken: launchToken,
+			},
+		)
 		if err != nil {
+			if errors.Is(err, workflow.ErrExternalWorkflowLaunchFenceRejected) {
+				return nil, s.launchFenceFailure(ctx, parsed)
+			}
 			return nil, httpx.ServiceUnavailable("Workflow 启动状态正在确认，请重试")
 		}
 		executionID, err = uuid.Parse(started.ID)
@@ -267,16 +328,20 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 		executionKind = "workflow_run"
 	}
 
-	return s.attachExecution(ctx, parsed, executionKind, executionID)
+	return s.attachLaunchedExecution(ctx, parsed, launchToken, executionKind, executionID)
 }
 
 const startEvaluationLease = 30 * time.Second
+const startLaunchLease = 30 * time.Second
 
 const (
 	startStatePending    = "pending"
 	startStateEvaluating = "evaluating"
 	startStateAuthorized = "authorized"
+	startStateLaunching  = "launching"
+	startStateAttached   = "attached"
 	startStateRejected   = "rejected"
+	startStateCanceled   = "canceled"
 )
 
 func (s *Service) ensureExecutionStartAuthorized(
@@ -478,6 +543,9 @@ func (s *Service) rejectStartEvaluation(
 }
 
 func executionStartRejection(record ExecutionRecord) error {
+	if record.StartState == startStateCanceled {
+		return externalExecutionCanceledError()
+	}
 	if record.StartState != startStateRejected {
 		return nil
 	}
@@ -494,6 +562,14 @@ func executionStartRejection(record ExecutionRecord) error {
 	default:
 		return httpx.Internal("外部执行拒绝原因无效")
 	}
+}
+
+func externalExecutionCanceledError() error {
+	return httpx.NewError(
+		http.StatusConflict,
+		httpx.ErrorCode("EXTERNAL_EXECUTION_CANCELED"),
+		"external execution 已取消",
+	)
 }
 
 func isExecutionErrorCode(err error, code httpx.ErrorCode) bool {
@@ -560,6 +636,56 @@ func (s *Service) lookupAndAttachReservedExecution(
 	}
 }
 
+func (s *Service) lookupAndAttachLaunchingExecution(
+	ctx context.Context,
+	record ExecutionRecord,
+	parsed parsedExecution,
+) (*ExecutionStartResponse, bool, error) {
+	if record.StartState != startStateLaunching || record.StartToken == nil || *record.StartToken == uuid.Nil {
+		return nil, false, nil
+	}
+	var executionID uuid.UUID
+	var executionKind string
+	switch record.TargetType {
+	case TargetTypeAgent:
+		if len(record.DownstreamKeyHash) == 0 && len(record.DownstreamFingerprint) == 0 {
+			return nil, false, nil
+		}
+		if len(record.DownstreamKeyHash) != sha256.Size || len(record.DownstreamFingerprint) != sha256.Size {
+			return nil, false, httpx.Internal("外部执行下游恢复身份无效")
+		}
+		existing, found, err := s.runtime.LookupRunByCreationIdentity(
+			ctx, parsed.actorUserID, record.DownstreamKeyHash, record.DownstreamFingerprint,
+		)
+		if err != nil || !found {
+			return nil, false, err
+		}
+		executionID, err = uuid.Parse(strings.TrimSpace(existing.RunID))
+		if err != nil || executionID == uuid.Nil {
+			return nil, false, httpx.Internal("Runtime 返回了无效 execution_id")
+		}
+		executionKind = "run"
+	case TargetTypeWorkflow:
+		existing, found, err := s.workflows.LookupExternalExecutionWorkflowRunByIdentity(
+			ctx, parsed.callerServiceID, parsed.actorUserID, parsed.targetID, parsed.externalRequestID,
+		)
+		if err != nil || !found {
+			return nil, false, err
+		}
+		executionID, err = uuid.Parse(strings.TrimSpace(existing.ID))
+		if err != nil || executionID == uuid.Nil {
+			return nil, false, httpx.Internal("Workflow 返回了无效 execution_id")
+		}
+		executionKind = "workflow_run"
+	default:
+		return nil, false, httpx.Internal("外部执行类型无效")
+	}
+	response, err := s.attachLaunchedExecution(
+		ctx, parsed, *record.StartToken, executionKind, executionID,
+	)
+	return response, err == nil, err
+}
+
 var errDownstreamIdentityConflict = errors.New("downstream execution identity conflict")
 
 func (s *Service) attachExecution(
@@ -579,6 +705,43 @@ func (s *Service) attachExecution(
 		return response, replayErr
 	}
 	return nil, httpx.ServiceUnavailable("外部执行关联状态正在确认，请重试")
+}
+
+func (s *Service) attachLaunchedExecution(
+	ctx context.Context,
+	parsed parsedExecution,
+	launchToken uuid.UUID,
+	executionKind string,
+	executionID uuid.UUID,
+) (*ExecutionStartResponse, error) {
+	record, attached, err := s.store.AttachLaunched(
+		ctx, parsed.callerServiceID, parsed.externalRequestID,
+		launchToken, executionKind, executionID,
+	)
+	if err != nil {
+		return nil, httpx.Internal("保存外部 execution_id 失败")
+	}
+	if rejectionErr := executionStartRejection(record); rejectionErr != nil {
+		return nil, rejectionErr
+	}
+	if !attached {
+		if response, complete, replayErr := s.responseForReservedRecord(ctx, record); complete || replayErr != nil {
+			return response, replayErr
+		}
+		return nil, httpx.ServiceUnavailable("外部执行关联状态正在确认，请重试")
+	}
+	if response, complete, replayErr := s.responseForReservedRecord(ctx, record); complete || replayErr != nil {
+		return response, replayErr
+	}
+	return nil, httpx.Internal("外部执行关联缺少 execution attachment")
+}
+
+func (s *Service) launchFenceFailure(ctx context.Context, parsed parsedExecution) error {
+	record, err := s.store.Get(ctx, parsed.callerServiceID, parsed.externalRequestID)
+	if err == nil && record.StartState == startStateCanceled {
+		return externalExecutionCanceledError()
+	}
+	return httpx.ServiceUnavailable("外部执行 launch fence 已变化，请重试")
 }
 
 func (s *Service) responseForReservedRecord(ctx context.Context, record ExecutionRecord) (*ExecutionStartResponse, bool, error) {
@@ -607,13 +770,32 @@ func (s *Service) GetExecution(ctx context.Context, principal *Principal, extern
 	}
 	record, err := s.store.Get(ctx, principal.CallerServiceID, id)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.NotFound("外部执行不存在")
+		key, keyErr := s.store.GetKey(ctx, principal.CallerServiceID, id)
+		if errors.Is(keyErr, pgx.ErrNoRows) || (keyErr == nil && key.ActorUserID != principal.ActorUserID) {
+			return nil, httpx.NotFound("外部执行不存在")
+		}
+		if keyErr != nil {
+			return nil, httpx.Internal("查询外部执行 identity 失败")
+		}
+		cancellation, cancelErr := s.store.GetCancellation(ctx, principal.CallerServiceID, id)
+		if errors.Is(cancelErr, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("外部执行不存在")
+		}
+		if cancelErr != nil {
+			return nil, httpx.Internal("查询外部执行取消 evidence 失败")
+		}
+		return s.cancellationStatusResponse(ctx, nil, cancellation)
 	}
 	if err != nil {
 		return nil, httpx.Internal("查询外部执行失败")
 	}
 	if record.ActorUserID != principal.ActorUserID {
 		return nil, httpx.NotFound("外部执行不存在")
+	}
+	if cancellation, cancelErr := s.store.GetCancellation(ctx, principal.CallerServiceID, id); cancelErr == nil {
+		return s.cancellationStatusResponse(ctx, &record, cancellation)
+	} else if !errors.Is(cancelErr, pgx.ErrNoRows) {
+		return nil, httpx.Internal("查询外部执行取消 evidence 失败")
 	}
 	return s.getExecutionStatus(ctx, record)
 }

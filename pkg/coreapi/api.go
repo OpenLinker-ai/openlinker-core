@@ -192,6 +192,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	)
 	if opts.ExternalExecutionAuthorizer != nil {
 		externalexecution.NewHandler(externalExecutionSvc, opts.ExternalExecutionAuthorizer).Register(e)
+		go externalexecution.StartCancellationMaintenanceWorker(rootCtx, externalExecutionSvc, time.Second, 100)
 	}
 	if cfg.WorkflowRunWorkerEnabled {
 		go workflow.StartRunWorker(rootCtx, workflowSvc, workflow.RunWorkerConfig{
@@ -291,6 +292,42 @@ func (s externalWorkflowService) LookupExternalExecutionWorkflowRun(
 	input map[string]interface{},
 ) (*workflow.WorkflowRunResponse, bool, error) {
 	return s.inner.LookupExternalExecutionWorkflowRun(ctx, callerServiceID, actorUserID, workflowID, externalRequestID, input)
+}
+
+func (s externalWorkflowService) LookupExternalExecutionWorkflowRunByIdentity(
+	ctx context.Context,
+	callerServiceID string,
+	actorUserID, workflowID, externalRequestID uuid.UUID,
+) (*workflow.WorkflowRunResponse, bool, error) {
+	return s.inner.LookupExternalExecutionWorkflowRunByIdentity(
+		ctx, callerServiceID, actorUserID, workflowID, externalRequestID,
+	)
+}
+
+func (s externalWorkflowService) StartExternalExecutionWorkflowRunWithFence(
+	ctx context.Context,
+	targetOwnerID, actorUserID, workflowID uuid.UUID,
+	input map[string]interface{},
+	fence workflow.ExternalExecutionLaunchFence,
+) (*workflow.WorkflowRunResponse, error) {
+	return s.inner.StartExternalExecutionWorkflowRunWithFence(
+		ctx, targetOwnerID, actorUserID, workflowID, input, fence,
+	)
+}
+
+func (s externalWorkflowService) CancelExternalWorkflowRun(
+	ctx context.Context,
+	actorUserID, workflowRunID uuid.UUID,
+	reasonCode string,
+) (*workflow.WorkflowRunResponse, workflow.CancellationEvidence, error) {
+	return s.inner.CancelExternalWorkflowRun(ctx, actorUserID, workflowRunID, reasonCode)
+}
+
+func (s externalWorkflowService) GetWorkflowCancellationEvidence(
+	ctx context.Context,
+	actorUserID, workflowRunID uuid.UUID,
+) (workflow.CancellationEvidence, error) {
+	return s.inner.GetWorkflowCancellationEvidence(ctx, actorUserID, workflowRunID)
 }
 
 func (s externalWorkflowService) GetWorkflowRun(

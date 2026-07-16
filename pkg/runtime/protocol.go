@@ -350,6 +350,16 @@ type RuntimeDrainPayload struct {
 	Inflight   int64     `json:"inflight" runtime:"required"`
 }
 
+// RuntimeSessionDrainRequest carries trusted transport identity outside the
+// JSON payload. RuntimeDrainPayload is shared by WebSocket and Pull so both
+// adapters commit exactly the same durable state transition. Capacity must be
+// zero; Inflight is only an untrusted client snapshot and is never persisted.
+type RuntimeSessionDrainRequest struct {
+	RuntimeSessionID uuid.UUID           `json:"-"`
+	AttachmentID     uuid.UUID           `json:"-"`
+	Payload          RuntimeDrainPayload `json:"-"`
+}
+
 // PendingCommand is a discriminated union. Payload is decoded strictly by
 // DecodePendingCommand after Type has selected the only legal schema.
 type PendingCommand struct {

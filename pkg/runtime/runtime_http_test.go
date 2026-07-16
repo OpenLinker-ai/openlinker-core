@@ -32,6 +32,7 @@ func TestRuntimeControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 	for _, route := range []string{
 		"POST /api/v1/agent-runtime/sessions",
 		"POST /api/v1/agent-runtime/sessions/:id/heartbeat",
+		"POST /api/v1/agent-runtime/sessions/:id/drain",
 		"POST /api/v1/agent-runtime/sessions/:id/close",
 		"POST /api/v1/agent-runtime/runs/claim",
 		"POST /api/v1/agent-runtime/runs/:id/assignment-ack",
@@ -73,6 +74,7 @@ func TestRuntimeHTTPTransportPolicyAdmissionUsesWireCompatibleSignals(t *testing
 		path   string
 	}{
 		{http.MethodPost, "/api/v1/agent-runtime/sessions/00000000-0000-4000-8000-000000000001/heartbeat"},
+		{http.MethodPost, "/api/v1/agent-runtime/sessions/00000000-0000-4000-8000-000000000001/drain"},
 		{http.MethodPost, "/api/v1/agent-runtime/sessions/00000000-0000-4000-8000-000000000001/close"},
 		{http.MethodPost, "/api/v1/agent-runtime/runs/claim"},
 		{http.MethodPost, "/api/v1/agent-runtime/runs/00000000-0000-4000-8000-000000000001/assignment-ack"},
@@ -189,6 +191,45 @@ func TestRuntimeCreateSessionAuthenticatesThenMapsFormalHello(t *testing.T) {
 	require.Equal(t, fixture.now, ready.DatabaseTime)
 }
 
+func TestRuntimePullDrainReturnsOnlyCommittedServerReceipt(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
+	deadline := fixture.now.Add(2 * time.Minute)
+	var captured RuntimeSessionDrainRequest
+	fixture.sessions.drain = func(
+		_ context.Context,
+		principal AuthenticatedRuntimePrincipal,
+		request RuntimeSessionDrainRequest,
+	) (RuntimeDrainPayload, error) {
+		require.Equal(t, fixture.authenticated, principal)
+		captured = request
+		return RuntimeDrainPayload{
+			DeadlineAt: deadline,
+			ReasonCode: "SDK_SHUTDOWN",
+			Capacity:   0,
+			Inflight:   2,
+		}, nil
+	}
+	request := RuntimeDrainPayload{
+		DeadlineAt: deadline,
+		ReasonCode: "SDK_SHUTDOWN",
+		Capacity:   0,
+		Inflight:   999,
+	}
+	response := serveRuntime(
+		t, fixture.controller(), http.MethodPost,
+		"/api/v1/agent-runtime/sessions/"+fixture.acting.RuntimeSessionID.String()+"/drain",
+		request,
+	)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	require.Equal(t, fixture.acting.RuntimeSessionID, captured.RuntimeSessionID)
+	require.Equal(t, fixture.acting.AttachmentID, captured.AttachmentID)
+	require.Equal(t, int64(999), captured.Payload.Inflight)
+	var receipt RuntimeDrainPayload
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &receipt))
+	require.Equal(t, int64(2), receipt.Inflight)
+	require.Equal(t, int64(0), receipt.Capacity)
+}
+
 func TestRuntimeCreateSessionAcceptsOnlyBoundedFallbackReasonHeader(t *testing.T) {
 	fixture := newRuntimeHandlerFixture()
 	fixture.sessions.create = func(_ context.Context, _ AuthenticatedRuntimePrincipal, request RuntimeSessionRequest) (RuntimeSessionState, error) {
@@ -240,7 +281,7 @@ func TestRuntimeFallbackReasonHeaderRejectsAmbiguousValues(t *testing.T) {
 	require.NotNil(t, err)
 }
 
-func TestRuntimePreviousGenerationUsesCanonicalHTTPAndPreAttachmentReadyShape(t *testing.T) {
+func TestRuntimePreviousGenerationUsesCanonicalHTTPAndAttachmentFence(t *testing.T) {
 	fixture := newRuntimeHandlerFixture()
 	fixture.acting.RuntimeContractDigest = runtimePreviousContractDigest
 	fixture.sessions.resolveResponse = fixture.acting
@@ -255,18 +296,23 @@ func TestRuntimePreviousGenerationUsesCanonicalHTTPAndPreAttachmentReadyShape(t 
 	}
 	hello := fixture.hello()
 	hello.ContractDigest = runtimePreviousContractDigest
+	hello.Features = runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest)
 	controller := fixture.controller()
 
 	created := serveRuntime(t, controller, http.MethodPost, "/api/v1/agent-runtime/sessions", hello)
 	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
 	var ready map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &ready))
-	require.NotContains(t, ready, "attachment_id")
-	require.ElementsMatch(t, []string{"core_instance_id", "features", "offer_ttl_seconds", "lease_ttl_seconds", "database_time"}, mapKeys(ready))
+	require.Contains(t, ready, "attachment_id")
+	require.ElementsMatch(t, []string{"core_instance_id", "attachment_id", "features", "offer_ttl_seconds", "lease_ttl_seconds", "database_time"}, mapKeys(ready))
+	var readyFeatures []string
+	require.NoError(t, json.Unmarshal(ready["features"], &readyFeatures))
+	require.ElementsMatch(t, runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest), readyFeatures)
+	require.NotContains(t, readyFeatures, "session_drain")
 
 	heartbeat := serveRuntimeWithoutAttachment(t, controller, http.MethodPost,
 		"/api/v1/agent-runtime/sessions/"+hello.RuntimeSessionID.String()+"/heartbeat", hello)
-	require.Equal(t, http.StatusOK, heartbeat.Code, heartbeat.Body.String())
+	require.Equal(t, http.StatusUnprocessableEntity, heartbeat.Code, heartbeat.Body.String())
 	require.Equal(t, hello.RuntimeSessionID, fixture.sessions.resolvedSessionID)
 
 	current := newRuntimeHandlerFixture()
@@ -276,6 +322,21 @@ func TestRuntimePreviousGenerationUsesCanonicalHTTPAndPreAttachmentReadyShape(t 
 	currentMissing := serveRuntimeWithoutAttachment(t, current.controller(), http.MethodPost,
 		"/api/v1/agent-runtime/sessions/"+current.acting.RuntimeSessionID.String()+"/heartbeat", current.hello())
 	require.Equal(t, http.StatusUnprocessableEntity, currentMissing.Code, currentMissing.Body.String())
+}
+
+func TestRuntimePreviousGenerationStaleReplayConflictIsStableOverHTTP(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
+	fixture.acting.RuntimeContractDigest = runtimePreviousContractDigest
+	fixture.sessions.create = func(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionRequest) (RuntimeSessionState, error) {
+		return RuntimeSessionState{}, newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
+	}
+	hello := fixture.hello()
+	hello.ContractDigest = runtimePreviousContractDigest
+	hello.Features = runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest)
+
+	response := serveRuntime(t, fixture.controller(), http.MethodPost, "/api/v1/agent-runtime/sessions", hello)
+	require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
+	requireRuntimeResponseCode(t, response, RuntimeErrorSessionConflict)
 }
 
 func TestRuntimeAuthenticationRunsBeforeBodyDecode(t *testing.T) {
@@ -868,7 +929,7 @@ func (f *runtimeHandlerFixture) sessionState() RuntimeSessionState {
 			WorkerID:               f.acting.WorkerID,
 			SessionEpoch:           f.acting.SessionEpoch,
 			RuntimeContractDigest:  f.acting.RuntimeContractDigest,
-			Features:               RuntimeRequiredFeatures(),
+			Features:               runtimeRequiredFeaturesForDigest(f.acting.RuntimeContractDigest),
 			Status:                 "active",
 			AttachedCoreInstanceID: &coreID,
 			HeartbeatAt:            f.now,
@@ -980,6 +1041,7 @@ func (f *runtimeDeviceAuthenticatorFake) AuthenticateHTTP(context.Context, *http
 type runtimeSessionServiceFake struct {
 	create                func(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionRequest) (RuntimeSessionState, error)
 	heartbeat             func(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionHeartbeatRequest) (RuntimeSessionState, error)
+	drain                 func(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionDrainRequest) (RuntimeDrainPayload, error)
 	close                 func(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionCloseRequest) (RuntimeSessionState, error)
 	createCalls           int
 	resolveResponse       RuntimeSessionPrincipal
@@ -1003,6 +1065,13 @@ func (f *runtimeSessionServiceFake) HeartbeatSession(ctx context.Context, princi
 		return RuntimeSessionState{}, nil
 	}
 	return f.heartbeat(ctx, principal, request)
+}
+
+func (f *runtimeSessionServiceFake) DrainSession(ctx context.Context, principal AuthenticatedRuntimePrincipal, request RuntimeSessionDrainRequest) (RuntimeDrainPayload, error) {
+	if f.drain == nil {
+		return request.Payload, nil
+	}
+	return f.drain(ctx, principal, request)
 }
 
 func (f *runtimeSessionServiceFake) CloseSession(ctx context.Context, principal AuthenticatedRuntimePrincipal, request RuntimeSessionCloseRequest) (RuntimeSessionState, error) {

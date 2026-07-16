@@ -530,7 +530,7 @@ func TestRuntimeNodeSessionAndClusterQueries(t *testing.T) {
 	digest := "60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61"
 	features := []string{
 		"lease_fence", "assignment_confirm", "renew", "resume",
-		"event_ack", "result_ack", "cancel", "persistent_spool",
+		"event_ack", "result_ack", "cancel", "persistent_spool", "session_drain",
 	}
 	dbtx := &fakeDBTX{}
 	q := New(dbtx)

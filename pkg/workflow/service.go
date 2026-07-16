@@ -879,6 +879,30 @@ func (s *Service) ResumeWorkflowRun(ctx context.Context, userID, workflowRunID u
 }
 
 func (s *Service) CancelWorkflowRun(ctx context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {
+	// Lightweight query fakes used by the pure service tests do not expose a
+	// transaction pool. Production always takes the durable evidence path below.
+	if s.pool == nil {
+		return s.cancelWorkflowRunCompatibility(ctx, userID, workflowRunID)
+	}
+	evidence, err := s.requestWorkflowCancellation(
+		ctx, userID, workflowRunID, "OWNER_CANCEL_REQUESTED",
+	)
+	if err != nil {
+		return nil, err
+	}
+	if evidence.State == "not_applied" {
+		return nil, httpx.Conflict("只有 pending / running / paused workflow_run 可以取消")
+	}
+	if evidence.State == "requested" || evidence.State == "stopping" {
+		if err := s.reconcileWorkflowCancellation(ctx, userID, workflowRunID); err != nil {
+			log.Error().Err(err).Str("workflow_run_id", workflowRunID.String()).Msg("workflow.CancelWorkflowRun: reconcile")
+			return nil, httpx.Internal("workflow child 取消状态正在确认")
+		}
+	}
+	return s.GetWorkflowRun(ctx, userID, workflowRunID)
+}
+
+func (s *Service) cancelWorkflowRunCompatibility(ctx context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {
 	run, err := s.getWorkflowRunForOwner(ctx, userID, workflowRunID)
 	if err != nil {
 		return nil, err
@@ -1136,7 +1160,7 @@ func (s *Service) runWorkflowNode(
 	if err != nil {
 		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: fmt.Errorf("创建 step 失败: %w", err)}
 	}
-	resp, err := s.runtime.Run(ctx, userID, &runtime.RunRequest{
+	runRequest := &runtime.RunRequest{
 		AgentID:          node.AgentID.String(),
 		Input:            stepInput,
 		IdempotencyKey:   workflowNodeRunIdempotencyKey(run.ID, node.NodeKey),
@@ -1148,7 +1172,35 @@ func (s *Service) runWorkflowNode(
 			"workflow_node_id":  node.ID.String(),
 			"workflow_node_key": node.NodeKey,
 		},
-	}, "api")
+	}
+	var resp *runtime.RunResponse
+	if fencedRuntime, ok := s.runtime.(workflowLaunchRuntime); ok {
+		identity, identityErr := fencedRuntime.PrepareRunCreationIdentity(runRequest, "api")
+		if identityErr != nil {
+			return workflowNodeRunResult{NodeKey: node.NodeKey, Err: identityErr}
+		}
+		fence, fenceErr := s.claimWorkflowChildLaunch(
+			ctx, dbWorkflowRunIdentity{ID: run.ID, UserID: run.UserID},
+			node.ID, step.ID, node.NodeKey, identity,
+		)
+		if fenceErr != nil {
+			return workflowNodeRunResult{NodeKey: node.NodeKey, Err: fenceErr}
+		}
+		resp, err = fencedRuntime.RunWorkflowChild(ctx, userID, runRequest, "api", fence)
+		if err == nil {
+			childRunID, parseErr := workflowChildRunIDFromResponse(resp)
+			if parseErr == nil {
+				attachCtx, cancelAttach := context.WithTimeout(context.WithoutCancel(ctx), workflowStepEvidenceWriteTimeout)
+				parseErr = s.attachWorkflowChildLaunch(attachCtx, fence, step.ID, childRunID)
+				cancelAttach()
+			}
+			if parseErr != nil {
+				err = parseErr
+			}
+		}
+	} else {
+		resp, err = s.runtime.Run(ctx, userID, runRequest, "api")
+	}
 	if err != nil {
 		msg := err.Error()
 		_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
@@ -1167,24 +1219,26 @@ func (s *Service) runWorkflowNode(
 		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
 	}
 	childRunIDPtr := &childRunID
-	attachCtx, cancelAttach := context.WithTimeout(context.WithoutCancel(ctx), workflowStepEvidenceWriteTimeout)
-	attached, err := s.queries.AttachWorkflowRunStepRun(attachCtx, db.AttachWorkflowRunStepRunParams{
-		ID:    step.ID,
-		RunID: childRunID,
-	})
-	cancelAttach()
-	if err != nil {
-		msg := fmt.Sprintf("关联 step 子 run 失败: %v", err)
-		_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
-			ID:           step.ID,
-			RunID:        childRunIDPtr,
-			ErrorMessage: &msg,
+	if _, fenced := s.runtime.(workflowLaunchRuntime); !fenced {
+		attachCtx, cancelAttach := context.WithTimeout(context.WithoutCancel(ctx), workflowStepEvidenceWriteTimeout)
+		attached, attachErr := s.queries.AttachWorkflowRunStepRun(attachCtx, db.AttachWorkflowRunStepRunParams{
+			ID:    step.ID,
+			RunID: childRunID,
 		})
-		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
-	}
-	if attached != 1 {
-		msg := "workflow step 不再接受子 run 关联"
-		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
+		cancelAttach()
+		if attachErr != nil {
+			msg := fmt.Sprintf("关联 step 子 run 失败: %v", attachErr)
+			_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
+				ID:           step.ID,
+				RunID:        childRunIDPtr,
+				ErrorMessage: &msg,
+			})
+			return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
+		}
+		if attached != 1 {
+			msg := "workflow step 不再接受子 run 关联"
+			return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
+		}
 	}
 	resp.Status = normalizeRunStatus(resp.Status)
 	if resp.Status == runtimeRunStatusRunning || resp.Status == runtimeRunStatusPending {

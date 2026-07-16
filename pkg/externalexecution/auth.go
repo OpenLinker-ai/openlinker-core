@@ -26,6 +26,7 @@ const (
 	ScopeValidateTarget            = "target.validate"
 	ScopeStartExecution            = "execution.start"
 	ScopeReadExecution             = "execution.read"
+	ScopeCancelExecution           = "execution.cancel"
 	ErrorCodeJTIReplay             = "EXTERNAL_EXECUTION_JTI_REPLAY"
 	ErrorCodeRequestBindingInvalid = "EXTERNAL_EXECUTION_REQUEST_BINDING_INVALID"
 	RequestBindingVersionV1        = "v1"
@@ -442,7 +443,7 @@ func decodeKeyMaterial(raw string) ([]byte, error) {
 
 func validServiceScope(scope string) bool {
 	switch strings.TrimSpace(scope) {
-	case ScopeValidateTarget, ScopeStartExecution, ScopeReadExecution:
+	case ScopeValidateTarget, ScopeStartExecution, ScopeReadExecution, ScopeCancelExecution:
 		return true
 	default:
 		return false

@@ -14,7 +14,8 @@
     "event_ack",
     "result_ack",
     "cancel",
-    "persistent_spool"
+    "persistent_spool",
+    "session_drain"
   ],
   "limits": {
     "max_non_artifact_message_bytes": 4194304,
@@ -185,6 +186,7 @@
       {
         "type": "runtime.drain",
         "direction": "bidirectional",
+        "expects_reply": true,
         "schema": {
           "$ref": "#/$defs/RuntimeDrainMessage"
         }
@@ -226,6 +228,23 @@
       },
       "success_response_schema": {
         "$ref": "#/$defs/RuntimeReadyPayload"
+      },
+      "error_response_schema": {
+        "$ref": "#/$defs/RuntimeError"
+      }
+    },
+    {
+      "client_method": "drainRuntimeSession",
+      "http_method": "POST",
+      "path": "/api/v1/agent-runtime/sessions/{id}/drain",
+      "required_headers": [
+        "OpenLinker-Runtime-Attachment"
+      ],
+      "request_body_schema": {
+        "$ref": "#/$defs/RuntimeDrainPayload"
+      },
+      "success_response_schema": {
+        "$ref": "#/$defs/RuntimeDrainPayload"
       },
       "error_response_schema": {
         "$ref": "#/$defs/RuntimeError"
@@ -1502,7 +1521,7 @@
           "maxLength": 120
         },
         "capacity": {
-          "$ref": "#/$defs/NonNegativeInteger"
+          "const": 0
         },
         "inflight": {
           "$ref": "#/$defs/NonNegativeInteger"

@@ -744,6 +744,26 @@ func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
 	require.Equal(t, "offered", dispatchState)
 	require.Equal(t, int32(1), offerCount)
 	require.Equal(t, "runtime", executorType)
+
+	var accepted, unfinished bool
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT accepted_at IS NOT NULL, finished_at IS NULL
+		FROM run_attempts WHERE id = $1`, assigned.AttemptIdentity.AttemptID).Scan(&accepted, &unfinished))
+	require.False(t, accepted, "ClaimOffer must leave a durable, unaccepted offer")
+	require.True(t, unfinished)
+
+	_, err = svc.DrainRuntimeNode(ctx, nodeID)
+	require.NoError(t, err)
+	// Zero the advisory counters so the durable unaccepted-offer row is the
+	// only activation fence exercised here.
+	_, err = pool.Exec(ctx, `UPDATE runtime_sessions SET inflight = 0 WHERE runtime_session_id = $1`, sessionID)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `UPDATE runtime_nodes SET inflight = 0 WHERE node_id = $1`, nodeID)
+	require.NoError(t, err)
+	_, err = svc.ActivateRuntimeNode(ctx, nodeID)
+	var activationErr *httpx.HTTPError
+	require.ErrorAs(t, err, &activationErr)
+	require.Equal(t, httpx.ErrorCode("RUNTIME_NODE_NOT_QUIESCENT"), activationErr.Code)
 }
 
 func TestRun_CreatesCallerOwnedTaskCallbackSubscription(t *testing.T) {

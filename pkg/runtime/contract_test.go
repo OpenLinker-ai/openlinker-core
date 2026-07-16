@@ -133,6 +133,7 @@ func TestRuntimeContractCoversWireProtocol(t *testing.T) {
 
 	endpointKeys := make([]string, 0, len(contract.Endpoints))
 	foundHeartbeat := false
+	foundDrain := false
 	foundClose := false
 	for _, endpoint := range contract.Endpoints {
 		require.NotEmpty(t, endpoint.ClientMethod)
@@ -165,15 +166,25 @@ func TestRuntimeContractCoversWireProtocol(t *testing.T) {
 			require.Nil(t, endpoint.SuccessResponseSchema)
 			require.NotNil(t, endpoint.EmptyResponseStatus)
 			require.Equal(t, http.StatusNoContent, *endpoint.EmptyResponseStatus)
+		case "/api/v1/agent-runtime/sessions/{id}/drain":
+			foundDrain = true
+			require.Equal(t, "drainRuntimeSession", endpoint.ClientMethod)
+			require.Equal(t, http.MethodPost, endpoint.HTTPMethod)
+			require.NotNil(t, endpoint.RequestBodySchema)
+			require.Equal(t, "#/$defs/RuntimeDrainPayload", endpoint.RequestBodySchema.Ref)
+			require.NotNil(t, endpoint.SuccessResponseSchema)
+			require.Equal(t, "#/$defs/RuntimeDrainPayload", endpoint.SuccessResponseSchema.Ref)
 		}
 		endpointKeys = append(endpointKeys, endpoint.HTTPMethod+" "+endpoint.Path)
 	}
 	require.True(t, foundHeartbeat)
+	require.True(t, foundDrain)
 	require.True(t, foundClose)
 	requireUniqueStrings(t, "endpoint", endpointKeys)
 	require.ElementsMatch(t, []string{
 		"POST /api/v1/agent-runtime/sessions",
 		"POST /api/v1/agent-runtime/sessions/{id}/heartbeat",
+		"POST /api/v1/agent-runtime/sessions/{id}/drain",
 		"POST /api/v1/agent-runtime/sessions/{id}/close",
 		"POST /api/v1/agent-runtime/runs/claim",
 		"POST /api/v1/agent-runtime/runs/{id}/assignment-ack",
@@ -290,6 +301,32 @@ func TestRuntimeContractDefinesRecoveryAndCancellation(t *testing.T) {
 	require.Equal(t, "string", sessionQuery.Type)
 	require.Equal(t, "uuid", sessionQuery.Format)
 	require.True(t, sessionQuery.Required)
+}
+
+func TestRuntimeContractDrainCapacityDoesNotNarrowAssignmentReject(t *testing.T) {
+	contract := decodeRuntimeContract(t)
+	type propertySchema struct {
+		Ref   string `json:"$ref"`
+		Const *int   `json:"const"`
+	}
+	type objectSchema struct {
+		Properties map[string]propertySchema `json:"properties"`
+	}
+	decode := func(name string) objectSchema {
+		t.Helper()
+		var schema objectSchema
+		require.NoError(t, json.Unmarshal(contract.Definitions[name], &schema))
+		return schema
+	}
+
+	drainCapacity := decode("RuntimeDrainPayload").Properties["capacity"]
+	require.NotNil(t, drainCapacity.Const)
+	require.Zero(t, *drainCapacity.Const)
+	require.Empty(t, drainCapacity.Ref)
+
+	rejectCapacity := decode("RunAssignmentRejectPayload").Properties["capacity"]
+	require.Nil(t, rejectCapacity.Const)
+	require.Equal(t, "#/$defs/NonNegativeInteger", rejectCapacity.Ref)
 }
 
 func TestRuntimeContractReferencesExistingDefinitions(t *testing.T) {

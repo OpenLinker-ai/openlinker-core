@@ -441,6 +441,8 @@ func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 		err = c.handleRunCancelAck(envelope)
 	case RuntimeMessageResume:
 		err = c.handleResume(envelope)
+	case RuntimeMessageDrain:
+		err = c.handleDrain(envelope)
 	default:
 		err = runtimeTransportValidationError()
 	}
@@ -629,6 +631,28 @@ func (c *runtimeWSConnection) handleResume(envelope RuntimeEnvelope) error {
 		}
 	}
 	return nil
+}
+
+func (c *runtimeWSConnection) handleDrain(envelope RuntimeEnvelope) error {
+	if envelope.ReplyToMessageID != nil {
+		return runtimeTransportValidationError()
+	}
+	payload, err := DecodeRuntimeMessagePayload[RuntimeDrainPayload](envelope, RuntimeMessageDrain)
+	if err != nil {
+		return err
+	}
+	receipt, err := c.controller.dependencies.Sessions.DrainSession(
+		c.ctx, c.authenticated, RuntimeSessionDrainRequest{
+			RuntimeSessionID: c.sessionPrincipal.RuntimeSessionID,
+			AttachmentID:     c.attachmentID,
+			Payload:          payload,
+		},
+	)
+	if err != nil {
+		return err
+	}
+	c.sessionPrincipal.Status = "draining"
+	return sendRuntimeWSReply(c, envelope, RuntimeMessageDrain, receipt)
 }
 
 func (c *runtimeWSConnection) maintenanceLoop() {

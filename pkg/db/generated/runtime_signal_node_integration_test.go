@@ -36,7 +36,7 @@ func TestHasActiveRuntimeSessionForAgentAgainstPostgres(t *testing.T) {
 	nodeID, sessionID, coreID := uuid.New(), uuid.New(), uuid.New()
 	features := []string{
 		"lease_fence", "assignment_confirm", "renew", "resume",
-		"event_ack", "result_ack", "cancel", "persistent_spool",
+		"event_ack", "result_ack", "cancel", "persistent_spool", "session_drain",
 	}
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO users (id, email, password_hash, display_name, is_creator)

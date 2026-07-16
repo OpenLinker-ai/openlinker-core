@@ -131,6 +131,48 @@ func TestRuntimeWebSocketHelloReadyAndDisconnectOrder(t *testing.T) {
 	require.Equal(t, "SESSION_DISCONNECTED", fixture.leases.releaseReason())
 }
 
+func TestRuntimeWebSocketDrainWaitsForCommittedCorrelatedReceipt(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	deadline := fixture.now.Add(2 * time.Minute)
+	fixture.sessions.drainReceipt = RuntimeDrainPayload{
+		DeadlineAt: deadline,
+		ReasonCode: "SDK_SHUTDOWN",
+		Capacity:   0,
+		Inflight:   2,
+	}
+	server, target := fixture.server(t)
+	defer server.Close()
+	conn := dialRuntimeWS(t, target)
+	defer conn.Close()
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+
+	request, requestEnvelope, err := newRuntimeWSTypedMessage(
+		RuntimeMessageDrain, nil, RuntimeDrainPayload{
+			DeadlineAt: deadline,
+			ReasonCode: "SDK_SHUTDOWN",
+			Capacity:   0,
+			Inflight:   999,
+		},
+	)
+	require.NoError(t, err)
+	require.NoError(t, conn.WriteJSON(request))
+	reply := readRuntimeWSEnvelope(t, conn)
+	require.Equal(t, RuntimeMessageDrain, reply.Type)
+	require.NoError(t, ValidateRuntimeReplyCorrelation(requestEnvelope, reply))
+	receipt, err := DecodeRuntimeMessagePayload[RuntimeDrainPayload](reply, RuntimeMessageDrain)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), receipt.Inflight)
+	require.Equal(t, int64(0), receipt.Capacity)
+
+	fixture.sessions.mu.Lock()
+	captured := fixture.sessions.drainRequest
+	fixture.sessions.mu.Unlock()
+	require.Equal(t, fixture.principal.RuntimeSessionID, captured.RuntimeSessionID)
+	require.Equal(t, fixture.principal.AttachmentID, captured.AttachmentID)
+	require.Equal(t, int64(999), captured.Payload.Inflight)
+}
+
 func TestRuntimeWebSocketPassesBoundedRecoveryReasonIntoServerValidation(t *testing.T) {
 	fixture := newRuntimeWSTestFixture()
 	server, target := fixture.server(t)
@@ -153,12 +195,14 @@ func TestRuntimeWebSocketPassesBoundedRecoveryReasonIntoServerValidation(t *test
 	require.Equal(t, CurrentRuntimeTransportPolicy(), created.TransportPolicy)
 }
 
-func TestRuntimePreviousGenerationUsesCanonicalWebSocketAndPreAttachmentReadyShape(t *testing.T) {
+func TestRuntimePreviousGenerationUsesCanonicalWebSocketAndAttachmentFence(t *testing.T) {
 	fixture := newRuntimeWSTestFixture()
 	fixture.hello.ContractDigest = runtimePreviousContractDigest
+	fixture.hello.Features = runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest)
 	fixture.principal.RuntimeContractDigest = runtimePreviousContractDigest
 	fixture.sessions.principal.RuntimeContractDigest = runtimePreviousContractDigest
 	fixture.sessions.state.Session.RuntimeContractDigest = runtimePreviousContractDigest
+	fixture.sessions.state.Session.Features = runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest)
 	server, target := fixture.server(t)
 	defer server.Close()
 	require.Contains(t, target, "/api/v1/agent-runtime/ws")
@@ -171,9 +215,33 @@ func TestRuntimePreviousGenerationUsesCanonicalWebSocketAndPreAttachmentReadySha
 	require.Equal(t, RuntimeMessageReady, readyEnvelope.Type)
 	var ready map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(readyEnvelope.Payload, &ready))
-	require.NotContains(t, ready, "attachment_id")
-	require.ElementsMatch(t, []string{"core_instance_id", "features", "offer_ttl_seconds", "lease_ttl_seconds", "database_time"}, mapKeys(ready))
+	require.Contains(t, ready, "attachment_id")
+	require.ElementsMatch(t, []string{"core_instance_id", "attachment_id", "features", "offer_ttl_seconds", "lease_ttl_seconds", "database_time"}, mapKeys(ready))
+	var readyFeatures []string
+	require.NoError(t, json.Unmarshal(ready["features"], &readyFeatures))
+	require.ElementsMatch(t, runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest), readyFeatures)
+	require.NotContains(t, readyFeatures, "session_drain")
 	require.Equal(t, runtimePreviousContractDigest, fixture.sessions.createdRequest().RuntimeContractDigest)
+}
+
+func TestRuntimePreviousGenerationStaleReplayConflictIsStableOverWebSocket(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	fixture.hello.ContractDigest = runtimePreviousContractDigest
+	fixture.hello.Features = runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest)
+	fixture.sessions.createErr = newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
+	server, target := fixture.server(t)
+	defer server.Close()
+
+	conn := dialRuntimeWS(t, target)
+	defer conn.Close()
+	request := writeRuntimeWSHello(t, conn, fixture.hello)
+	errorEnvelope := readRuntimeWSEnvelope(t, conn)
+	require.Equal(t, RuntimeMessageError, errorEnvelope.Type)
+	require.Equal(t, request.MessageID, *errorEnvelope.ReplyToMessageID)
+	body, err := DecodeRuntimeMessagePayload[RuntimeErrorBody](errorEnvelope, RuntimeMessageError)
+	require.NoError(t, err)
+	require.Equal(t, RuntimeErrorSessionConflict, body.Code)
+	requireRuntimeWSCloseCode(t, conn, RuntimeWSCloseSessionConflict)
 }
 
 func TestRuntimeWebSocketControllerShutdownDrainsHijackedConnections(t *testing.T) {
@@ -1036,6 +1104,9 @@ type runtimeWSSessionServiceFake struct {
 	resolveErr   error
 	heartbeatErr error
 	closeErr     error
+	drainErr     error
+	drainReceipt RuntimeDrainPayload
+	drainRequest RuntimeSessionDrainRequest
 	createCount  int
 	created      RuntimeSessionRequest
 	closeRequest RuntimeSessionCloseRequest
@@ -1053,6 +1124,20 @@ func (f *runtimeWSSessionServiceFake) HeartbeatSession(context.Context, Authenti
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.state, f.heartbeatErr
+}
+
+func (f *runtimeWSSessionServiceFake) DrainSession(
+	_ context.Context,
+	_ AuthenticatedRuntimePrincipal,
+	request RuntimeSessionDrainRequest,
+) (RuntimeDrainPayload, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.drainRequest = request
+	if f.drainReceipt.DeadlineAt.IsZero() {
+		return request.Payload, f.drainErr
+	}
+	return f.drainReceipt, f.drainErr
 }
 
 func (f *runtimeWSSessionServiceFake) CloseSession(_ context.Context, _ AuthenticatedRuntimePrincipal, request RuntimeSessionCloseRequest) (RuntimeSessionState, error) {

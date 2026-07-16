@@ -215,6 +215,7 @@ var runtimeReplyTypes = map[RuntimeMessageType][]RuntimeMessageType{
 	RuntimeMessageRunResult:        {RuntimeMessageRunResultAck},
 	RuntimeMessageRunCancel:        {RuntimeMessageRunCancelAck},
 	RuntimeMessageResume:           {RuntimeMessageResumeAccepted},
+	RuntimeMessageDrain:            {RuntimeMessageDrain},
 }
 
 func runtimeMessageExpectsReply(messageType RuntimeMessageType) bool {
@@ -363,7 +364,7 @@ func ValidateRuntimePayload(payload any) error {
 			return runtimeValidationError("invalid lease revocation", nil)
 		}
 	case RuntimeDrainPayload:
-		if value.DeadlineAt.IsZero() || !validRequiredString(value.ReasonCode, 120) || value.Capacity < 0 || value.Inflight < 0 {
+		if value.DeadlineAt.IsZero() || !validRequiredString(value.ReasonCode, 120) || value.Capacity != 0 || value.Inflight < 0 {
 			return runtimeValidationError("invalid runtime drain command", nil)
 		}
 	case PendingCommand:
@@ -419,7 +420,7 @@ func validateRuntimeHello(value RuntimeHelloPayload) error {
 		}
 		seen[feature] = struct{}{}
 	}
-	for _, required := range RuntimeRequiredFeatures() {
+	for _, required := range runtimeRequiredFeaturesForDigest(value.ContractDigest) {
 		if _, ok := seen[required]; !ok {
 			return newRuntimeTransportError(RuntimeErrorRequiredFeatureMissing, runtimeErrorDefaultMessage(RuntimeErrorRequiredFeatureMissing), nil)
 		}

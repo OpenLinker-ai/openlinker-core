@@ -429,6 +429,10 @@ func (*fakeExecutionHandlerService) GetExecution(context.Context, *Principal, st
 	return &ExecutionStatusResponse{}, nil
 }
 
+func (*fakeExecutionHandlerService) CancelExecution(context.Context, *Principal, string, *ExecutionCancelRequest) (*ExecutionStatusResponse, error) {
+	return &ExecutionStatusResponse{}, nil
+}
+
 type memoryReplayStore struct {
 	mu   sync.Mutex
 	seen map[string]struct{}

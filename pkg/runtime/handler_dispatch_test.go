@@ -336,6 +336,15 @@ func TestRuntimeNodeAdminHandlers(t *testing.T) {
 	require.Equal(t, http.StatusOK, drainRecorder.Code)
 	require.Equal(t, nodeID, mock.runtimeNodeID)
 
+	activateCtx, activateRecorder := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method: http.MethodPost,
+		target: "/api/v1/admin/runtime/nodes/" + nodeID.String() + "/activate",
+		params: map[string]string{"id": nodeID.String()},
+	})
+	require.NoError(t, h.ActivateRuntimeNode(activateCtx))
+	require.Equal(t, http.StatusOK, activateRecorder.Code)
+	require.Equal(t, nodeID, mock.runtimeNodeID)
+
 	revokeCtx, revokeRecorder := newRuntimeDispatchContext(&runtimeDispatchRequest{
 		method: http.MethodPost,
 		target: "/api/v1/admin/runtime/nodes/" + nodeID.String() + "/revoke",
@@ -833,6 +842,14 @@ func (m *mockRuntimeService) ListRuntimeNodes(
 }
 
 func (m *mockRuntimeService) DrainRuntimeNode(
+	_ context.Context,
+	nodeID uuid.UUID,
+) (*RuntimeNodeListItem, error) {
+	m.runtimeNodeID = nodeID
+	return m.runtimeNodeResp, m.err
+}
+
+func (m *mockRuntimeService) ActivateRuntimeNode(
 	_ context.Context,
 	nodeID uuid.UUID,
 ) (*RuntimeNodeListItem, error) {

@@ -102,6 +102,9 @@ type createRunOptions struct {
 	// the accepted parent Attempt under durable locks; a successful return is
 	// therefore authorization for this transaction only.
 	beforeCreate func(context.Context, pgx.Tx) error
+	// afterCreate records cross-domain creation evidence in the same transaction
+	// as the Run. It is invoked only for the winning insert, never for replay.
+	afterCreate func(context.Context, pgx.Tx, uuid.UUID) error
 }
 
 type preparedTaskCallbackSubscription struct {
@@ -950,6 +953,11 @@ func (s *Service) createRunningRun(
 		}
 		created = true
 		runID = run.ID
+		if opts.afterCreate != nil {
+			if createErr = opts.afterCreate(ctx, tx, runID); createErr != nil {
+				return createErr
+			}
+		}
 		if runA2AContext != nil {
 			if _, createErr = q.UpsertA2AContextMapping(ctx, db.UpsertA2AContextMappingParams{
 				RunID:             runID,

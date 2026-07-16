@@ -576,7 +576,7 @@ func TestStartExecutionAuthorizedDownstreamErrorRemainsTransient(t *testing.T) {
 	_, err := svc.StartExecution(context.Background(), principal, req)
 	assertHTTPStatus(t, err, http.StatusServiceUnavailable)
 	stored := store.records[executionStoreKey("openlinker-cloud", requestID)]
-	if stored.StartState != startStateAuthorized || stored.RejectionCode != nil || runtimeSvc.startCalls != 1 || store.resolveCalls != 0 {
+	if stored.StartState != startStateLaunching || stored.RejectionCode != nil || runtimeSvc.startCalls != 1 || store.resolveCalls != 0 {
 		t.Fatalf("authorized transient state/start/resolve = %#v/%d/%d", stored, runtimeSvc.startCalls, store.resolveCalls)
 	}
 }
@@ -1044,6 +1044,10 @@ type fakeRuntimeService struct {
 	startActors    []uuid.UUID
 	startRequests  []*runtime.RunRequest
 	lookupRequests []*runtime.RunRequest
+	cancelResponse *runtime.RunResponse
+	cancelErr      error
+	cancelEvidence runtime.RunCancellationEvidence
+	evidenceErr    error
 }
 
 func (f *fakeRuntimeService) LookupRunByCreationRequest(_ context.Context, _ uuid.UUID, request *runtime.RunRequest, _ string) (*runtime.RunResponse, bool, error) {
@@ -1060,6 +1064,14 @@ func (f *fakeRuntimeService) LookupRunByCreationRequest(_ context.Context, _ uui
 	return response, found, err
 }
 
+func (f *fakeRuntimeService) LookupRunByCreationIdentity(context.Context, uuid.UUID, []byte, []byte) (*runtime.RunResponse, bool, error) {
+	f.lookupMu.Lock()
+	f.lookupCalls++
+	response, found, err := f.lookupResponse, f.lookupFound, f.lookupErr
+	f.lookupMu.Unlock()
+	return response, found, err
+}
+
 func (f *fakeRuntimeService) StartRun(_ context.Context, actorID uuid.UUID, request *runtime.RunRequest, _ string) (*runtime.RunResponse, error) {
 	f.startCalls++
 	f.startActors = append(f.startActors, actorID)
@@ -1068,6 +1080,33 @@ func (f *fakeRuntimeService) StartRun(_ context.Context, actorID uuid.UUID, requ
 		return nil, errors.New("unexpected StartRun")
 	}
 	return f.startResponse, nil
+}
+
+func (f *fakeRuntimeService) StartExternalRun(ctx context.Context, actorID uuid.UUID, request *runtime.RunRequest, source string, _ runtime.ExternalExecutionLaunchFence) (*runtime.RunResponse, error) {
+	return f.StartRun(ctx, actorID, request, source)
+}
+
+func (f *fakeRuntimeService) CancelRun(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error) {
+	if f.cancelErr != nil {
+		return f.cancelResponse, f.cancelErr
+	}
+	if f.cancelResponse != nil {
+		return f.cancelResponse, nil
+	}
+	if f.getResponse != nil {
+		return f.getResponse, nil
+	}
+	return &runtime.RunResponse{Status: "canceled"}, nil
+}
+
+func (f *fakeRuntimeService) GetRunCancellationEvidence(context.Context, uuid.UUID, uuid.UUID) (runtime.RunCancellationEvidence, error) {
+	if f.evidenceErr != nil {
+		return runtime.RunCancellationEvidence{}, f.evidenceErr
+	}
+	if f.cancelEvidence.CancellationID != uuid.Nil || f.cancelEvidence.State != "" {
+		return f.cancelEvidence, nil
+	}
+	return runtime.RunCancellationEvidence{CancellationID: uuid.New(), State: "stopped"}, nil
 }
 
 func (f *fakeRuntimeService) GetRun(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error) {
@@ -1105,12 +1144,37 @@ func (f *fakeWorkflowService) LookupExternalExecutionWorkflowRun(context.Context
 	return f.lookup, f.lookupFound, f.lookupErr
 }
 
+func (f *fakeWorkflowService) LookupExternalExecutionWorkflowRunByIdentity(context.Context, string, uuid.UUID, uuid.UUID, uuid.UUID) (*workflow.WorkflowRunResponse, bool, error) {
+	f.lookupCalls++
+	return f.lookup, f.lookupFound, f.lookupErr
+}
+
 func (f *fakeWorkflowService) StartExternalWorkflowRun(context.Context, string, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, map[string]interface{}) (*workflow.WorkflowRunResponse, error) {
 	f.startCalls++
 	if f.start == nil {
 		return nil, errors.New("unexpected StartExternalWorkflowRun")
 	}
 	return f.start, nil
+}
+
+func (f *fakeWorkflowService) StartExternalExecutionWorkflowRunWithFence(_ context.Context, _, _, _ uuid.UUID, _ map[string]interface{}, _ workflow.ExternalExecutionLaunchFence) (*workflow.WorkflowRunResponse, error) {
+	f.startCalls++
+	if f.start == nil {
+		return nil, errors.New("unexpected StartExternalExecutionWorkflowRunWithFence")
+	}
+	return f.start, nil
+}
+
+func (f *fakeWorkflowService) CancelExternalWorkflowRun(context.Context, uuid.UUID, uuid.UUID, string) (*workflow.WorkflowRunResponse, workflow.CancellationEvidence, error) {
+	resp := f.getResponse
+	if resp == nil {
+		resp = &workflow.WorkflowRunResponse{Status: "canceled"}
+	}
+	return resp, workflow.CancellationEvidence{CancellationID: uuid.New(), State: "stopped"}, nil
+}
+
+func (f *fakeWorkflowService) GetWorkflowCancellationEvidence(context.Context, uuid.UUID, uuid.UUID) (workflow.CancellationEvidence, error) {
+	return workflow.CancellationEvidence{CancellationID: uuid.New(), State: "stopped"}, nil
 }
 
 func (f *fakeWorkflowService) GetWorkflowRun(context.Context, uuid.UUID, uuid.UUID) (*workflow.WorkflowRunResponse, error) {
@@ -1159,6 +1223,12 @@ func (m *memoryStore) Reserve(_ context.Context, record ExecutionRecord) (Execut
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := executionStoreKey(record.CallerServiceID, record.ExternalRequestID)
+	if existingKey, ok := memoryCancellationState(m).keys[key]; ok && existingKey.ActorUserID != record.ActorUserID {
+		return ExecutionRecord{}, ErrExecutionIdentityConflict
+	}
+	if _, canceled := memoryCancellationState(m).cancellations[key]; canceled {
+		return ExecutionRecord{}, ErrExecutionCanceled
+	}
 	if existing, ok := m.records[key]; ok {
 		return memoryExecutionRecordDefaults(existing), nil
 	}

@@ -303,13 +303,11 @@ func TestRuntimeSessionReaperClosesCrashedPullGenerationWithoutFinishingAttempt(
 	require.NotNil(t, fixture.identity.RuntimeSessionID)
 	sessionID := *fixture.identity.RuntimeSessionID
 
-	_, err := pool.Exec(context.Background(), `
-		UPDATE runtime_sessions
-		SET heartbeat_at = clock_timestamp() - INTERVAL '10 minutes'
-		WHERE runtime_session_id = $1`, sessionID)
-	require.NoError(t, err)
-
-	reaped, err := runtime.NewRuntimeSessionReaper(pool, time.Minute).ReapStaleSessions(context.Background(), 32)
+	// The immutable clock trigger correctly forbids manufacturing staleness by
+	// moving heartbeat_at backwards. A millisecond liveness window makes the
+	// already-committed fixture stale without weakening that production fence.
+	time.Sleep(2 * time.Millisecond)
+	reaped, err := runtime.NewRuntimeSessionReaper(pool, time.Millisecond).ReapStaleSessions(context.Background(), 32)
 	require.NoError(t, err)
 	require.Equal(t, 1, reaped)
 
@@ -380,15 +378,16 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 		"result_ack",
 		"cancel",
 		"persistent_spool",
+		"session_drain",
 	}
 	keyHash := sha256.Sum256([]byte("event-store-key/" + runID.String()))
 	fingerprint := sha256.Sum256([]byte("event-store-fingerprint/" + runID.String()))
 	prefix := "ol_agent_" + strings.ReplaceAll(credentialID.String(), "-", "")[:12]
 
 	var leaseExpiresAt time.Time
+	var contractDigest string
 	err := pgx.BeginTxFunc(context.Background(), pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
 		var databaseNow time.Time
-		var contractDigest string
 		if err := tx.QueryRow(context.Background(), `
 			SELECT clock_timestamp(), runtime_contract_digest
 			FROM runtime_schema_contracts
@@ -566,6 +565,7 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 		identity: identity,
 		principal: runtime.RuntimeEventPrincipal{
 			AgentID:                         agentID,
+			RuntimeContractDigest:           contractDigest,
 			CredentialID:                    &credentialID,
 			NodeID:                          &nodeID,
 			WorkerID:                        &workerID,

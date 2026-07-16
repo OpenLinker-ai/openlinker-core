@@ -19,6 +19,7 @@ type executionService interface {
 	ValidateTarget(context.Context, *Principal, *TargetValidationRequest) (*TargetValidationResponse, error)
 	StartExecution(context.Context, *Principal, *ExecutionRequest) (*ExecutionStartResponse, error)
 	GetExecution(context.Context, *Principal, string) (*ExecutionStatusResponse, error)
+	CancelExecution(context.Context, *Principal, string, *ExecutionCancelRequest) (*ExecutionStatusResponse, error)
 }
 
 type Handler struct {
@@ -34,6 +35,25 @@ func (h *Handler) Register(e *echo.Echo) {
 	e.POST("/internal/external-execution-targets/validate", h.ValidateTarget)
 	e.POST("/internal/external-executions", h.StartExecution)
 	e.GET("/internal/external-executions/:external_request_id", h.GetExecution)
+	e.POST("/internal/external-executions/:external_request_id/cancel", h.CancelExecution)
+}
+
+func (h *Handler) CancelExecution(c echo.Context) error {
+	principal, err := h.authorizeRequest(c, ScopeCancelExecution)
+	if err != nil {
+		return err
+	}
+	var req ExecutionCancelRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	resp, err := h.svc.CancelExecution(
+		c.Request().Context(), principal, c.Param("external_request_id"), &req,
+	)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 func (h *Handler) ValidateTarget(c echo.Context) error {

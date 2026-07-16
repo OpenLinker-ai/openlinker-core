@@ -37,6 +37,7 @@ type RuntimeDeviceAuthenticator interface {
 type RuntimeSessionAPI interface {
 	CreateOrAttachSession(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionRequest) (RuntimeSessionState, error)
 	HeartbeatSession(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionHeartbeatRequest) (RuntimeSessionState, error)
+	DrainSession(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionDrainRequest) (RuntimeDrainPayload, error)
 	CloseSession(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionCloseRequest) (RuntimeSessionState, error)
 	ResolveSessionPrincipal(context.Context, AuthenticatedRuntimePrincipal, uuid.UUID) (RuntimeSessionPrincipal, error)
 	// ResolveWorkerSessionPrincipal returns the currently acting Session. The
@@ -160,6 +161,9 @@ func (h *RuntimeHTTPController) Register(api *echo.Group) {
 	))
 	api.POST("/agent-runtime/sessions/:id/heartbeat", h.runtimeTransportEndpoint(
 		RuntimeTransportLongPoll, true, h.HeartbeatSession,
+	))
+	api.POST("/agent-runtime/sessions/:id/drain", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.DrainSession,
 	))
 	api.POST("/agent-runtime/sessions/:id/close", h.runtimeTransportEndpoint(
 		RuntimeTransportLongPoll, true, h.CloseSession,
@@ -341,6 +345,43 @@ func (h *RuntimeHTTPController) CloseSession(c echo.Context) error {
 	}
 	h.removePresence(c.Request().Context(), state, "pull:"+state.Session.RuntimeSessionID.String())
 	return c.NoContent(http.StatusNoContent)
+}
+
+// DrainSession is the Pull half of the server-authoritative drain handshake.
+// The payload cannot establish identity or capacity: Core authenticates the
+// path Session and attachment, atomically commits draining/capacity=0, then
+// returns only the database receipt.
+func (h *RuntimeHTTPController) DrainSession(c echo.Context) error {
+	principal, transportErr := h.authenticate(c)
+	if transportErr != nil {
+		return writeRuntimeError(c, transportErr)
+	}
+	if h.dependencies.Sessions == nil {
+		return writeRuntimeError(c, runtimeUnavailableError())
+	}
+	sessionID, err := parseRuntimePathUUID(c.Param("id"))
+	if err != nil {
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
+	}
+	payload, err := DecodeRuntimeBody[RuntimeDrainPayload](c.Request().Body)
+	if err != nil {
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
+	}
+	attachmentID, err := h.runtimeAttachmentIDForSessionRequest(c, principal, sessionID)
+	if err != nil {
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
+	}
+	receipt, err := h.dependencies.Sessions.DrainSession(
+		c.Request().Context(), principal, RuntimeSessionDrainRequest{
+			RuntimeSessionID: sessionID,
+			AttachmentID:     attachmentID,
+			Payload:          payload,
+		},
+	)
+	if err != nil {
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
+	}
+	return writeRuntimePayload(c, http.StatusOK, receipt)
 }
 
 func (h *RuntimeHTTPController) ClaimRun(c echo.Context) error {
@@ -852,10 +893,11 @@ func runtimeReadyFromSessionState(state RuntimeSessionState) (any, error) {
 	if !runtimeWireContractSupported(state.Session.RuntimeContractDigest) {
 		return nil, errors.New("unsupported committed runtime wire contract")
 	}
+	readyFeatures := runtimeRequiredFeaturesForDigest(state.Session.RuntimeContractDigest)
 	if runtimeWireContractAllowsMissingAttachment(state.Session.RuntimeContractDigest) {
 		ready := runtimePreviousReadyPayload{
 			CoreInstanceID:  state.Session.AttachedCoreInstanceID.String(),
-			Features:        RuntimeRequiredFeatures(),
+			Features:        readyFeatures,
 			OfferTTLSeconds: RuntimeOfferTTLSeconds,
 			LeaseTTLSeconds: RuntimeLeaseTTLSeconds,
 			DatabaseTime:    state.DatabaseTime,
@@ -868,7 +910,7 @@ func runtimeReadyFromSessionState(state RuntimeSessionState) (any, error) {
 	ready := RuntimeReadyPayload{
 		CoreInstanceID:  state.Session.AttachedCoreInstanceID.String(),
 		AttachmentID:    state.Attachment.ID,
-		Features:        RuntimeRequiredFeatures(),
+		Features:        readyFeatures,
 		OfferTTLSeconds: RuntimeOfferTTLSeconds,
 		LeaseTTLSeconds: RuntimeLeaseTTLSeconds,
 		DatabaseTime:    state.DatabaseTime,

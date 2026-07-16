@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/http"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -132,7 +133,7 @@ func TestRuntimeSessionServiceCreateLocksPrincipalAndPersistsAuthenticatedIdenti
 	}
 	wantOrder := []string{
 		"lock_session_identity", "lock_sessions", "lock_nodes", "lock_tokens",
-		"lock_attachments", "get_session_for_update", "cluster_gate", "get_node", "list_active", "heartbeat_node", "create_session", "create_attachment",
+		"lock_attachments", "get_session_for_update", "cluster_gate", "check_generation", "get_node", "list_active", "heartbeat_node", "create_session", "create_attachment",
 	}
 	if !reflect.DeepEqual(tx.operations, wantOrder) {
 		t.Fatalf("operation order = %#v, want %#v", tx.operations, wantOrder)
@@ -180,6 +181,144 @@ func TestRuntimeSessionServiceRejectsUnprovableTransportReasonBeforeMutableWrite
 	}
 }
 
+func TestRuntimeSessionServiceDrainCommitsServerCapacityAndFirstWriterEvidence(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSessionFixture()
+	tx := newSessionTransactionFake(fixture)
+	tx.session.Inflight = 2
+	tx.session.Capacity = 4
+	service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+	firstDeadline := fixture.databaseNow.Add(2 * time.Minute)
+	request := RuntimeSessionDrainRequest{
+		RuntimeSessionID: fixture.request.RuntimeSessionID,
+		AttachmentID:     tx.attachment.ID,
+		Payload: RuntimeDrainPayload{
+			DeadlineAt: firstDeadline,
+			ReasonCode: "SDK_SHUTDOWN",
+			Capacity:   0,
+			Inflight:   999,
+		},
+	}
+
+	receipt, err := service.DrainSession(context.Background(), fixture.principal, request)
+	if err != nil {
+		t.Fatalf("DrainSession() error = %v", err)
+	}
+	if receipt.Capacity != 0 || receipt.Inflight != 2 || receipt.ReasonCode != "SDK_SHUTDOWN" ||
+		!receipt.DeadlineAt.Equal(firstDeadline) {
+		t.Fatalf("receipt = %#v", receipt)
+	}
+	wantOrder := []string{
+		"lock_session_identity", "lock_sessions", "lock_nodes", "lock_tokens",
+		"lock_attachments", "get_session_for_update", "get_attachment", "get_node", "drain_session",
+	}
+	if !reflect.DeepEqual(tx.operations, wantOrder) {
+		t.Fatalf("operation order = %#v, want %#v", tx.operations, wantOrder)
+	}
+	if tx.session.Status != "draining" || tx.session.Capacity != 0 || tx.drainResumeCapacity != 4 {
+		t.Fatalf("drained session = %#v resume_capacity=%d", tx.session, tx.drainResumeCapacity)
+	}
+
+	tx.operations = nil
+	tx.session.Inflight = 1
+	request.Payload.DeadlineAt = firstDeadline.Add(time.Minute)
+	request.Payload.ReasonCode = "DIFFERENT_REASON"
+	replayed, err := service.DrainSession(context.Background(), fixture.principal, request)
+	if err != nil {
+		t.Fatalf("DrainSession(replay) error = %v", err)
+	}
+	if replayed.Inflight != 1 || replayed.ReasonCode != receipt.ReasonCode ||
+		!replayed.DeadlineAt.Equal(receipt.DeadlineAt) {
+		t.Fatalf("replayed receipt = %#v, first = %#v", replayed, receipt)
+	}
+}
+
+func TestRuntimeSessionServiceDrainRejectsNonZeroCapacityBeforeLocks(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSessionFixture()
+	tx := newSessionTransactionFake(fixture)
+	service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+	_, err := service.DrainSession(context.Background(), fixture.principal, RuntimeSessionDrainRequest{
+		RuntimeSessionID: fixture.request.RuntimeSessionID,
+		AttachmentID:     tx.attachment.ID,
+		Payload: RuntimeDrainPayload{
+			DeadlineAt: fixture.databaseNow.Add(time.Minute),
+			ReasonCode: "SDK_SHUTDOWN",
+			Capacity:   1,
+		},
+	})
+	if !IsRuntimeSessionError(err, RuntimeSessionErrorValidationFailed) {
+		t.Fatalf("DrainSession() error = %v", err)
+	}
+	if len(tx.operations) != 0 {
+		t.Fatalf("invalid drain acquired locks: %#v", tx.operations)
+	}
+}
+
+func TestRuntimeSessionServiceDrainRejectsNonCurrentSessionGeneration(t *testing.T) {
+	t.Parallel()
+
+	for _, mutate := range []struct {
+		name string
+		fn   func(*sessionTransactionFake)
+	}{
+		{
+			name: "previous digest",
+			fn: func(tx *sessionTransactionFake) {
+				tx.session.RuntimeContractDigest = runtimePreviousContractDigest
+				tx.node.RuntimeContractDigest = runtimePreviousContractDigest
+			},
+		},
+		{
+			name: "missing feature",
+			fn: func(tx *sessionTransactionFake) {
+				tx.session.Features = runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest)
+				tx.node.Features = runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest)
+			},
+		},
+		{
+			name: "wrong protocol",
+			fn: func(tx *sessionTransactionFake) {
+				tx.session.ProtocolVersion = RuntimeProtocolVersion + 1
+				tx.node.ProtocolVersion = RuntimeProtocolVersion + 1
+			},
+		},
+		{
+			name: "wrong contract id",
+			fn: func(tx *sessionTransactionFake) {
+				tx.session.RuntimeContractID = "other.runtime"
+				tx.node.RuntimeContractID = "other.runtime"
+			},
+		},
+	} {
+		mutate := mutate
+		t.Run(mutate.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newSessionFixture()
+			tx := newSessionTransactionFake(fixture)
+			mutate.fn(tx)
+			service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+			_, err := service.DrainSession(context.Background(), fixture.principal, RuntimeSessionDrainRequest{
+				RuntimeSessionID: fixture.request.RuntimeSessionID,
+				AttachmentID:     tx.attachment.ID,
+				Payload: RuntimeDrainPayload{
+					DeadlineAt: fixture.databaseNow.Add(time.Minute),
+					ReasonCode: "SDK_SHUTDOWN",
+					Capacity:   0,
+				},
+			})
+			if !IsRuntimeSessionError(err, RuntimeSessionErrorContractMismatch) {
+				t.Fatalf("DrainSession() error = %v", err)
+			}
+			if slices.Contains(tx.operations, "drain_session") {
+				t.Fatalf("non-current session reached drain mutation: %#v", tx.operations)
+			}
+		})
+	}
+}
+
 func TestRuntimeSessionServicePersistsValidatedRecoveryAcrossOfflineHistory(t *testing.T) {
 	t.Parallel()
 
@@ -205,30 +344,37 @@ func TestRuntimeSessionServicePersistsValidatedRecoveryAcrossOfflineHistory(t *t
 	}
 }
 
-func TestRuntimeSessionServiceNegotiatesSupportedNodeGenerationWithoutLiveConflict(t *testing.T) {
+func TestRuntimeSessionServiceNegotiatesPreviousNodeToCurrentWithoutChangingIdentity(t *testing.T) {
 	t.Parallel()
 
 	fixture := newSessionFixture()
-	fixture.request.RuntimeContractDigest = runtimePreviousContractDigest
 	tx := newSessionTransactionFake(fixture)
 	tx.getErr = pgx.ErrNoRows
-	// Provisioning records the current Server contract. The authenticated
-	// previous client selects its adapter generation only during Session create.
-	tx.node.RuntimeContractDigest = RuntimeContractDigest
+	tx.node.RuntimeContractDigest = runtimePreviousContractDigest
+	tx.node.Features = runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest)
 	service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
 
 	state, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request)
 	if err != nil {
-		t.Fatalf("CreateOrAttachSession(previous) error = %v", err)
+		t.Fatalf("CreateOrAttachSession(current) error = %v", err)
 	}
-	if tx.heartbeatNodeParams.RuntimeContractDigest != runtimePreviousContractDigest ||
-		tx.createParams.RuntimeContractDigest != runtimePreviousContractDigest ||
-		state.Session.RuntimeContractDigest != runtimePreviousContractDigest {
-		t.Fatalf("previous generation was not negotiated: heartbeat=%q create=%q state=%q",
+	if tx.heartbeatNodeParams.RuntimeContractDigest != RuntimeContractDigest ||
+		tx.createParams.RuntimeContractDigest != RuntimeContractDigest ||
+		state.Session.RuntimeContractDigest != RuntimeContractDigest {
+		t.Fatalf("current generation was not negotiated: heartbeat=%q create=%q state=%q",
 			tx.heartbeatNodeParams.RuntimeContractDigest,
 			tx.createParams.RuntimeContractDigest,
 			state.Session.RuntimeContractDigest,
 		)
+	}
+	if tx.heartbeatNodeParams.NodeID != fixture.principal.Device.NodeID ||
+		tx.heartbeatNodeParams.NodeVersion != fixture.request.NodeVersion ||
+		tx.heartbeatNodeParams.ProtocolVersion != fixture.request.ProtocolVersion ||
+		tx.heartbeatNodeParams.RuntimeContractID != fixture.request.RuntimeContractID ||
+		tx.heartbeatNodeParams.DeviceCertificateSerial != fixture.principal.Device.CertificateSerial ||
+		tx.heartbeatNodeParams.DevicePublicKeyThumbprint != fixture.principal.Device.PublicKeyThumbprintSHA256 ||
+		!sameRuntimeFeatureSet(tx.heartbeatNodeParams.Features, RuntimeRequiredFeatures()) {
+		t.Fatalf("generation switch changed immutable identity or target features: %#v", tx.heartbeatNodeParams)
 	}
 }
 
@@ -236,12 +382,13 @@ func TestRuntimeSessionServiceRejectsNodeGenerationSwitchWithLiveSession(t *test
 	t.Parallel()
 
 	fixture := newSessionFixture()
-	fixture.request.RuntimeContractDigest = runtimePreviousContractDigest
 	tx := newSessionTransactionFake(fixture)
 	tx.getErr = pgx.ErrNoRows
-	tx.node.RuntimeContractDigest = RuntimeContractDigest
+	tx.node.RuntimeContractDigest = runtimePreviousContractDigest
+	tx.node.Features = runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest)
 	live := tx.session
-	live.RuntimeContractDigest = RuntimeContractDigest
+	live.RuntimeContractDigest = runtimePreviousContractDigest
+	live.Features = runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest)
 	tx.active = []db.RuntimeSession{live}
 	service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
 
@@ -251,6 +398,69 @@ func TestRuntimeSessionServiceRejectsNodeGenerationSwitchWithLiveSession(t *test
 	}
 	if tx.heartbeatNodeParams.RuntimeContractDigest != "" || tx.createCalls != 0 {
 		t.Fatalf("conflicting generation mutated state: heartbeat=%#v creates=%d", tx.heartbeatNodeParams, tx.createCalls)
+	}
+}
+
+func TestRuntimeSessionServiceRejectsReplayBehindDurableNewerEpoch(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSessionFixture()
+	tx := newSessionTransactionFake(fixture)
+	tx.session.Status = "offline"
+	tx.session.AttachedCoreInstanceID = nil
+	tx.newerGeneration = true
+	service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+
+	_, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request)
+	if !IsRuntimeSessionError(err, RuntimeSessionErrorSessionConflict) {
+		t.Fatalf("stale replay error = %v", err)
+	}
+	if !slices.Contains(tx.operations, "check_generation") ||
+		slices.Contains(tx.operations, "heartbeat_node") ||
+		slices.Contains(tx.operations, "claim_session") {
+		t.Fatalf("stale replay crossed generation fence: %#v", tx.operations)
+	}
+}
+
+func TestRuntimeSessionServiceGenerationSwitchRequiresExactTargetFeatures(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		features []string
+		wantCode RuntimeSessionErrorCode
+	}{
+		{
+			name:     "missing current feature",
+			features: runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest),
+			wantCode: RuntimeSessionErrorRequiredFeatureMissing,
+		},
+		{
+			name:     "extra target feature",
+			features: append(RuntimeRequiredFeatures(), "future_extension"),
+			wantCode: RuntimeSessionErrorContractMismatch,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newSessionFixture()
+			fixture.request.Features = append([]string(nil), test.features...)
+			tx := newSessionTransactionFake(fixture)
+			tx.getErr = pgx.ErrNoRows
+			tx.node.RuntimeContractDigest = runtimePreviousContractDigest
+			tx.node.Features = runtimeRequiredFeaturesForDigest(runtimePreviousContractDigest)
+			service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+
+			_, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request)
+			if !IsRuntimeSessionError(err, test.wantCode) {
+				t.Fatalf("CreateOrAttachSession() error = %v, want %s", err, test.wantCode)
+			}
+			if tx.heartbeatNodeParams.NodeID != uuid.Nil || tx.createCalls != 0 {
+				t.Fatalf("invalid target feature set mutated state: heartbeat=%#v creates=%d", tx.heartbeatNodeParams, tx.createCalls)
+			}
+		})
 	}
 }
 
@@ -631,10 +841,17 @@ type sessionTransactionFake struct {
 	heartbeatParams        db.HeartbeatRuntimeSessionParams
 	heartbeatNodeParams    db.HeartbeatRuntimeNodeParams
 	heartbeatErr           error
+	newerGeneration        bool
+	newerGenerationErr     error
+	retiredOffline         int64
 	attachment             db.RuntimeSessionAttachment
 	createAttachmentParams db.CreateRuntimeSessionAttachmentParams
 	closeAttachmentParams  db.CloseRuntimeSessionAttachmentParams
 	closeSessionCalls      int
+	drainDeadline          time.Time
+	drainReason            string
+	drainRequestedAt       time.Time
+	drainResumeCapacity    int32
 }
 
 func newSessionTransactionFake(fixture sessionFixture) *sessionTransactionFake {
@@ -733,6 +950,14 @@ func (f *sessionTransactionFake) GetRuntimeNode(context.Context, uuid.UUID) (db.
 	return f.node, nil
 }
 
+func (f *sessionTransactionFake) HasNewerRuntimeSessionGeneration(
+	_ context.Context,
+	_ runtimeSessionGenerationParams,
+) (bool, error) {
+	f.op("check_generation")
+	return f.newerGeneration, f.newerGenerationErr
+}
+
 func (f *sessionTransactionFake) HeartbeatRuntimeNode(_ context.Context, params db.HeartbeatRuntimeNodeParams) (db.RuntimeNode, error) {
 	f.op("heartbeat_node")
 	f.heartbeatNodeParams = params
@@ -752,6 +977,15 @@ func (f *sessionTransactionFake) HeartbeatRuntimeNode(_ context.Context, params 
 func (f *sessionTransactionFake) ListActiveRuntimeSessionsByNode(context.Context, uuid.UUID) ([]db.RuntimeSession, error) {
 	f.op("list_active")
 	return f.active, nil
+}
+
+func (f *sessionTransactionFake) RetireOfflineRuntimeSessionsForGenerationSwitch(
+	_ context.Context,
+	_ uuid.UUID,
+	_ string,
+) (int64, error) {
+	f.op("retire_offline_generation")
+	return f.retiredOffline, nil
 }
 
 func (f *sessionTransactionFake) CreateRuntimeSession(_ context.Context, params db.CreateRuntimeSessionParams) (db.RuntimeSession, error) {
@@ -789,6 +1023,33 @@ func (f *sessionTransactionFake) HeartbeatRuntimeSession(_ context.Context, para
 	heartbeat.Capacity = params.Capacity
 	heartbeat.HeartbeatAt = f.fixture.databaseNow.Add(2 * time.Second)
 	return heartbeat, nil
+}
+
+func (f *sessionTransactionFake) DrainRuntimeSession(
+	_ context.Context,
+	sessionID uuid.UUID,
+	coreInstanceID uuid.UUID,
+	payload RuntimeDrainPayload,
+) (runtimeSessionDrainRecord, error) {
+	f.op("drain_session")
+	if sessionID != f.session.RuntimeSessionID || f.session.AttachedCoreInstanceID == nil ||
+		*f.session.AttachedCoreInstanceID != coreInstanceID ||
+		(f.session.Status != "active" && f.session.Status != "draining") {
+		return runtimeSessionDrainRecord{}, pgx.ErrNoRows
+	}
+	if f.drainRequestedAt.IsZero() {
+		f.drainRequestedAt = f.fixture.databaseNow.Add(3 * time.Second)
+		f.drainDeadline = payload.DeadlineAt
+		f.drainReason = payload.ReasonCode
+		f.drainResumeCapacity = f.session.Capacity
+	}
+	f.session.Status = "draining"
+	f.session.Capacity = 0
+	f.session.UpdatedAt = f.fixture.databaseNow.Add(3 * time.Second)
+	return runtimeSessionDrainRecord{
+		Session: f.session, DeadlineAt: f.drainDeadline,
+		ReasonCode: f.drainReason, RequestedAt: f.drainRequestedAt,
+	}, nil
 }
 
 func (f *sessionTransactionFake) GetActiveRuntimeSessionAttachment(context.Context, uuid.UUID) (db.RuntimeSessionAttachment, error) {

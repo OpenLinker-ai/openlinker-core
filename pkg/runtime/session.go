@@ -491,6 +491,9 @@ func (s *RuntimeSessionService) CreateOrAttachSession(
 		if gateErr := tx.RequireRuntimeClusterOperation(ctx, RuntimeClusterNewSession); gateErr != nil {
 			return gateErr
 		}
+		if generationErr := rejectStaleRuntimeSessionGeneration(ctx, tx, normalized); generationErr != nil {
+			return generationErr
+		}
 		transportReason, validReason := resolveRuntimeTransportReason(
 			normalized.Transport, "", normalized.ReportedTransportReason, normalized.TransportPolicy,
 		)
@@ -567,6 +570,9 @@ func (s *RuntimeSessionService) attachExistingSession(
 	state *RuntimeSessionState,
 ) error {
 	if err := validateStoredRuntimeSession(existing, principal, request); err != nil {
+		return err
+	}
+	if err := rejectStaleRuntimeSessionGeneration(ctx, tx, request); err != nil {
 		return err
 	}
 
@@ -770,6 +776,122 @@ func (s *RuntimeSessionService) HeartbeatSession(
 	return state, err
 }
 
+type runtimeSessionDrainRecord struct {
+	Session     db.RuntimeSession
+	DeadlineAt  time.Time
+	ReasonCode  string
+	RequestedAt time.Time
+}
+
+// DrainSession commits the admission fence before acknowledging either
+// transport. The client capacity/inflight snapshot is never authoritative:
+// capacity is forced to zero and inflight is read back from PostgreSQL.
+func (s *RuntimeSessionService) DrainSession(
+	ctx context.Context,
+	principal AuthenticatedRuntimePrincipal,
+	request RuntimeSessionDrainRequest,
+) (RuntimeDrainPayload, error) {
+	if err := validateAuthenticatedRuntimePrincipal(principal); err != nil {
+		return RuntimeDrainPayload{}, err
+	}
+	if request.RuntimeSessionID == uuid.Nil || request.AttachmentID == uuid.Nil ||
+		s == nil || s.repository == nil || s.coreInstanceID == uuid.Nil {
+		return RuntimeDrainPayload{}, newRuntimeSessionError(RuntimeSessionErrorValidationFailed, nil)
+	}
+	if err := ValidateRuntimePayload(request.Payload); err != nil {
+		return RuntimeDrainPayload{}, newRuntimeSessionError(RuntimeSessionErrorValidationFailed, err)
+	}
+
+	var receipt RuntimeDrainPayload
+	err := s.repository.WithTransaction(ctx, func(tx runtimeSessionTransaction) error {
+		if err := tx.LockSessionIdentity(ctx, request.RuntimeSessionID); err != nil {
+			return err
+		}
+		if _, err := lockRuntimeSessionPrincipal(
+			ctx, tx, principal.Device.NodeID, principal.CredentialID, request.RuntimeSessionID,
+		); err != nil {
+			return err
+		}
+		existing, err := tx.GetRuntimeSessionForUpdate(ctx, request.RuntimeSessionID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return newRuntimeSessionError(RuntimeSessionErrorPrincipalInactive, err)
+			}
+			return err
+		}
+		identity := RuntimeSessionIdentity{
+			RuntimeSessionID: existing.RuntimeSessionID,
+			NodeID:           existing.NodeID,
+			AgentID:          existing.AgentID,
+			WorkerID:         existing.WorkerID,
+			SessionEpoch:     existing.SessionEpoch,
+		}
+		if err = validateStoredRuntimeSessionIdentity(existing, principal, identity); err != nil {
+			return err
+		}
+		if existing.Status == "revoked" {
+			return newRuntimeSessionError(RuntimeSessionErrorPrincipalInactive, nil)
+		}
+		if existing.Status != "active" && existing.Status != "draining" {
+			return newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
+		}
+		if existing.ProtocolVersion != RuntimeProtocolVersion ||
+			existing.RuntimeContractID != RuntimeContractID ||
+			!constantTimeStringEqual(existing.RuntimeContractDigest, RuntimeContractDigest) ||
+			!containsRuntimeFeature(existing.Features, "session_drain") {
+			return newRuntimeSessionError(RuntimeSessionErrorContractMismatch, nil)
+		}
+		if existing.AttachedCoreInstanceID == nil || *existing.AttachedCoreInstanceID != s.coreInstanceID {
+			return newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
+		}
+		attachment, err := tx.GetActiveRuntimeSessionAttachment(ctx, existing.RuntimeSessionID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return newRuntimeSessionError(RuntimeSessionErrorNotAttached, err)
+			}
+			return err
+		}
+		if attachment.CoreInstanceID != s.coreInstanceID || attachment.ID != request.AttachmentID {
+			return newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
+		}
+		node, err := tx.GetRuntimeNode(ctx, existing.NodeID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return newRuntimeSessionError(RuntimeSessionErrorPrincipalInactive, err)
+			}
+			return err
+		}
+		if (node.Status != "active" && node.Status != "draining") ||
+			node.ProtocolVersion != RuntimeProtocolVersion ||
+			node.RuntimeContractID != RuntimeContractID ||
+			!constantTimeStringEqual(node.RuntimeContractDigest, RuntimeContractDigest) ||
+			!containsRuntimeFeature(node.Features, "session_drain") ||
+			node.RuntimeContractID != existing.RuntimeContractID ||
+			node.RuntimeContractDigest != existing.RuntimeContractDigest ||
+			node.ProtocolVersion != existing.ProtocolVersion ||
+			!constantTimeStringEqual(node.DeviceCertificateSerial, existing.DeviceCertificateSerial) ||
+			!constantTimeStringEqual(node.DevicePublicKeyThumbprint, principal.Device.PublicKeyThumbprintSHA256) {
+			return newRuntimeSessionError(RuntimeSessionErrorPrincipalInactive, nil)
+		}
+
+		drained, err := tx.DrainRuntimeSession(ctx, request.RuntimeSessionID, s.coreInstanceID, request.Payload)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return newRuntimeSessionError(RuntimeSessionErrorPrincipalInactive, err)
+			}
+			return err
+		}
+		receipt = RuntimeDrainPayload{
+			DeadlineAt: drained.DeadlineAt,
+			ReasonCode: drained.ReasonCode,
+			Capacity:   int64(drained.Session.Capacity),
+			Inflight:   int64(drained.Session.Inflight),
+		}
+		return ValidateRuntimePayload(receipt)
+	})
+	return receipt, err
+}
+
 func (s *RuntimeSessionService) CloseSession(
 	ctx context.Context,
 	principal AuthenticatedRuntimePrincipal,
@@ -884,7 +1006,7 @@ func validateRuntimeSessionRequest(
 		return RuntimeSessionRequest{}, newRuntimeSessionError(RuntimeSessionErrorContractMismatch, nil)
 	}
 
-	features, err := normalizeRuntimeSessionFeatures(request.Features)
+	features, err := normalizeRuntimeSessionFeatures(request.Features, request.RuntimeContractDigest)
 	if err != nil {
 		return RuntimeSessionRequest{}, err
 	}
@@ -939,13 +1061,46 @@ func negotiateRuntimeNodeForSession(
 			return nil, newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
 		}
 	}
-	if node.RuntimeContractDigest != request.RuntimeContractDigest && len(active) != 0 {
+	switchingGeneration := node.RuntimeContractDigest != request.RuntimeContractDigest
+	if switchingGeneration && len(active) != 0 {
 		return nil, newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
+	}
+	if switchingGeneration {
+		if _, err = tx.RetireOfflineRuntimeSessionsForGenerationSwitch(
+			ctx, node.NodeID, request.RuntimeContractDigest,
+		); err != nil {
+			return nil, err
+		}
 	}
 	if _, err = persistRuntimeNodeHeartbeat(ctx, tx, principal, request); err != nil {
 		return nil, err
 	}
 	return active, nil
+}
+
+// rejectStaleRuntimeSessionGeneration makes Session epochs monotonic for one
+// durable Node/Agent/worker identity. Terminal and offline rows count: a
+// replayed older Session must never regain authority after a newer process
+// generation has committed, even when every transport is currently offline.
+func rejectStaleRuntimeSessionGeneration(
+	ctx context.Context,
+	tx runtimeSessionTransaction,
+	request RuntimeSessionRequest,
+) error {
+	newer, err := tx.HasNewerRuntimeSessionGeneration(ctx, runtimeSessionGenerationParams{
+		RuntimeSessionID: request.RuntimeSessionID,
+		NodeID:           request.NodeID,
+		AgentID:          request.AgentID,
+		WorkerID:         request.WorkerID,
+		SessionEpoch:     request.SessionEpoch,
+	})
+	if err != nil {
+		return err
+	}
+	if newer {
+		return newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
+	}
+	return nil
 }
 
 func persistRuntimeNodeHeartbeat(
@@ -1002,8 +1157,9 @@ func validateAuthenticatedRuntimePrincipal(principal AuthenticatedRuntimePrincip
 	return nil
 }
 
-func normalizeRuntimeSessionFeatures(features []string) ([]string, error) {
-	if len(features) < len(runtimeRequiredFeatures) {
+func normalizeRuntimeSessionFeatures(features []string, contractDigest string) ([]string, error) {
+	required := runtimeRequiredFeaturesForDigest(contractDigest)
+	if len(features) < len(required) {
 		return nil, newRuntimeSessionError(RuntimeSessionErrorRequiredFeatureMissing, nil)
 	}
 	seen := make(map[string]struct{}, len(features))
@@ -1018,13 +1174,27 @@ func normalizeRuntimeSessionFeatures(features []string) ([]string, error) {
 		seen[feature] = struct{}{}
 		normalized = append(normalized, feature)
 	}
-	for _, required := range runtimeRequiredFeatures {
-		if _, ok := seen[required]; !ok {
+	for _, feature := range required {
+		if _, ok := seen[feature]; !ok {
 			return nil, newRuntimeSessionError(RuntimeSessionErrorRequiredFeatureMissing, nil)
 		}
 	}
 	sort.Strings(normalized)
 	return normalized, nil
+}
+
+func runtimeRequiredFeaturesForDigest(contractDigest string) []string {
+	features := RuntimeRequiredFeatures()
+	if constantTimeStringEqual(contractDigest, RuntimeContractDigest) {
+		return features
+	}
+	withoutDrain := features[:0]
+	for _, feature := range features {
+		if feature != "session_drain" {
+			withoutDrain = append(withoutDrain, feature)
+		}
+	}
+	return withoutDrain
 }
 
 func validateRuntimeNodeForSession(
@@ -1065,8 +1235,25 @@ func validateRuntimeNodeForNegotiation(
 	if node.NodeVersion != request.NodeVersion || node.ProtocolVersion != request.ProtocolVersion ||
 		node.RuntimeContractID != request.RuntimeContractID ||
 		!runtimeWireContractSupported(node.RuntimeContractDigest) ||
-		!runtimeWireContractSupported(request.RuntimeContractDigest) ||
-		!sameRuntimeFeatureSet(node.Features, request.Features) {
+		!runtimeWireContractSupported(request.RuntimeContractDigest) {
+		return newRuntimeSessionError(RuntimeSessionErrorContractMismatch, nil)
+	}
+	if node.RuntimeContractDigest == request.RuntimeContractDigest {
+		if !sameRuntimeFeatureSet(node.Features, request.Features) {
+			return newRuntimeSessionError(RuntimeSessionErrorContractMismatch, nil)
+		}
+		return nil
+	}
+
+	// A ring switch changes the durable Node adapter generation. Extensions
+	// that were valid within one generation cannot be silently carried across
+	// that boundary: the target must advertise exactly its Server-owned feature
+	// set. The caller locks and proves the complete live Session set is empty
+	// before persistRuntimeNodeHeartbeat commits digest+features atomically.
+	if !sameRuntimeFeatureSet(
+		request.Features,
+		runtimeRequiredFeaturesForDigest(request.RuntimeContractDigest),
+	) {
 		return newRuntimeSessionError(RuntimeSessionErrorContractMismatch, nil)
 	}
 	return nil
@@ -1253,6 +1440,14 @@ type runtimeWorkerSessionResolveParams struct {
 	CoreInstanceID            uuid.UUID
 }
 
+type runtimeSessionGenerationParams struct {
+	RuntimeSessionID uuid.UUID
+	NodeID           uuid.UUID
+	AgentID          uuid.UUID
+	WorkerID         string
+	SessionEpoch     int64
+}
+
 type runtimeSessionTransaction interface {
 	RequireRuntimeClusterOperation(context.Context, RuntimeClusterOperation) error
 	LockSessionIdentity(context.Context, uuid.UUID) error
@@ -1262,11 +1457,14 @@ type runtimeSessionTransaction interface {
 	LockAgentTokensForPrincipalRevocation(context.Context, []uuid.UUID) ([]uuid.UUID, error)
 	LockActiveRuntimeSessionAttachmentsForPrincipalRevocation(context.Context, []uuid.UUID) ([]uuid.UUID, error)
 	GetRuntimeNode(context.Context, uuid.UUID) (db.RuntimeNode, error)
+	HasNewerRuntimeSessionGeneration(context.Context, runtimeSessionGenerationParams) (bool, error)
 	HeartbeatRuntimeNode(context.Context, db.HeartbeatRuntimeNodeParams) (db.RuntimeNode, error)
 	ListActiveRuntimeSessionsByNode(context.Context, uuid.UUID) ([]db.RuntimeSession, error)
+	RetireOfflineRuntimeSessionsForGenerationSwitch(context.Context, uuid.UUID, string) (int64, error)
 	CreateRuntimeSession(context.Context, db.CreateRuntimeSessionParams) (db.RuntimeSession, error)
 	ClaimRuntimeSessionForCore(context.Context, db.ClaimRuntimeSessionForCoreParams) (db.RuntimeSession, error)
 	HeartbeatRuntimeSession(context.Context, db.HeartbeatRuntimeSessionParams) (db.RuntimeSession, error)
+	DrainRuntimeSession(context.Context, uuid.UUID, uuid.UUID, RuntimeDrainPayload) (runtimeSessionDrainRecord, error)
 	GetActiveRuntimeSessionAttachment(context.Context, uuid.UUID) (db.RuntimeSessionAttachment, error)
 	ListRuntimeSessionAttachments(context.Context, db.ListRuntimeSessionAttachmentsParams) ([]db.RuntimeSessionAttachment, error)
 	CreateRuntimeSessionAttachment(context.Context, db.CreateRuntimeSessionAttachmentParams) (db.RuntimeSessionAttachment, error)
@@ -1445,6 +1643,40 @@ func (t *postgresRuntimeSessionTransaction) GetRuntimeSessionForUpdate(ctx conte
 	return t.queries.GetRuntimeSessionForUpdate(ctx, id)
 }
 
+func (t *postgresRuntimeSessionTransaction) HasNewerRuntimeSessionGeneration(
+	ctx context.Context,
+	params runtimeSessionGenerationParams,
+) (bool, error) {
+	var newer bool
+	err := t.tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM runtime_sessions
+    WHERE node_id = $1
+      AND agent_id = $2
+      AND worker_id = $3
+      AND (
+          session_epoch > $4
+          OR (session_epoch = $4 AND runtime_session_id <> $5)
+      )
+)`, params.NodeID, params.AgentID, params.WorkerID, params.SessionEpoch,
+		params.RuntimeSessionID).Scan(&newer)
+	return newer, err
+}
+
+func (t *postgresRuntimeSessionTransaction) RetireOfflineRuntimeSessionsForGenerationSwitch(
+	ctx context.Context,
+	nodeID uuid.UUID,
+	targetDigest string,
+) (int64, error) {
+	tag, err := t.tx.Exec(ctx, `
+UPDATE runtime_sessions
+SET status = 'closed', updated_at = clock_timestamp()
+WHERE node_id = $1
+  AND status = 'offline'
+  AND runtime_contract_digest <> $2`, nodeID, targetDigest)
+	return tag.RowsAffected(), err
+}
+
 func (t *postgresRuntimeSessionTransaction) LockRuntimeSessionsForPrincipalRevocation(ctx context.Context, params db.LockRuntimeSessionsForPrincipalRevocationParams) ([]db.LockRuntimeSessionsForPrincipalRevocationRow, error) {
 	return t.queries.LockRuntimeSessionsForPrincipalRevocation(ctx, params)
 }
@@ -1483,6 +1715,79 @@ func (t *postgresRuntimeSessionTransaction) ClaimRuntimeSessionForCore(ctx conte
 
 func (t *postgresRuntimeSessionTransaction) HeartbeatRuntimeSession(ctx context.Context, params db.HeartbeatRuntimeSessionParams) (db.RuntimeSession, error) {
 	return t.queries.HeartbeatRuntimeSession(ctx, params)
+}
+
+func (t *postgresRuntimeSessionTransaction) DrainRuntimeSession(
+	ctx context.Context,
+	sessionID uuid.UUID,
+	coreInstanceID uuid.UUID,
+	payload RuntimeDrainPayload,
+) (runtimeSessionDrainRecord, error) {
+	var record runtimeSessionDrainRecord
+	err := t.tx.QueryRow(ctx, `
+UPDATE runtime_sessions s
+SET drain_requested_at = COALESCE(s.drain_requested_at, clock_timestamp()),
+    drain_deadline_at = COALESCE(s.drain_deadline_at, $3),
+    drain_reason_code = COALESCE(s.drain_reason_code, $4),
+    resume_capacity = COALESCE(s.resume_capacity, s.capacity),
+    status = 'draining',
+    capacity = 0,
+    updated_at = clock_timestamp()
+WHERE s.runtime_session_id = $1
+  AND s.attached_core_instance_id = $2
+  AND s.status IN ('active', 'draining')
+  AND EXISTS (
+      SELECT 1
+      FROM runtime_nodes n
+      JOIN agent_tokens token
+        ON token.id = s.credential_id
+       AND token.agent_id = s.agent_id
+      JOIN runtime_session_attachments attachment
+        ON attachment.runtime_session_id = s.runtime_session_id
+       AND attachment.core_instance_id = s.attached_core_instance_id
+       AND attachment.detached_at IS NULL
+      WHERE n.node_id = s.node_id
+        AND n.status IN ('active', 'draining')
+        AND n.revoked_at IS NULL
+        AND n.protocol_version = $5
+        AND n.runtime_contract_id = $6
+        AND n.runtime_contract_digest = $7
+        AND n.features @> ARRAY['session_drain']::text[]
+        AND s.protocol_version = $5
+        AND s.runtime_contract_id = $6
+        AND s.runtime_contract_digest = $7
+        AND s.features @> ARRAY['session_drain']::text[]
+        AND n.protocol_version = s.protocol_version
+        AND n.runtime_contract_id = s.runtime_contract_id
+        AND n.runtime_contract_digest = s.runtime_contract_digest
+        AND token.status = 'active_runtime'
+        AND token.revoked_at IS NULL
+        AND token.scopes @> ARRAY['agent:pull']::text[]
+        AND (token.expires_at IS NULL OR token.expires_at > clock_timestamp())
+  )
+RETURNING s.runtime_session_id, s.node_id, s.agent_id, s.credential_id,
+          s.worker_id, s.session_epoch, s.device_certificate_serial,
+          s.node_version, s.protocol_version, s.runtime_contract_id,
+          s.runtime_contract_digest, s.features, s.capacity, s.inflight,
+          s.status, s.attached_core_instance_id, s.connected_at,
+          s.heartbeat_at, s.disconnected_at, s.created_at, s.updated_at,
+          s.drain_deadline_at, s.drain_reason_code, s.drain_requested_at`,
+		sessionID, coreInstanceID, payload.DeadlineAt, payload.ReasonCode,
+		RuntimeProtocolVersion, RuntimeContractID, RuntimeContractDigest,
+	).Scan(
+		&record.Session.RuntimeSessionID, &record.Session.NodeID,
+		&record.Session.AgentID, &record.Session.CredentialID,
+		&record.Session.WorkerID, &record.Session.SessionEpoch,
+		&record.Session.DeviceCertificateSerial, &record.Session.NodeVersion,
+		&record.Session.ProtocolVersion, &record.Session.RuntimeContractID,
+		&record.Session.RuntimeContractDigest, &record.Session.Features,
+		&record.Session.Capacity, &record.Session.Inflight, &record.Session.Status,
+		&record.Session.AttachedCoreInstanceID, &record.Session.ConnectedAt,
+		&record.Session.HeartbeatAt, &record.Session.DisconnectedAt,
+		&record.Session.CreatedAt, &record.Session.UpdatedAt,
+		&record.DeadlineAt, &record.ReasonCode, &record.RequestedAt,
+	)
+	return record, err
 }
 
 func (t *postgresRuntimeSessionTransaction) GetActiveRuntimeSessionAttachment(ctx context.Context, id uuid.UUID) (db.RuntimeSessionAttachment, error) {

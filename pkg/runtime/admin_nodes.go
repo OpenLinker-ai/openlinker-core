@@ -20,15 +20,36 @@ const (
 	maxRuntimeNodeLimit        int32 = 200
 	runtimeNodeLiveWindow            = RuntimeSessionStaleAfter
 	runtimeNodeMutationRetries       = 3
+	runtimeNodeDrainDeadline         = 60 * time.Second
 )
 
 var errRuntimeNodeSessionScopeChanged = errors.New("runtime node session scope changed")
 
+const (
+	runtimeNodeErrorRevoked         httpx.ErrorCode = "RUNTIME_NODE_REVOKED"
+	runtimeNodeErrorNotDraining     httpx.ErrorCode = "RUNTIME_NODE_NOT_DRAINING"
+	runtimeNodeErrorNotQuiescent    httpx.ErrorCode = "RUNTIME_NODE_NOT_QUIESCENT"
+	runtimeNodeErrorIdentityInvalid httpx.ErrorCode = "RUNTIME_NODE_IDENTITY_INVALID"
+	runtimeNodeErrorSessionChanged  httpx.ErrorCode = "RUNTIME_NODE_SESSION_CHANGED"
+)
+
 type lockedRuntimeNodeSession struct {
-	runtimeSessionID uuid.UUID
-	agentID          uuid.UUID
-	credentialID     uuid.UUID
-	coreInstanceID   *uuid.UUID
+	runtimeSessionID  uuid.UUID
+	agentID           uuid.UUID
+	credentialID      uuid.UUID
+	coreInstanceID    *uuid.UUID
+	workerID          string
+	sessionEpoch      int64
+	status            string
+	capacity          int32
+	inflight          int32
+	heartbeatAt       time.Time
+	disconnectedAt    *time.Time
+	protocolVersion   int32
+	contractID        string
+	contractDigest    string
+	certificateSerial string
+	resumeCapacity    *int32
 }
 
 type runtimeNodeRecord struct {
@@ -178,6 +199,215 @@ func (s *Service) DrainRuntimeNode(ctx context.Context, nodeID uuid.UUID) (*Runt
 	return s.mutateRuntimeNode(ctx, nodeID, "", false)
 }
 
+// ActivateRuntimeNode is a guarded rollback of an administrative drain. It is
+// deliberately separate from heartbeat/session attach: only a quiescent,
+// current, non-revoked Node can move backwards from draining to active.
+func (s *Service) ActivateRuntimeNode(ctx context.Context, nodeID uuid.UUID) (*RuntimeNodeListItem, error) {
+	if s == nil || s.pool == nil {
+		return nil, httpx.ServiceUnavailable("Runtime Node 管理能力不可用")
+	}
+	if nodeID == uuid.Nil {
+		return nil, httpx.BadRequest("node id 不是合法 uuid")
+	}
+	for attempt := 0; attempt < runtimeNodeMutationRetries; attempt++ {
+		item, err := s.activateRuntimeNodeOnce(ctx, nodeID)
+		if !errors.Is(err, errRuntimeNodeSessionScopeChanged) {
+			return item, err
+		}
+	}
+	return nil, httpx.NewError(
+		409, runtimeNodeErrorSessionChanged, "Runtime Node 的 Session 正在变化，请重试",
+	)
+}
+
+func (s *Service) activateRuntimeNodeOnce(ctx context.Context, nodeID uuid.UUID) (*RuntimeNodeListItem, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, httpx.Internal("激活 Runtime Node 失败")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Keep the global principal lock order shared with drain/revoke and Session
+	// lifecycle: Session -> Node -> Token -> Attachment.
+	sessions, err := lockRuntimeNodeSessions(ctx, tx, nodeID)
+	if err != nil {
+		return nil, httpx.Internal("锁定 Runtime Session 失败")
+	}
+	record, err := lockRuntimeNode(ctx, tx, nodeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("Runtime Node 不存在")
+	}
+	if err != nil {
+		return nil, httpx.Internal("锁定 Runtime Node 失败")
+	}
+	if record.status == "revoked" || record.revokedAt != nil {
+		return nil, httpx.NewError(409, runtimeNodeErrorRevoked, "已撤销的 Runtime Node 不可恢复")
+	}
+	if record.status != "draining" || record.drainingAt == nil {
+		return nil, httpx.NewError(409, runtimeNodeErrorNotDraining, "Runtime Node 当前不在排空状态")
+	}
+	credentialIDs := uniqueRuntimeNodeCredentials(sessions)
+	if err = lockRuntimeNodeTokens(ctx, tx, credentialIDs); err != nil {
+		return nil, httpx.NewError(409, runtimeNodeErrorIdentityInvalid, "Runtime credential 已失效")
+	}
+	sessionIDs := runtimeNodeSessionIDs(sessions)
+	if err = lockRuntimeNodeAttachments(ctx, tx, sessionIDs); err != nil {
+		return nil, httpx.Internal("锁定 Runtime attachment 失败")
+	}
+	changed, err := runtimeNodeSessionScopeChanged(ctx, tx, nodeID, sessionIDs)
+	if err != nil {
+		return nil, httpx.Internal("确认 Runtime Session 范围失败")
+	}
+	if changed {
+		return nil, errRuntimeNodeSessionScopeChanged
+	}
+
+	var databaseTime time.Time
+	var currentContractID, currentContractDigest string
+	if err = tx.QueryRow(ctx, `
+SELECT clock_timestamp(), runtime_contract_id, runtime_contract_digest
+FROM runtime_schema_contracts WHERE is_current`).Scan(
+		&databaseTime, &currentContractID, &currentContractDigest,
+	); err != nil {
+		return nil, httpx.Internal("读取 Runtime contract 失败")
+	}
+	if record.protocolVersion != RuntimeProtocolVersion ||
+		record.runtimeContractID != currentContractID ||
+		record.runtimeContractDigest != currentContractDigest ||
+		!containsRuntimeFeature(record.features, "session_drain") {
+		return nil, httpx.NewError(409, runtimeNodeErrorIdentityInvalid, "Runtime Node contract 不可激活")
+	}
+	var unfinished bool
+	if err = tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM run_attempts
+    WHERE node_id = $1 AND finished_at IS NULL
+)`, nodeID).Scan(&unfinished); err != nil {
+		return nil, httpx.Internal("检查 Runtime Attempt 失败")
+	}
+	if unfinished {
+		return nil, httpx.NewError(409, runtimeNodeErrorNotQuiescent, "Runtime Node 仍有未完成的 offer 或 Attempt")
+	}
+	if record.inflight != 0 {
+		return nil, httpx.NewError(409, runtimeNodeErrorNotQuiescent, "Runtime Node 仍有执行中的任务")
+	}
+	for _, session := range sessions {
+		if session.inflight != 0 {
+			return nil, httpx.NewError(409, runtimeNodeErrorNotQuiescent, "Runtime Session 仍有执行中的任务")
+		}
+	}
+
+	invalidLive, err := runtimeNodeHasInvalidLiveActivationSession(
+		ctx, tx, nodeID, databaseTime, currentContractID, currentContractDigest,
+	)
+	if err != nil {
+		return nil, httpx.Internal("验证 Runtime Session 身份失败")
+	}
+	if invalidLive {
+		return nil, httpx.NewError(409, runtimeNodeErrorIdentityInvalid, "Runtime Session 身份或 contract 已失效")
+	}
+	candidateCount, err := runtimeNodeActivationCandidateCount(
+		ctx, tx, nodeID, databaseTime, currentContractID, currentContractDigest,
+	)
+	if err != nil {
+		return nil, httpx.Internal("检查 Runtime Session 激活候选失败")
+	}
+	if candidateCount < 1 {
+		return nil, httpx.NewError(409, runtimeNodeErrorNotQuiescent, "Runtime Node 没有可安全恢复的在线 Session")
+	}
+	tag, err := tx.Exec(ctx, `
+UPDATE runtime_sessions s
+SET status = 'active',
+    capacity = s.resume_capacity,
+    drain_requested_at = NULL,
+    drain_deadline_at = NULL,
+    drain_reason_code = NULL,
+    resume_capacity = NULL,
+    updated_at = clock_timestamp()
+WHERE s.node_id = $1
+  AND s.status = 'draining'
+  AND s.inflight = 0
+  AND s.resume_capacity IS NOT NULL
+  AND s.attached_core_instance_id IS NOT NULL
+  AND s.disconnected_at IS NULL
+  AND s.heartbeat_at >= $2::timestamptz - ($3::bigint * INTERVAL '1 millisecond')
+  AND s.protocol_version = $4
+  AND s.runtime_contract_id = $5
+  AND s.runtime_contract_digest = $6
+	AND s.features @> ARRAY['session_drain']::text[]
+	AND EXISTS (
+	    SELECT 1 FROM runtime_nodes n
+	    WHERE n.node_id = s.node_id
+	      AND n.status = 'draining'
+	      AND n.revoked_at IS NULL
+	      AND n.device_certificate_serial = s.device_certificate_serial
+	      AND n.protocol_version = s.protocol_version
+	      AND n.runtime_contract_id = s.runtime_contract_id
+	      AND n.runtime_contract_digest = s.runtime_contract_digest
+	)
+	AND EXISTS (
+	    SELECT 1 FROM agent_tokens token
+	    WHERE token.id = s.credential_id
+	      AND token.agent_id = s.agent_id
+	      AND token.status = 'active_runtime'
+	      AND token.revoked_at IS NULL
+	      AND token.scopes @> ARRAY['agent:pull']::text[]
+	      AND (token.expires_at IS NULL OR token.expires_at > $2)
+	)
+  AND NOT EXISTS (
+      SELECT 1 FROM runtime_sessions newer
+      WHERE newer.node_id = s.node_id
+        AND newer.agent_id = s.agent_id
+        AND newer.worker_id = s.worker_id
+        AND newer.session_epoch > s.session_epoch
+        AND newer.status IN ('active', 'draining', 'offline')
+  )
+  AND EXISTS (
+      SELECT 1 FROM runtime_session_attachments attachment
+      WHERE attachment.runtime_session_id = s.runtime_session_id
+        AND attachment.core_instance_id = s.attached_core_instance_id
+        AND attachment.detached_at IS NULL
+  )`, nodeID, databaseTime, runtimeNodeLiveWindow.Milliseconds(),
+		RuntimeProtocolVersion, currentContractID, currentContractDigest)
+	if err != nil {
+		return nil, httpx.Internal("恢复 Runtime Session 失败")
+	}
+	if tag.RowsAffected() != int64(candidateCount) {
+		return nil, httpx.NewError(409, runtimeNodeErrorSessionChanged, "Runtime Session 激活范围发生变化")
+	}
+	if _, err = tx.Exec(
+		ctx,
+		`SELECT set_config('openlinker.runtime_node_activation', $1, true)`,
+		nodeID.String(),
+	); err != nil {
+		return nil, httpx.Internal("建立 Runtime Node 激活防线失败")
+	}
+	tag, err = tx.Exec(ctx, `
+UPDATE runtime_nodes
+SET status = 'active', draining_at = NULL, updated_at = clock_timestamp()
+WHERE node_id = $1 AND status = 'draining' AND revoked_at IS NULL`, nodeID)
+	if err != nil {
+		return nil, httpx.Internal("激活 Runtime Node 失败")
+	}
+	if tag.RowsAffected() != 1 {
+		return nil, httpx.NewError(409, runtimeNodeErrorSessionChanged, "Runtime Node 激活范围发生变化")
+	}
+
+	record, err = getRuntimeNodeRecord(ctx, tx, nodeID)
+	if err != nil {
+		return nil, httpx.Internal("读取 Runtime Node 失败")
+	}
+	activeSessions, activeAgents, err := runtimeNodeLiveCounts(ctx, tx, nodeID, runtimeNodeLiveWindow)
+	if err != nil {
+		return nil, httpx.Internal("读取 Runtime Session 失败")
+	}
+	item := runtimeNodeListItem(record, currentContractID, currentContractDigest, activeSessions, activeAgents)
+	if err = tx.Commit(ctx); err != nil {
+		return nil, httpx.Internal("激活 Runtime Node 失败")
+	}
+	return &item, nil
+}
+
 func (s *Service) RevokeRuntimeNode(
 	ctx context.Context,
 	nodeID uuid.UUID,
@@ -302,7 +532,10 @@ FROM runtime_schema_contracts WHERE is_current`).Scan(
 
 func lockRuntimeNodeSessions(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID) ([]lockedRuntimeNodeSession, error) {
 	rows, err := tx.Query(ctx, `
-SELECT runtime_session_id, agent_id, credential_id, attached_core_instance_id
+SELECT runtime_session_id, agent_id, credential_id, attached_core_instance_id,
+       worker_id, session_epoch, status, capacity, inflight, heartbeat_at,
+       disconnected_at, protocol_version, runtime_contract_id,
+       runtime_contract_digest, device_certificate_serial, resume_capacity
 FROM runtime_sessions
 WHERE node_id = $1
   AND status IN ('active', 'draining', 'offline')
@@ -315,7 +548,13 @@ FOR UPDATE`, nodeID)
 	items := make([]lockedRuntimeNodeSession, 0)
 	for rows.Next() {
 		var item lockedRuntimeNodeSession
-		if err = rows.Scan(&item.runtimeSessionID, &item.agentID, &item.credentialID, &item.coreInstanceID); err != nil {
+		if err = rows.Scan(
+			&item.runtimeSessionID, &item.agentID, &item.credentialID, &item.coreInstanceID,
+			&item.workerID, &item.sessionEpoch, &item.status, &item.capacity,
+			&item.inflight, &item.heartbeatAt, &item.disconnectedAt,
+			&item.protocolVersion, &item.contractID, &item.contractDigest,
+			&item.certificateSerial, &item.resumeCapacity,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -429,9 +668,15 @@ func drainLockedRuntimeNode(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, se
 	if len(sessionIDs) > 0 {
 		if _, err := tx.Exec(ctx, `
 UPDATE runtime_sessions
-SET status = 'draining', updated_at = clock_timestamp()
+SET drain_requested_at = COALESCE(drain_requested_at, clock_timestamp()),
+    drain_deadline_at = COALESCE(drain_deadline_at, clock_timestamp() + ($2::bigint * INTERVAL '1 millisecond')),
+    drain_reason_code = COALESCE(drain_reason_code, 'ADMIN_REQUESTED'),
+    resume_capacity = COALESCE(resume_capacity, capacity),
+    status = 'draining',
+    capacity = 0,
+    updated_at = clock_timestamp()
 WHERE runtime_session_id = ANY($1::uuid[])
-  AND status = 'active'`, sessionIDs); err != nil {
+	  AND status IN ('active', 'draining')`, sessionIDs, runtimeNodeDrainDeadline.Milliseconds()); err != nil {
 			return err
 		}
 	}
@@ -443,6 +688,134 @@ SET status = 'draining',
 WHERE node_id = $1
   AND status IN ('active', 'draining')`, nodeID)
 	return err
+}
+
+func runtimeNodeHasInvalidLiveActivationSession(
+	ctx context.Context,
+	tx pgx.Tx,
+	nodeID uuid.UUID,
+	databaseTime time.Time,
+	contractID, contractDigest string,
+) (bool, error) {
+	var invalid bool
+	err := tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM runtime_sessions s
+    JOIN runtime_nodes n ON n.node_id = s.node_id
+    WHERE s.node_id = $1
+      AND s.status IN ('active', 'draining')
+      AND s.attached_core_instance_id IS NOT NULL
+      AND s.disconnected_at IS NULL
+      AND s.heartbeat_at >= $2::timestamptz - ($3::bigint * INTERVAL '1 millisecond')
+      AND (
+          s.status <> 'draining'
+          OR
+          s.inflight <> 0
+          OR s.capacity <> 0
+          OR s.resume_capacity IS NULL
+          OR s.drain_requested_at IS NULL
+          OR s.drain_deadline_at IS NULL
+          OR s.drain_reason_code IS NULL
+          OR s.protocol_version <> $4
+          OR s.runtime_contract_id <> $5
+          OR s.runtime_contract_digest <> $6
+          OR s.device_certificate_serial <> n.device_certificate_serial
+          OR NOT (s.features @> ARRAY['session_drain']::text[])
+          OR EXISTS (
+              SELECT 1 FROM runtime_sessions newer
+              WHERE newer.node_id = s.node_id
+                AND newer.agent_id = s.agent_id
+                AND newer.worker_id = s.worker_id
+                AND newer.session_epoch > s.session_epoch
+                AND newer.status IN ('active', 'draining', 'offline')
+          )
+          OR NOT EXISTS (
+              SELECT 1 FROM agent_tokens token
+              WHERE token.id = s.credential_id
+                AND token.agent_id = s.agent_id
+                AND token.status = 'active_runtime'
+                AND token.revoked_at IS NULL
+                AND token.scopes @> ARRAY['agent:pull']::text[]
+                AND (token.expires_at IS NULL OR token.expires_at > $2)
+          )
+          OR NOT EXISTS (
+              SELECT 1 FROM runtime_session_attachments attachment
+              WHERE attachment.runtime_session_id = s.runtime_session_id
+                AND attachment.core_instance_id = s.attached_core_instance_id
+                AND attachment.detached_at IS NULL
+          )
+      )
+)`, nodeID, databaseTime, runtimeNodeLiveWindow.Milliseconds(),
+		RuntimeProtocolVersion, contractID, contractDigest).Scan(&invalid)
+	return invalid, err
+}
+
+func runtimeNodeActivationCandidateCount(
+	ctx context.Context,
+	tx pgx.Tx,
+	nodeID uuid.UUID,
+	databaseTime time.Time,
+	contractID, contractDigest string,
+) (int32, error) {
+	var count int32
+	err := tx.QueryRow(ctx, `
+SELECT COUNT(*)::int
+FROM runtime_sessions s
+JOIN runtime_nodes n ON n.node_id = s.node_id
+JOIN agent_tokens token
+  ON token.id = s.credential_id
+ AND token.agent_id = s.agent_id
+WHERE s.node_id = $1
+  AND s.status = 'draining'
+  AND s.inflight = 0
+  AND s.capacity = 0
+  AND s.resume_capacity IS NOT NULL
+  AND s.drain_requested_at IS NOT NULL
+  AND s.drain_deadline_at IS NOT NULL
+  AND s.drain_reason_code IS NOT NULL
+  AND s.attached_core_instance_id IS NOT NULL
+  AND s.disconnected_at IS NULL
+  AND s.heartbeat_at >= $2::timestamptz - ($3::bigint * INTERVAL '1 millisecond')
+  AND s.protocol_version = $4
+  AND s.runtime_contract_id = $5
+  AND s.runtime_contract_digest = $6
+  AND s.features @> ARRAY['session_drain']::text[]
+  AND n.status = 'draining'
+  AND n.revoked_at IS NULL
+  AND n.device_certificate_serial = s.device_certificate_serial
+  AND n.protocol_version = s.protocol_version
+  AND n.runtime_contract_id = s.runtime_contract_id
+  AND n.runtime_contract_digest = s.runtime_contract_digest
+  AND token.status = 'active_runtime'
+  AND token.revoked_at IS NULL
+  AND token.scopes @> ARRAY['agent:pull']::text[]
+  AND (token.expires_at IS NULL OR token.expires_at > $2)
+  AND NOT EXISTS (
+      SELECT 1 FROM runtime_sessions newer
+      WHERE newer.node_id = s.node_id
+        AND newer.agent_id = s.agent_id
+        AND newer.worker_id = s.worker_id
+        AND newer.session_epoch > s.session_epoch
+        AND newer.status IN ('active', 'draining', 'offline')
+  )
+  AND EXISTS (
+      SELECT 1 FROM runtime_session_attachments attachment
+      WHERE attachment.runtime_session_id = s.runtime_session_id
+        AND attachment.core_instance_id = s.attached_core_instance_id
+        AND attachment.detached_at IS NULL
+  )`, nodeID, databaseTime, runtimeNodeLiveWindow.Milliseconds(),
+		RuntimeProtocolVersion, contractID, contractDigest).Scan(&count)
+	return count, err
+}
+
+func containsRuntimeFeature(features []string, feature string) bool {
+	for _, candidate := range features {
+		if candidate == feature {
+			return true
+		}
+	}
+	return false
 }
 
 func revokeLockedRuntimeNode(

@@ -43,16 +43,32 @@ type ExecutionStartResponse struct {
 }
 
 type ExecutionStatusResponse struct {
-	ExternalRequestID string                        `json:"external_request_id"`
-	ExecutionID       string                        `json:"execution_id,omitempty"`
-	TargetType        string                        `json:"target_type"`
-	Status            string                        `json:"status"`
-	Output            map[string]interface{}        `json:"output,omitempty"`
-	Artifacts         []runtime.RunArtifactResponse `json:"artifacts"`
-	ErrorCode         string                        `json:"error_code,omitempty"`
-	ErrorMessage      string                        `json:"error_message,omitempty"`
-	StartedAt         string                        `json:"started_at,omitempty"`
-	FinishedAt        string                        `json:"finished_at,omitempty"`
+	ExternalRequestID string                         `json:"external_request_id"`
+	ExecutionID       string                         `json:"execution_id,omitempty"`
+	TargetType        string                         `json:"target_type,omitempty"`
+	Status            string                         `json:"status"`
+	Output            map[string]interface{}         `json:"output,omitempty"`
+	Artifacts         []runtime.RunArtifactResponse  `json:"artifacts"`
+	ErrorCode         string                         `json:"error_code,omitempty"`
+	ErrorMessage      string                         `json:"error_message,omitempty"`
+	StartedAt         string                         `json:"started_at,omitempty"`
+	FinishedAt        string                         `json:"finished_at,omitempty"`
+	Cancellation      *ExecutionCancellationResponse `json:"cancellation,omitempty"`
+}
+
+type ExecutionCancelRequest struct {
+	ReasonCode string `json:"reason_code"`
+}
+
+type ExecutionCancellationResponse struct {
+	CancellationID string `json:"cancellation_id"`
+	State          string `json:"state"`
+	ReasonCode     string `json:"reason_code"`
+	ExecutionKind  string `json:"execution_kind,omitempty"`
+	ExecutionID    string `json:"execution_id,omitempty"`
+	RequestedAt    string `json:"requested_at"`
+	AppliedAt      string `json:"applied_at,omitempty"`
+	FinishedAt     string `json:"finished_at,omitempty"`
 }
 
 type SafeExecutionError struct {

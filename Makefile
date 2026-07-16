@@ -1,4 +1,4 @@
-.PHONY: help dev build run bootstrap-admin runtime-node-issue runtime-node-inspect test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status migration-063-test migration-069-test migration-070-test migration-071-test migration-074-test migration-075-test migration-076-test deps runtime-loadtest
+.PHONY: help dev build run bootstrap-admin runtime-node-issue runtime-node-inspect test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status migration-063-test migration-069-test migration-070-test migration-071-test migration-074-test migration-075-test migration-076-test migration-077-test deps runtime-loadtest
 
 ENV_FILE ?= .env
 API_URL ?= http://localhost:8080
@@ -81,3 +81,6 @@ migration-075-test: ## 在一次性 PostgreSQL 16 中验证 Runtime N/N-1 升级
 
 migration-076-test: ## 在一次性 PostgreSQL 16 中验证 cancellation terminal reaper 升级、回退与重放
 	./bin/test-migration-076.sh
+
+migration-077-test: ## 在一次性 PostgreSQL 16 中验证 External Execution cancel/launch fence 升级与 fail-closed 回退
+	./bin/test-migration-077.sh

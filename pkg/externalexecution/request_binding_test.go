@@ -565,6 +565,7 @@ type countingExecutionHandlerService struct {
 	validateCalls atomic.Int32
 	startCalls    atomic.Int32
 	getCalls      atomic.Int32
+	cancelCalls   atomic.Int32
 }
 
 func (s *countingExecutionHandlerService) ValidateTarget(context.Context, *Principal, *TargetValidationRequest) (*TargetValidationResponse, error) {
@@ -579,5 +580,10 @@ func (s *countingExecutionHandlerService) StartExecution(context.Context, *Princ
 
 func (s *countingExecutionHandlerService) GetExecution(context.Context, *Principal, string) (*ExecutionStatusResponse, error) {
 	s.getCalls.Add(1)
+	return &ExecutionStatusResponse{}, nil
+}
+
+func (s *countingExecutionHandlerService) CancelExecution(context.Context, *Principal, string, *ExecutionCancelRequest) (*ExecutionStatusResponse, error) {
+	s.cancelCalls.Add(1)
 	return &ExecutionStatusResponse{}, nil
 }

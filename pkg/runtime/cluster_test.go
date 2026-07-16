@@ -27,7 +27,7 @@ func TestRuntimeSchemaChecksumMatchesCurrentContractTuple(t *testing.T) {
 }
 
 func TestRuntimeSchemaIdentityTracksTerminalCancellationReapMigration(t *testing.T) {
-	if RuntimeSchemaVersion != 76 || RuntimeSchemaMigrationName != "076_runtime_cancellation_terminal_reap" {
+	if RuntimeSchemaVersion != 77 || RuntimeSchemaMigrationName != "077_external_execution_cancellation" {
 		t.Fatalf("runtime schema identity = %d:%s", RuntimeSchemaVersion, RuntimeSchemaMigrationName)
 	}
 }
