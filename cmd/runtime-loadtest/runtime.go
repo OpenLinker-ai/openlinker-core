@@ -952,10 +952,12 @@ func (w *runtimeWorker) run(ctx context.Context) {
 		// The replacement transport is not visible to Event/Result senders until
 		// Core has reconciled every durable Attempt for this Session.
 		w.publishConnection(connection)
+		w.metrics.c.workersConnected.Add(1)
 		w.readyOnce.Do(func() {
 			w.metrics.c.workersReady.Add(1)
 		})
 		serveErr := w.serve(ctx, connection, fallbackUntil)
+		w.metrics.c.workersConnected.Add(-1)
 		w.clearConnection(connection)
 		w.closeConnection(connection, "transport_switch")
 		if ctx.Err() != nil {

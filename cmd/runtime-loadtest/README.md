@@ -165,3 +165,36 @@ requires `redis_signal_outage_observed: true` and a positive
 
 Reports never contain Agent Tokens, private-key material, or certificate
 contents.
+
+## Slow connection capacity probe
+
+`-connection-capacity` retains every accepted mTLS WebSocket while adding the
+next batch. It checks Core health/readiness and requires at least 99% of the
+target workers to remain connected. The default profile adds 25 workers per
+stage at two connections per second, observes each stage for 30 seconds, runs a
+small functional workload, and confirms the highest candidate for five
+minutes.
+
+Choose enough Agents to keep each Agent at or below the ten-token limit. The
+overall timeout must cover the complete ramp and hold periods; validation
+prints the minimum value for the selected target.
+
+```bash
+go run ./cmd/runtime-loadtest \
+  -api http://127.0.0.1:8080/api/v1 \
+  -auth-api https://cloud.example.test/api/v1 \
+  -runtime-url https://127.0.0.1:8443 \
+  -transport ws -scenarios ws-only \
+  -connection-capacity \
+  -agents 60 -workers-per-agent 10 -node-capacity 600 \
+  -connection-step-size 25 -connection-step-hold 30s \
+  -connect-stagger 500ms \
+  -runs 1 -run-concurrency 1 \
+  -hold-after-completion 5m -timeout 30m
+```
+
+The JSON `connection_capacity_report` contains every accepted or rejected
+stage, the first rejected target, the five-minute confirmed stable value, and
+the recommended value after retaining 20% operating headroom. Reaching the
+configured target without a rejected stage is a lower bound, not proof that
+the host cannot accept more connections.

@@ -67,6 +67,9 @@ type config struct {
 	HeartbeatInterval     time.Duration
 	WSProbeInterval       time.Duration
 	ConnectStagger        time.Duration
+	ConnectionCapacity    bool
+	ConnectionStepSize    int
+	ConnectionStepHold    time.Duration
 	SwitchAfter           time.Duration
 	SwitchBackAfter       time.Duration
 	CancelCount           int
@@ -337,6 +340,7 @@ func (t *runTracker) phaseRunIDs(phase string) []string {
 
 type counters struct {
 	workersReady      atomic.Int64
+	workersConnected  atomic.Int64
 	assignments       atomic.Int64
 	workerErrors      atomic.Int64
 	unknownAssignment atomic.Int64
@@ -351,6 +355,8 @@ type metrics struct {
 	errorSamples []string
 	c            counters
 	runtime      *runtimeMetrics
+	capacity     *connectionCapacityReport
+	connectedEnd int64
 }
 
 type phaseTimestamps struct {
@@ -734,15 +740,16 @@ func main() {
 	workerCtx, stopWorkers := context.WithCancel(ctx)
 	var workerWG sync.WaitGroup
 	phases.workersStart = time.Now()
-	workerOrdinal := 0
-	for _, agent := range agents {
-		for i, token := range agent.RuntimeKeys {
-			connectDelay := time.Duration(0)
-			if cfg.ConnectStagger > 0 {
-				connectDelay = time.Duration(workerOrdinal) * cfg.ConnectStagger
-			}
-			workerOrdinal++
-			worker, workerErr := newRuntimeWorker(cfg, agent, token, i, tracker, m)
+	specs := makeRuntimeWorkerSpecs(agents)
+	var capacityErr error
+	if cfg.ConnectionCapacity {
+		m.capacity, capacityErr = runConnectionCapacityStages(
+			workerCtx, cfg, coreAPI, specs, tracker, m, &workerWG,
+		)
+	} else {
+		for workerOrdinal, spec := range specs {
+			connectDelay := time.Duration(workerOrdinal) * cfg.ConnectStagger
+			worker, workerErr := newRuntimeWorker(cfg, spec.agent, spec.token, spec.workerIndex, tracker, m)
 			if workerErr != nil {
 				stopWorkers()
 				workerWG.Wait()
@@ -760,22 +767,23 @@ func main() {
 				worker.run(workerCtx)
 			}(worker, connectDelay)
 		}
+		if err := waitForWorkersReady(ctx, cfg, m, len(specs)); err != nil {
+			stopWorkers()
+			workerWG.Wait()
+			fail(err)
+		}
 	}
-
-	if err := waitForWorkersReady(ctx, cfg, m, len(agents)*cfg.WorkersPerAgent); err != nil {
-		stopWorkers()
-		workerWG.Wait()
-		fail(err)
+	if capacityErr == nil {
+		phases.workersReady = time.Now()
 	}
-	phases.workersReady = time.Now()
-	if cfg.hasScenario("redis-signal-outage") {
+	if capacityErr == nil && cfg.hasScenario("redis-signal-outage") {
 		if err := waitForRedisSignalOutage(ctx, coreAPI, cfg.RedisOutageObserve, m.runtime); err != nil {
 			stopWorkers()
 			workerWG.Wait()
 			fail(err)
 		}
 	}
-	if cfg.HistoryPerAgent > 0 {
+	if capacityErr == nil && cfg.HistoryPerAgent > 0 {
 		phases.historyStart = time.Now()
 		if err := submitRuns(ctx, coreAPI, cfg, agents, tracker, m, "history", cfg.HistoryPerAgent*len(agents), 1); err != nil {
 			stopWorkers()
@@ -792,16 +800,21 @@ func main() {
 
 	measuredStart := time.Now()
 	phases.measuredStart = measuredStart
-	if err := submitRuns(ctx, coreAPI, cfg, agents, tracker, m, "measured", cfg.Runs, cfg.RunConcurrency); err != nil {
+	var waitErr error
+	if capacityErr != nil {
+		waitErr = capacityErr
+	} else if err := submitRuns(ctx, coreAPI, cfg, agents, tracker, m, "measured", cfg.Runs, cfg.RunConcurrency); err != nil {
 		stopWorkers()
 		workerWG.Wait()
 		fail(err)
 	}
 	var cancelErr error
-	if cfg.CancelCount > 0 {
+	if waitErr == nil && cfg.CancelCount > 0 {
 		cancelErr = driveRuntimeCancellations(ctx, coreAPI, cfg, accounts, tracker, m)
 	}
-	waitErr := waitForMeasuredPhase(ctx, cfg, tracker, cfg.Runs, cfg.Timeout)
+	if waitErr == nil {
+		waitErr = waitForMeasuredPhase(ctx, cfg, tracker, cfg.Runs, cfg.Timeout)
+	}
 	if waitErr == nil && cancelErr != nil {
 		waitErr = cancelErr
 	}
@@ -813,10 +826,18 @@ func main() {
 	if waitErr == nil && cfg.HoldAfter > 0 {
 		holdStart = time.Now()
 		phases.holdStart = holdStart
-		holdErr = holdContext(ctx, cfg.HoldAfter)
+		if m.capacity != nil {
+			holdErr = confirmConnectionCapacity(ctx, cfg.HoldAfter, coreAPI, m, m.capacity)
+		} else {
+			holdErr = holdContext(ctx, cfg.HoldAfter)
+		}
 		holdEnd = time.Now()
 		phases.holdEnd = holdEnd
 	}
+	if m.capacity != nil {
+		m.capacity.FinalConnected = m.c.workersConnected.Load()
+	}
+	m.connectedEnd = m.c.workersConnected.Load()
 	stopWorkers()
 	workerWG.Wait()
 	m.endedAt = time.Now()
@@ -886,6 +907,9 @@ func parseFlags() config {
 	flag.DurationVar(&cfg.HeartbeatInterval, "heartbeat-interval", durationEnv("OPENLINKER_RUNTIME_LOADTEST_HEARTBEAT_INTERVAL", 15*time.Second), "Pull session heartbeat / WS liveness interval")
 	flag.DurationVar(&cfg.WSProbeInterval, "ws-probe-interval", durationEnv("OPENLINKER_RUNTIME_LOADTEST_WS_PROBE_INTERVAL", 10*time.Second), "auto-mode interval before probing WebSocket recovery")
 	flag.DurationVar(&cfg.ConnectStagger, "connect-stagger", durationEnv("OPENLINKER_RUNTIME_LOADTEST_CONNECT_STAGGER", 0), "delay increment between Runtime worker connections")
+	flag.BoolVar(&cfg.ConnectionCapacity, "connection-capacity", boolEnv("OPENLINKER_RUNTIME_LOADTEST_CONNECTION_CAPACITY", false), "slow stair-step authenticated WebSocket capacity probe")
+	flag.IntVar(&cfg.ConnectionStepSize, "connection-step-size", intEnv("OPENLINKER_RUNTIME_LOADTEST_CONNECTION_STEP_SIZE", 0), "workers added per capacity stage; default 25")
+	flag.DurationVar(&cfg.ConnectionStepHold, "connection-step-hold", durationEnv("OPENLINKER_RUNTIME_LOADTEST_CONNECTION_STEP_HOLD", 0), "observation hold per capacity stage; default 30s")
 	flag.DurationVar(&cfg.SwitchAfter, "switch-after", durationEnv("OPENLINKER_RUNTIME_LOADTEST_SWITCH_AFTER", 5*time.Second), "planned first transport/Core switch after worker start")
 	flag.DurationVar(&cfg.SwitchBackAfter, "switch-back-after", durationEnv("OPENLINKER_RUNTIME_LOADTEST_SWITCH_BACK_AFTER", 10*time.Second), "planned Pull→WebSocket switch after worker start")
 	flag.IntVar(&cfg.CancelCount, "cancel-count", intEnv("OPENLINKER_RUNTIME_LOADTEST_CANCEL_COUNT", 0), "number of measured Runs to cancel; cancel-race defaults to 1000")
@@ -939,6 +963,33 @@ func (c *config) validate() error {
 	}
 	if c.HoldAfter < 0 || c.SubmitDuration < 0 || c.ConnectStagger < 0 {
 		return errors.New("hold/submit/connect durations cannot be negative")
+	}
+	if c.ConnectionStepSize < 0 || c.ConnectionStepHold < 0 {
+		return errors.New("connection capacity step size/hold cannot be negative")
+	}
+	if c.ConnectionCapacity {
+		if c.Transport != transportWS {
+			return errors.New("connection-capacity requires transport=ws")
+		}
+		if c.ConnectionStepSize == 0 {
+			c.ConnectionStepSize = 25
+		}
+		if c.ConnectionStepHold == 0 {
+			c.ConnectionStepHold = 30 * time.Second
+		}
+		if c.ConnectStagger == 0 {
+			c.ConnectStagger = 500 * time.Millisecond
+		}
+		if c.HoldAfter == 0 {
+			c.HoldAfter = 5 * time.Minute
+		}
+		minimumTimeout := minimumConnectionCapacityTimeout(*c)
+		if c.Timeout < minimumTimeout {
+			return fmt.Errorf(
+				"connection-capacity timeout must be at least %s for the configured ramp and holds",
+				minimumTimeout.Round(time.Second),
+			)
+		}
 	}
 	if c.PullWait < time.Second || c.PullWait > time.Duration(openlinker.RuntimeMaxPullWaitSeconds)*time.Second {
 		return fmt.Errorf("pull-wait must be between 1s and %ds", openlinker.RuntimeMaxPullWaitSeconds)
@@ -1611,6 +1662,7 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 		"run_id":                  runID,
 		"account_run_id":          accountRunID,
 		"api_root":                cfg.APIRoot,
+		"auth_api_root":           cfg.AuthAPIRoot,
 		"runtime_origins":         runtimeOrigins,
 		"transport":               cfg.Transport,
 		"scenarios":               cfg.Scenarios,
@@ -1635,6 +1687,9 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 		"heartbeat_interval_ms":   ms(cfg.HeartbeatInterval),
 		"ws_probe_interval_ms":    ms(cfg.WSProbeInterval),
 		"connect_stagger_ms":      ms(cfg.ConnectStagger),
+		"connection_capacity":     cfg.ConnectionCapacity,
+		"connection_step_size":    cfg.ConnectionStepSize,
+		"connection_step_hold_ms": ms(cfg.ConnectionStepHold),
 		"hold_after_ms":           ms(cfg.HoldAfter),
 		"hold_actual_ms":          holdActual,
 		"a2a_context":             cfg.ContextMode,
@@ -1657,6 +1712,7 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 		"http_status_by_op":       statusByOp,
 		"worker_counts": map[string]int64{
 			"ready":              m.c.workersReady.Load(),
+			"connected_at_end":   m.connectedEnd,
 			"assignments":        m.c.assignments.Load(),
 			"worker_errors":      m.c.workerErrors.Load(),
 			"unknown_assignment": m.c.unknownAssignment.Load(),
@@ -1670,6 +1726,9 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 	}
 	if holdErr != nil {
 		report["hold_error"] = holdErr.Error()
+	}
+	if m.capacity != nil {
+		report["connection_capacity_report"] = m.capacity
 	}
 	report["phase_timestamps"] = phaseTimestampReport(phases)
 	report["phase_durations_ms"] = phaseDurationReport(phases)

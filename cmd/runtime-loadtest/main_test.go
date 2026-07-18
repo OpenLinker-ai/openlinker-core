@@ -239,6 +239,91 @@ func TestConfigValidateDerivesSetupConcurrency(t *testing.T) {
 	}
 }
 
+func TestConfigValidateDefaultsSlowConnectionCapacityProfile(t *testing.T) {
+	directory := t.TempDir()
+	cert := filepath.Join(directory, "node.crt")
+	key := filepath.Join(directory, "node.key")
+	ca := filepath.Join(directory, "server-ca.crt")
+	for _, path := range []string{cert, key, ca} {
+		if err := os.WriteFile(path, []byte("test"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config{
+		APIRoot: "http://127.0.0.1:8080/api/v1", RuntimeURL: "https://runtime.example.test",
+		Transport: transportWS, Scenarios: []string{"ws-only"}, ConnectionCapacity: true,
+		NodeID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", NodeVersion: runtimeLoadtestNodeVersion,
+		MTLSCertFile: cert, MTLSKeyFile: key, MTLSCAFile: ca, StateDir: directory,
+		Users: 1, Agents: 3, WorkersPerAgent: 10, Runs: 1,
+		RunConcurrency: 1, SetupConcurrency: 1,
+		Timeout: 10 * time.Minute, RequestTimeout: time.Second, ReadyTimeout: time.Second,
+		PullWait: time.Second, CommandWait: time.Second,
+		HeartbeatInterval: time.Second, WSProbeInterval: time.Second,
+		CancelConcurrency: 1,
+	}
+
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate error = %v", err)
+	}
+	if cfg.ConnectionStepSize != 25 {
+		t.Fatalf("connection step size = %d, want 25", cfg.ConnectionStepSize)
+	}
+	if cfg.ConnectionStepHold != 30*time.Second {
+		t.Fatalf("connection step hold = %s, want 30s", cfg.ConnectionStepHold)
+	}
+	if cfg.ConnectStagger != 500*time.Millisecond {
+		t.Fatalf("connect stagger = %s, want 500ms", cfg.ConnectStagger)
+	}
+	if cfg.HoldAfter != 5*time.Minute {
+		t.Fatalf("final hold = %s, want 5m", cfg.HoldAfter)
+	}
+}
+
+func TestRecommendedConnectionCapacityKeepsTwentyPercentHeadroom(t *testing.T) {
+	if got := recommendedConnectionCapacity(359, 25); got != 275 {
+		t.Fatalf("recommended capacity = %d, want 275", got)
+	}
+	if got := minimumStableConnections(101); got != 100 {
+		t.Fatalf("minimum stable connections = %d, want 100", got)
+	}
+}
+
+func TestObserveConnectionCapacityStageUsesCoreHealthAndRetention(t *testing.T) {
+	var healthCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz", "/readyz":
+			healthCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	api := &apiClient{root: server.URL + "/api/v1", client: server.Client()}
+
+	stableMetrics := &metrics{}
+	stableMetrics.c.workersConnected.Store(100)
+	stableStage := connectionCapacityStage{}
+	if err := observeConnectionCapacityStage(
+		context.Background(), 30*time.Millisecond, 100, api, stableMetrics, &stableStage,
+	); err != nil {
+		t.Fatalf("stable stage error = %v", err)
+	}
+	if stableStage.HealthSamples < 2 || healthCalls.Load() < 4 {
+		t.Fatalf("health samples = %d calls = %d", stableStage.HealthSamples, healthCalls.Load())
+	}
+
+	unstableMetrics := &metrics{}
+	unstableMetrics.c.workersConnected.Store(98)
+	unstableStage := connectionCapacityStage{}
+	if err := observeConnectionCapacityStage(
+		context.Background(), 50*time.Millisecond, 100, api, unstableMetrics, &unstableStage,
+	); err == nil {
+		t.Fatal("unstable stage was accepted")
+	}
+}
+
 func TestRunSetupJobsProcessesAllIndexes(t *testing.T) {
 	var seen atomic.Int32
 	err := runSetupJobs(context.Background(), 4, 11, func(ctx context.Context, index int) error {
