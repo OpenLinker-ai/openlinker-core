@@ -491,11 +491,11 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 				runtime_session_id, node_id, offered_by_core_instance_id,
 				attached_core_instance_id, offered_at, offer_expires_at,
 				accepted_at, lease_expires_at, attempt_deadline_at,
-				slot_acquired_at, active_runtime_session_id
+				slot_acquired_at, active_runtime_session_id, runtime_attachment_id
 			) VALUES (
 				$1, $2, $3, 1, 1, 'runtime',
 				$4, 1, $5, $6, $7, $8, $9, $9, $10, $11, $10, $12, $13,
-				$10, $7
+				$10, $7, $14
 			)`,
 			attemptID,
 			runID,
@@ -510,6 +510,7 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 			offerExpiresAt,
 			leaseExpiresAt,
 			attemptDeadlineAt,
+			attachmentID,
 		); err != nil {
 			return fmt.Errorf("insert event-store attempt: %w", err)
 		}
@@ -659,11 +660,11 @@ func rotateEventStoreAttempt(t *testing.T, pool *pgxpool.Pool, fixture eventStor
 				runtime_session_id, node_id, offered_by_core_instance_id,
 				attached_core_instance_id, offered_at, offer_expires_at,
 				accepted_at, lease_expires_at, attempt_deadline_at,
-				slot_acquired_at, active_runtime_session_id
+				slot_acquired_at, active_runtime_session_id, runtime_attachment_id
 			) VALUES (
 				$1, $2, $3, 2, 2, 'runtime',
 				$4, 2, $5, $6, $7, $8, $9, $9, $10, $11, $10, $12, $13,
-				$10, $7
+				$10, $7, $14
 			)`,
 			newAttemptID,
 			fixture.identity.RunID,
@@ -678,6 +679,7 @@ func rotateEventStoreAttempt(t *testing.T, pool *pgxpool.Pool, fixture eventStor
 			offeredAt.Add(30*time.Second),
 			leaseExpiresAt,
 			attemptDeadlineAt,
+			*fixture.principal.AttachmentID,
 		); err != nil {
 			return fmt.Errorf("insert rotated event-store attempt: %w", err)
 		}

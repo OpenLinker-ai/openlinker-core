@@ -21,7 +21,7 @@ func scanRunAttempt(row interface{ Scan(dest ...any) error }, a *RunAttempt) err
 		&a.ResultFingerprint, &a.ResultClassification, &a.ResultAcknowledgedAt,
 		&a.LastClientEventSeq, &a.FinalClientEventSeq, &a.ErrorCode,
 		&a.ErrorDetailRedacted, &a.CreatedAt, &a.SlotAcquiredAt,
-		&a.SlotReleasedAt, &a.ActiveRuntimeSessionID,
+		&a.SlotReleasedAt, &a.ActiveRuntimeSessionID, &a.RuntimeAttachmentID,
 	)
 }
 
@@ -202,6 +202,39 @@ func (q *Queries) ListRunAttemptsByRun(ctx context.Context, runID uuid.UUID) ([]
 		items = append(items, attempt)
 	}
 	return items, rows.Err()
+}
+
+const getRunAttemptTransportEvidence = `-- name: GetRunAttemptTransportEvidence :one
+SELECT attachment.transport,
+       attachment.transport_reason,
+       attachment.transport_changed_at
+FROM runs run
+JOIN run_attempts attempt
+  ON attempt.run_id = run.id
+ AND attempt.id = COALESCE(run.active_attempt_id, run.latest_attempt_id)
+JOIN runtime_session_attachments attachment
+  ON attachment.id = attempt.runtime_attachment_id
+ AND attachment.runtime_session_id = attempt.runtime_session_id
+WHERE run.id = $1
+  AND attempt.executor_type = 'runtime'
+  AND attempt.accepted_at IS NOT NULL
+  AND attachment.transport IN ('websocket', 'long_poll')`
+
+type GetRunAttemptTransportEvidenceRow struct {
+	Transport          string    `db:"transport" json:"transport"`
+	TransportReason    *string   `db:"transport_reason" json:"transport_reason"`
+	TransportChangedAt time.Time `db:"transport_changed_at" json:"transport_changed_at"`
+}
+
+func (q *Queries) GetRunAttemptTransportEvidence(ctx context.Context, runID uuid.UUID) (GetRunAttemptTransportEvidenceRow, error) {
+	row := q.db.QueryRow(ctx, getRunAttemptTransportEvidence, runID)
+	var evidence GetRunAttemptTransportEvidenceRow
+	err := row.Scan(
+		&evidence.Transport,
+		&evidence.TransportReason,
+		&evidence.TransportChangedAt,
+	)
+	return evidence, err
 }
 
 const acceptRunAttempt = `-- name: AcceptRunAttempt :one

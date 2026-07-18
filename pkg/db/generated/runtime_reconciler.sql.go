@@ -341,7 +341,7 @@ RETURNING a.id, a.run_id, a.agent_id, a.offer_no, a.attempt_no,
           a.result_acknowledged_at, a.last_client_event_seq,
           a.final_client_event_seq, a.error_code, a.error_detail_redacted,
           a.created_at, a.slot_acquired_at, a.slot_released_at,
-          a.active_runtime_session_id`
+          a.active_runtime_session_id, a.runtime_attachment_id`
 
 type FinishRuntimeReconciledAttemptParams struct {
 	Outcome      string    `db:"outcome" json:"outcome"`

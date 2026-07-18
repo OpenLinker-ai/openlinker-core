@@ -882,6 +882,7 @@ func (s *Service) createRunningRun(
 	// read required by PostgreSQL READ COMMITTED snapshot semantics.
 	created := false
 	replayed := false
+	var createdRun db.Run
 	var taskCallbackResp *RunTaskCallbackResponse
 	err = pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{
 		IsoLevel:   pgx.ReadCommitted,
@@ -952,6 +953,7 @@ func (s *Service) createRunningRun(
 			return createErr
 		}
 		created = true
+		createdRun = run
 		runID = run.ID
 		if opts.afterCreate != nil {
 			if createErr = opts.afterCreate(ctx, tx, runID); createErr != nil {
@@ -1103,20 +1105,14 @@ func (s *Service) createRunningRun(
 		delegation:       opts.delegation,
 		runtimeAvailable: runtimeAvailable,
 	}
-	resp := &RunResponse{
-		RunID:               runID.String(),
-		AgentID:             agentID.String(),
-		AgentConnectionMode: agent.ConnectionMode,
-		Status:              "running",
-		CostCents:           cost,
-		Source:              source,
-		RuntimeContractID:   RuntimeContractID,
-		DispatchState:       string(RuntimeDispatchPending),
-		AttemptCount:        0,
-		MaxAttempts:         maxAttempts,
-		A2AContext:          runA2AContextResponseFromRequest(runA2AContext),
-		TaskCallback:        taskCallbackResp,
+	resp := runToResponse(&createdRun)
+	resp.AgentSlug = agent.Slug
+	resp.AgentName = agent.Name
+	if resp.AgentConnectionMode == "" {
+		resp.AgentConnectionMode = agent.ConnectionMode
 	}
+	resp.A2AContext = runA2AContextResponseFromRequest(runA2AContext)
+	resp.TaskCallback = taskCallbackResp
 	if opts.replayOfRunID != nil {
 		resp.ReplayOfRunID = opts.replayOfRunID.String()
 	}
@@ -1424,11 +1420,17 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 	if agentErr == nil {
 		resp.AgentSlug = agent.Slug
 		resp.AgentName = agent.Name
-		resp.AgentConnectionMode = agent.ConnectionMode
+		if resp.AgentConnectionMode == "" {
+			resp.AgentConnectionMode = agent.ConnectionMode
+		}
 	} else {
 		s.attachRunAgentSummary(ctx, r.AgentID, resp)
 	}
 	s.attachRunA2AContext(ctx, runID, resp)
+	if err := s.attachRunTransportEvidence(ctx, runID, resp); err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.GetRun: GetRunAttemptTransportEvidence")
+		return nil, httpx.Internal("查询调用传输证据失败")
+	}
 	s.attachRunRequirementEvidence(ctx, runID, resp)
 	s.attachRunEvidenceSummary(ctx, runID, resp)
 	delegation, err := s.queries.GetRunDelegationByChild(ctx, runID)
@@ -1472,7 +1474,27 @@ func (s *Service) attachRunAgentSummary(ctx context.Context, agentID uuid.UUID, 
 	}
 	resp.AgentSlug = agent.Slug
 	resp.AgentName = agent.Name
-	resp.AgentConnectionMode = agent.ConnectionMode
+	if resp.AgentConnectionMode == "" {
+		resp.AgentConnectionMode = agent.ConnectionMode
+	}
+}
+
+func (s *Service) attachRunTransportEvidence(ctx context.Context, runID uuid.UUID, resp *RunResponse) error {
+	if resp == nil {
+		return nil
+	}
+	evidence, err := s.queries.GetRunAttemptTransportEvidence(ctx, runID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	resp.RuntimeTransport = evidence.Transport
+	resp.RuntimeTransportReason = stringPtrValue(evidence.TransportReason)
+	changedAt := evidence.TransportChangedAt
+	resp.RuntimeTransportChangedAt = &changedAt
+	return nil
 }
 
 func (s *Service) attachRunEvidenceSummary(ctx context.Context, runID uuid.UUID, resp *RunResponse) {
@@ -1519,7 +1541,7 @@ func (s *Service) cancelRuntime(ctx context.Context, userID, runID uuid.UUID) (*
 	if s.cancellation == nil {
 		return nil, httpx.Internal("取消服务暂不可用")
 	}
-	result, err := s.cancellation.CancelOwnedRun(ctx, userID, runID, "run canceled by user")
+	_, err := s.cancellation.CancelOwnedRun(ctx, userID, runID, "run canceled by user")
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrRuntimeCancellationNotFound):
@@ -1536,9 +1558,7 @@ func (s *Service) cancelRuntime(ctx context.Context, userID, runID uuid.UUID) (*
 			return nil, httpx.Internal("取消调用失败")
 		}
 	}
-	resp := runToResponse(&result.Run)
-	s.attachRunRequirementEvidence(ctx, runID, resp)
-	return resp, nil
+	return s.GetRun(ctx, userID, runID)
 }
 
 // ListRunEvents 查询单个 run 的事件流；仅 owner 可看。
@@ -2710,6 +2730,7 @@ func runToResponse(r *db.Run) *RunResponse {
 		CancelReason:         stringPtrValue(r.CancelReason),
 		DeadLetteredAt:       r.DeadLetteredAt,
 		ReplayOfRunID:        uuidPtrString(r.ReplayOfRunID),
+		AgentConnectionMode:  stringPtrValue(r.ConnectionModeSnapshot),
 	}
 	if len(r.Input) > 0 {
 		var in map[string]interface{}

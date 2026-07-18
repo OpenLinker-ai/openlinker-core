@@ -226,6 +226,19 @@ func TestRuntimeOfferAndLeaseQueriesAreFencedAndDatabaseTimed(t *testing.T) {
 		t.Fatal("assignment ACK does not use strict database offer expiry")
 	}
 	for _, fragment := range []string{
+		"runtime_attachment_id = attachment.id",
+		"attachment.id = $11",
+		"attachment.runtime_session_id = s.runtime_session_id",
+		"attachment.core_instance_id = $2",
+		"attachment.detached_at IS NULL",
+		"attachment.transport IN ('websocket', 'long_poll')",
+		"attachment.transport_reason IS NOT NULL",
+	} {
+		if !strings.Contains(confirmRunAssignment, fragment) {
+			t.Fatalf("assignment ACK transport evidence missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
 		"a.lease_expires_at > c.database_now",
 		"r.lease_expires_at > c.database_now",
 		"GREATEST(",
@@ -331,7 +344,7 @@ func TestRuntimeLeaseGeneratedMethodsScanAndPreserveArgumentOrder(t *testing.T) 
 		(*time.Time)(nil), (*string)(nil), (*uuid.UUID)(nil), []byte(nil),
 		(*string)(nil), (*time.Time)(nil), int64(0), (*int64)(nil),
 		(*string)(nil), (*string)(nil), now,
-		&now, (*time.Time)(nil), &sessionID,
+		&now, (*time.Time)(nil), &sessionID, (*uuid.UUID)(nil),
 	}
 	dbtx := &fakeDBTX{row: fakeRow{values: attemptValues}}
 	q := New(dbtx)
@@ -351,6 +364,31 @@ func TestRuntimeLeaseGeneratedMethodsScanAndPreserveArgumentOrder(t *testing.T) 
 	}
 	if !reflect.DeepEqual(dbtx.queryRowArgs, wantArgs) {
 		t.Fatalf("CreateRuntimeRunOffer args = %#v", dbtx.queryRowArgs)
+	}
+
+	attachmentID := uuid.New()
+	attemptNo := int32(1)
+	acceptedAt := now
+	attemptValues[4] = &attemptNo
+	attemptValues[16] = &acceptedAt
+	attemptValues[17] = &acceptedAt
+	attemptValues[34] = &attachmentID
+	dbtx.row = fakeRow{values: attemptValues}
+	confirmed, err := q.ConfirmRunAssignment(context.Background(), ConfirmRunAssignmentParams{
+		LeaseTtlMs: 60_000, CoreInstanceID: coreID, RunID: runID,
+		AttemptID: attemptID, LeaseID: leaseID, FencingToken: 1,
+		RuntimeSessionID: &sessionID, NodeID: &nodeID, CredentialID: &tokenID,
+		WorkerID: &workerID, AttachmentID: attachmentID,
+	})
+	if err != nil || confirmed.RuntimeAttachmentID == nil || *confirmed.RuntimeAttachmentID != attachmentID {
+		t.Fatalf("ConfirmRunAssignment = %#v, %v", confirmed, err)
+	}
+	wantConfirmArgs := []any{
+		int64(60_000), coreID, runID, attemptID, leaseID, int64(1),
+		&sessionID, &nodeID, &tokenID, &workerID, attachmentID,
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, wantConfirmArgs) {
+		t.Fatalf("ConfirmRunAssignment args = %#v", dbtx.queryRowArgs)
 	}
 
 	grantID, targetSessionID := uuid.New(), uuid.New()

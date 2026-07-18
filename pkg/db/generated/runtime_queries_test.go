@@ -39,6 +39,26 @@ func TestRuntimeAttemptAndCancellationQueries(t *testing.T) {
 		t.Fatal("LockNextDueRetryRuntimeRun must match the global retry index")
 	}
 
+	transportReason := "explicit"
+	transportChangedAt := now.Add(-time.Second)
+	lockDBTX.row = fakeRow{values: []any{"long_poll", &transportReason, transportChangedAt}}
+	evidence, err := lockQueries.GetRunAttemptTransportEvidence(context.Background(), runID)
+	if err != nil || evidence.Transport != "long_poll" || evidence.TransportReason == nil ||
+		*evidence.TransportReason != transportReason || evidence.TransportChangedAt != transportChangedAt {
+		t.Fatalf("GetRunAttemptTransportEvidence = %#v, %v", evidence, err)
+	}
+	requireSQLName(t, lockDBTX.queryRowSQL, "GetRunAttemptTransportEvidence")
+	for _, fragment := range []string{
+		"COALESCE(run.active_attempt_id, run.latest_attempt_id)",
+		"attachment.id = attempt.runtime_attachment_id",
+		"attachment.runtime_session_id = attempt.runtime_session_id",
+		"attempt.accepted_at IS NOT NULL",
+		"attachment.transport IN ('websocket', 'long_poll')",
+	} {
+		if !strings.Contains(lockDBTX.queryRowSQL, fragment) {
+			t.Fatalf("GetRunAttemptTransportEvidence missing %q", fragment)
+		}
+	}
 	attemptValues := []any{
 		attemptID, runID, agentID, int32(1), (*int32)(nil), "core_http",
 		leaseID, int64(1), (*uuid.UUID)(nil), (*string)(nil), (*uuid.UUID)(nil),
@@ -47,7 +67,7 @@ func TestRuntimeAttemptAndCancellationQueries(t *testing.T) {
 		now.Add(5 * time.Minute), (*time.Time)(nil), (*string)(nil),
 		(*uuid.UUID)(nil), []byte(nil), (*string)(nil), (*time.Time)(nil),
 		int64(0), (*int64)(nil), (*string)(nil), (*string)(nil), now,
-		(*time.Time)(nil), (*time.Time)(nil), (*uuid.UUID)(nil),
+		(*time.Time)(nil), (*time.Time)(nil), (*uuid.UUID)(nil), (*uuid.UUID)(nil),
 	}
 	dbtx := &fakeDBTX{row: fakeRow{values: attemptValues}}
 	q := New(dbtx)
@@ -111,7 +131,7 @@ func TestResultFinalizationQueries(t *testing.T) {
 		now.Add(2 * time.Minute), &finishedAt, &outcome, &resultID,
 		fingerprint, &classification, &finishedAt, finalSequence, &finalSequence,
 		(*string)(nil), (*string)(nil), now.Add(-2 * time.Minute),
-		&slotAcquiredAt, &finishedAt, (*uuid.UUID)(nil),
+		&slotAcquiredAt, &finishedAt, (*uuid.UUID)(nil), (*uuid.UUID)(nil),
 	}
 	dbtx := &fakeDBTX{row: fakeRow{values: attemptValues}}
 	q := New(dbtx)
@@ -367,7 +387,7 @@ func TestRuntimeRunEventQueriesAndLockOrder(t *testing.T) {
 		(*time.Time)(nil), (*string)(nil), (*uuid.UUID)(nil), []byte(nil),
 		(*string)(nil), (*time.Time)(nil), clientSequence, (*int64)(nil),
 		(*string)(nil), (*string)(nil), now,
-		&now, (*time.Time)(nil), &sessionID,
+		&now, (*time.Time)(nil), &sessionID, (*uuid.UUID)(nil),
 	}
 	dbtx.row = fakeRow{values: attemptValues}
 	_, err = q.AdvanceRunAttemptEventSequence(context.Background(), AdvanceRunAttemptEventSequenceParams{
@@ -880,6 +900,57 @@ func TestRuntimeWireCompatibilityMigrationShape(t *testing.T) {
 		"active Runtime Node and Session generations disagree",
 		"support_tier = 'current'",
 		"support_tier = 'previous'",
+	} {
+		if !strings.Contains(string(verify), fragment) {
+			t.Fatalf("verify migration missing %q", fragment)
+		}
+	}
+}
+
+func TestRuntimeAttemptTransportEvidenceMigrationShape(t *testing.T) {
+	t.Parallel()
+
+	up, err := os.ReadFile("../../../migrations/079_runtime_attempt_transport_evidence.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	down, err := os.ReadFile("../../../migrations/079_runtime_attempt_transport_evidence.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	verify, err := os.ReadFile("../../../migrations/079_runtime_attempt_transport_evidence_verify.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, fragment := range []string{
+		"ADD COLUMN runtime_attachment_id UUID",
+		"run_attempts_runtime_attachment_identity_fk",
+		"runtime_session_attachments_attempt_identity_unique",
+		"new Runtime acceptance requires Runtime Attachment evidence",
+		"accepted run attempt Runtime Attachment evidence cannot change",
+		"79,\n    '079_runtime_attempt_transport_evidence'",
+		"schema_version = 77",
+	} {
+		if !strings.Contains(string(up), fragment) {
+			t.Fatalf("up migration missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"rollback refuses recorded Runtime Attachment evidence",
+		"DROP COLUMN runtime_attachment_id",
+		"schema_version = 77",
+	} {
+		if !strings.Contains(string(down), fragment) {
+			t.Fatalf("down migration missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"runtime schema contract 79 is missing or mismatched",
+		"Run Attempt Runtime Attachment evidence column is missing",
+		"Run Attempt Runtime Attachment constraints are missing or unvalidated",
+		"Run Attempt Runtime Attachment evidence trigger is missing",
+		"Run Attempt Runtime Attachment evidence is inconsistent",
 	} {
 		if !strings.Contains(string(verify), fragment) {
 			t.Fatalf("verify migration missing %q", fragment)

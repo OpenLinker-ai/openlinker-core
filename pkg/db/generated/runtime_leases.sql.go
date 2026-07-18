@@ -25,8 +25,10 @@ SET attempt_no = r.attempt_count + 1,
         a.attempt_deadline_at,
         r.run_deadline_at
     ),
-    attached_core_instance_id = $2
+    attached_core_instance_id = $2,
+    runtime_attachment_id = attachment.id
 FROM runs r, runtime_sessions s, runtime_nodes n, agent_tokens t,
+     runtime_session_attachments attachment,
      database_clock c
 WHERE a.run_id = $3
   AND a.id = $4
@@ -71,8 +73,14 @@ WHERE a.run_id = $3
   AND t.revoked_at IS NULL
   AND (t.expires_at IS NULL OR t.expires_at > c.database_now)
   AND t.scopes @> ARRAY['agent:pull']::text[]
+  AND attachment.id = $11
+  AND attachment.runtime_session_id = s.runtime_session_id
+  AND attachment.core_instance_id = $2
+  AND attachment.detached_at IS NULL
+  AND attachment.transport IN ('websocket', 'long_poll')
+  AND attachment.transport_reason IS NOT NULL
   AND $1::bigint BETWEEN 1 AND 3600000
-RETURNING a.id, a.run_id, a.agent_id, a.offer_no, a.attempt_no, a.executor_type, a.lease_id, a.fencing_token, a.runtime_token_id, a.runtime_worker_id, a.runtime_session_id, a.node_id, a.offered_by_core_instance_id, a.attached_core_instance_id, a.offered_at, a.offer_expires_at, a.accepted_at, a.last_renewed_at, a.lease_expires_at, a.attempt_deadline_at, a.finished_at, a.outcome, a.result_id, a.result_fingerprint, a.result_classification, a.result_acknowledged_at, a.last_client_event_seq, a.final_client_event_seq, a.error_code, a.error_detail_redacted, a.created_at, a.slot_acquired_at, a.slot_released_at, a.active_runtime_session_id
+RETURNING a.id, a.run_id, a.agent_id, a.offer_no, a.attempt_no, a.executor_type, a.lease_id, a.fencing_token, a.runtime_token_id, a.runtime_worker_id, a.runtime_session_id, a.node_id, a.offered_by_core_instance_id, a.attached_core_instance_id, a.offered_at, a.offer_expires_at, a.accepted_at, a.last_renewed_at, a.lease_expires_at, a.attempt_deadline_at, a.finished_at, a.outcome, a.result_id, a.result_fingerprint, a.result_classification, a.result_acknowledged_at, a.last_client_event_seq, a.final_client_event_seq, a.error_code, a.error_detail_redacted, a.created_at, a.slot_acquired_at, a.slot_released_at, a.active_runtime_session_id, a.runtime_attachment_id
 `
 
 type ConfirmRunAssignmentParams struct {
@@ -86,6 +94,7 @@ type ConfirmRunAssignmentParams struct {
 	NodeID           *uuid.UUID `db:"node_id" json:"node_id"`
 	CredentialID     *uuid.UUID `db:"credential_id" json:"credential_id"`
 	WorkerID         *string    `db:"worker_id" json:"worker_id"`
+	AttachmentID     uuid.UUID  `db:"attachment_id" json:"attachment_id"`
 }
 
 func (q *Queries) ConfirmRunAssignment(ctx context.Context, arg ConfirmRunAssignmentParams) (RunAttempt, error) {
@@ -100,6 +109,7 @@ func (q *Queries) ConfirmRunAssignment(ctx context.Context, arg ConfirmRunAssign
 		arg.NodeID,
 		arg.CredentialID,
 		arg.WorkerID,
+		arg.AttachmentID,
 	)
 	var i RunAttempt
 	err := row.Scan(
@@ -137,6 +147,7 @@ func (q *Queries) ConfirmRunAssignment(ctx context.Context, arg ConfirmRunAssign
 		&i.SlotAcquiredAt,
 		&i.SlotReleasedAt,
 		&i.ActiveRuntimeSessionID,
+		&i.RuntimeAttachmentID,
 	)
 	return i, err
 }
@@ -221,7 +232,7 @@ WHERE r.id = $8
         AND outstanding.accepted_at IS NULL
         AND outstanding.finished_at IS NULL
   )
-RETURNING id, run_id, agent_id, offer_no, attempt_no, executor_type, lease_id, fencing_token, runtime_token_id, runtime_worker_id, runtime_session_id, node_id, offered_by_core_instance_id, attached_core_instance_id, offered_at, offer_expires_at, accepted_at, last_renewed_at, lease_expires_at, attempt_deadline_at, finished_at, outcome, result_id, result_fingerprint, result_classification, result_acknowledged_at, last_client_event_seq, final_client_event_seq, error_code, error_detail_redacted, created_at, slot_acquired_at, slot_released_at, active_runtime_session_id
+RETURNING id, run_id, agent_id, offer_no, attempt_no, executor_type, lease_id, fencing_token, runtime_token_id, runtime_worker_id, runtime_session_id, node_id, offered_by_core_instance_id, attached_core_instance_id, offered_at, offer_expires_at, accepted_at, last_renewed_at, lease_expires_at, attempt_deadline_at, finished_at, outcome, result_id, result_fingerprint, result_classification, result_acknowledged_at, last_client_event_seq, final_client_event_seq, error_code, error_detail_redacted, created_at, slot_acquired_at, slot_released_at, active_runtime_session_id, runtime_attachment_id
 `
 
 type CreateRuntimeRunOfferParams struct {
@@ -288,6 +299,7 @@ func (q *Queries) CreateRuntimeRunOffer(ctx context.Context, arg CreateRuntimeRu
 		&i.SlotAcquiredAt,
 		&i.SlotReleasedAt,
 		&i.ActiveRuntimeSessionID,
+		&i.RuntimeAttachmentID,
 	)
 	return i, err
 }
@@ -352,7 +364,7 @@ WHERE a.run_id = $4
             )
         )
   )
-RETURNING a.id, a.run_id, a.agent_id, a.offer_no, a.attempt_no, a.executor_type, a.lease_id, a.fencing_token, a.runtime_token_id, a.runtime_worker_id, a.runtime_session_id, a.node_id, a.offered_by_core_instance_id, a.attached_core_instance_id, a.offered_at, a.offer_expires_at, a.accepted_at, a.last_renewed_at, a.lease_expires_at, a.attempt_deadline_at, a.finished_at, a.outcome, a.result_id, a.result_fingerprint, a.result_classification, a.result_acknowledged_at, a.last_client_event_seq, a.final_client_event_seq, a.error_code, a.error_detail_redacted, a.created_at, a.slot_acquired_at, a.slot_released_at, a.active_runtime_session_id
+RETURNING a.id, a.run_id, a.agent_id, a.offer_no, a.attempt_no, a.executor_type, a.lease_id, a.fencing_token, a.runtime_token_id, a.runtime_worker_id, a.runtime_session_id, a.node_id, a.offered_by_core_instance_id, a.attached_core_instance_id, a.offered_at, a.offer_expires_at, a.accepted_at, a.last_renewed_at, a.lease_expires_at, a.attempt_deadline_at, a.finished_at, a.outcome, a.result_id, a.result_fingerprint, a.result_classification, a.result_acknowledged_at, a.last_client_event_seq, a.final_client_event_seq, a.error_code, a.error_detail_redacted, a.created_at, a.slot_acquired_at, a.slot_released_at, a.active_runtime_session_id, a.runtime_attachment_id
 `
 
 type FinishUnacceptedRunOfferParams struct {
@@ -421,6 +433,7 @@ func (q *Queries) FinishUnacceptedRunOffer(ctx context.Context, arg FinishUnacce
 		&i.SlotAcquiredAt,
 		&i.SlotReleasedAt,
 		&i.ActiveRuntimeSessionID,
+		&i.RuntimeAttachmentID,
 	)
 	return i, err
 }
@@ -557,7 +570,7 @@ func (q *Queries) GetExistingUnacceptedRunOfferForSession(ctx context.Context, a
 }
 
 const lockRuntimeRunAttemptForLeaseMutation = `-- name: LockRuntimeRunAttemptForLeaseMutation :one
-SELECT a.id, a.run_id, a.agent_id, a.offer_no, a.attempt_no, a.executor_type, a.lease_id, a.fencing_token, a.runtime_token_id, a.runtime_worker_id, a.runtime_session_id, a.node_id, a.offered_by_core_instance_id, a.attached_core_instance_id, a.offered_at, a.offer_expires_at, a.accepted_at, a.last_renewed_at, a.lease_expires_at, a.attempt_deadline_at, a.finished_at, a.outcome, a.result_id, a.result_fingerprint, a.result_classification, a.result_acknowledged_at, a.last_client_event_seq, a.final_client_event_seq, a.error_code, a.error_detail_redacted, a.created_at, a.slot_acquired_at, a.slot_released_at, a.active_runtime_session_id
+SELECT a.id, a.run_id, a.agent_id, a.offer_no, a.attempt_no, a.executor_type, a.lease_id, a.fencing_token, a.runtime_token_id, a.runtime_worker_id, a.runtime_session_id, a.node_id, a.offered_by_core_instance_id, a.attached_core_instance_id, a.offered_at, a.offer_expires_at, a.accepted_at, a.last_renewed_at, a.lease_expires_at, a.attempt_deadline_at, a.finished_at, a.outcome, a.result_id, a.result_fingerprint, a.result_classification, a.result_acknowledged_at, a.last_client_event_seq, a.final_client_event_seq, a.error_code, a.error_detail_redacted, a.created_at, a.slot_acquired_at, a.slot_released_at, a.active_runtime_session_id, a.runtime_attachment_id
 FROM run_attempts a
 WHERE a.run_id = $1
   AND a.id = $2
@@ -629,6 +642,7 @@ func (q *Queries) LockRuntimeRunAttemptForLeaseMutation(ctx context.Context, arg
 		&i.SlotAcquiredAt,
 		&i.SlotReleasedAt,
 		&i.ActiveRuntimeSessionID,
+		&i.RuntimeAttachmentID,
 	)
 	return i, err
 }
@@ -1630,7 +1644,7 @@ WHERE a.run_id = $3
   AND (t.expires_at IS NULL OR t.expires_at > c.database_now)
   AND t.scopes @> ARRAY['agent:pull']::text[]
   AND $1::bigint BETWEEN 1 AND 3600000
-RETURNING a.id, a.run_id, a.agent_id, a.offer_no, a.attempt_no, a.executor_type, a.lease_id, a.fencing_token, a.runtime_token_id, a.runtime_worker_id, a.runtime_session_id, a.node_id, a.offered_by_core_instance_id, a.attached_core_instance_id, a.offered_at, a.offer_expires_at, a.accepted_at, a.last_renewed_at, a.lease_expires_at, a.attempt_deadline_at, a.finished_at, a.outcome, a.result_id, a.result_fingerprint, a.result_classification, a.result_acknowledged_at, a.last_client_event_seq, a.final_client_event_seq, a.error_code, a.error_detail_redacted, a.created_at, a.slot_acquired_at, a.slot_released_at, a.active_runtime_session_id
+RETURNING a.id, a.run_id, a.agent_id, a.offer_no, a.attempt_no, a.executor_type, a.lease_id, a.fencing_token, a.runtime_token_id, a.runtime_worker_id, a.runtime_session_id, a.node_id, a.offered_by_core_instance_id, a.attached_core_instance_id, a.offered_at, a.offer_expires_at, a.accepted_at, a.last_renewed_at, a.lease_expires_at, a.attempt_deadline_at, a.finished_at, a.outcome, a.result_id, a.result_fingerprint, a.result_classification, a.result_acknowledged_at, a.last_client_event_seq, a.final_client_event_seq, a.error_code, a.error_detail_redacted, a.created_at, a.slot_acquired_at, a.slot_released_at, a.active_runtime_session_id, a.runtime_attachment_id
 `
 
 type RenewRuntimeRunAttemptParams struct {
@@ -1695,6 +1709,7 @@ func (q *Queries) RenewRuntimeRunAttempt(ctx context.Context, arg RenewRuntimeRu
 		&i.SlotAcquiredAt,
 		&i.SlotReleasedAt,
 		&i.ActiveRuntimeSessionID,
+		&i.RuntimeAttachmentID,
 	)
 	return i, err
 }

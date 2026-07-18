@@ -119,34 +119,37 @@ type RunResponse struct {
 	ErrorCode           string                 `json:"error_code,omitempty"`
 	// ErrorMsg keeps the historical Go field name while preserving the public
 	// JSON contract as error_message.
-	ErrorMsg             string                          `json:"error_message,omitempty"`
-	CostCents            int32                           `json:"cost_cents"`
-	DurationMs           int32                           `json:"duration_ms"`
-	StartedAt            time.Time                       `json:"started_at"`
-	FinishedAt           *time.Time                      `json:"finished_at,omitempty"`
-	Source               string                          `json:"source,omitempty"`
-	RuntimeContractID    string                          `json:"runtime_contract_id"`
-	DispatchState        string                          `json:"dispatch_state"`
-	AttemptCount         int32                           `json:"attempt_count"`
-	MaxAttempts          int32                           `json:"max_attempts"`
-	NextAttemptAt        *time.Time                      `json:"next_attempt_at,omitempty"`
-	LatestAttemptID      string                          `json:"latest_attempt_id,omitempty"`
-	ActiveAttemptID      string                          `json:"active_attempt_id,omitempty"`
-	CancelState          string                          `json:"cancel_state,omitempty"`
-	CancelRequestedAt    *time.Time                      `json:"cancel_requested_at,omitempty"`
-	CancelAcknowledgedAt *time.Time                      `json:"cancel_acknowledged_at,omitempty"`
-	CancelReason         string                          `json:"cancel_reason,omitempty"`
-	DeadLetteredAt       *time.Time                      `json:"dead_lettered_at,omitempty"`
-	ReplayOfRunID        string                          `json:"replay_of_run_id,omitempty"`
-	ParentRunID          string                          `json:"parent_run_id,omitempty"`
-	CallerAgentID        string                          `json:"caller_agent_id,omitempty"`
-	BillingMode          string                          `json:"billing_mode,omitempty"`
-	A2AContext           *RunA2AContextResponse          `json:"a2a_context,omitempty"`
-	TaskCallback         *RunTaskCallbackResponse        `json:"task_callback,omitempty"`
-	RequirementEvidence  *RunRequirementEvidenceResponse `json:"requirement_evidence,omitempty"`
-	EvidenceSummary      *RunEvidenceSummary             `json:"evidence_summary,omitempty"`
-	NextAction           *RunNextAction                  `json:"next_action,omitempty"`
-	Replayed             bool                            `json:"replayed"`
+	ErrorMsg                  string                          `json:"error_message,omitempty"`
+	CostCents                 int32                           `json:"cost_cents"`
+	DurationMs                int32                           `json:"duration_ms"`
+	StartedAt                 time.Time                       `json:"started_at"`
+	FinishedAt                *time.Time                      `json:"finished_at,omitempty"`
+	Source                    string                          `json:"source,omitempty"`
+	RuntimeContractID         string                          `json:"runtime_contract_id"`
+	RuntimeTransport          string                          `json:"runtime_transport,omitempty"`
+	RuntimeTransportReason    string                          `json:"runtime_transport_reason,omitempty"`
+	RuntimeTransportChangedAt *time.Time                      `json:"runtime_transport_changed_at,omitempty"`
+	DispatchState             string                          `json:"dispatch_state"`
+	AttemptCount              int32                           `json:"attempt_count"`
+	MaxAttempts               int32                           `json:"max_attempts"`
+	NextAttemptAt             *time.Time                      `json:"next_attempt_at,omitempty"`
+	LatestAttemptID           string                          `json:"latest_attempt_id,omitempty"`
+	ActiveAttemptID           string                          `json:"active_attempt_id,omitempty"`
+	CancelState               string                          `json:"cancel_state,omitempty"`
+	CancelRequestedAt         *time.Time                      `json:"cancel_requested_at,omitempty"`
+	CancelAcknowledgedAt      *time.Time                      `json:"cancel_acknowledged_at,omitempty"`
+	CancelReason              string                          `json:"cancel_reason,omitempty"`
+	DeadLetteredAt            *time.Time                      `json:"dead_lettered_at,omitempty"`
+	ReplayOfRunID             string                          `json:"replay_of_run_id,omitempty"`
+	ParentRunID               string                          `json:"parent_run_id,omitempty"`
+	CallerAgentID             string                          `json:"caller_agent_id,omitempty"`
+	BillingMode               string                          `json:"billing_mode,omitempty"`
+	A2AContext                *RunA2AContextResponse          `json:"a2a_context,omitempty"`
+	TaskCallback              *RunTaskCallbackResponse        `json:"task_callback,omitempty"`
+	RequirementEvidence       *RunRequirementEvidenceResponse `json:"requirement_evidence,omitempty"`
+	EvidenceSummary           *RunEvidenceSummary             `json:"evidence_summary,omitempty"`
+	NextAction                *RunNextAction                  `json:"next_action,omitempty"`
+	Replayed                  bool                            `json:"replayed"`
 }
 
 // RuntimeDeadLetterListResponse is the admin-only, input-free DLQ inventory.

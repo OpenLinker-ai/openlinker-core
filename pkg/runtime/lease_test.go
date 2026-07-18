@@ -152,6 +152,7 @@ func TestRuntimeLeaseAckFirstConfirmationAndReplay(t *testing.T) {
 	require.Equal(t, int64(1), confirmed.AttemptNo)
 	require.Equal(t, fixture.databaseNow.Add(time.Minute), confirmed.LeaseExpiresAt)
 	require.Equal(t, 1, fixture.tx.confirmCalls)
+	require.Equal(t, fixture.principal.AttachmentID, fixture.tx.confirmParams.AttachmentID)
 	require.Equal(t, 1, fixture.tx.mirrorConfirmCalls)
 	require.Equal(t, []string{"lock_session", "lock_node", "lock_credential", "lock_attachment", "lock_run", "lock_attempt", "confirm", "mirror_confirm"}, fixture.tx.calls)
 
@@ -492,6 +493,7 @@ type runtimeLeaseTransactionFake struct {
 	attempt           db.RunAttempt
 
 	confirmCalls            int
+	confirmParams           db.ConfirmRunAssignmentParams
 	mirrorConfirmCalls      int
 	renewCalls              int
 	mirrorRenewCalls        int
@@ -648,15 +650,17 @@ func (f *runtimeLeaseTransactionFake) LockRuntimeRunAttemptForLeaseMutation(_ co
 	return f.attempt, nil
 }
 
-func (f *runtimeLeaseTransactionFake) ConfirmRunAssignment(_ context.Context, _ db.ConfirmRunAssignmentParams) (db.RunAttempt, error) {
+func (f *runtimeLeaseTransactionFake) ConfirmRunAssignment(_ context.Context, params db.ConfirmRunAssignmentParams) (db.RunAttempt, error) {
 	f.call("confirm")
 	f.confirmCalls++
+	f.confirmParams = params
 	attempt := f.attempt
 	attemptNo := int32(1)
 	acceptedAt := f.databaseNow
 	attempt.AttemptNo = &attemptNo
 	attempt.AcceptedAt = &acceptedAt
 	attempt.LeaseExpiresAt = f.databaseNow.Add(time.Minute)
+	attempt.RuntimeAttachmentID = &params.AttachmentID
 	return attempt, nil
 }
 

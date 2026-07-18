@@ -1,4 +1,4 @@
-.PHONY: help dev build run bootstrap-admin runtime-node-issue runtime-node-inspect test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status migration-063-test migration-069-test migration-070-test migration-071-test migration-074-test migration-075-test migration-076-test migration-077-test migration-078-test deps runtime-loadtest
+.PHONY: help dev build run bootstrap-admin runtime-node-issue runtime-node-inspect test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status migration-063-test migration-069-test migration-070-test migration-071-test migration-074-test migration-075-test migration-076-test migration-077-test migration-078-test migration-079-test deps runtime-loadtest
 
 ENV_FILE ?= .env
 API_URL ?= http://localhost:8080
@@ -87,3 +87,6 @@ migration-077-test: ## 在一次性 PostgreSQL 16 中验证 External Execution c
 
 migration-078-test: ## 在一次性 PostgreSQL 16 中验证 OAuth subject-only 升级、兼容读写与 fail-closed 回退
 	./bin/test-migration-078.sh
+
+migration-079-test: ## 在一次性 PostgreSQL 16 中验证 Runtime Attempt 传输证据升级、约束与 fail-closed 回退
+	./bin/test-migration-079.sh

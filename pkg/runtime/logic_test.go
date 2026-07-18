@@ -575,6 +575,7 @@ func TestRuntimeResponseAndNextActionHelpers(t *testing.T) {
 	errMsg := "failed"
 	cancelState := "stopping"
 	cancelReason := "operator requested"
+	connectionMode := "runtime"
 	nextAttemptAt := time.Date(2026, 7, 12, 2, 0, 0, 0, time.UTC)
 	cancelRequestedAt := nextAttemptAt.Add(-time.Minute)
 	cancelAcknowledgedAt := nextAttemptAt.Add(-30 * time.Second)
@@ -590,6 +591,7 @@ func TestRuntimeResponseAndNextActionHelpers(t *testing.T) {
 		CancelState: &cancelState, CancelRequestedAt: &cancelRequestedAt,
 		CancelAcknowledgedAt: &cancelAcknowledgedAt, CancelReason: &cancelReason,
 		DeadLetteredAt: &deadLetteredAt, ReplayOfRunID: &replayOfRunID,
+		ConnectionModeSnapshot: &connectionMode,
 	})
 	require.Equal(t, "success", success.Status)
 	require.Equal(t, int32(99), success.CostCents)
@@ -604,6 +606,7 @@ func TestRuntimeResponseAndNextActionHelpers(t *testing.T) {
 	require.Equal(t, activeAttemptID.String(), success.ActiveAttemptID)
 	require.Equal(t, "stopping", success.CancelState)
 	require.Equal(t, replayOfRunID.String(), success.ReplayOfRunID)
+	require.Equal(t, "runtime", success.AgentConnectionMode)
 
 	failed := runToResponse(&db.Run{ID: runID, Status: "timeout", CostCents: 99, ErrorCode: &errCode, ErrorMessage: &errMsg, DurationMs: &duration})
 	require.Equal(t, int32(0), failed.CostCents)

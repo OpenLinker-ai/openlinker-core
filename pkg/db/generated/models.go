@@ -213,6 +213,7 @@ type RunAttempt struct {
 	SlotAcquiredAt          *time.Time `db:"slot_acquired_at" json:"slot_acquired_at"`
 	SlotReleasedAt          *time.Time `db:"slot_released_at" json:"slot_released_at"`
 	ActiveRuntimeSessionID  *uuid.UUID `db:"active_runtime_session_id" json:"active_runtime_session_id"`
+	RuntimeAttachmentID     *uuid.UUID `db:"runtime_attachment_id" json:"runtime_attachment_id"`
 }
 
 // RuntimeResumeGrant is durable authorization evidence for a replacement

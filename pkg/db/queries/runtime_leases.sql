@@ -388,8 +388,10 @@ SET attempt_no = r.attempt_count + 1,
         a.attempt_deadline_at,
         r.run_deadline_at
     ),
-    attached_core_instance_id = sqlc.arg(core_instance_id)
+    attached_core_instance_id = sqlc.arg(core_instance_id),
+    runtime_attachment_id = attachment.id
 FROM runs r, runtime_sessions s, runtime_nodes n, agent_tokens t,
+     runtime_session_attachments attachment,
      database_clock c
 WHERE a.run_id = sqlc.arg(run_id)
   AND a.id = sqlc.arg(attempt_id)
@@ -434,6 +436,12 @@ WHERE a.run_id = sqlc.arg(run_id)
   AND t.revoked_at IS NULL
   AND (t.expires_at IS NULL OR t.expires_at > c.database_now)
   AND t.scopes @> ARRAY['agent:pull']::text[]
+  AND attachment.id = sqlc.arg(attachment_id)
+  AND attachment.runtime_session_id = s.runtime_session_id
+  AND attachment.core_instance_id = sqlc.arg(core_instance_id)
+  AND attachment.detached_at IS NULL
+  AND attachment.transport IN ('websocket', 'long_poll')
+  AND attachment.transport_reason IS NOT NULL
   AND sqlc.arg(lease_ttl_ms)::bigint BETWEEN 1 AND 3600000
 RETURNING a.*;
 

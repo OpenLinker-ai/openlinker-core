@@ -80,6 +80,22 @@ FROM run_attempts
 WHERE run_id = $1
 ORDER BY offer_no ASC, id ASC;
 
+-- name: GetRunAttemptTransportEvidence :one
+SELECT attachment.transport,
+       attachment.transport_reason,
+       attachment.transport_changed_at
+FROM runs run
+JOIN run_attempts attempt
+  ON attempt.run_id = run.id
+ AND attempt.id = COALESCE(run.active_attempt_id, run.latest_attempt_id)
+JOIN runtime_session_attachments attachment
+  ON attachment.id = attempt.runtime_attachment_id
+ AND attachment.runtime_session_id = attempt.runtime_session_id
+WHERE run.id = $1
+  AND attempt.executor_type = 'runtime'
+  AND attempt.accepted_at IS NOT NULL
+  AND attachment.transport IN ('websocket', 'long_poll');
+
 -- name: AcceptRunAttempt :one
 UPDATE run_attempts
 SET attempt_no = $5,

@@ -709,13 +709,17 @@ func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "running", created.Status)
 	require.Equal(t, "runtime", created.AgentConnectionMode)
+	require.NotEmpty(t, created.AgentSlug)
+	require.NotEmpty(t, created.AgentName)
+	require.Equal(t, "claim me", created.Input["task"])
+	require.False(t, created.StartedAt.IsZero())
 
 	signer, err := runtime.NewRuntimeInvocationSignerWithPrevious(
 		"test-current", "runtime-v2-integration-signing-secret-32-bytes", "", "",
 	)
 	require.NoError(t, err)
 	leases := runtime.NewRuntimeLeaseService(pool, coreID, signer, runtime.DefaultRuntimeLeaseConfig())
-	assigned, err := leases.ClaimOffer(ctx, runtime.RuntimeSessionPrincipal{
+	principal := runtime.RuntimeSessionPrincipal{
 		RuntimeSessionID:                sessionID,
 		NodeID:                          nodeID,
 		AgentID:                         agentID,
@@ -728,7 +732,8 @@ func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
 		DeviceCertificateSerial:         certificateSerial,
 		DevicePublicKeyThumbprintSHA256: thumbprint,
 		Status:                          "active",
-	})
+	}
+	assigned, err := leases.ClaimOffer(ctx, principal)
 	require.NoError(t, err)
 	require.NotNil(t, assigned)
 	require.Equal(t, mustParseUUID(t, created.RunID), assigned.AttemptIdentity.RunID)
@@ -764,6 +769,22 @@ func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
 	var activationErr *httpx.HTTPError
 	require.ErrorAs(t, err, &activationErr)
 	require.Equal(t, httpx.ErrorCode("RUNTIME_NODE_NOT_QUIESCENT"), activationErr.Code)
+
+	_, err = leases.AckAssignment(ctx, principal, runtime.RunAssignmentAckPayload{AttemptIdentity: assigned.AttemptIdentity})
+	require.NoError(t, err)
+	detail, err := svc.GetRun(ctx, userID, assigned.AttemptIdentity.RunID)
+	require.NoError(t, err)
+	require.Equal(t, "runtime", detail.AgentConnectionMode)
+	require.Equal(t, "long_poll", detail.RuntimeTransport)
+	require.Equal(t, "explicit", detail.RuntimeTransportReason)
+	require.NotNil(t, detail.RuntimeTransportChangedAt)
+
+	var recordedAttachmentID uuid.UUID
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT runtime_attachment_id
+		FROM run_attempts
+		WHERE id = $1`, assigned.AttemptIdentity.AttemptID).Scan(&recordedAttachmentID))
+	require.Equal(t, attachmentID, recordedAttachmentID)
 }
 
 func TestRun_CreatesCallerOwnedTaskCallbackSubscription(t *testing.T) {
