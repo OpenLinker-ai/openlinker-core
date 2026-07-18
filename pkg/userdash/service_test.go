@@ -94,38 +94,43 @@ func TestUserDashServiceListCallRecords(t *testing.T) {
 	callerID := uuid.New()
 	parentRunID := uuid.New().String()
 	started := time.Date(2026, 6, 20, 12, 30, 0, 0, time.UTC)
+	transportChangedAt := started.Add(-30 * time.Second)
 	duration := int32(850)
 	rows := []db.ListCallRecordsForUserRow{
 		{
-			ID:                  uuid.New(),
-			UserID:              userID,
-			AgentID:             agentID,
-			Status:              "success",
-			CostCents:           0,
-			CreatorRevenueCents: 0,
-			DurationMs:          &duration,
-			StartedAt:           started,
-			Source:              "api",
-			RuntimeContractID:   "openlinker.runtime.v2",
-			DispatchState:       "terminal",
-			AttemptCount:        1,
-			MaxAttempts:         3,
-			AgentSlug:           "child",
-			AgentName:           "Child Agent",
-			Direction:           "made",
-			ParentRunID:         parentRunID,
-			CallerAgentID:       callerID.String(),
-			CallerAgentSlug:     "parent",
-			CallerAgentName:     "Parent Agent",
-			ProtocolContextID:   "ctx-protocol",
-			ProtocolTaskID:      "task-child",
-			RootContextID:       "ctx-root",
-			ParentContextID:     "ctx-parent",
-			ParentTaskID:        "task-parent",
-			TraceID:             "trace-1",
-			ReferenceTaskIDs:    []string{"task-parent"},
-			ContextSource:       "agent_delegation",
-			CallID:              "task-child",
+			ID:                        uuid.New(),
+			UserID:                    userID,
+			AgentID:                   agentID,
+			Status:                    "success",
+			CostCents:                 0,
+			CreatorRevenueCents:       0,
+			DurationMs:                &duration,
+			StartedAt:                 started,
+			Source:                    "api",
+			RuntimeContractID:         "openlinker.runtime.v2",
+			AgentConnectionMode:       "runtime",
+			RuntimeTransport:          "long_poll",
+			RuntimeTransportReason:    "explicit",
+			RuntimeTransportChangedAt: &transportChangedAt,
+			DispatchState:             "terminal",
+			AttemptCount:              1,
+			MaxAttempts:               3,
+			AgentSlug:                 "child",
+			AgentName:                 "Child Agent",
+			Direction:                 "made",
+			ParentRunID:               parentRunID,
+			CallerAgentID:             callerID.String(),
+			CallerAgentSlug:           "parent",
+			CallerAgentName:           "Parent Agent",
+			ProtocolContextID:         "ctx-protocol",
+			ProtocolTaskID:            "task-child",
+			RootContextID:             "ctx-root",
+			ParentContextID:           "ctx-parent",
+			ParentTaskID:              "task-parent",
+			TraceID:                   "trace-1",
+			ReferenceTaskIDs:          []string{"task-parent"},
+			ContextSource:             "agent_delegation",
+			CallID:                    "task-child",
 		},
 	}
 	queries := &fakeDashboardQueries{
@@ -164,6 +169,11 @@ func TestUserDashServiceListCallRecords(t *testing.T) {
 	if got.RuntimeContractID != "openlinker.runtime.v2" || got.DispatchState != "terminal" ||
 		got.AttemptCount != 1 || got.MaxAttempts != 3 {
 		t.Fatalf("call record runtime fields = %#v", got)
+	}
+	if got.AgentConnectionMode != "runtime" || got.RuntimeTransport != "long_poll" ||
+		got.RuntimeTransportReason != "explicit" || got.RuntimeTransportChangedAt == nil ||
+		!got.RuntimeTransportChangedAt.Equal(transportChangedAt) {
+		t.Fatalf("call record execution evidence = %#v", got)
 	}
 }
 

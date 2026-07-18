@@ -19,6 +19,10 @@ SELECT r.id,
        r.finished_at,
        r.source,
        r.runtime_contract_id,
+       COALESCE(r.connection_mode_snapshot, '')::text AS agent_connection_mode,
+       COALESCE(runtime_evidence.transport, '')::text AS runtime_transport,
+       COALESCE(runtime_evidence.transport_reason, '')::text AS runtime_transport_reason,
+       runtime_evidence.transport_changed_at AS runtime_transport_changed_at,
        r.dispatch_state,
        r.attempt_count,
        r.max_attempts,
@@ -57,6 +61,20 @@ JOIN agents a ON a.id = r.agent_id
 LEFT JOIN run_delegations d ON d.child_run_id = r.id
 LEFT JOIN agents caller ON caller.id = d.caller_agent_id
 LEFT JOIN a2a_context_mappings ctx ON ctx.run_id = r.id
+LEFT JOIN LATERAL (
+    SELECT attachment.transport,
+           attachment.transport_reason,
+           attachment.transport_changed_at
+    FROM run_attempts attempt
+    JOIN runtime_session_attachments attachment
+      ON attachment.id = attempt.runtime_attachment_id
+     AND attachment.runtime_session_id = attempt.runtime_session_id
+    WHERE attempt.run_id = r.id
+      AND attempt.id = COALESCE(r.active_attempt_id, r.latest_attempt_id)
+      AND attempt.executor_type = 'runtime'
+      AND attempt.accepted_at IS NOT NULL
+      AND attachment.transport IN ('websocket', 'long_poll')
+) runtime_evidence ON TRUE
 LEFT JOIN LATERAL (
     SELECT COUNT(*)::int AS child_count
     FROM run_delegations cd
@@ -125,46 +143,50 @@ type ListCallRecordsForUserParams struct {
 }
 
 type ListCallRecordsForUserRow struct {
-	ID                   uuid.UUID  `db:"id" json:"id"`
-	UserID               uuid.UUID  `db:"user_id" json:"user_id"`
-	AgentID              uuid.UUID  `db:"agent_id" json:"agent_id"`
-	Status               string     `db:"status" json:"status"`
-	CostCents            int32      `db:"cost_cents" json:"cost_cents"`
-	CreatorRevenueCents  int32      `db:"creator_revenue_cents" json:"creator_revenue_cents"`
-	DurationMs           *int32     `db:"duration_ms" json:"duration_ms"`
-	StartedAt            time.Time  `db:"started_at" json:"started_at"`
-	FinishedAt           *time.Time `db:"finished_at" json:"finished_at"`
-	Source               string     `db:"source" json:"source"`
-	RuntimeContractID    string     `db:"runtime_contract_id" json:"runtime_contract_id"`
-	DispatchState        string     `db:"dispatch_state" json:"dispatch_state"`
-	AttemptCount         int32      `db:"attempt_count" json:"attempt_count"`
-	MaxAttempts          int32      `db:"max_attempts" json:"max_attempts"`
-	NextAttemptAt        *time.Time `db:"next_attempt_at" json:"next_attempt_at"`
-	LatestAttemptID      *uuid.UUID `db:"latest_attempt_id" json:"latest_attempt_id"`
-	ActiveAttemptID      *uuid.UUID `db:"active_attempt_id" json:"active_attempt_id"`
-	CancelState          *string    `db:"cancel_state" json:"cancel_state"`
-	CancelRequestedAt    *time.Time `db:"cancel_requested_at" json:"cancel_requested_at"`
-	CancelAcknowledgedAt *time.Time `db:"cancel_acknowledged_at" json:"cancel_acknowledged_at"`
-	CancelReason         *string    `db:"cancel_reason" json:"cancel_reason"`
-	DeadLetteredAt       *time.Time `db:"dead_lettered_at" json:"dead_lettered_at"`
-	ReplayOfRunID        *uuid.UUID `db:"replay_of_run_id" json:"replay_of_run_id"`
-	AgentSlug            string     `db:"agent_slug" json:"agent_slug"`
-	AgentName            string     `db:"agent_name" json:"agent_name"`
-	Direction            string     `db:"direction" json:"direction"`
-	ParentRunID          string     `db:"parent_run_id" json:"parent_run_id"`
-	CallerAgentID        string     `db:"caller_agent_id" json:"caller_agent_id"`
-	CallerAgentSlug      string     `db:"caller_agent_slug" json:"caller_agent_slug"`
-	CallerAgentName      string     `db:"caller_agent_name" json:"caller_agent_name"`
-	ProtocolContextID    string     `db:"protocol_context_id" json:"protocol_context_id"`
-	ProtocolTaskID       string     `db:"protocol_task_id" json:"protocol_task_id"`
-	RootContextID        string     `db:"root_context_id" json:"root_context_id"`
-	ParentContextID      string     `db:"parent_context_id" json:"parent_context_id"`
-	ParentTaskID         string     `db:"parent_task_id" json:"parent_task_id"`
-	TraceID              string     `db:"trace_id" json:"trace_id"`
-	ReferenceTaskIDs     []string   `db:"reference_task_ids" json:"reference_task_ids"`
-	ContextSource        string     `db:"context_source" json:"context_source"`
-	CallID               string     `db:"call_id" json:"call_id"`
-	ChildCount           int32      `db:"child_count" json:"child_count"`
+	ID                        uuid.UUID  `db:"id" json:"id"`
+	UserID                    uuid.UUID  `db:"user_id" json:"user_id"`
+	AgentID                   uuid.UUID  `db:"agent_id" json:"agent_id"`
+	Status                    string     `db:"status" json:"status"`
+	CostCents                 int32      `db:"cost_cents" json:"cost_cents"`
+	CreatorRevenueCents       int32      `db:"creator_revenue_cents" json:"creator_revenue_cents"`
+	DurationMs                *int32     `db:"duration_ms" json:"duration_ms"`
+	StartedAt                 time.Time  `db:"started_at" json:"started_at"`
+	FinishedAt                *time.Time `db:"finished_at" json:"finished_at"`
+	Source                    string     `db:"source" json:"source"`
+	RuntimeContractID         string     `db:"runtime_contract_id" json:"runtime_contract_id"`
+	AgentConnectionMode       string     `db:"agent_connection_mode" json:"agent_connection_mode"`
+	RuntimeTransport          string     `db:"runtime_transport" json:"runtime_transport"`
+	RuntimeTransportReason    string     `db:"runtime_transport_reason" json:"runtime_transport_reason"`
+	RuntimeTransportChangedAt *time.Time `db:"runtime_transport_changed_at" json:"runtime_transport_changed_at"`
+	DispatchState             string     `db:"dispatch_state" json:"dispatch_state"`
+	AttemptCount              int32      `db:"attempt_count" json:"attempt_count"`
+	MaxAttempts               int32      `db:"max_attempts" json:"max_attempts"`
+	NextAttemptAt             *time.Time `db:"next_attempt_at" json:"next_attempt_at"`
+	LatestAttemptID           *uuid.UUID `db:"latest_attempt_id" json:"latest_attempt_id"`
+	ActiveAttemptID           *uuid.UUID `db:"active_attempt_id" json:"active_attempt_id"`
+	CancelState               *string    `db:"cancel_state" json:"cancel_state"`
+	CancelRequestedAt         *time.Time `db:"cancel_requested_at" json:"cancel_requested_at"`
+	CancelAcknowledgedAt      *time.Time `db:"cancel_acknowledged_at" json:"cancel_acknowledged_at"`
+	CancelReason              *string    `db:"cancel_reason" json:"cancel_reason"`
+	DeadLetteredAt            *time.Time `db:"dead_lettered_at" json:"dead_lettered_at"`
+	ReplayOfRunID             *uuid.UUID `db:"replay_of_run_id" json:"replay_of_run_id"`
+	AgentSlug                 string     `db:"agent_slug" json:"agent_slug"`
+	AgentName                 string     `db:"agent_name" json:"agent_name"`
+	Direction                 string     `db:"direction" json:"direction"`
+	ParentRunID               string     `db:"parent_run_id" json:"parent_run_id"`
+	CallerAgentID             string     `db:"caller_agent_id" json:"caller_agent_id"`
+	CallerAgentSlug           string     `db:"caller_agent_slug" json:"caller_agent_slug"`
+	CallerAgentName           string     `db:"caller_agent_name" json:"caller_agent_name"`
+	ProtocolContextID         string     `db:"protocol_context_id" json:"protocol_context_id"`
+	ProtocolTaskID            string     `db:"protocol_task_id" json:"protocol_task_id"`
+	RootContextID             string     `db:"root_context_id" json:"root_context_id"`
+	ParentContextID           string     `db:"parent_context_id" json:"parent_context_id"`
+	ParentTaskID              string     `db:"parent_task_id" json:"parent_task_id"`
+	TraceID                   string     `db:"trace_id" json:"trace_id"`
+	ReferenceTaskIDs          []string   `db:"reference_task_ids" json:"reference_task_ids"`
+	ContextSource             string     `db:"context_source" json:"context_source"`
+	CallID                    string     `db:"call_id" json:"call_id"`
+	ChildCount                int32      `db:"child_count" json:"child_count"`
 }
 
 func (q *Queries) ListCallRecordsForUser(ctx context.Context, arg ListCallRecordsForUserParams) ([]ListCallRecordsForUserRow, error) {
@@ -188,6 +210,10 @@ func (q *Queries) ListCallRecordsForUser(ctx context.Context, arg ListCallRecord
 			&item.FinishedAt,
 			&item.Source,
 			&item.RuntimeContractID,
+			&item.AgentConnectionMode,
+			&item.RuntimeTransport,
+			&item.RuntimeTransportReason,
+			&item.RuntimeTransportChangedAt,
 			&item.DispatchState,
 			&item.AttemptCount,
 			&item.MaxAttempts,

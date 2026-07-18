@@ -591,6 +591,10 @@ SELECT r.id,
        r.finished_at,
        r.source,
        r.runtime_contract_id,
+       COALESCE(r.connection_mode_snapshot, '')::text AS agent_connection_mode,
+       COALESCE(runtime_evidence.transport, '')::text AS runtime_transport,
+       COALESCE(runtime_evidence.transport_reason, '')::text AS runtime_transport_reason,
+       runtime_evidence.transport_changed_at AS runtime_transport_changed_at,
        r.dispatch_state,
        r.attempt_count,
        r.max_attempts,
@@ -629,6 +633,20 @@ JOIN agents a ON a.id = r.agent_id
 LEFT JOIN run_delegations d ON d.child_run_id = r.id
 LEFT JOIN agents caller ON caller.id = d.caller_agent_id
 LEFT JOIN a2a_context_mappings ctx ON ctx.run_id = r.id
+LEFT JOIN LATERAL (
+    SELECT attachment.transport,
+           attachment.transport_reason,
+           attachment.transport_changed_at
+    FROM run_attempts attempt
+    JOIN runtime_session_attachments attachment
+      ON attachment.id = attempt.runtime_attachment_id
+     AND attachment.runtime_session_id = attempt.runtime_session_id
+    WHERE attempt.run_id = r.id
+      AND attempt.id = COALESCE(r.active_attempt_id, r.latest_attempt_id)
+      AND attempt.executor_type = 'runtime'
+      AND attempt.accepted_at IS NOT NULL
+      AND attachment.transport IN ('websocket', 'long_poll')
+) runtime_evidence ON TRUE
 LEFT JOIN LATERAL (
     SELECT COUNT(*)::int AS child_count
     FROM run_delegations cd
