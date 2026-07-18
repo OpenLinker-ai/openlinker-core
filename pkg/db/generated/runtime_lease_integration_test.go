@@ -211,14 +211,20 @@ func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
+		attachment, err := q.GetActiveRuntimeSessionAttachment(ctx, fixture.sourceSessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
 		attempt, err := q.ConfirmRunAssignment(ctx, ConfirmRunAssignmentParams{
 			LeaseTtlMs: 60_000, CoreInstanceID: fixture.coreID,
 			RunID: fixture.runID, AttemptID: fixture.attemptID,
 			LeaseID: fixture.leaseID, FencingToken: 1,
 			RuntimeSessionID: &fixture.sourceSessionID, NodeID: &fixture.nodeID,
 			CredentialID: &fixture.tokenID, WorkerID: &fixture.workerID,
+			AttachmentID: attachment.ID,
 		})
-		if err != nil || attempt.AttemptNo == nil || *attempt.AttemptNo != 1 {
+		if err != nil || attempt.AttemptNo == nil || *attempt.AttemptNo != 1 ||
+			attempt.RuntimeAttachmentID == nil || *attempt.RuntimeAttachmentID != attachment.ID {
 			t.Fatalf("ConfirmRunAssignment = %#v, %v", attempt, err)
 		}
 		mirrored, err := q.MirrorRunConfirmedAssignment(ctx, MirrorRunConfirmedAssignmentParams{

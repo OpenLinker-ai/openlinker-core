@@ -294,7 +294,8 @@ func (s *RuntimeLeaseService) AckAssignment(
 
 	var confirmed RunAssignmentConfirmedPayload
 	err := s.repository.WithTransaction(ctx, func(tx runtimeLeaseTransaction) error {
-		if _, err := s.lockPrincipal(ctx, tx, principal); err != nil {
+		locked, err := s.lockPrincipal(ctx, tx, principal)
+		if err != nil {
 			return err
 		}
 		run, attempt, err := lockLeaseMutation(ctx, tx, principal, request.AttemptIdentity)
@@ -322,7 +323,7 @@ func (s *RuntimeLeaseService) AckAssignment(
 			return newRuntimeLeaseError(RuntimeLeaseErrorLeaseExpired, nil)
 		}
 
-		accepted, err := tx.ConfirmRunAssignment(ctx, confirmAssignmentParams(principal, s.coreInstanceID, s.config.LeaseTTL, request.AttemptIdentity))
+		accepted, err := tx.ConfirmRunAssignment(ctx, confirmAssignmentParams(principal, locked.attachment.ID, s.coreInstanceID, s.config.LeaseTTL, request.AttemptIdentity))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				// All non-time guards were checked under the Session, Run, and
@@ -333,7 +334,8 @@ func (s *RuntimeLeaseService) AckAssignment(
 			return err
 		}
 		if !attemptMatchesLeaseIdentity(accepted, principal, request.AttemptIdentity) || accepted.AttemptNo == nil ||
-			*accepted.AttemptNo < 1 || accepted.AcceptedAt == nil || accepted.LeaseExpiresAt.IsZero() {
+			*accepted.AttemptNo < 1 || accepted.AcceptedAt == nil || accepted.LeaseExpiresAt.IsZero() ||
+			accepted.RuntimeAttachmentID == nil || *accepted.RuntimeAttachmentID != locked.attachment.ID {
 			return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, nil)
 		}
 		mirrored, err := tx.MirrorRunConfirmedAssignment(ctx, mirrorConfirmedParams(principal, s.coreInstanceID, request.AttemptIdentity))
@@ -1035,12 +1037,13 @@ func mirrorOfferParams(principal RuntimeSessionPrincipal, attempt db.RunAttempt)
 	}
 }
 
-func confirmAssignmentParams(principal RuntimeSessionPrincipal, coreInstanceID uuid.UUID, ttl time.Duration, identity AttemptIdentity) db.ConfirmRunAssignmentParams {
+func confirmAssignmentParams(principal RuntimeSessionPrincipal, attachmentID, coreInstanceID uuid.UUID, ttl time.Duration, identity AttemptIdentity) db.ConfirmRunAssignmentParams {
 	sessionID, nodeID, credentialID, workerID := principal.RuntimeSessionID, principal.NodeID, principal.CredentialID, principal.WorkerID
 	return db.ConfirmRunAssignmentParams{
 		LeaseTtlMs: ttl.Milliseconds(), CoreInstanceID: coreInstanceID, RunID: identity.RunID,
 		AttemptID: identity.AttemptID, LeaseID: identity.LeaseID, FencingToken: identity.FencingToken,
 		RuntimeSessionID: &sessionID, NodeID: &nodeID, CredentialID: &credentialID, WorkerID: &workerID,
+		AttachmentID: attachmentID,
 	}
 }
 
