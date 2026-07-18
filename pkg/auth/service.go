@@ -37,13 +37,13 @@ const (
 // ParseOAuthCodeStorageMode returns the compatibility default for an empty
 // value and rejects every unknown mode without echoing the supplied value.
 func ParseOAuthCodeStorageMode(value string) (OAuthCodeStorageMode, error) {
-	switch strings.TrimSpace(value) {
+	switch value {
 	case "", string(OAuthCodeStorageModeLegacyJWT):
 		return OAuthCodeStorageModeLegacyJWT, nil
 	case string(OAuthCodeStorageModeSubjectOnly):
 		return OAuthCodeStorageModeSubjectOnly, nil
 	default:
-		return "", fmt.Errorf("OAuth code storage mode must be legacy-jwt or subject-only")
+		return "", fmt.Errorf("invalid OAuth code storage mode")
 	}
 }
 
@@ -85,7 +85,7 @@ func (s *Service) SetOAuthCodeStorageMode(mode OAuthCodeStorageMode) error {
 		s.oauthCodeStorageMode = mode
 		return nil
 	default:
-		return fmt.Errorf("OAuth code storage mode must be legacy-jwt or subject-only")
+		return fmt.Errorf("invalid OAuth code storage mode")
 	}
 }
 

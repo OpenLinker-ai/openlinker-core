@@ -133,20 +133,25 @@ func TestLoadOAuthCodeStorageMode(t *testing.T) {
 		})
 	}
 
-	t.Run("unknown mode fails without echoing value", func(t *testing.T) {
-		const invalid = "subject-only-secret-looking-invalid-value"
-		t.Setenv("OAUTH_CODE_STORAGE_MODE", invalid)
-		_, err := Load()
-		if err == nil {
-			t.Fatal("Load should reject an unknown OAuth code storage mode")
-		}
-		if !strings.Contains(err.Error(), "OAUTH_CODE_STORAGE_MODE") {
-			t.Fatalf("error does not identify OAUTH_CODE_STORAGE_MODE: %v", err)
-		}
-		if strings.Contains(err.Error(), invalid) {
-			t.Fatalf("error echoed the rejected value: %v", err)
-		}
-	})
+	for _, invalid := range []string{
+		"subject-only-secret-looking-invalid-value",
+		" subject-only ",
+		" legacy-jwt ",
+	} {
+		t.Run("invalid mode fails without echoing value", func(t *testing.T) {
+			t.Setenv("OAUTH_CODE_STORAGE_MODE", invalid)
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load should reject OAuth code storage mode %q", invalid)
+			}
+			if !strings.Contains(err.Error(), "OAUTH_CODE_STORAGE_MODE") {
+				t.Fatalf("error does not identify OAUTH_CODE_STORAGE_MODE: %v", err)
+			}
+			if strings.Contains(err.Error(), invalid) {
+				t.Fatalf("error echoed the rejected value: %v", err)
+			}
+		})
+	}
 }
 
 func TestLoadRequiresDatabaseURLAndJWTSecret(t *testing.T) {

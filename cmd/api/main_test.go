@@ -220,16 +220,21 @@ func TestValidateProductionConfigSecretLengths(t *testing.T) {
 }
 
 func TestValidateProductionConfigRejectsUnknownOAuthCodeStorageMode(t *testing.T) {
-	const invalid = "secret-looking-invalid-storage-value"
-	err := validateProductionConfig(&config.Config{
-		Env:                  "development",
-		OAuthCodeStorageMode: invalid,
-	})
-	if err == nil || !strings.Contains(err.Error(), "OAUTH_CODE_STORAGE_MODE") {
-		t.Fatalf("unknown storage mode error = %v", err)
-	}
-	if strings.Contains(err.Error(), invalid) {
-		t.Fatalf("unknown storage mode error echoed value: %v", err)
+	for _, invalid := range []string{
+		"secret-looking-invalid-storage-value",
+		" subject-only ",
+		" legacy-jwt ",
+	} {
+		err := validateProductionConfig(&config.Config{
+			Env:                  "development",
+			OAuthCodeStorageMode: invalid,
+		})
+		if err == nil || !strings.Contains(err.Error(), "OAUTH_CODE_STORAGE_MODE") {
+			t.Fatalf("unknown storage mode %q error = %v", invalid, err)
+		}
+		if strings.Contains(err.Error(), invalid) {
+			t.Fatalf("unknown storage mode error echoed value: %v", err)
+		}
 	}
 }
 

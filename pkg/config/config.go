@@ -148,13 +148,13 @@ func Load() (*Config, error) {
 }
 
 func normalizeOAuthCodeStorageMode(value string) (string, error) {
-	switch strings.TrimSpace(value) {
+	switch value {
 	case "", "legacy-jwt":
 		return "legacy-jwt", nil
 	case "subject-only":
 		return "subject-only", nil
 	default:
-		return "", fmt.Errorf("OAUTH_CODE_STORAGE_MODE must be legacy-jwt or subject-only")
+		return "", fmt.Errorf("OAUTH_CODE_STORAGE_MODE is invalid")
 	}
 }
 

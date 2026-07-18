@@ -388,17 +388,25 @@ func TestOAuthCodeStorageModeParsingAndSetter(t *testing.T) {
 		assert.Equal(t, tc.want, got)
 	}
 
-	const invalid = OAuthCodeStorageMode("secret-looking-invalid-mode")
-	if _, err := ParseOAuthCodeStorageMode(string(invalid)); err == nil || strings.Contains(err.Error(), string(invalid)) {
-		t.Fatalf("ParseOAuthCodeStorageMode invalid error = %v", err)
+	invalidModes := []OAuthCodeStorageMode{
+		"secret-looking-invalid-mode",
+		" subject-only ",
+		" legacy-jwt ",
+	}
+	for _, invalid := range invalidModes {
+		if _, err := ParseOAuthCodeStorageMode(string(invalid)); err == nil || strings.Contains(err.Error(), string(invalid)) {
+			t.Fatalf("ParseOAuthCodeStorageMode(%q) invalid error = %v", invalid, err)
+		}
 	}
 
 	svc := NewService(nil, testServiceSecret, testServiceTTL)
 	assert.Equal(t, OAuthCodeStorageModeLegacyJWT, svc.oauthCodeStorageMode)
 	require.NoError(t, svc.SetOAuthCodeStorageMode(OAuthCodeStorageModeSubjectOnly))
 	assert.Equal(t, OAuthCodeStorageModeSubjectOnly, svc.oauthCodeStorageMode)
-	if err := svc.SetOAuthCodeStorageMode(invalid); err == nil || strings.Contains(err.Error(), string(invalid)) {
-		t.Fatalf("SetOAuthCodeStorageMode invalid error = %v", err)
+	for _, invalid := range invalidModes {
+		if err := svc.SetOAuthCodeStorageMode(invalid); err == nil || strings.Contains(err.Error(), string(invalid)) {
+			t.Fatalf("SetOAuthCodeStorageMode(%q) invalid error = %v", invalid, err)
+		}
 	}
 }
 
