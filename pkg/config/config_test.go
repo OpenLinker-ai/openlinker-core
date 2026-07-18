@@ -67,8 +67,8 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	if cfg.OAuthSessionSecret != "oauth-secret" {
 		t.Fatalf("OAuthSessionSecret = %q", cfg.OAuthSessionSecret)
 	}
-	if cfg.OAuthCodeStorageMode != "legacy-jwt" {
-		t.Fatalf("OAuthCodeStorageMode = %q, want legacy-jwt", cfg.OAuthCodeStorageMode)
+	if cfg.OAuthCodeStorageMode != "subject-only" {
+		t.Fatalf("OAuthCodeStorageMode = %q, want subject-only", cfg.OAuthCodeStorageMode)
 	}
 	if cfg.InternalToken != "internal-secret" {
 		t.Fatalf("InternalToken = %q", cfg.InternalToken)

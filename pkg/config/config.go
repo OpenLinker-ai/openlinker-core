@@ -33,9 +33,9 @@ type Config struct {
 	JWTExpireHours     int    `envconfig:"JWT_EXPIRE_HOURS" default:"24"`
 	OAuthSessionSecret string `envconfig:"OAUTH_SESSION_SECRET"`
 	// OAuthCodeStorageMode controls only the temporary OAuth handoff row format.
-	// legacy-jwt is the rolling-deployment compatibility default; subject-only
-	// must be enabled only after every reader understands nullable JWT rows.
-	OAuthCodeStorageMode string `envconfig:"OAUTH_CODE_STORAGE_MODE" default:"legacy-jwt"`
+	// subject-only is the post-activation application default. legacy-jwt stays
+	// available as an explicit rollback mode for compatibility windows.
+	OAuthCodeStorageMode string `envconfig:"OAUTH_CODE_STORAGE_MODE" default:"subject-only"`
 
 	// Google OAuth
 	GoogleClientID     string `envconfig:"GOOGLE_OAUTH_CLIENT_ID"`
@@ -150,7 +150,9 @@ func Load() (*Config, error) {
 
 func normalizeOAuthCodeStorageMode(value string) (string, error) {
 	switch value {
-	case "", "legacy-jwt":
+	case "":
+		return "subject-only", nil
+	case "legacy-jwt":
 		return "legacy-jwt", nil
 	case "subject-only":
 		return "subject-only", nil
