@@ -3,7 +3,7 @@ module github.com/OpenLinker-ai/openlinker-core
 go 1.25.0
 
 require (
-	github.com/OpenLinker-ai/openlinker-go v0.1.43-0.20260713131922-a81ec74b4c0d
+	github.com/OpenLinker-ai/openlinker-go v0.2.0-rc1.0.20260716190923-b4ab6d0d7f19
 	github.com/alicebob/miniredis/v2 v2.35.0
 	github.com/go-playground/validator/v10 v10.30.2
 	github.com/go-redis/redis_rate/v10 v10.0.1
