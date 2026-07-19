@@ -479,6 +479,7 @@ func officialA2AAgentCardView(raw interface{}) interface{} {
 		"supported_interfaces",
 		"skills",
 		"signatures",
+		"openlinker",
 	} {
 		if value, ok := card[key]; ok {
 			out[key] = value

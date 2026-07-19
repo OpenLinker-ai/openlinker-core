@@ -38,6 +38,11 @@ type workflowRuntime interface {
 const defaultWorkflowRunMaxAttempts int32 = 3
 
 const (
+	workflowInputMappingInvalidCode     = httpx.ErrorCode("WORKFLOW_INPUT_MAPPING_INVALID")
+	workflowNodeInputSchemaMismatchCode = httpx.ErrorCode("WORKFLOW_NODE_INPUT_SCHEMA_MISMATCH")
+)
+
+const (
 	workflowRunStatusPending  = "pending"
 	workflowRunStatusRunning  = "running"
 	workflowRunStatusPaused   = "paused"
@@ -91,6 +96,9 @@ func (s *Service) CreateWorkflow(ctx context.Context, userID uuid.UUID, req *Cre
 		return nil, err
 	}
 	if err := s.validateWorkflowRequestAgentsAvailable(ctx, userID, req.Nodes, false); err != nil {
+		return nil, err
+	}
+	if err := s.validateWorkflowRequestInputMappings(ctx, req.Nodes, edges); err != nil {
 		return nil, err
 	}
 	edgesJSON, err := json.Marshal(edges)
@@ -1145,10 +1153,13 @@ func (s *Service) runWorkflowNode(
 	w db.Workflow,
 	run db.WorkflowRun,
 	node db.WorkflowNode,
-	stepInput map[string]interface{},
+	stepInput workflowStepInputResult,
 	sequence int32,
 ) workflowNodeRunResult {
-	stepInputJSON, _ := json.Marshal(stepInput)
+	if stepInput.Value == nil {
+		stepInput.Value = map[string]interface{}{}
+	}
+	stepInputJSON, _ := json.Marshal(stepInput.Value)
 	step, err := s.queries.CreateWorkflowRunStep(ctx, db.CreateWorkflowRunStepParams{
 		WorkflowRunID:  run.ID,
 		WorkflowNodeID: node.ID,
@@ -1160,9 +1171,27 @@ func (s *Service) runWorkflowNode(
 	if err != nil {
 		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: fmt.Errorf("创建 step 失败: %w", err)}
 	}
+	if stepInput.Err != nil {
+		msg := stepInput.Err.Error()
+		_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
+			ID:           step.ID,
+			ErrorMessage: &msg,
+		})
+		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
+	}
+	if stepInput.Mapped {
+		if err := s.validateMappedWorkflowNodeInput(ctx, node, stepInput.Value); err != nil {
+			msg := err.Error()
+			_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
+				ID:           step.ID,
+				ErrorMessage: &msg,
+			})
+			return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
+		}
+	}
 	runRequest := &runtime.RunRequest{
 		AgentID:          node.AgentID.String(),
-		Input:            stepInput,
+		Input:            stepInput.Value,
 		IdempotencyKey:   workflowNodeRunIdempotencyKey(run.ID, node.NodeKey),
 		CreationProtocol: "workflow",
 		CreationMethod:   "node.run",
@@ -1942,29 +1971,6 @@ func isWorkflowEndpointKey(key string) bool {
 	default:
 		return false
 	}
-}
-
-func workflowStepInput(original map[string]interface{}, outputsByNode map[string]map[string]interface{}, parents []string, node db.WorkflowNode) map[string]interface{} {
-	if len(parents) == 0 {
-		return map[string]interface{}{
-			"workflow_input": original,
-			"node_key":       node.NodeKey,
-		}
-	}
-	dependencies := map[string]interface{}{}
-	for _, key := range parents {
-		dependencies[key] = outputsByNode[key]
-	}
-	input := map[string]interface{}{
-		"workflow_input": original,
-		"dependencies":   dependencies,
-		"node_key":       node.NodeKey,
-	}
-	if len(parents) == 1 {
-		input["previous_node"] = parents[0]
-		input["previous_output"] = outputsByNode[parents[0]]
-	}
-	return input
 }
 
 func workflowFinalOutput(outputsByNode map[string]map[string]interface{}, sinks []string) map[string]interface{} {

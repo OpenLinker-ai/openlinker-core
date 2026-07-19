@@ -111,6 +111,30 @@ func TestNormalizeA2AResultForVersionCompatibilityEdges(t *testing.T) {
 	assert.NotContains(t, items[2].(map[string]interface{}), "kind")
 }
 
+func TestOfficialA2AAgentCardViewPreservesDeclaredExtensionOnly(t *testing.T) {
+	view := officialA2AAgentCardView(map[string]interface{}{
+		"name":        "Extended Agent",
+		"description": "authenticated card",
+		"version":     "v1",
+		"capabilities": map[string]interface{}{
+			"streaming": true,
+			"internal":  "drop-me",
+		},
+		"openlinker": map[string]interface{}{
+			"slug":         "extended-agent",
+			"card_variant": "extended",
+		},
+		"capability":           map[string]interface{}{"input_schema": map[string]interface{}{"type": "object"}},
+		"endpoint_auth_header": "Bearer secret",
+	}).(map[string]interface{})
+
+	require.Equal(t, "extended", view["openlinker"].(map[string]interface{})["card_variant"])
+	require.Equal(t, true, view["capabilities"].(map[string]interface{})["streaming"])
+	assert.NotContains(t, view["capabilities"].(map[string]interface{}), "internal")
+	assert.NotContains(t, view, "capability")
+	assert.NotContains(t, view, "endpoint_auth_header")
+}
+
 func TestNormalizeA2AResultForCurrentVersionUsesProtoPushAndEventShapes(t *testing.T) {
 	normalized := normalizeA2AResultForVersion(map[string]interface{}{
 		"items": []interface{}{

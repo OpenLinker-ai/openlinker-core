@@ -121,6 +121,113 @@ func TestWorkflowRunExecutesAgentNodesAndPersistsChildRuns(t *testing.T) {
 	require.Equal(t, 2, runCount)
 }
 
+func TestWorkflowRunMapsExplicitInputBeforeCreatingChildRun(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+
+	var received map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req runtimemod.AgentRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		received = req.Input
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+			"output": map[string]interface{}{"answer": "mapped"},
+		}))
+	}))
+	t.Cleanup(server.Close)
+
+	userID := insertWorkflowUser(t, pool, "wf-mapping-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-mapping-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
+	insertWorkflowAgentCapability(t, pool, agentID, `{
+		"type":"object",
+		"properties":{"task":{"type":"string"},"format":{"type":"string"}},
+		"required":["task"],
+		"additionalProperties":false
+	}`)
+
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
+	svc := workflow.NewService(pool, runtimeSvc)
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Mapped workflow",
+		Nodes: []workflow.WorkflowNodeRequest{{
+			Key: "analyze", AgentID: agentID,
+			Config: map[string]interface{}{"input_mapping": map[string]interface{}{
+				"version": "v1",
+				"fields": map[string]interface{}{
+					"task":   map[string]interface{}{"source": "workflow_input", "path": []interface{}{"text"}},
+					"format": map[string]interface{}{"source": "constant", "value": "markdown"},
+				},
+			}},
+		}},
+	})
+	require.NoError(t, err)
+
+	run, err := svc.RunWorkflow(context.Background(), userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"text": "audit the boundary", "ignored": true},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "success", run.Status)
+	require.Equal(t, map[string]interface{}{"task": "audit the boundary", "format": "markdown"}, received)
+	require.NotContains(t, received, "workflow_input")
+	require.NotContains(t, received, "node_key")
+}
+
+func TestWorkflowMappedInputSchemaMismatchFailsBeforeChildRun(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+	userID := insertWorkflowUser(t, pool, "wf-mismatch-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-mismatch-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, "http://127.0.0.1:18080")
+	insertWorkflowAgentCapability(t, pool, agentID, `{
+		"type":"object",
+		"properties":{"task":{"type":"string"}},
+		"required":["task"],
+		"additionalProperties":false
+	}`)
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
+	svc := workflow.NewService(pool, runtimeSvc)
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Schema mismatch workflow",
+		Nodes: []workflow.WorkflowNodeRequest{{
+			Key: "analyze", AgentID: agentID,
+			Config: map[string]interface{}{"input_mapping": map[string]interface{}{
+				"version": "v1",
+				"fields": map[string]interface{}{
+					"task": map[string]interface{}{"source": "workflow_input", "path": []interface{}{"task"}},
+				},
+			}},
+		}},
+	})
+	require.NoError(t, err)
+
+	run, err := svc.RunWorkflow(context.Background(), userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"task": 42},
+	})
+	require.Nil(t, run)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "WORKFLOW_NODE_INPUT_SCHEMA_MISMATCH")
+
+	var childRuns int
+	require.NoError(t, pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM runs WHERE user_id=$1 AND agent_id=$2`, userID, agentID).Scan(&childRuns))
+	require.Zero(t, childRuns)
+
+	runs, err := svc.ListWorkflowRuns(context.Background(), userID, uuid.MustParse(created.ID), 10)
+	require.NoError(t, err)
+	require.Len(t, runs.Items, 1)
+	require.Equal(t, "failed", runs.Items[0].Status)
+	require.Len(t, runs.Items[0].Steps, 1)
+	require.Equal(t, "failed", runs.Items[0].Steps[0].Status)
+}
+
 func TestWorkflowCreateRejectsUncallableAgent(t *testing.T) {
 	pool := setupWorkflowTestDB(t)
 	userID := insertWorkflowUser(t, pool, "wf-uncallable-user")
@@ -1369,12 +1476,20 @@ VALUES ($1,'{"type":"object"}'::jsonb,'{"type":"object"}'::jsonb,'external execu
 	require.True(t, first.Executable)
 	require.Regexp(t, `^hct:v1:[a-f0-9]{64}$`, first.ContractHash)
 
+	_, err = pool.Exec(context.Background(), `UPDATE workflow_nodes SET config=$2::jsonb WHERE workflow_id=$1`, workflowID,
+		`{"mode":"strict","input_mapping":{"version":"v1","fields":{"task":{"source":"workflow_input","path":["text"]}}}}`)
+	require.NoError(t, err)
+	mapped, err := svc.ValidateExternalExecutionTarget(context.Background(), ownerID, workflowID)
+	require.NoError(t, err)
+	require.True(t, mapped.Executable)
+	require.NotEqual(t, first.ContractHash, mapped.ContractHash)
+
 	_, err = pool.Exec(context.Background(), `UPDATE agent_capabilities SET version=version+1, updated_at=NOW() WHERE agent_id=$1`, agentID)
 	require.NoError(t, err)
 	second, err := svc.ValidateExternalExecutionTarget(context.Background(), ownerID, workflowID)
 	require.NoError(t, err)
 	require.True(t, second.Executable)
-	require.NotEqual(t, first.ContractHash, second.ContractHash)
+	require.NotEqual(t, mapped.ContractHash, second.ContractHash)
 }
 
 func setupWorkflowTestDB(t *testing.T) *pgxpool.Pool {
@@ -1446,6 +1561,16 @@ func insertWorkflowAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, 
 	)
 	require.NoError(t, err)
 	return id
+}
+
+func insertWorkflowAgentCapability(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, inputSchema string) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO agent_capabilities (
+			agent_id, input_schema, output_schema, summary, version, published_at, updated_at
+		) VALUES ($1, $2::jsonb, '{"type":"object"}'::jsonb, 'workflow mapping test', 1, NOW(), NOW())
+	`, agentID, inputSchema)
+	require.NoError(t, err)
 }
 
 func insertWorkflowRuntimeSession(

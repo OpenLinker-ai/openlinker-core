@@ -214,15 +214,15 @@ func TestWorkflowResponseAndDataHelpers(t *testing.T) {
 		"review":  {"approved": true},
 	}
 	firstInput := workflowStepInput(original, outputsByNode, nil, db.WorkflowNode{NodeKey: "extract"})
-	if firstInput["node_key"] != "extract" || !reflect.DeepEqual(firstInput["workflow_input"], original) {
+	if firstInput.Err != nil || firstInput.Mapped || firstInput.Value["node_key"] != "extract" || !reflect.DeepEqual(firstInput.Value["workflow_input"], original) {
 		t.Fatalf("first step input = %#v", firstInput)
 	}
 	nextInput := workflowStepInput(original, outputsByNode, []string{"extract"}, db.WorkflowNode{NodeKey: "review"})
-	if nextInput["previous_node"] != "extract" || !reflect.DeepEqual(nextInput["previous_output"], outputsByNode["extract"]) {
+	if nextInput.Err != nil || nextInput.Mapped || nextInput.Value["previous_node"] != "extract" || !reflect.DeepEqual(nextInput.Value["previous_output"], outputsByNode["extract"]) {
 		t.Fatalf("single parent input = %#v", nextInput)
 	}
 	multiInput := workflowStepInput(original, outputsByNode, []string{"extract", "review"}, db.WorkflowNode{NodeKey: "publish"})
-	deps, ok := multiInput["dependencies"].(map[string]interface{})
+	deps, ok := multiInput.Value["dependencies"].(map[string]interface{})
 	if !ok || deps["extract"] == nil || deps["review"] == nil {
 		t.Fatalf("multi parent dependencies = %#v", multiInput)
 	}
@@ -1269,7 +1269,7 @@ func TestWorkflowStepCopyAndRunNodeErrorEdges(t *testing.T) {
 		db.Workflow{ID: workflowID},
 		db.WorkflowRun{ID: runID, UserID: userID},
 		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
-		map[string]interface{}{"node_key": "extract"},
+		workflowStepInputResult{Value: map[string]interface{}{"node_key": "extract"}},
 		0,
 	)
 	if result.Err == nil || !strings.Contains(result.Err.Error(), "创建 step 失败") {
@@ -1326,7 +1326,7 @@ func TestRunWorkflowNodeAttachesChildRunBeforeWaiting(t *testing.T) {
 		db.Workflow{ID: workflowID},
 		db.WorkflowRun{ID: runID, UserID: userID},
 		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
-		map[string]interface{}{"node_key": "extract"},
+		workflowStepInputResult{Value: map[string]interface{}{"node_key": "extract"}},
 		0,
 	)
 	if result.Err != nil || result.Output["summary"] != "done" {
@@ -1366,7 +1366,7 @@ func TestRunWorkflowNodeRejectsInvalidChildRunIDWithoutWaiting(t *testing.T) {
 		db.Workflow{ID: uuid.New()},
 		db.WorkflowRun{ID: runID},
 		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
-		map[string]interface{}{"node_key": "extract"},
+		workflowStepInputResult{Value: map[string]interface{}{"node_key": "extract"}},
 		0,
 	)
 	if result.Err == nil || !strings.Contains(result.Err.Error(), "runID 无效") {
@@ -1424,7 +1424,7 @@ func TestRunWorkflowNodeDurablyAttachesChildRunAfterContextCancellation(t *testi
 		db.Workflow{ID: uuid.New()},
 		db.WorkflowRun{ID: runID},
 		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
-		map[string]interface{}{"node_key": "extract"},
+		workflowStepInputResult{Value: map[string]interface{}{"node_key": "extract"}},
 		0,
 	)
 	if result.Err == nil || !strings.Contains(result.Err.Error(), context.Canceled.Error()) {
@@ -1482,7 +1482,7 @@ func TestRunWorkflowNodeStopsWhenChildRunAttachmentErrors(t *testing.T) {
 		db.Workflow{ID: uuid.New()},
 		db.WorkflowRun{ID: runID},
 		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
-		map[string]interface{}{"node_key": "extract"},
+		workflowStepInputResult{Value: map[string]interface{}{"node_key": "extract"}},
 		0,
 	)
 	if result.Err == nil || !strings.Contains(result.Err.Error(), attachErr.Error()) {
@@ -1528,7 +1528,7 @@ func TestRunWorkflowNodeStopsWhenChildRunAttachmentIsRejected(t *testing.T) {
 		db.Workflow{ID: uuid.New()},
 		db.WorkflowRun{ID: runID},
 		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
-		map[string]interface{}{"node_key": "extract"},
+		workflowStepInputResult{Value: map[string]interface{}{"node_key": "extract"}},
 		0,
 	)
 	if result.Err == nil || !strings.Contains(result.Err.Error(), "不再接受子 run 关联") {

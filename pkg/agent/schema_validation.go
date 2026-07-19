@@ -112,6 +112,14 @@ func validateJSONAgainstSchema(value interface{}, schema map[string]interface{},
 	return validateJSONValue(value, schema, label, 0)
 }
 
+// ValidateInputAgainstSchema lets Core orchestration layers validate the
+// concrete input they are about to send to an Agent. Capability schema
+// ownership stays in the agent package; callers do not duplicate a partial
+// validator or reinterpret the Agent contract.
+func ValidateInputAgainstSchema(value interface{}, schema map[string]interface{}) error {
+	return validateJSONAgainstSchema(value, schema, "input")
+}
+
 func validateJSONValue(value interface{}, schema map[string]interface{}, path string, depth int) error {
 	if depth > maxSchemaDepth {
 		return fmt.Errorf("%s 嵌套过深", path)
