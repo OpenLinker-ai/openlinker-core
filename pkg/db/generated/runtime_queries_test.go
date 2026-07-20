@@ -110,6 +110,34 @@ func TestRuntimeAttemptAndCancellationQueries(t *testing.T) {
 	requireSQLName(t, dbtx.queryRowSQL, "CreateRunCancellation")
 }
 
+func TestListRequestedCoreAttemptCancellationsBatchesAndReturnsFencedIdentity(t *testing.T) {
+	runID, attemptID, leaseID := uuid.New(), uuid.New(), uuid.New()
+	dbtx := &fakeDBTX{queryRows: &fakeRows{rows: [][]any{{
+		runID, attemptID, leaseID, int64(7),
+	}}}}
+	queries := New(dbtx)
+	items, err := queries.ListRequestedCoreAttemptCancellations(
+		context.Background(), []uuid.UUID{runID},
+	)
+	if err != nil || len(items) != 1 || items[0].RunID != runID ||
+		items[0].AttemptID != attemptID || items[0].LeaseID != leaseID ||
+		items[0].FencingToken != 7 {
+		t.Fatalf("ListRequestedCoreAttemptCancellations = %#v, %v", items, err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRequestedCoreAttemptCancellations")
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{[]uuid.UUID{runID}}) {
+		t.Fatalf("ListRequestedCoreAttemptCancellations args = %#v", dbtx.queryArgs)
+	}
+	for _, fragment := range []string{
+		"r.id = ANY($1::uuid[])", "a.id = c.target_attempt_id",
+		"a.lease_id", "a.fencing_token", "a.finished_at IS NULL",
+	} {
+		if !strings.Contains(dbtx.querySQL, fragment) {
+			t.Fatalf("ListRequestedCoreAttemptCancellations missing %q: %s", fragment, dbtx.querySQL)
+		}
+	}
+}
+
 func TestResultFinalizationQueries(t *testing.T) {
 	now := time.Date(2026, 7, 11, 8, 30, 0, 0, time.UTC)
 	runID, userID, agentID := uuid.New(), uuid.New(), uuid.New()

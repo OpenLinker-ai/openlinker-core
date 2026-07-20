@@ -453,6 +453,7 @@ func configureRuntime(
 		return
 	}
 	runtimeService.ConfigureCoreRuntime(coreInstanceID)
+	runtimeService.StartCoreAttemptCancellationCoordinator(rootCtx)
 	sessions := runtime.NewRuntimeSessionService(pool, coreInstanceID)
 	verifier := runtime.NewDBRuntimeNodeCredentialVerifier(pool)
 	cancellations := runtime.NewRuntimeCancellationCoordinator(pool)

@@ -111,3 +111,28 @@ SELECT EXISTS (
       AND a.outcome IS NULL
       AND a.result_id IS NULL
 );
+
+-- name: ListRequestedCoreAttemptCancellations :many
+-- One Core-scoped fallback query replaces one query per active HTTP/MCP
+-- Attempt. The returned immutable identity is rechecked against the local
+-- registry before cancellation, preserving the lease/fencing boundary.
+SELECT r.id AS run_id,
+       a.id AS attempt_id,
+       a.lease_id,
+       a.fencing_token
+FROM runs r
+JOIN run_cancellations c
+  ON c.run_id = r.id
+ AND c.id = r.cancel_request_id
+JOIN run_attempts a
+  ON a.run_id = r.id
+ AND a.id = c.target_attempt_id
+WHERE r.id = ANY($1::uuid[])
+  AND r.runtime_contract_id = 'openlinker.runtime.v2'
+  AND r.status = 'canceled'
+  AND r.dispatch_state = 'terminal'
+  AND c.state IN ('requested', 'delivered', 'stopping')
+  AND a.executor_type IN ('core_http', 'core_mcp')
+  AND a.finished_at IS NULL
+  AND a.outcome IS NULL
+  AND a.result_id IS NULL;
