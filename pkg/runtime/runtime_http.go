@@ -91,6 +91,7 @@ type RuntimeHTTPDependencies struct {
 	Cancellations       RuntimeCancellationAPI
 	WakeHub             *RuntimeWakeHub
 	Presence            RuntimePresenceStore
+	SessionLeases       *RuntimeSessionLeaseManager
 	AdmissionLimiter    RuntimeAdmissionLimiter
 	Observer            WorkerObserver
 	CoreInstanceID      uuid.UUID

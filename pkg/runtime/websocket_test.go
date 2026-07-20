@@ -94,6 +94,89 @@ func TestRuntimeWebSocketPolicyChangeClosesEstablishedTransportWithCanonicalSign
 	require.Equal(t, RuntimePolicyChangedSignal, closeErr.Text)
 }
 
+func TestRuntimeWebSocketHeartbeatUsesHealthyLeaseAndFallsBackOnRedisFailure(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	reason := string(RuntimeTransportReasonExplicit)
+	fixture.sessions.state.Session.NodeVersion = "2.0.0"
+	fixture.sessions.state.Session.Capacity = 1
+	fixture.sessions.state.Attachment.Transport = string(RuntimeTransportWebSocket)
+	fixture.sessions.state.Attachment.TransportReason = &reason
+	fixture.sessions.state.Attachment.TransportChangedAt = fixture.now
+
+	store := &runtimeSessionLeaseStoreFake{}
+	manager, err := NewRuntimeSessionLeaseManager(store, RuntimeSessionLeaseManagerConfig{
+		LeaseTTL: time.Minute, PresenceTTL: time.Minute, DisableJitter: true,
+	})
+	require.NoError(t, err)
+	connectionID := "ws:test-heartbeat"
+	record, err := runtimeSessionLeaseRecordFromState(fixture.sessions.state, connectionID)
+	require.NoError(t, err)
+	require.NoError(t, manager.Register(record))
+	manager.refresh(context.Background())
+	require.True(t, manager.HealthyFor(connectionID))
+
+	controller := fixture.controller()
+	controller.dependencies.SessionLeases = manager
+	sessionRequest := runtimeSessionRequestFromHello(fixture.hello)
+	sessionRequest.Transport = RuntimeTransportWebSocket
+	sessionRequest.ReportedTransportReason = RuntimeTransportReasonExplicit
+	sessionRequest.AttachmentID = fixture.principal.AttachmentID
+	connection := &runtimeWSConnection{
+		controller: controller, authenticated: fixture.authenticated,
+		ctx: context.Background(), sessionRequest: sessionRequest,
+		sessionState: fixture.sessions.state, sessionPrincipal: fixture.principal,
+		attachmentID: fixture.principal.AttachmentID,
+		connectionID: connectionID, leaseRegistered: true,
+	}
+	require.True(t, connection.heartbeatMaintenanceSession("ticker"))
+	resolveCalls, heartbeatCalls := fixture.sessions.maintenanceCalls()
+	require.Zero(t, resolveCalls)
+	require.Zero(t, heartbeatCalls)
+
+	store.setRefreshError(errors.New("redis unavailable"))
+	manager.refresh(context.Background())
+	require.False(t, manager.HealthyFor(connectionID))
+	require.True(t, connection.heartbeatMaintenanceSession("ticker"))
+	resolveCalls, heartbeatCalls = fixture.sessions.maintenanceCalls()
+	require.Equal(t, 1, resolveCalls)
+	require.Equal(t, 1, heartbeatCalls)
+}
+
+func TestRuntimeWebSocketRegistersLeaseBeforeReadyAndRemovesItAfterDurableClose(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	reason := string(RuntimeTransportReasonExplicit)
+	fixture.sessions.state.Session.NodeVersion = "2.0.0"
+	fixture.sessions.state.Session.Capacity = 1
+	fixture.sessions.state.Attachment.Transport = string(RuntimeTransportWebSocket)
+	fixture.sessions.state.Attachment.TransportReason = &reason
+	fixture.sessions.state.Attachment.TransportChangedAt = fixture.now
+	store := &runtimeSessionLeaseStoreFake{}
+	manager, err := NewRuntimeSessionLeaseManager(store, RuntimeSessionLeaseManagerConfig{
+		LeaseTTL: time.Minute, PresenceTTL: time.Minute, DisableJitter: true,
+	})
+	require.NoError(t, err)
+	fixture.sessionLeases = manager
+	server, target := fixture.server(t)
+	defer server.Close()
+
+	connection := dialRuntimeWS(t, target)
+	writeRuntimeWSHello(t, connection, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, connection).Type)
+	require.Equal(t, 1, manager.Health().Registered)
+	require.Equal(t, []int{1}, store.batchSizes(), "Ready requires the initial lease write to finish")
+
+	require.NoError(t, connection.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, "done"),
+		time.Now().Add(time.Second),
+	))
+	require.Eventually(t, func() bool {
+		return manager.Health().Registered == 0
+	}, 3*time.Second, time.Millisecond)
+	require.Equal(t, 1, len(store.removedConnections()))
+	require.Equal(t, "offline", fixture.sessions.closedStatus())
+}
+
 func TestRuntimeWebSocketHelloReadyAndDisconnectOrder(t *testing.T) {
 	fixture := newRuntimeWSTestFixture()
 	server, target := fixture.server(t)
@@ -1046,6 +1129,7 @@ type runtimeWSTestFixture struct {
 	resume          RuntimeResumeAPI
 	cancellations   *runtimeWSCancellationServiceFake
 	wakeHub         *RuntimeWakeHub
+	sessionLeases   *RuntimeSessionLeaseManager
 	transportPolicy RuntimeTransportPolicyProvider
 }
 
@@ -1145,6 +1229,7 @@ func (f *runtimeWSTestFixture) controller() *RuntimeHTTPController {
 		Resume:              f.resume,
 		Cancellations:       f.cancellations,
 		WakeHub:             f.wakeHub,
+		SessionLeases:       f.sessionLeases,
 	})
 }
 
@@ -1289,20 +1374,22 @@ func (f *runtimeWSDeviceAuthenticatorFake) AuthenticateHTTP(context.Context, *ht
 }
 
 type runtimeWSSessionServiceFake struct {
-	mu           sync.Mutex
-	state        RuntimeSessionState
-	principal    RuntimeSessionPrincipal
-	operations   *runtimeWSOperations
-	createErr    error
-	resolveErr   error
-	heartbeatErr error
-	closeErr     error
-	drainErr     error
-	drainReceipt RuntimeDrainPayload
-	drainRequest RuntimeSessionDrainRequest
-	createCount  int
-	created      RuntimeSessionRequest
-	closeRequest RuntimeSessionCloseRequest
+	mu             sync.Mutex
+	state          RuntimeSessionState
+	principal      RuntimeSessionPrincipal
+	operations     *runtimeWSOperations
+	createErr      error
+	resolveErr     error
+	heartbeatErr   error
+	closeErr       error
+	drainErr       error
+	drainReceipt   RuntimeDrainPayload
+	drainRequest   RuntimeSessionDrainRequest
+	createCount    int
+	resolveCount   int
+	heartbeatCount int
+	created        RuntimeSessionRequest
+	closeRequest   RuntimeSessionCloseRequest
 }
 
 func (f *runtimeWSSessionServiceFake) CreateOrAttachSession(_ context.Context, _ AuthenticatedRuntimePrincipal, request RuntimeSessionRequest) (RuntimeSessionState, error) {
@@ -1316,6 +1403,7 @@ func (f *runtimeWSSessionServiceFake) CreateOrAttachSession(_ context.Context, _
 func (f *runtimeWSSessionServiceFake) HeartbeatSession(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionHeartbeatRequest) (RuntimeSessionState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.heartbeatCount++
 	return f.state, f.heartbeatErr
 }
 
@@ -1368,6 +1456,7 @@ func (f *runtimeWSSessionServiceFake) replaceAttachment() uuid.UUID {
 func (f *runtimeWSSessionServiceFake) ResolveSessionPrincipal(context.Context, AuthenticatedRuntimePrincipal, uuid.UUID) (RuntimeSessionPrincipal, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.resolveCount++
 	return f.principal, f.resolveErr
 }
 
@@ -1381,6 +1470,12 @@ func (f *runtimeWSSessionServiceFake) createCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.createCount
+}
+
+func (f *runtimeWSSessionServiceFake) maintenanceCalls() (int, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.resolveCount, f.heartbeatCount
 }
 
 func (f *runtimeWSSessionServiceFake) createdRequest() RuntimeSessionRequest {

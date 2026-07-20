@@ -183,6 +183,8 @@ func TestRedisSignalBusRejectsTypedNilClientWithoutPanic(t *testing.T) {
 	require.ErrorIs(t, err, ErrRuntimeSignalBusUnavailable)
 	_, err = NewRedisRuntimePresenceStore(client, "")
 	require.ErrorIs(t, err, ErrRuntimeSignalBusUnavailable)
+	_, err = NewRedisRuntimeSessionLeaseStore(client, "", "")
+	require.ErrorIs(t, err, ErrRuntimeSignalBusUnavailable)
 }
 
 func TestRedisSignalBusRequiresCoreIdentityForTargetFiltering(t *testing.T) {

@@ -462,11 +462,34 @@ func configureRuntime(
 
 	wakeHub := runtime.NewRuntimeWakeHub()
 	var presence runtime.RuntimePresenceStore
+	var sessionLeases *runtime.RuntimeSessionLeaseManager
 	if provider, ok := signalBus.(runtime.RuntimePresenceStoreProvider); ok {
 		presence, err = provider.RuntimePresenceStore()
 		if err != nil {
 			log.Warn().Err(err).Msg("agent runtime Redis presence is unavailable")
 		}
+	}
+	if provider, ok := signalBus.(runtime.RuntimeSessionLeaseStoreProvider); ok {
+		leaseStore, leaseErr := provider.RuntimeSessionLeaseStore()
+		if leaseErr != nil {
+			log.Warn().Err(leaseErr).Msg("agent runtime Redis Session leases are unavailable; using database heartbeat")
+		} else {
+			sessionLeases, leaseErr = runtime.NewRuntimeSessionLeaseManager(
+				leaseStore,
+				runtime.RuntimeSessionLeaseManagerConfig{},
+			)
+			if leaseErr != nil {
+				log.Warn().Err(leaseErr).Msg("agent runtime Session lease manager is unavailable; using database heartbeat")
+				sessionLeases = nil
+			}
+		}
+	}
+	if sessionLeases != nil {
+		go func() {
+			if leaseErr := sessionLeases.Run(rootCtx); leaseErr != nil && rootCtx.Err() == nil {
+				log.Error().Err(leaseErr).Msg("agent runtime Session lease manager stopped")
+			}
+		}()
 	}
 	handler.SetRuntimeDependencies(runtime.RuntimeHTTPDependencies{
 		TokenValidator:      runtimeService,
@@ -480,6 +503,7 @@ func configureRuntime(
 		Cancellations:       cancellations,
 		WakeHub:             wakeHub,
 		Presence:            presence,
+		SessionLeases:       sessionLeases,
 		AdmissionLimiter:    runtime.NewRuntimeAdmissionLimiter(runtime.RuntimeAdmissionLimitConfig{}),
 		CoreInstanceID:      coreInstanceID,
 	})
@@ -487,7 +511,11 @@ func configureRuntime(
 		rootCtx,
 		runtime.NewRuntimeDeadlineReconciler(pool, nil),
 		cancellations,
-		runtime.NewRuntimeSessionReaper(pool, runtime.DefaultRuntimeLeaseConfig().HeartbeatTTL),
+		runtime.NewRuntimeSessionReaperWithLeases(
+			pool,
+			runtime.DefaultRuntimeLeaseConfig().HeartbeatTTL,
+			sessionLeases,
+		),
 		runtime.RuntimeMaintenanceWorkerConfig{},
 	)
 	if signalBus != nil {

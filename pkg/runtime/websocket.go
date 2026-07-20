@@ -235,6 +235,7 @@ type runtimeWSConnection struct {
 	sessionPrincipal   RuntimeSessionPrincipal
 	attachmentID       uuid.UUID
 	attached           bool
+	leaseRegistered    bool
 	maintenanceStarted bool
 	connectionID       string
 	reportedReason     RuntimeTransportReason
@@ -374,6 +375,20 @@ func (c *runtimeWSConnection) run() {
 		return
 	}
 	c.sessionPrincipal = principal
+	if c.controller.dependencies.SessionLeases != nil {
+		record, leaseErr := runtimeSessionLeaseRecordFromState(state, c.connectionID)
+		if leaseErr == nil {
+			leaseErr = c.controller.dependencies.SessionLeases.Register(record)
+		}
+		if leaseErr != nil {
+			log.Warn().Err(leaseErr).Msg("Runtime websocket Session lease registration failed; using database heartbeat")
+		} else {
+			c.leaseRegistered = true
+			if leaseErr = c.controller.dependencies.SessionLeases.RefreshConnection(c.ctx, c.connectionID); leaseErr != nil {
+				log.Warn().Err(leaseErr).Msg("Runtime websocket initial Session lease refresh failed; using database heartbeat")
+			}
+		}
+	}
 
 	ready, err := runtimeReadyFromSessionState(state)
 	if err != nil {
@@ -722,24 +737,20 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 			case <-c.ctx.Done():
 				return
 			case <-heartbeatTicker.C:
-				if !c.refreshMaintenanceSession() {
+				if !c.heartbeatMaintenanceSession("attach_only") {
 					return
 				}
-				observeWorker(c.controller.dependencies.Observer, "runtime.websocket.session_heartbeat", "attach_only", 1)
-				state, err := c.controller.dependencies.Sessions.HeartbeatSession(
-					c.ctx, c.authenticated, c.sessionRequest,
-				)
-				if err != nil {
-					c.closeForError(mapRuntimeHTTPError(err))
-					return
-				}
-				c.controller.refreshPresence(c.ctx, state, c.connectionID)
 			}
 		}
 	}
 
-	policyTicker := time.NewTicker(runtimeWSPolicyCheckInterval)
-	defer policyTicker.Stop()
+	var policyChecks <-chan time.Time
+	var policyTicker *time.Ticker
+	if c.controller.dependencies.TransportPolicy != nil {
+		policyTicker = time.NewTicker(runtimeWSPolicyCheckInterval)
+		policyChecks = policyTicker.C
+		defer policyTicker.Stop()
+	}
 
 	var dispatchWake, controlWake, nodeDispatchWake <-chan struct{}
 	if c.controller.dependencies.WakeHub != nil {
@@ -758,7 +769,7 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 		select {
 		case <-c.ctx.Done():
 			return
-		case <-policyTicker.C:
+		case <-policyChecks:
 			observeWorker(c.controller.dependencies.Observer, "runtime.websocket.policy_check", "ticker", 1)
 			// Policy providers are in-memory. Preserve fast policy cutover without
 			// reintroducing the former per-connection PostgreSQL poll.
@@ -794,20 +805,41 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 			}
 			c.claimPendingAndSend()
 		case <-heartbeatTicker.C:
-			if !c.refreshMaintenanceSession() {
+			if !c.heartbeatMaintenanceSession("ticker") {
 				return
 			}
-			observeWorker(c.controller.dependencies.Observer, "runtime.websocket.session_heartbeat", "ticker", 1)
-			state, err := c.controller.dependencies.Sessions.HeartbeatSession(
-				c.ctx, c.authenticated, c.sessionRequest,
-			)
-			if err != nil {
-				c.closeForError(mapRuntimeHTTPError(err))
-				return
-			}
-			c.controller.refreshPresence(c.ctx, state, c.connectionID)
 		}
 	}
+}
+
+func (c *runtimeWSConnection) heartbeatMaintenanceSession(reason string) bool {
+	if c.leaseRegistered && c.controller.dependencies.SessionLeases != nil &&
+		c.controller.dependencies.SessionLeases.HealthyFor(c.connectionID) {
+		observeWorker(c.controller.dependencies.Observer, "runtime.websocket.session_heartbeat", "redis_lease", 1)
+		return true
+	}
+	if !c.refreshMaintenanceSession() {
+		return false
+	}
+	observeWorker(c.controller.dependencies.Observer, "runtime.websocket.session_heartbeat", reason, 1)
+	state, err := c.controller.dependencies.Sessions.HeartbeatSession(
+		c.ctx, c.authenticated, c.sessionRequest,
+	)
+	if err != nil {
+		c.closeForError(mapRuntimeHTTPError(err))
+		return false
+	}
+	c.sessionState = state
+	if c.leaseRegistered && c.controller.dependencies.SessionLeases != nil {
+		record, recordErr := runtimeSessionLeaseRecordFromState(state, c.connectionID)
+		if recordErr == nil && c.controller.dependencies.SessionLeases.UpdatePresence(c.connectionID, record.Presence) {
+			if refreshErr := c.controller.dependencies.SessionLeases.RefreshConnection(c.ctx, c.connectionID); refreshErr == nil {
+				return true
+			}
+		}
+	}
+	c.controller.refreshPresence(c.ctx, state, c.connectionID)
+	return true
 }
 
 func (c *runtimeWSConnection) refreshMaintenanceSession() bool {
@@ -1190,7 +1222,18 @@ func (c *runtimeWSConnection) cleanup() {
 			} else {
 				detached = !state.Replayed
 			}
-			c.controller.removePresence(closeCtx, c.sessionState, c.connectionID)
+			if c.leaseRegistered && c.controller.dependencies.SessionLeases != nil {
+				removed, leaseErr := c.controller.dependencies.SessionLeases.Unregister(
+					closeCtx, c.connectionID, c.attachmentID,
+				)
+				if leaseErr != nil {
+					log.Warn().Err(leaseErr).Msg("Runtime websocket remove Session lease")
+				} else if !removed {
+					c.controller.removePresence(closeCtx, c.sessionState, c.connectionID)
+				}
+			} else {
+				c.controller.removePresence(closeCtx, c.sessionState, c.connectionID)
+			}
 			closeCancel()
 			// This call is deliberately after durable detach/offline evidence.
 			// Lease implementations must use the exact offline cleanup path: only

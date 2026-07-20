@@ -23,6 +23,15 @@ var (
 type runtimeSessionReaperRepository interface {
 	WithTransaction(context.Context, func(runtimeSessionTransaction) error) error
 	ListStaleRuntimeSessionCandidates(context.Context, time.Duration, int) ([]db.RuntimeSession, error)
+	GetRuntimeSessionReapCandidate(context.Context, uuid.UUID) (db.RuntimeSession, time.Time, error)
+}
+
+type runtimeSessionLeaseEvidence interface {
+	Lookup(context.Context, uuid.UUID) (RuntimeSessionLease, bool, error)
+	ListExpired(context.Context, int) ([]uuid.UUID, error)
+	ScheduleCheck(context.Context, uuid.UUID, time.Duration) error
+	Forget(context.Context, uuid.UUID) error
+	AbsenceReady() bool
 }
 
 // RuntimeSessionReaper closes transport Sessions whose database heartbeat has
@@ -31,15 +40,29 @@ type runtimeSessionReaperRepository interface {
 type RuntimeSessionReaper struct {
 	repository   runtimeSessionReaperRepository
 	heartbeatTTL time.Duration
+	leases       runtimeSessionLeaseEvidence
 }
 
 func NewRuntimeSessionReaper(pool *pgxpool.Pool, heartbeatTTL time.Duration) *RuntimeSessionReaper {
+	return NewRuntimeSessionReaperWithLeases(pool, heartbeatTTL, nil)
+}
+
+// NewRuntimeSessionReaperWithLeases keeps the database fencing transaction
+// authoritative while allowing a healthy Redis lease to prove that a
+// database-stale WebSocket is still connected. Redis errors and startup
+// uncertainty can only delay a reap; they can never close a Session.
+func NewRuntimeSessionReaperWithLeases(
+	pool *pgxpool.Pool,
+	heartbeatTTL time.Duration,
+	leases *RuntimeSessionLeaseManager,
+) *RuntimeSessionReaper {
 	if pool == nil {
-		return &RuntimeSessionReaper{heartbeatTTL: heartbeatTTL}
+		return &RuntimeSessionReaper{heartbeatTTL: heartbeatTTL, leases: leases}
 	}
 	return &RuntimeSessionReaper{
 		repository:   &postgresRuntimeSessionRepository{pool: pool, queries: db.New(pool)},
 		heartbeatTTL: heartbeatTTL,
+		leases:       leases,
 	}
 }
 
@@ -47,9 +70,20 @@ func newRuntimeSessionReaper(repository runtimeSessionReaperRepository, heartbea
 	return &RuntimeSessionReaper{repository: repository, heartbeatTTL: heartbeatTTL}
 }
 
+func newRuntimeSessionReaperWithLeases(
+	repository runtimeSessionReaperRepository,
+	heartbeatTTL time.Duration,
+	leases runtimeSessionLeaseEvidence,
+) *RuntimeSessionReaper {
+	return &RuntimeSessionReaper{repository: repository, heartbeatTTL: heartbeatTTL, leases: leases}
+}
+
 func (r *RuntimeSessionReaper) ReapStaleSessions(ctx context.Context, limit int) (int, error) {
 	if r == nil || r.repository == nil || r.heartbeatTTL < time.Millisecond || limit <= 0 || limit > maxRuntimeSessionReapBatch {
 		return 0, ErrRuntimeSessionReaperNotConfigured
+	}
+	if r.leases != nil {
+		return r.reapExpiredLeaseSessions(ctx, min(limit, maxRuntimeSessionLeaseBatch))
 	}
 	candidates, err := r.repository.ListStaleRuntimeSessionCandidates(ctx, r.heartbeatTTL, limit)
 	if err != nil {
@@ -75,7 +109,77 @@ func (r *RuntimeSessionReaper) ReapStaleSessions(ctx context.Context, limit int)
 	return reaped, errors.Join(errs...)
 }
 
+func (r *RuntimeSessionReaper) reapExpiredLeaseSessions(ctx context.Context, limit int) (int, error) {
+	expired, err := r.leases.ListExpired(ctx, limit)
+	if err != nil {
+		return 0, fmt.Errorf("list expired Runtime Session leases: %w", err)
+	}
+	reaped := 0
+	var errs []error
+	for _, runtimeSessionID := range expired {
+		if err = ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
+		_, live, lookupErr := r.leases.Lookup(ctx, runtimeSessionID)
+		if lookupErr != nil {
+			errs = append(errs, fmt.Errorf("check Runtime Session lease %s: %w", runtimeSessionID, lookupErr))
+			continue
+		}
+		if live || !r.leases.AbsenceReady() {
+			continue
+		}
+
+		candidate, databaseNow, candidateErr := r.repository.GetRuntimeSessionReapCandidate(ctx, runtimeSessionID)
+		if errors.Is(candidateErr, pgx.ErrNoRows) {
+			if forgetErr := r.leases.Forget(ctx, runtimeSessionID); forgetErr != nil {
+				errs = append(errs, forgetErr)
+			}
+			continue
+		}
+		if candidateErr != nil {
+			errs = append(errs, candidateErr)
+			continue
+		}
+		if candidate.Status != "active" && candidate.Status != "draining" {
+			if forgetErr := r.leases.Forget(ctx, runtimeSessionID); forgetErr != nil {
+				errs = append(errs, forgetErr)
+			}
+			continue
+		}
+		remaining := candidate.HeartbeatAt.Add(r.heartbeatTTL).Sub(databaseNow)
+		if remaining >= 0 {
+			if scheduleErr := r.leases.ScheduleCheck(ctx, runtimeSessionID, remaining+time.Millisecond); scheduleErr != nil {
+				errs = append(errs, scheduleErr)
+			}
+			continue
+		}
+
+		closed, reapErr := r.reapCandidate(ctx, candidate)
+		if reapErr != nil {
+			errs = append(errs, reapErr)
+			continue
+		}
+		if closed {
+			reaped++
+			if forgetErr := r.leases.Forget(ctx, runtimeSessionID); forgetErr != nil {
+				errs = append(errs, forgetErr)
+			}
+		}
+	}
+	return reaped, errors.Join(errs...)
+}
+
 func (r *RuntimeSessionReaper) reapCandidate(ctx context.Context, candidate db.RuntimeSession) (bool, error) {
+	if r.leases != nil {
+		_, live, err := r.leases.Lookup(ctx, candidate.RuntimeSessionID)
+		if err != nil {
+			return false, fmt.Errorf("check Runtime Session lease %s: %w", candidate.RuntimeSessionID, err)
+		}
+		if live || !r.leases.AbsenceReady() {
+			return false, nil
+		}
+	}
 	closed := false
 	err := r.repository.WithTransaction(ctx, func(tx runtimeSessionTransaction) error {
 		if err := tx.LockSessionIdentity(ctx, candidate.RuntimeSessionID); err != nil {
