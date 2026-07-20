@@ -2,6 +2,8 @@ package agent_test
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -167,6 +169,110 @@ func TestStartMetricWorkerAggregatesAndSweepsExpiredApprovals(t *testing.T) {
 
 	cancel()
 	time.Sleep(20 * time.Millisecond)
+}
+
+func TestStartMetricWorkerWithDirtyRefreshesClaimAndKeepsLegacyResult(t *testing.T) {
+	pool := setupTestDB(t)
+	creator := insertCreatorUser(t, pool, "Metric Dirty Creator")
+	agentID := createApprovedAgent(t, pool, creator, "metric-dirty-worker")
+	insertRun(t, pool, creator, agentID, "success", 900, time.Now().Add(-time.Minute))
+
+	claim := agent.AgentMetricDirtyClaim{AgentID: agentID, Version: 1, Owner: uuid.New()}
+	var initialRefreshDone atomic.Bool
+	dirty := &metricDirtyStoreFake{
+		claim: claim, acked: make(chan struct{}), initialRefreshDone: initialRefreshDone.Load,
+	}
+	metrics := agent.NewMetricService(pool)
+	dirtyRefreshObserved := make(chan struct{}, 1)
+	metrics.SetWorkerObserver(coreruntime.WorkerObserverFunc(func(observation coreruntime.WorkerObservation) {
+		if observation.Category == "agent.metric.upsert_rows" && observation.Reason == "30d" {
+			initialRefreshDone.Store(true)
+		}
+		if observation.Category == "agent.metric.dirty_refresh_rows" {
+			select {
+			case dirtyRefreshObserved <- struct{}{}:
+			default:
+			}
+		}
+	}))
+	workerCtx, cancel := context.WithCancel(context.Background())
+	agent.StartMetricWorkerWithDirty(workerCtx, metrics, nil, dirty, nil)
+	defer cancel()
+
+	select {
+	case <-dirty.acked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Redis dirty metric claim was not acknowledged")
+	}
+	require.False(t, dirty.wasClaimedBeforeInitialRefresh(), "dirty refresh must not overlap startup aggregation")
+	select {
+	case <-dirtyRefreshObserved:
+	case <-time.After(time.Second):
+		t.Fatal("dirty Agent batch did not execute the selected refresh query")
+	}
+	snapshots, err := metrics.GetSnapshots(context.Background(), agentID)
+	require.NoError(t, err)
+	require.Len(t, snapshots.Items, 3)
+	for _, snapshot := range snapshots.Items {
+		require.Equal(t, int32(1), snapshot.CallCount)
+		require.Equal(t, int32(1), snapshot.SuccessCount)
+	}
+}
+
+type metricDirtyStoreFake struct {
+	mu      sync.Mutex
+	claim   agent.AgentMetricDirtyClaim
+	claimed bool
+	acked   chan struct{}
+	ackOnce sync.Once
+
+	initialRefreshDone func() bool
+	claimedBeforeReady bool
+}
+
+func (f *metricDirtyStoreFake) Mark(context.Context, []uuid.UUID) error { return nil }
+
+func (f *metricDirtyStoreFake) Claim(
+	context.Context, uuid.UUID, time.Duration, int,
+) ([]agent.AgentMetricDirtyClaim, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.initialRefreshDone != nil && !f.initialRefreshDone() {
+		f.claimedBeforeReady = true
+	}
+	if f.claimed {
+		return nil, nil
+	}
+	f.claimed = true
+	return []agent.AgentMetricDirtyClaim{f.claim}, nil
+}
+
+func (f *metricDirtyStoreFake) wasClaimedBeforeInitialRefresh() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.claimedBeforeReady
+}
+
+func (f *metricDirtyStoreFake) Ack(
+	_ context.Context, claim agent.AgentMetricDirtyClaim,
+) (bool, error) {
+	if claim != f.claim {
+		return false, nil
+	}
+	f.ackOnce.Do(func() { close(f.acked) })
+	return true, nil
+}
+
+func (f *metricDirtyStoreFake) Nack(context.Context, agent.AgentMetricDirtyClaim) (bool, error) {
+	return true, nil
+}
+
+func (f *metricDirtyStoreFake) Cursor(context.Context) (agent.AgentMetricCursor, bool, error) {
+	return agent.AgentMetricCursor{Time: time.Now().Add(time.Hour), ID: uuid.Nil}, true, nil
+}
+
+func (f *metricDirtyStoreFake) AdvanceCursor(context.Context, agent.AgentMetricCursor) (bool, error) {
+	return true, nil
 }
 
 // insertRun 直接 SQL 插一条 run，给 metric worker 测试用。

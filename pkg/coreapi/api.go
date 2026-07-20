@@ -45,6 +45,7 @@ type Options struct {
 	UserProvisioner             auth.UserProvisioner
 	CoreInstanceID              uuid.UUID
 	RuntimeSignalBus            runtime.RuntimeSignalBus
+	AgentMetricDirtyStore       agent.AgentMetricDirtyStore
 	ExternalExecutionAuthorizer *externalexecution.Authorizer
 }
 
@@ -173,7 +174,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	metricSvc := agent.NewMetricService(pool)
 	metricHandler := agent.NewMetricHandler(metricSvc)
 	metricHandler.Register(api)
-	agent.StartMetricWorker(rootCtx, metricSvc, approvalSvc)
+	agent.StartMetricWorkerWithDirty(
+		rootCtx, metricSvc, approvalSvc, opts.AgentMetricDirtyStore, eventWake,
+	)
 
 	e.GET("/skill/publish-agent", agent.ServePublishAgentSkill)
 	e.GET("/skill/consume-agent", agent.ServeConsumeAgentSkill)

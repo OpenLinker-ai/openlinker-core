@@ -29,6 +29,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/time/rate"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/coreapi"
@@ -125,7 +126,9 @@ func main() {
 
 	var rateLimiterStore emw.RateLimiterStore
 	var redisClient *redis.Client
-	if cfg.RuntimeHAMode || (!runtimeAttachOnly && cfg.ExternalExecutionEnabled()) {
+	redisAccelerationRequested := strings.TrimSpace(os.Getenv("REDIS_URL")) != ""
+	if redisAccelerationRequested || cfg.RuntimeHAMode ||
+		(!runtimeAttachOnly && cfg.ExternalExecutionEnabled()) {
 		redisClient, err = newRedisClient(cfg.RedisURL)
 		if err != nil {
 			log.Fatal().Err(err).Msg("configure redis failed")
@@ -148,7 +151,7 @@ func main() {
 
 	coreInstanceID := uuid.New()
 	var runtimeSignalBus runtime.RuntimeSignalBus = runtime.NewLocalSignalBus(coreInstanceID)
-	if cfg.RuntimeHAMode {
+	if redisClient != nil {
 		runtimeSignalBus, err = runtime.NewRedisSignalBus(redisClient, runtime.RedisSignalBusConfig{
 			InstanceID: coreInstanceID,
 		})
@@ -194,6 +197,12 @@ func main() {
 		RuntimeSignalBus: runtimeSignalBus,
 	}
 	if !runtimeAttachOnly {
+		if redisClient != nil {
+			opts.AgentMetricDirtyStore, err = agent.NewRedisAgentMetricDirtyStore(redisClient, "")
+			if err != nil {
+				log.Fatal().Err(err).Msg("configure agent metric dirty store failed")
+			}
+		}
 		opts.AdminMiddleware = auth.AdminMiddleware(dbgen.New(pool))
 		opts.LLMClient = buildLLMClient(cfg)
 		opts.ExternalExecutionAuthorizer = externalExecutionAuthorizer
