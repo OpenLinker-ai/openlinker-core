@@ -18,6 +18,7 @@ import (
 const (
 	runtimeTokenScope                       = "agent:pull"
 	RuntimeAttachmentIDHeader               = "OpenLinker-Runtime-Attachment"
+	RuntimeNodeIDHeader                     = "OpenLinker-Runtime-Node"
 	RuntimeFallbackReasonHeader             = "OpenLinker-Runtime-Fallback-Reason"
 	runtimeAuthenticatedPrincipalContextKey = "openlinker.runtime.authenticated-principal"
 )
@@ -41,6 +42,7 @@ type RuntimeDeviceAuthenticator interface {
 type RuntimePrincipalBinder interface {
 	VerifyRuntimePrincipalBinding(context.Context, uuid.UUID, RuntimeDeviceIdentity) error
 	ResolveRuntimeDeviceIdentity(context.Context, uuid.UUID) (RuntimeDeviceIdentity, error)
+	ResolveTokenOnlyRuntimeDeviceIdentity(context.Context, uuid.UUID, uuid.UUID) (RuntimeDeviceIdentity, error)
 }
 
 type RuntimeSessionAPI interface {
@@ -823,14 +825,20 @@ func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRunti
 		if h.dependencies.PrincipalBinder == nil {
 			return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(nil)
 		}
-		device, err = h.dependencies.PrincipalBinder.ResolveRuntimeDeviceIdentity(c.Request().Context(), token.ID)
+		nodeID, nodeErr := runtimeNodeIDFromRequest(c.Request())
+		if nodeErr != nil {
+			return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(nodeErr)
+		}
+		device, err = h.dependencies.PrincipalBinder.ResolveTokenOnlyRuntimeDeviceIdentity(
+			c.Request().Context(), token.ID, nodeID,
+		)
 	} else {
 		device, err = h.dependencies.DeviceAuthenticator.AuthenticateHTTP(c.Request().Context(), c.Request())
 	}
 	if err != nil {
 		return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
 	}
-	if h.dependencies.PrincipalBinder != nil {
+	if !h.dependencies.TokenOnlyTransport && h.dependencies.PrincipalBinder != nil {
 		if err = h.dependencies.PrincipalBinder.VerifyRuntimePrincipalBinding(c.Request().Context(), token.ID, device); err != nil {
 			return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
 		}
@@ -841,6 +849,21 @@ func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRunti
 	}
 	c.Set(runtimeAuthenticatedPrincipalContextKey, principal)
 	return principal, nil
+}
+
+func runtimeNodeIDFromRequest(request *http.Request) (uuid.UUID, error) {
+	if request == nil {
+		return uuid.Nil, errors.New("runtime Node selector is missing")
+	}
+	values := request.Header.Values(RuntimeNodeIDHeader)
+	if len(values) != 1 || values[0] == "" || strings.TrimSpace(values[0]) != values[0] {
+		return uuid.Nil, errors.New("runtime Node selector is invalid")
+	}
+	nodeID, err := uuid.Parse(values[0])
+	if err != nil || nodeID == uuid.Nil || nodeID.String() != values[0] {
+		return uuid.Nil, errors.New("runtime Node selector is invalid")
+	}
+	return nodeID, nil
 }
 
 func (h *RuntimeHTTPController) resolveSession(

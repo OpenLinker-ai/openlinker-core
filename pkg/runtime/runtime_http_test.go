@@ -141,6 +141,61 @@ func TestRuntimeHTTPTransportPolicyAdmissionPreservesAuthenticationPrecedence(t 
 	require.Equal(t, 0, fixture.sessions.createCalls)
 }
 
+func TestRuntimeTokenOnlyRequiresCanonicalNodeSelectorAndNeverAuthenticatesDevice(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
+	fixture.sessions.create = func(
+		_ context.Context,
+		_ AuthenticatedRuntimePrincipal,
+		_ RuntimeSessionRequest,
+	) (RuntimeSessionState, error) {
+		return fixture.sessionState(), nil
+	}
+	binder := &runtimePrincipalBinderFake{device: fixture.authenticated.Device}
+	controller := fixture.controller()
+	controller.dependencies.TokenOnlyTransport = true
+	controller.dependencies.DeviceAuthenticator = nil
+	controller.dependencies.PrincipalBinder = binder
+	hello := fixture.hello()
+	body, err := json.Marshal(hello)
+	require.NoError(t, err)
+
+	serve := func(values ...string) *httptest.ResponseRecorder {
+		e := echo.New()
+		controller.Register(e.Group("/api/v1"))
+		request := httptest.NewRequest(
+			http.MethodPost, "/api/v1/agent-runtime/sessions", strings.NewReader(string(body)),
+		)
+		request.Header.Set(echo.HeaderAuthorization, "Bearer runtime-secret")
+		request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		for _, value := range values {
+			request.Header.Add(RuntimeNodeIDHeader, value)
+		}
+		recorder := httptest.NewRecorder()
+		e.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	for _, values := range [][]string{
+		nil,
+		{" " + fixture.authenticated.Device.NodeID.String()},
+		{strings.ToUpper(fixture.authenticated.Device.NodeID.String())},
+		{fixture.authenticated.Device.NodeID.String(), uuid.NewString()},
+	} {
+		response := serve(values...)
+		require.Equal(t, http.StatusUnauthorized, response.Code, response.Body.String())
+	}
+	require.Zero(t, binder.resolveCalls)
+	require.Zero(t, fixture.devices.calls)
+
+	response := serve(fixture.authenticated.Device.NodeID.String())
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	require.Equal(t, 1, binder.resolveCalls)
+	require.Equal(t, fixture.authenticated.CredentialID, binder.credentialID)
+	require.Equal(t, fixture.authenticated.Device.NodeID, binder.nodeID)
+	require.Zero(t, binder.verifyCalls)
+	require.Zero(t, fixture.devices.calls)
+}
+
 func TestRuntimePullClaimWakeDoesNotWaitForDatabasePollTick(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
@@ -1133,6 +1188,46 @@ type runtimeDeviceAuthenticatorFake struct {
 	device RuntimeDeviceIdentity
 	err    error
 	calls  int
+}
+
+type runtimePrincipalBinderFake struct {
+	device       RuntimeDeviceIdentity
+	err          error
+	credentialID uuid.UUID
+	nodeID       uuid.UUID
+	resolveCalls int
+	verifyCalls  int
+}
+
+func (f *runtimePrincipalBinderFake) VerifyRuntimePrincipalBinding(
+	_ context.Context,
+	credentialID uuid.UUID,
+	device RuntimeDeviceIdentity,
+) error {
+	f.verifyCalls++
+	f.credentialID = credentialID
+	f.nodeID = device.NodeID
+	return f.err
+}
+
+func (f *runtimePrincipalBinderFake) ResolveRuntimeDeviceIdentity(
+	_ context.Context,
+	credentialID uuid.UUID,
+) (RuntimeDeviceIdentity, error) {
+	f.resolveCalls++
+	f.credentialID = credentialID
+	return f.device, f.err
+}
+
+func (f *runtimePrincipalBinderFake) ResolveTokenOnlyRuntimeDeviceIdentity(
+	_ context.Context,
+	credentialID uuid.UUID,
+	nodeID uuid.UUID,
+) (RuntimeDeviceIdentity, error) {
+	f.resolveCalls++
+	f.credentialID = credentialID
+	f.nodeID = nodeID
+	return f.device, f.err
 }
 
 func (f *runtimeDeviceAuthenticatorFake) AuthenticateHTTP(context.Context, *http.Request) (RuntimeDeviceIdentity, error) {

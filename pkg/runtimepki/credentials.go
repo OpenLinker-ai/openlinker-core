@@ -110,9 +110,6 @@ func (s *CredentialService) issue(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	if nodeID == uuid.Nil {
-		nodeID = uuid.New()
-	}
 	issued, err := s.authority.IssueClientCertificate(csr, nodeID)
 	if err != nil {
 		return httpx.BadRequest("CSR 无法签发")
@@ -147,6 +144,45 @@ func (s *CredentialService) persistIssuedCredential(
 		return httpx.Internal("签发 Runtime 证书失败")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	var boundNodeID uuid.UUID
+	var boundThumbprint string
+	bindingErr := tx.QueryRow(ctx, `
+SELECT node_id, public_key_thumbprint
+FROM runtime_node_bindings
+WHERE credential_id = $1`, token.ID).Scan(&boundNodeID, &boundThumbprint)
+	if bindingErr != nil && !errors.Is(bindingErr, pgx.ErrNoRows) {
+		return httpx.Internal("查询 Runtime 凭证绑定失败")
+	}
+
+	var nodeStatus string
+	if bindingErr == nil {
+		if err = tx.QueryRow(ctx, `
+SELECT status
+FROM runtime_nodes
+WHERE node_id = $1
+FOR UPDATE`, boundNodeID).Scan(&nodeStatus); err != nil {
+			return httpx.Internal("查询 Runtime Node 失败")
+		}
+	} else {
+		if _, err = tx.Exec(ctx, `
+SELECT pg_advisory_xact_lock(hashtextextended('runtime-node-enrollment:' || $1::text, 0))`, nodeID); err != nil {
+			return httpx.Internal("锁定 Runtime Node 登记失败")
+		}
+		var existingStatus string
+		err = tx.QueryRow(ctx, `
+SELECT status
+FROM runtime_nodes
+WHERE node_id = $1
+FOR UPDATE`, nodeID).Scan(&existingStatus)
+		if err == nil {
+			return httpx.NewError(http.StatusConflict, "RUNTIME_NODE_ENROLLMENT_CONFLICT", "Runtime Node 标识或公钥已被使用")
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return httpx.Internal("查询 Runtime Node 失败")
+		}
+	}
+
 	var lockedAgentID uuid.UUID
 	var status string
 	var revokedAt *time.Time
@@ -159,14 +195,11 @@ FOR UPDATE`, token.ID).Scan(&lockedAgentID, &status, &revokedAt)
 		return httpx.Unauthorized("Agent Token 无效或已撤销")
 	}
 
-	var boundNodeID uuid.UUID
-	var boundThumbprint, nodeStatus string
 	err = tx.QueryRow(ctx, `
-SELECT binding.node_id, binding.public_key_thumbprint, node.status
-FROM runtime_node_bindings binding
-JOIN runtime_nodes node ON node.node_id = binding.node_id
-WHERE binding.credential_id = $1
-FOR UPDATE OF binding, node`, token.ID).Scan(&boundNodeID, &boundThumbprint, &nodeStatus)
+SELECT node_id, public_key_thumbprint
+FROM runtime_node_bindings
+WHERE credential_id = $1
+FOR UPDATE`, token.ID).Scan(&boundNodeID, &boundThumbprint)
 	switch {
 	case err == nil:
 		if boundNodeID != nodeID || boundThumbprint != issued.PublicKeySHA256 {
@@ -191,6 +224,9 @@ WHERE node_id = $1`, nodeID, request.DisplayName, request.NodeVersion,
 			return httpx.NewError(http.StatusConflict, "RUNTIME_NODE_UPDATE_REJECTED", "Runtime Node 状态不允许续期")
 		}
 	case errors.Is(err, pgx.ErrNoRows):
+		if bindingErr == nil {
+			return httpx.NewError(http.StatusConflict, "RUNTIME_CREDENTIAL_BOUND", "Agent Token 凭证绑定已发生变化")
+		}
 		_, err = tx.Exec(ctx, `
 INSERT INTO runtime_nodes (
     node_id, display_name, device_certificate_serial,
@@ -239,12 +275,12 @@ func validateCredentialRequest(request *CredentialRequest) (uuid.UUID, *x509.Cer
 	request.RuntimeContractID = strings.TrimSpace(request.RuntimeContractID)
 	request.RuntimeContractDigest = strings.ToLower(strings.TrimSpace(request.RuntimeContractDigest))
 	var nodeID uuid.UUID
-	var err error
-	if request.NodeID != "" {
-		nodeID, err = uuid.Parse(request.NodeID)
-		if err != nil || nodeID == uuid.Nil || nodeID.String() != request.NodeID {
-			return uuid.Nil, nil, httpx.BadRequest("node_id 不是规范 UUID")
-		}
+	if request.NodeID == "" {
+		return uuid.Nil, nil, httpx.BadRequest("node_id 必填")
+	}
+	nodeID, err := uuid.Parse(request.NodeID)
+	if err != nil || nodeID == uuid.Nil || nodeID.String() != request.NodeID {
+		return uuid.Nil, nil, httpx.BadRequest("node_id 不是规范 UUID")
 	}
 	if !utf8.ValidString(request.DisplayName) || utf8.RuneCountInString(request.DisplayName) < 1 || utf8.RuneCountInString(request.DisplayName) > 200 {
 		return uuid.Nil, nil, httpx.BadRequest("display_name 长度必须为 1 到 200")
