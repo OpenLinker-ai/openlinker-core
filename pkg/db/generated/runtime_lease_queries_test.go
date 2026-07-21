@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -411,69 +410,5 @@ func TestRuntimeLeaseGeneratedMethodsScanAndPreserveArgumentOrder(t *testing.T) 
 	if len(dbtx.queryRowArgs) != 9 || dbtx.queryRowArgs[1] != permission ||
 		dbtx.queryRowArgs[4] != targetSessionID {
 		t.Fatalf("CreateRuntimeResumeGrant args = %#v", dbtx.queryRowArgs)
-	}
-}
-
-func TestRuntimeLeaseResumeMigrationShape(t *testing.T) {
-	t.Parallel()
-
-	up, err := os.ReadFile("../../../migrations/064_runtime_lease_resume_primitives.up.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	down, err := os.ReadFile("../../../migrations/064_runtime_lease_resume_primitives.down.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	verify, err := os.ReadFile("../../../migrations/064_runtime_lease_resume_primitives_verify.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, fragment := range []string{
-		"CREATE UNIQUE INDEX idx_run_attempts_unaccepted_session",
-		"accepted_at IS NULL",
-		"finished_at IS NULL",
-		"CREATE TABLE runtime_resume_grants",
-		"idx_runtime_resume_grants_unrevoked_attempt",
-		"runtime_resume_grants_source_session_fk",
-		"runtime_resume_grants_target_session_fk",
-		"runtime_resume_grants_identity_immutable",
-		"NOT ('agent:pull' = ANY(token_record.scopes))",
-		"ADD COLUMN slot_acquired_at TIMESTAMPTZ",
-		"ADD COLUMN slot_released_at TIMESTAMPTZ",
-		"ADD COLUMN active_runtime_session_id UUID",
-		"run_attempts_slot_evidence_forward_only",
-		"run_attempts_slot_release_on_finish",
-		"SET schema_version = 64",
-		"migration_name = '064_runtime_lease_resume_primitives'",
-	} {
-		if !strings.Contains(string(up), fragment) {
-			t.Fatalf("up migration missing %q", fragment)
-		}
-	}
-	if !strings.Contains(string(down), "down refuses runtime resume grant evidence") {
-		t.Fatal("down migration must not discard resume authorization evidence")
-	}
-	for _, fragment := range []string{
-		"SET schema_version = 63",
-		"migration_name = '063_reliable_runtime_v2'",
-	} {
-		if !strings.Contains(string(down), fragment) {
-			t.Fatalf("down migration does not restore schema contract: %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"runtime resume grant columns are missing or mismatched",
-		"single unaccepted Session offer index is missing or mismatched",
-		"runtime resume grant identity trigger is missing",
-		"runtime Session principal does not enforce agent:pull scope",
-		"run Attempt slot evidence columns are missing or mismatched",
-		"run Attempt slot evidence triggers are missing or mismatched",
-		"runtime schema contract 64 is missing or mismatched",
-	} {
-		if !strings.Contains(string(verify), fragment) {
-			t.Fatalf("verify migration missing %q", fragment)
-		}
 	}
 }

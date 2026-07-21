@@ -237,8 +237,7 @@ make build             # build bin/api
 make run               # build and run with .env
 make test              # go test ./... -race -cover
 make fmt               # gofmt and go vet
-make migrate-up        # apply migrations
-make migrate-down      # roll back one migration
+make migrate-up        # initialize or verify the exact current schema
 make runtime-loadtest  # exercise Runtime Worker over WebSocket and long polling
 ```
 

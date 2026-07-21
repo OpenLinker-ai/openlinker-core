@@ -1,7 +1,7 @@
 -- benchmark.sql
 --
 -- 模块 B（Phase 2 §5）：Skill Benchmark
--- 表结构见 migrations/006_skill_benchmark.up.sql。
+-- 表结构见 migrations/086_current_schema_init.up.sql。
 --
 -- 设计要点：
 --   - 创作者触发：只允许 agent_skills 已声明的 skill；service 层做关联校验。

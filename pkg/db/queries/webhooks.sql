@@ -1,7 +1,7 @@
 -- webhooks.sql
 --
 -- 子轮 2.1（Phase 2）：Agent 调用结束后向创作者 webhook 推送结果。
--- 表结构见 migrations/002_api_keys_and_webhooks.up.sql：
+-- 表结构见 migrations/086_current_schema_init.up.sql：
 --   - agents.webhook_url / webhook_secret
 --   - webhook_deliveries（投递日志 + 重试状态）
 --

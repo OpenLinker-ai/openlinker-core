@@ -1,7 +1,7 @@
 -- capabilities.sql
 --
 -- 模块 A（Phase 2 §4）：Agent capabilities + examples + dry-run。
--- 表结构见 migrations/005_agent_capabilities.up.sql。
+-- 表结构见 migrations/086_current_schema_init.up.sql。
 --
 -- 设计要点：
 --   - capabilities 与 agent 1:1（unique agent_id）。Upsert 时 version += 1。

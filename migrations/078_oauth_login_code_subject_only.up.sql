@@ -1,6 +1,0 @@
-BEGIN;
-
-ALTER TABLE oauth_login_codes
-    ALTER COLUMN jwt DROP NOT NULL;
-
-COMMIT;

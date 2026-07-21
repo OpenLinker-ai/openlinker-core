@@ -216,8 +216,7 @@ make build             # 构建 bin/api
 make run               # 使用 .env 构建并运行
 make test              # go test ./... -race -cover
 make fmt               # gofmt 和 go vet
-make migrate-up        # 应用迁移
-make migrate-down      # 回退一个迁移
+make migrate-up        # 初始化或验证精确的当前 schema
 make runtime-loadtest  # 分别通过 WebSocket 与长轮询压测 Runtime Worker
 ```
 

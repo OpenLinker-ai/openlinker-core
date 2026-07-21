@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -207,102 +206,5 @@ func TestRuntimeCancellationGeneratedCommandScanAndArgumentOrder(t *testing.T) {
 		"delivered", (*string)(nil), runID, cancellationID, "requested",
 	}) {
 		t.Fatalf("cancellation transition args = %#v", dbtx.queryRowArgs)
-	}
-}
-
-func TestRuntimeCancellationMigrationShape(t *testing.T) {
-	t.Parallel()
-
-	up, err := os.ReadFile("../../../migrations/065_runtime_cancellation_lifecycle.up.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	down, err := os.ReadFile("../../../migrations/065_runtime_cancellation_lifecycle.down.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	verify, err := os.ReadFile("../../../migrations/065_runtime_cancellation_lifecycle_verify.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, fragment := range []string{
-		"SET schema_version = 65",
-		"migration_name = '065_runtime_cancellation_lifecycle'",
-		"unsettled cancellation target",
-		"cancellation_state IN ('requested', 'delivered', 'stopping', 'unsupported', 'failed')",
-		"cancellation_state IN ('stopped', 'unconfirmed')",
-	} {
-		if !strings.Contains(string(up), fragment) {
-			t.Fatalf("up migration missing %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"down refuses unsettled canceled Attempt capacity evidence",
-		"SET schema_version = 64",
-		"migration_name = '064_runtime_lease_resume_primitives'",
-	} {
-		if !strings.Contains(string(down), fragment) {
-			t.Fatalf("down migration missing %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"runtime schema contract 65 is missing or mismatched",
-		"runtime cancellation lifecycle invariants are missing",
-		"stored runtime cancellation lifecycle evidence is inconsistent",
-	} {
-		if !strings.Contains(string(verify), fragment) {
-			t.Fatalf("verify migration missing %q", fragment)
-		}
-	}
-}
-
-func TestRuntimeCancellationTerminalReapMigrationShape(t *testing.T) {
-	t.Parallel()
-
-	up, err := os.ReadFile("../../../migrations/076_runtime_cancellation_terminal_reap.up.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	down, err := os.ReadFile("../../../migrations/076_runtime_cancellation_terminal_reap.down.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	verify, err := os.ReadFile("../../../migrations/076_runtime_cancellation_terminal_reap_verify.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, fragment := range []string{
-		"migration 076 requires the exact current schema contract 75",
-		"76,\n    '076_runtime_cancellation_terminal_reap'",
-		"cancellation_state IN ('requested', 'delivered', 'stopping')",
-		"cancellation_state IN ('unsupported', 'failed')",
-		"latest_attempt.error_code IS DISTINCT FROM 'CANCEL_UNCONFIRMED'",
-		"latest_attempt.finished_at\n                                           < cancellation_requested_at + INTERVAL '30 seconds'",
-	} {
-		if !strings.Contains(string(up), fragment) {
-			t.Fatalf("up migration missing %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"rollback refuses reaped negative terminal cancellation evidence",
-		"migration 076 rollback requires the exact current schema contract 76",
-		"DELETE FROM runtime_schema_contracts",
-		"schema_version = 75",
-	} {
-		if !strings.Contains(string(down), fragment) {
-			t.Fatalf("down migration missing %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"runtime schema contract 76 is missing or mismatched",
-		"negative terminal cancellation deadline invariant is missing or over-broad",
-		"terminal cancellation state or original error evidence is not immutable",
-		"stored negative terminal cancellation reap evidence is inconsistent",
-	} {
-		if !strings.Contains(string(verify), fragment) {
-			t.Fatalf("verify migration missing %q", fragment)
-		}
 	}
 }
