@@ -2,10 +2,29 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
 )
+
+// DeriveRuntimePublicOrigin keeps the default deployment zero-touch: it uses
+// the public API hostname and the dedicated Runtime listener port, while the
+// Runtime listener itself always speaks HTTPS.
+func DeriveRuntimePublicOrigin(apiOrigin string, port int) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(apiOrigin))
+	if err != nil || parsed.Hostname() == "" || port < 1 || port > 65535 {
+		return "", fmt.Errorf("RUNTIME_MTLS_API_URL is required when API_URL cannot be used to derive it")
+	}
+	parsed.Scheme = "https"
+	parsed.Host = net.JoinHostPort(parsed.Hostname(), strconv.Itoa(port))
+	parsed.Path = ""
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	parsed.User = nil
+	return NormalizeRuntimePublicOrigin(parsed.String())
+}
 
 // NormalizeRuntimePublicOrigin validates the public HTTPS origin that Core
 // publishes for its dedicated mTLS Runtime listener. Keeping this validator in

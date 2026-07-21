@@ -31,6 +31,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/mcp"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/registry"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runtimepki"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/skill"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/task"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/userdash"
@@ -47,6 +48,7 @@ type Options struct {
 	RuntimeSignalBus            runtime.RuntimeSignalBus
 	AgentMetricDirtyStore       agent.AgentMetricDirtyStore
 	ExternalExecutionAuthorizer *externalexecution.Authorizer
+	RuntimePKI                  *runtimepki.Manager
 }
 
 type Services struct {
@@ -106,8 +108,11 @@ func RegisterRuntimeAttachOnly(
 	agent.NewRegistrationHandler(registrationSvc).RegisterRuntimeAttachReadOnly(api, jwtMiddleware)
 
 	runtimeSvc := runtime.NewService(pool, cfg)
+	runtimeCredentials := runtimepki.NewCredentialService(pool, opts.RuntimePKI, runtimeSvc)
+	runtimeCredentials.Register(api)
+	runtimeCredentials.RegisterTrustBundle(e)
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
-	runtimeSessions := configureRuntimeAttachOnly(runtimeHandler, runtimeSvc, pool, opts.CoreInstanceID)
+	runtimeSessions := configureRuntimeAttachOnly(runtimeHandler, runtimeSvc, pool, cfg, opts.CoreInstanceID)
 	runtimeHandler.RegisterAgentRuntimeAttachOnly(api)
 
 	return &Services{
@@ -187,6 +192,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	skillHandler.RegisterProtected(api, jwtMiddleware)
 
 	runtimeSvc := runtime.NewService(pool, cfg)
+	runtimeCredentials := runtimepki.NewCredentialService(pool, opts.RuntimePKI, runtimeSvc)
+	runtimeCredentials.Register(api)
+	runtimeCredentials.RegisterTrustBundle(e)
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
 	runtimeHandler.SetRunUpdateSource(runUpdates)
 	configureRuntime(
@@ -513,6 +521,8 @@ func configureRuntime(
 	handler.SetRuntimeDependencies(runtime.RuntimeHTTPDependencies{
 		TokenValidator:      runtimeService,
 		DeviceAuthenticator: runtime.NewMTLSRuntimeDeviceAuthenticator(verifier),
+		PrincipalBinder:     runtimepki.NewBindingVerifier(pool),
+		TokenOnlyTransport:  !cfg.RuntimeMTLSEnabled,
 		Sessions:            sessions,
 		Leases:              leases,
 		EventProjector:      runtimeService,
@@ -558,6 +568,7 @@ func configureRuntimeAttachOnly(
 	handler *runtime.Handler,
 	runtimeService *runtime.Service,
 	pool *pgxpool.Pool,
+	cfg *config.Config,
 	coreInstanceID uuid.UUID,
 ) *runtime.RuntimeSessionService {
 	if handler == nil || runtimeService == nil {
@@ -570,6 +581,9 @@ func configureRuntimeAttachOnly(
 		CoreInstanceID:   coreInstanceID,
 		AttachOnly:       true,
 	}
+	if cfg != nil {
+		dependencies.TokenOnlyTransport = !cfg.RuntimeMTLSEnabled
+	}
 	if pool == nil || coreInstanceID == uuid.Nil {
 		handler.SetRuntimeDependencies(dependencies)
 		return nil
@@ -578,6 +592,7 @@ func configureRuntimeAttachOnly(
 	dependencies.DeviceAuthenticator = runtime.NewMTLSRuntimeDeviceAuthenticator(
 		runtime.NewDBRuntimeNodeCredentialVerifier(pool),
 	)
+	dependencies.PrincipalBinder = runtimepki.NewBindingVerifier(pool)
 	runtimeSessions := runtime.NewRuntimeSessionService(pool, coreInstanceID)
 	dependencies.Sessions = runtimeSessions
 	handler.SetRuntimeDependencies(dependencies)

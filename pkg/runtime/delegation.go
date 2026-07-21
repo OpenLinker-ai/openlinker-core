@@ -73,6 +73,57 @@ func NewRuntimeDelegationService(
 	return service
 }
 
+// ResolveInvocationDevice verifies the assignment-scoped Bearer capability
+// against PostgreSQL time, then resolves the same durable token-to-key binding
+// used by ordinary Runtime requests. It is used only when mTLS is explicitly
+// disabled; request bodies and headers never establish Node identity.
+func (s *RuntimeDelegationService) ResolveInvocationDevice(
+	ctx context.Context,
+	invocationToken string,
+) (RuntimeDeviceIdentity, error) {
+	if s == nil || s.pool == nil || s.verifier == nil || strings.TrimSpace(invocationToken) == "" {
+		return RuntimeDeviceIdentity{}, runtimeUnauthorizedError(ErrInvalidRuntimeInvocation)
+	}
+	var databaseNow time.Time
+	if err := s.pool.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&databaseNow); err != nil {
+		return RuntimeDeviceIdentity{}, runtimeDatabaseUnavailable(err)
+	}
+	capability, err := s.verifier.VerifyInvocationToken(invocationToken, databaseNow)
+	if err != nil {
+		return RuntimeDeviceIdentity{}, runtimeUnauthorizedError(err)
+	}
+	var device RuntimeDeviceIdentity
+	var agentID uuid.UUID
+	var status string
+	err = s.pool.QueryRow(ctx, `
+SELECT node.node_id, binding.agent_id, node.device_certificate_serial,
+       certificate.certificate_fingerprint, binding.public_key_thumbprint,
+       node.status
+FROM runtime_node_bindings binding
+JOIN runtime_nodes node ON node.node_id = binding.node_id
+JOIN LATERAL (
+    SELECT issued.certificate_fingerprint
+    FROM runtime_node_certificates issued
+    WHERE issued.node_id = node.node_id
+      AND issued.public_key_thumbprint = binding.public_key_thumbprint
+    ORDER BY issued.not_after DESC, issued.issued_at DESC
+    LIMIT 1
+) certificate ON TRUE
+WHERE binding.credential_id = $1`, capability.CredentialID).Scan(
+		&device.NodeID,
+		&agentID,
+		&device.CertificateSerial,
+		&device.CertificateFingerprintSHA256,
+		&device.PublicKeyThumbprintSHA256,
+		&status,
+	)
+	if err != nil || device.NodeID != capability.NodeID || agentID != capability.AgentID ||
+		(status != "active" && status != "draining") {
+		return RuntimeDeviceIdentity{}, runtimeUnauthorizedError(ErrInvalidRuntimeInvocation)
+	}
+	return device, nil
+}
+
 func (s *RuntimeDelegationService) CallAgent(
 	ctx context.Context,
 	authorization RuntimeDelegationAuthorization,

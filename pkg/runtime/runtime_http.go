@@ -35,6 +35,14 @@ type RuntimeDeviceAuthenticator interface {
 	AuthenticateHTTP(context.Context, *http.Request) (RuntimeDeviceIdentity, error)
 }
 
+// RuntimePrincipalBinder enforces the durable one-to-one relationship between
+// an Agent Token Credential and a Runtime Node public key. Token-only transport
+// resolves the same Node through this binding instead of trusting request data.
+type RuntimePrincipalBinder interface {
+	VerifyRuntimePrincipalBinding(context.Context, uuid.UUID, RuntimeDeviceIdentity) error
+	ResolveRuntimeDeviceIdentity(context.Context, uuid.UUID) (RuntimeDeviceIdentity, error)
+}
+
 type RuntimeSessionAPI interface {
 	CreateOrAttachSession(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionRequest) (RuntimeSessionState, error)
 	HeartbeatSession(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionHeartbeatRequest) (RuntimeSessionState, error)
@@ -70,6 +78,10 @@ type RuntimeDelegationAPI interface {
 	CallAgent(context.Context, RuntimeDelegationAuthorization) (RunSummary, error)
 }
 
+type runtimeInvocationDeviceResolver interface {
+	ResolveInvocationDevice(context.Context, string) (RuntimeDeviceIdentity, error)
+}
+
 type RuntimeCancellationAPI interface {
 	NextCommand(context.Context, RuntimeSessionPrincipal) (*PendingCommand, time.Time, error)
 	PollCommands(context.Context, RuntimeSessionPrincipal) (RuntimeCommandsResponse, error)
@@ -81,6 +93,8 @@ type RuntimeCancellationAPI interface {
 type RuntimeHTTPDependencies struct {
 	TokenValidator      RuntimeTokenValidator
 	DeviceAuthenticator RuntimeDeviceAuthenticator
+	PrincipalBinder     RuntimePrincipalBinder
+	TokenOnlyTransport  bool
 	TransportPolicy     RuntimeTransportPolicyProvider
 	Sessions            RuntimeSessionAPI
 	Leases              RuntimeLeaseAPI
@@ -727,21 +741,32 @@ func (h *RuntimeHTTPController) AckCancel(c echo.Context) error {
 	return writeRuntimePayload(c, http.StatusOK, state)
 }
 
-// CallAgent authenticates the mTLS Node and both assignment-scoped signed
+// CallAgent authenticates the Node and both assignment-scoped signed
 // capabilities before the exact request bytes are decoded as business input.
 // The invocation capability, not a long-lived Agent Token, is the Bearer
-// credential for this endpoint.
+// credential for this endpoint. Token-only transport resolves the same durable
+// Node/key binding from that signed capability.
 func (h *RuntimeHTTPController) CallAgent(c echo.Context) error {
-	if h == nil || h.dependencies.DeviceAuthenticator == nil || h.dependencies.Delegation == nil {
+	if h == nil || h.dependencies.Delegation == nil ||
+		(!h.dependencies.TokenOnlyTransport && h.dependencies.DeviceAuthenticator == nil) {
 		return writeRuntimeError(c, runtimeUnavailableError())
 	}
 	invocationToken, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
 	if err != nil {
 		return writeRuntimeError(c, runtimeUnauthorizedError(err))
 	}
-	device, err := h.dependencies.DeviceAuthenticator.AuthenticateHTTP(
-		c.Request().Context(), c.Request(),
-	)
+	var device RuntimeDeviceIdentity
+	if h.dependencies.TokenOnlyTransport {
+		resolver, ok := h.dependencies.Delegation.(runtimeInvocationDeviceResolver)
+		if !ok {
+			return writeRuntimeError(c, runtimeUnavailableError())
+		}
+		device, err = resolver.ResolveInvocationDevice(c.Request().Context(), invocationToken)
+	} else {
+		device, err = h.dependencies.DeviceAuthenticator.AuthenticateHTTP(
+			c.Request().Context(), c.Request(),
+		)
+	}
 	if err != nil {
 		return writeRuntimeError(c, runtimeUnauthorizedError(err))
 	}
@@ -776,7 +801,8 @@ func (h *RuntimeHTTPController) CallAgent(c echo.Context) error {
 }
 
 func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRuntimePrincipal, *RuntimeTransportError) {
-	if h == nil || h.dependencies.TokenValidator == nil || h.dependencies.DeviceAuthenticator == nil {
+	if h == nil || h.dependencies.TokenValidator == nil ||
+		(!h.dependencies.TokenOnlyTransport && h.dependencies.DeviceAuthenticator == nil) {
 		return AuthenticatedRuntimePrincipal{}, runtimeUnavailableError()
 	}
 	if cached, ok := c.Get(runtimeAuthenticatedPrincipalContextKey).(AuthenticatedRuntimePrincipal); ok {
@@ -792,9 +818,22 @@ func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRunti
 	if err != nil {
 		return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
 	}
-	device, err := h.dependencies.DeviceAuthenticator.AuthenticateHTTP(c.Request().Context(), c.Request())
+	var device RuntimeDeviceIdentity
+	if h.dependencies.TokenOnlyTransport {
+		if h.dependencies.PrincipalBinder == nil {
+			return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(nil)
+		}
+		device, err = h.dependencies.PrincipalBinder.ResolveRuntimeDeviceIdentity(c.Request().Context(), token.ID)
+	} else {
+		device, err = h.dependencies.DeviceAuthenticator.AuthenticateHTTP(c.Request().Context(), c.Request())
+	}
 	if err != nil {
 		return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
+	}
+	if h.dependencies.PrincipalBinder != nil {
+		if err = h.dependencies.PrincipalBinder.VerifyRuntimePrincipalBinding(c.Request().Context(), token.ID, device); err != nil {
+			return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
+		}
 	}
 	principal := AuthenticatedRuntimePrincipal{AgentID: token.AgentID, CredentialID: token.ID, Device: device}
 	if err = validateAuthenticatedRuntimePrincipal(principal); err != nil {

@@ -709,6 +709,33 @@ func TestRuntimeCallAgentPreservesProofBodyAndAuthenticatesDeviceBeforeService(t
 	require.Equal(t, 1, fixture.delegation.calls)
 }
 
+func TestRuntimeCallAgentTokenOnlyResolvesDeviceFromSignedInvocation(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
+	fixture.delegation.summary = RunSummary{
+		RunID: uuid.New(), Status: RuntimeRunRunning, DispatchState: RuntimeDispatchPending,
+	}
+	fixture.delegation.resolvedDevice = fixture.authenticated.Device
+	controller := fixture.controller()
+	controller.dependencies.TokenOnlyTransport = true
+	controller.dependencies.DeviceAuthenticator = nil
+	body := `{"target_agent_id":"` + uuid.NewString() + `","input":{"q":"delegate"}}`
+	e := echo.New()
+	controller.Register(e.Group("/api/v1"))
+	req := httptest.NewRequest(http.MethodPost, runtimeCallAgentPath, strings.NewReader(body))
+	req.Header.Set(echo.HeaderAuthorization, "Bearer invocation-token")
+	req.Header.Set("Idempotency-Key", "delegate-token-only")
+	req.Header.Set("OpenLinker-Invocation-Context", "node-envelope")
+	req.Header.Set("OpenLinker-Invocation-Proof", "request-proof")
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, req)
+
+	require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
+	require.Equal(t, 0, fixture.devices.calls)
+	require.Equal(t, 1, fixture.delegation.resolveCalls)
+	require.Equal(t, "invocation-token", fixture.delegation.resolvedToken)
+	require.Equal(t, fixture.authenticated.Device, fixture.delegation.authorization.Device)
+}
+
 func TestRuntimeCommandsBindExplicitSessionAndCancelAck(t *testing.T) {
 	fixture := newRuntimeHandlerFixture()
 	identity := fixture.attemptIdentity()
@@ -1246,10 +1273,14 @@ type runtimeResumeServiceFake struct {
 }
 
 type runtimeDelegationServiceFake struct {
-	summary       RunSummary
-	err           error
-	authorization RuntimeDelegationAuthorization
-	calls         int
+	summary        RunSummary
+	err            error
+	authorization  RuntimeDelegationAuthorization
+	calls          int
+	resolvedDevice RuntimeDeviceIdentity
+	resolvedToken  string
+	resolveErr     error
+	resolveCalls   int
 }
 
 type runtimeCancellationServiceFake struct {
@@ -1302,6 +1333,15 @@ func (f *runtimeDelegationServiceFake) CallAgent(
 	f.calls++
 	f.authorization = authorization
 	return f.summary, f.err
+}
+
+func (f *runtimeDelegationServiceFake) ResolveInvocationDevice(
+	_ context.Context,
+	token string,
+) (RuntimeDeviceIdentity, error) {
+	f.resolveCalls++
+	f.resolvedToken = token
+	return f.resolvedDevice, f.resolveErr
 }
 
 func (f *runtimeResumeServiceFake) Resume(

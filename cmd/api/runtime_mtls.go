@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -25,11 +26,11 @@ const (
 
 type runtimeListenerContextKey struct{}
 
-func startRuntimeMTLSListener(cfg *config.Config, application http.Handler) (*http.Server, net.Listener, error) {
+func startRuntimeMTLSListener(cfg *config.Config, application http.Handler, automatic ...*tls.Config) (*http.Server, net.Listener, error) {
 	if cfg == nil || !cfg.RuntimeMTLSEnabled {
 		return nil, nil, nil
 	}
-	tlsConfig, err := buildRuntimeMTLSConfig(cfg)
+	tlsConfig, err := buildRuntimeMTLSConfig(cfg, automatic...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -99,9 +100,19 @@ func (connection *runtimeConnectionLimitConnection) Close() error {
 	return err
 }
 
-func buildRuntimeMTLSConfig(cfg *config.Config) (*tls.Config, error) {
+func buildRuntimeMTLSConfig(cfg *config.Config, automatic ...*tls.Config) (*tls.Config, error) {
 	if err := validateRuntimeMTLSConfig(cfg); err != nil {
 		return nil, err
+	}
+	if len(automatic) > 0 && automatic[0] != nil {
+		cloned := automatic[0].Clone()
+		cloned.MinVersion = tls.VersionTLS13
+		cloned.ClientAuth = tls.RequireAndVerifyClientCert
+		cloned.NextProtos = []string{"http/1.1"}
+		if cloned.ClientCAs == nil || (len(cloned.Certificates) == 0 && cloned.GetCertificate == nil) {
+			return nil, errors.New("automatic runtime mTLS configuration is incomplete")
+		}
+		return cloned, nil
 	}
 	certificate, err := tls.LoadX509KeyPair(cfg.RuntimeMTLSCertFile, cfg.RuntimeMTLSKeyFile)
 	if err != nil {
@@ -141,12 +152,13 @@ func validateRuntimeMTLSConfig(cfg *config.Config) error {
 		cfg.RuntimeMTLSMaxConnections > maximumRuntimeMTLSMaxConnections {
 		return fmt.Errorf("RUNTIME_MTLS_MAX_CONNECTIONS must be between 1 and 65535")
 	}
-	for name, value := range map[string]string{
-		"RUNTIME_MTLS_API_URL":        cfg.RuntimeMTLSAPIURL,
-		"RUNTIME_MTLS_CERT_FILE":      cfg.RuntimeMTLSCertFile,
-		"RUNTIME_MTLS_KEY_FILE":       cfg.RuntimeMTLSKeyFile,
-		"RUNTIME_MTLS_CLIENT_CA_FILE": cfg.RuntimeMTLSClientCAFile,
-	} {
+	required := map[string]string{"RUNTIME_MTLS_API_URL": cfg.RuntimeMTLSAPIURL}
+	if cfg.RuntimePKIMode == "files" {
+		required["RUNTIME_MTLS_CERT_FILE"] = cfg.RuntimeMTLSCertFile
+		required["RUNTIME_MTLS_KEY_FILE"] = cfg.RuntimeMTLSKeyFile
+		required["RUNTIME_MTLS_CLIENT_CA_FILE"] = cfg.RuntimeMTLSClientCAFile
+	}
+	for name, value := range required {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s is required when RUNTIME_MTLS_ENABLED=true", name)
 		}
@@ -181,13 +193,20 @@ func runtimeOnlyHandler(application http.Handler) http.Handler {
 // dedicated mTLS listener after TLS client-certificate verification, so it
 // cannot be supplied by an external header.
 func runtimeListenerIsolation(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		path := c.Request().URL.Path
-		isRuntimePath := strings.HasPrefix(path, runtimePathPrefix)
-		fromRuntimeListener, _ := c.Request().Context().Value(runtimeListenerContextKey{}).(bool)
-		if isRuntimePath && !fromRuntimeListener {
-			return echo.ErrNotFound
+	return runtimeListenerIsolationForConfig(&config.Config{RuntimeMTLSEnabled: true})(next)
+}
+
+func runtimeListenerIsolationForConfig(cfg *config.Config) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			path := c.Request().URL.Path
+			isRuntimePath := strings.HasPrefix(path, runtimePathPrefix)
+			fromRuntimeListener, _ := c.Request().Context().Value(runtimeListenerContextKey{}).(bool)
+			mtlsRequired := cfg == nil || cfg.RuntimeMTLSEnabled
+			if mtlsRequired && isRuntimePath && !fromRuntimeListener {
+				return echo.ErrNotFound
+			}
+			return next(c)
 		}
-		return next(c)
 	}
 }

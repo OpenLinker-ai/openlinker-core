@@ -323,14 +323,26 @@ FROM runtime_nodes
 WHERE node_id = $1;
 
 -- name: GetRuntimeNodeByCertificate :one
-SELECT node_id, display_name, device_certificate_serial,
-       device_public_key_thumbprint, node_version, protocol_version,
-       runtime_contract_id, runtime_contract_digest, features, capacity,
-       inflight, status, last_seen_at, draining_at, revoked_at, revoke_reason,
-       created_at, updated_at
-FROM runtime_nodes
-WHERE device_certificate_serial = $1
-  AND device_public_key_thumbprint = $2;
+SELECT node.node_id, node.display_name, node.device_certificate_serial,
+       node.device_public_key_thumbprint, node.node_version, node.protocol_version,
+       node.runtime_contract_id, node.runtime_contract_digest, node.features, node.capacity,
+       node.inflight, node.status, node.last_seen_at, node.draining_at, node.revoked_at, node.revoke_reason,
+       node.created_at, node.updated_at
+FROM runtime_nodes node
+WHERE node.device_public_key_thumbprint = $2
+  AND (
+      node.device_certificate_serial = $1
+      OR EXISTS (
+          SELECT 1
+          FROM runtime_node_certificates certificate
+          WHERE certificate.node_id = node.node_id
+            AND certificate.certificate_serial = $1
+            AND certificate.public_key_thumbprint = $2
+            AND certificate.revoked_at IS NULL
+            AND certificate.not_before <= clock_timestamp()
+            AND certificate.not_after > clock_timestamp()
+      )
+  );
 
 -- name: ListRuntimeNodes :many
 SELECT node_id, display_name, device_certificate_serial,
