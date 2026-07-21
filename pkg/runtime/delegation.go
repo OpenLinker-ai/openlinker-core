@@ -94,14 +94,16 @@ func (s *RuntimeDelegationService) ResolveInvocationDevice(
 	}
 	var device RuntimeDeviceIdentity
 	var agentID uuid.UUID
-	var status string
+	var status, bindingMode string
 	err = s.pool.QueryRow(ctx, `
 SELECT node.node_id, binding.agent_id, node.device_certificate_serial,
-       certificate.certificate_fingerprint, binding.public_key_thumbprint,
-       node.status
+       COALESCE(certificate.certificate_fingerprint,
+                CASE WHEN binding.binding_mode = 'token_only'
+                     THEN binding.public_key_thumbprint ELSE '' END),
+       binding.public_key_thumbprint, node.status, binding.binding_mode
 FROM runtime_node_bindings binding
 JOIN runtime_nodes node ON node.node_id = binding.node_id
-JOIN LATERAL (
+LEFT JOIN LATERAL (
     SELECT issued.certificate_fingerprint
     FROM runtime_node_certificates issued
     WHERE issued.node_id = node.node_id
@@ -116,11 +118,15 @@ WHERE binding.credential_id = $1`, capability.CredentialID).Scan(
 		&device.CertificateFingerprintSHA256,
 		&device.PublicKeyThumbprintSHA256,
 		&status,
+		&bindingMode,
 	)
 	if err != nil || device.NodeID != capability.NodeID || agentID != capability.AgentID ||
-		(status != "active" && status != "draining") {
+		(status != "active" && status != "draining") ||
+		(bindingMode != "token_only" && bindingMode != "mtls") ||
+		device.CertificateFingerprintSHA256 == "" {
 		return RuntimeDeviceIdentity{}, runtimeUnauthorizedError(ErrInvalidRuntimeInvocation)
 	}
+	device.AuthenticationMode = RuntimeAuthenticationTokenOnly
 	return device, nil
 }
 
