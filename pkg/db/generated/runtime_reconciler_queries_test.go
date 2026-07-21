@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -176,58 +175,6 @@ func TestRuntimeReconcilerGeneratedScanAndArgumentOrder(t *testing.T) {
 	gotNodeID, err := queries.LockRuntimeNodeForReconcile(context.Background(), nodeID)
 	if err != nil || gotNodeID != nodeID {
 		t.Fatalf("LockRuntimeNodeForReconcile = %s, %v", gotNodeID, err)
-	}
-}
-
-func TestRuntimeReconcilerMigration066Shape(t *testing.T) {
-	t.Parallel()
-
-	up, err := os.ReadFile("../../../migrations/066_runtime_v2_deadline_reconciler.up.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	down, err := os.ReadFile("../../../migrations/066_runtime_v2_deadline_reconciler.down.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	verify, err := os.ReadFile("../../../migrations/066_runtime_v2_deadline_reconciler_verify.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldDigest := "d83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f"
-	newDigest := "60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61"
-	for _, fragment := range []string{
-		"schema_version = 65", "schema_version = 66",
-		"066_runtime_v2_deadline_reconciler", oldDigest, newDigest,
-		"runtime contract digest cutover", "status = 'closed'",
-		"status IN ('active', 'draining')", "status IN ('offline', 'revoked', 'closed')",
-		"fenced slot release", "NEW.inflight = OLD.inflight - 1",
-		"idx_runs_runtime_v2_dispatch_due", "idx_runs_runtime_v2_run_deadline_due",
-		"idx_run_attempts_runtime_v2_offer_due", "idx_run_attempts_runtime_v2_execution_due",
-	} {
-		if !strings.Contains(string(up), fragment) {
-			t.Fatalf("066 up migration missing %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"down refuses immutable new-digest Session or revoked Node evidence",
-		"schema_version = 65", "065_runtime_cancellation_lifecycle",
-		"Restore the exact pre-066 terminal Session immutability rule",
-		oldDigest, newDigest,
-	} {
-		if !strings.Contains(string(down), fragment) {
-			t.Fatalf("066 down migration missing %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"runtime schema contract 66 is missing or mismatched",
-		"active runtime principal retained an obsolete digest",
-		"runtime v2 deadline reconcile indexes are missing",
-		oldDigest, newDigest,
-	} {
-		if !strings.Contains(string(verify), fragment) {
-			t.Fatalf("066 verify migration missing %q", fragment)
-		}
 	}
 }
 

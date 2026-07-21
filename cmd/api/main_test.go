@@ -19,6 +19,7 @@ import (
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/migrationinit"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
@@ -615,108 +616,168 @@ func TestMigrationSourceLoadsWithoutDuplicateVersions(t *testing.T) {
 
 func TestRunMigrateWithCommandBranches(t *testing.T) {
 	tests := []struct {
-		name      string
-		args      []string
-		env       map[string]string
-		migrator  *fakeMigrator
-		newErr    error
-		wantCode  int
-		wantOut   string
-		wantErr   string
-		wantSrc   string
-		wantDBURL string
+		name         string
+		args         []string
+		env          map[string]string
+		snapshot     migrationinit.Snapshot
+		postSnapshot *migrationinit.Snapshot
+		inspectErr   error
+		migrator     *fakeMigrator
+		newErr       error
+		wantCode     int
+		wantOut      string
+		wantErr      string
+		wantSrc      string
+		wantDBURL    string
+		wantInspect  int
+		wantFactory  int
 	}{
-		{name: "missing command", wantCode: 2, wantOut: "usage: api migrate <up|down|status>"},
+		{name: "missing command", wantCode: 2, wantOut: "usage: api migrate <up|check|status>"},
 		{name: "missing database", args: []string{"up"}, wantCode: 1, wantErr: "DATABASE_URL not set"},
 		{
-			name:      "init failure",
-			args:      []string{"up"},
-			env:       map[string]string{"DATABASE_URL": "postgres://db"},
-			newErr:    errors.New("bad migration source"),
-			wantCode:  1,
-			wantErr:   "migrate init: bad migration source",
-			wantSrc:   "file://./migrations",
-			wantDBURL: "postgres://db",
+			name:        "inspection failure",
+			args:        []string{"up"},
+			env:         map[string]string{"DATABASE_URL": "postgres://db"},
+			inspectErr:  errors.New("inspection failed"),
+			wantCode:    1,
+			wantErr:     "migration preflight: inspection failed",
+			wantInspect: 1,
 		},
 		{
-			name:      "up success",
-			args:      []string{"up"},
-			env:       map[string]string{"DATABASE_URL": "postgres://db", "MIGRATIONS_DIR": "/app/migrations"},
-			migrator:  &fakeMigrator{},
-			wantCode:  0,
-			wantOut:   "migrate up: ok",
-			wantSrc:   "file:///app/migrations",
-			wantDBURL: "postgres://db",
+			name:         "fresh up success",
+			args:         []string{"up"},
+			env:          map[string]string{"DATABASE_URL": "postgres://db", "MIGRATIONS_DIR": "/app/migrations"},
+			migrator:     &fakeMigrator{},
+			postSnapshot: migrationSnapshotPointer(currentCoreMigrationSnapshot()),
+			wantCode:     0,
+			wantOut:      "migrate up: ok",
+			wantSrc:      "file:///app/migrations",
+			wantDBURL:    "postgres://db",
+			wantInspect:  2,
+			wantFactory:  1,
 		},
 		{
-			name:      "up no change is ok",
-			args:      []string{"up"},
-			env:       map[string]string{"DATABASE_URL": "postgres://db"},
-			migrator:  &fakeMigrator{upErr: migratecmd.ErrNoChange},
-			wantCode:  0,
-			wantOut:   "migrate up: ok",
-			wantSrc:   "file://./migrations",
-			wantDBURL: "postgres://db",
+			name:         "fresh up no change is ok",
+			args:         []string{"up"},
+			env:          map[string]string{"DATABASE_URL": "postgres://db"},
+			migrator:     &fakeMigrator{upErr: migratecmd.ErrNoChange},
+			postSnapshot: migrationSnapshotPointer(currentCoreMigrationSnapshot()),
+			wantCode:     0,
+			wantOut:      "migrate up: ok",
+			wantSrc:      "file://./migrations",
+			wantDBURL:    "postgres://db",
+			wantInspect:  2,
+			wantFactory:  1,
 		},
 		{
-			name:      "up failure",
-			args:      []string{"up"},
-			env:       map[string]string{"DATABASE_URL": "postgres://db"},
-			migrator:  &fakeMigrator{upErr: errors.New("up failed")},
-			wantCode:  1,
-			wantErr:   "migrate up: up failed",
-			wantSrc:   "file://./migrations",
-			wantDBURL: "postgres://db",
+			name:        "fresh up failure",
+			args:        []string{"up"},
+			env:         map[string]string{"DATABASE_URL": "postgres://db"},
+			migrator:    &fakeMigrator{upErr: errors.New("up failed")},
+			wantCode:    1,
+			wantErr:     "migrate up: up failed",
+			wantSrc:     "file://./migrations",
+			wantDBURL:   "postgres://db",
+			wantInspect: 1,
+			wantFactory: 1,
 		},
 		{
-			name:      "down success",
-			args:      []string{"down"},
-			env:       map[string]string{"DATABASE_URL": "postgres://db"},
-			migrator:  &fakeMigrator{},
-			wantCode:  0,
-			wantOut:   "migrate down 1 step: ok",
-			wantSrc:   "file://./migrations",
-			wantDBURL: "postgres://db",
+			name:         "postflight drift fails",
+			args:         []string{"up"},
+			env:          map[string]string{"DATABASE_URL": "postgres://db"},
+			migrator:     &fakeMigrator{},
+			postSnapshot: migrationSnapshotPointer(legacyCoreMigrationSnapshot(81)),
+			wantCode:     1,
+			wantErr:      "migrate up postflight: schema is not the exact current Core state",
+			wantInspect:  2,
+			wantFactory:  1,
 		},
 		{
-			name:      "down failure",
-			args:      []string{"down"},
-			env:       map[string]string{"DATABASE_URL": "postgres://db"},
-			migrator:  &fakeMigrator{stepsErr: errors.New("down failed")},
-			wantCode:  1,
-			wantErr:   "migrate down: down failed",
-			wantSrc:   "file://./migrations",
-			wantDBURL: "postgres://db",
+			name:        "current is a preflight no-op",
+			args:        []string{"up"},
+			env:         map[string]string{"DATABASE_URL": "postgres://db"},
+			snapshot:    currentCoreMigrationSnapshot(),
+			wantCode:    0,
+			wantOut:     "migrate up: ok",
+			wantInspect: 1,
 		},
 		{
-			name:      "status success",
-			args:      []string{"status"},
-			env:       map[string]string{"DATABASE_URL": "postgres://db"},
-			migrator:  &fakeMigrator{version: 42, dirty: true},
-			wantCode:  0,
-			wantOut:   "version=42 dirty=true",
-			wantSrc:   "file://./migrations",
-			wantDBURL: "postgres://db",
+			name:        "check reports fresh without factory",
+			args:        []string{"check"},
+			env:         map[string]string{"DATABASE_URL": "postgres://db"},
+			wantCode:    0,
+			wantOut:     "migrate check: state=fresh",
+			wantInspect: 1,
 		},
 		{
-			name:      "status failure",
-			args:      []string{"status"},
-			env:       map[string]string{"DATABASE_URL": "postgres://db"},
-			migrator:  &fakeMigrator{versionErr: errors.New("status failed")},
-			wantCode:  1,
-			wantErr:   "status: status failed",
-			wantSrc:   "file://./migrations",
-			wantDBURL: "postgres://db",
+			name:        "check reports current without factory",
+			args:        []string{"check"},
+			env:         map[string]string{"DATABASE_URL": "postgres://db"},
+			snapshot:    currentCoreMigrationSnapshot(),
+			wantCode:    0,
+			wantOut:     "migrate check: state=current",
+			wantInspect: 1,
 		},
 		{
-			name:      "unknown command",
-			args:      []string{"sideways"},
-			env:       map[string]string{"DATABASE_URL": "postgres://db"},
-			migrator:  &fakeMigrator{},
-			wantCode:  2,
-			wantErr:   "unknown migrate command: sideways",
-			wantSrc:   "file://./migrations",
-			wantDBURL: "postgres://db",
+			name:        "legacy is rejected before factory",
+			args:        []string{"up"},
+			env:         map[string]string{"DATABASE_URL": "postgres://db"},
+			snapshot:    legacyCoreMigrationSnapshot(81),
+			wantCode:    1,
+			wantErr:     "unsupported; rebuild an empty database",
+			wantInspect: 1,
+		},
+		{
+			name:        "factory failure",
+			args:        []string{"up"},
+			env:         map[string]string{"DATABASE_URL": "postgres://db"},
+			newErr:      errors.New("bad migration source"),
+			wantCode:    1,
+			wantErr:     "migrate init: bad migration source",
+			wantSrc:     "file://./migrations",
+			wantDBURL:   "postgres://db",
+			wantInspect: 1,
+			wantFactory: 1,
+		},
+		{
+			name:        "empty status is read only",
+			args:        []string{"status"},
+			env:         map[string]string{"DATABASE_URL": "postgres://db"},
+			wantCode:    0,
+			wantOut:     "version=0 dirty=false",
+			wantInspect: 1,
+		},
+		{
+			name:        "legacy status remains visible",
+			args:        []string{"status"},
+			env:         map[string]string{"DATABASE_URL": "postgres://db"},
+			snapshot:    migrationinit.Snapshot{Core: migrationinit.MigrationTableState{Exists: true, Rows: 1, Version: 81, Dirty: true}},
+			wantCode:    0,
+			wantOut:     "version=81 dirty=true",
+			wantInspect: 1,
+		},
+		{
+			name:        "malformed status fails",
+			args:        []string{"status"},
+			env:         map[string]string{"DATABASE_URL": "postgres://db"},
+			snapshot:    migrationinit.Snapshot{Core: migrationinit.MigrationTableState{Exists: true, Rows: 2}},
+			wantCode:    1,
+			wantErr:     "expected exactly one",
+			wantInspect: 1,
+		},
+		{
+			name:     "down is disabled before inspection",
+			args:     []string{"down"},
+			env:      map[string]string{"DATABASE_URL": "postgres://db"},
+			wantCode: 1,
+			wantErr:  "migrate down is disabled",
+		},
+		{
+			name:     "unknown command does not inspect",
+			args:     []string{"sideways"},
+			env:      map[string]string{"DATABASE_URL": "postgres://db"},
+			wantCode: 2,
+			wantErr:  "unknown migrate command: sideways",
 		},
 	}
 
@@ -724,11 +785,26 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			var gotSrc, gotDBURL string
+			inspectCalls := 0
+			factoryCalls := 0
 			fakeM := tt.migrator
 			if fakeM == nil {
 				fakeM = &fakeMigrator{}
 			}
-			code := runMigrateWith(tt.args, func(key string) string { return tt.env[key] }, func(sourceURL, databaseURL string) (migrator, error) {
+			code := runMigrateWith(tt.args, func(key string) string { return tt.env[key] }, func(ctx context.Context, databaseURL string) (migrationinit.Snapshot, error) {
+				inspectCalls++
+				if _, ok := ctx.Deadline(); !ok {
+					t.Fatal("migration inspection context has no deadline")
+				}
+				if databaseURL != tt.env["DATABASE_URL"] {
+					t.Fatalf("inspection database URL = %q", databaseURL)
+				}
+				if inspectCalls > 1 && tt.postSnapshot != nil {
+					return *tt.postSnapshot, nil
+				}
+				return tt.snapshot, tt.inspectErr
+			}, func(sourceURL, databaseURL string) (migrator, error) {
+				factoryCalls++
 				gotSrc = sourceURL
 				gotDBURL = databaseURL
 				if tt.newErr != nil {
@@ -752,8 +828,38 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 			if tt.wantDBURL != "" && gotDBURL != tt.wantDBURL {
 				t.Fatalf("databaseURL = %q, want %q", gotDBURL, tt.wantDBURL)
 			}
+			if inspectCalls != tt.wantInspect {
+				t.Fatalf("inspection calls = %d, want %d", inspectCalls, tt.wantInspect)
+			}
+			if factoryCalls != tt.wantFactory {
+				t.Fatalf("factory calls = %d, want %d", factoryCalls, tt.wantFactory)
+			}
 		})
 	}
+}
+
+func currentCoreMigrationSnapshot() migrationinit.Snapshot {
+	return migrationinit.Snapshot{
+		Core:                  migrationinit.MigrationTableState{Exists: true, Rows: 1, Version: migrationinit.CoreVersion},
+		NonBookkeepingObjects: 69,
+		CoreShape: migrationinit.SchemaShape{
+			Digest: migrationinit.CoreSchemaDigest,
+			Tables: 69, Constraints: 587, Indexes: 259, Triggers: 70,
+			CoreIdentities: 1, RuntimeControls: 1, RuntimeSchemas: 9,
+			CurrentRuntime: 1, RuntimeWires: 5, CurrentWire: 1, PreviousWire: 1,
+			BuiltInSkills: 30, BuiltInSkillCases: 15,
+		},
+	}
+}
+
+func legacyCoreMigrationSnapshot(version int64) migrationinit.Snapshot {
+	snapshot := currentCoreMigrationSnapshot()
+	snapshot.Core.Version = version
+	return snapshot
+}
+
+func migrationSnapshotPointer(snapshot migrationinit.Snapshot) *migrationinit.Snapshot {
+	return &snapshot
 }
 
 type fakePinger struct {

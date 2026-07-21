@@ -24,7 +24,7 @@ func TestCanonicalSkillEnglishTranslations(t *testing.T) {
 }
 
 func TestCanonicalSkillEnglishTranslationKeysMatchSeedCatalog(t *testing.T) {
-	seedPath := filepath.Join("..", "..", "migrations", "003_skills_and_tasks.up.sql")
+	seedPath := filepath.Join("..", "..", "migrations", "086_current_schema_init.up.sql")
 	seedSQL, err := os.ReadFile(seedPath)
 	require.NoError(t, err)
 

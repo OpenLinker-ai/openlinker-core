@@ -1,7 +1,7 @@
 -- delivery.sql
 --
 -- Phase 2 §7：用户侧 Output Delivery。
--- 表结构见 migrations/009_delivery_targets.up.sql：
+-- 表结构见 migrations/086_current_schema_init.up.sql：
 --   - delivery_targets：用户拥有的投递目标
 --   - run_deliveries：每次投递记录 + 重试状态
 --   - delivery_targets.config：{url, event_types}；旧 {url} 自动按终态事件处理

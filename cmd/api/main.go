@@ -40,6 +40,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/llm"
 	openlinkerlog "github.com/OpenLinker-ai/openlinker-core/pkg/log"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/migrationinit"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/ratelimit"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtimepki"
@@ -696,9 +697,9 @@ func buildLLMClient(cfg *config.Config) llm.Client {
 	return nil
 }
 
-// runMigrate runs goose-style up/down/status against MIGRATIONS_DIR (default ./migrations).
+// runMigrate validates or initializes the exact current schema in MIGRATIONS_DIR.
 func runMigrate(args []string) {
-	code := runMigrateWith(args, os.Getenv, func(sourceURL, databaseURL string) (migrator, error) {
+	code := runMigrateWith(args, os.Getenv, migrationinit.Inspect, func(sourceURL, databaseURL string) (migrator, error) {
 		return migratecmd.New(sourceURL, databaseURL)
 	}, os.Stdout, os.Stderr)
 	if code != 0 {
@@ -708,14 +709,14 @@ func runMigrate(args []string) {
 
 type migrator interface {
 	Up() error
-	Steps(int) error
-	Version() (uint, bool, error)
 	Close() (error, error)
 }
 
-func runMigrateWith(args []string, getenv func(string) string, newMigrator func(string, string) (migrator, error), stdout, stderr io.Writer) int {
+type migrationInspector func(context.Context, string) (migrationinit.Snapshot, error)
+
+func runMigrateWith(args []string, getenv func(string) string, inspect migrationInspector, newMigrator func(string, string) (migrator, error), stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stdout, "usage: api migrate <up|down|status>")
+		fmt.Fprintln(stdout, "usage: api migrate <up|check|status>")
 		return 2
 	}
 	cmd := args[0]
@@ -726,6 +727,50 @@ func runMigrateWith(args []string, getenv func(string) string, newMigrator func(
 		return 1
 	}
 
+	switch cmd {
+	case "up", "check", "status":
+	case "down":
+		fmt.Fprintln(stderr, "migrate down is disabled for the current-schema initializer; recreate a disposable database instead")
+		return 1
+	default:
+		fmt.Fprintf(stderr, "unknown migrate command: %s\n", cmd)
+		return 2
+	}
+
+	inspectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	snapshot, err := inspect(inspectCtx, dbURL)
+	if err != nil {
+		fmt.Fprintf(stderr, "migration preflight: %v\n", err)
+		return 1
+	}
+	if cmd == "status" {
+		if snapshot.Core.Exists && snapshot.Core.Rows != 1 {
+			fmt.Fprintf(stderr, "status: Core migration table has %d rows; expected exactly one\n", snapshot.Core.Rows)
+			return 1
+		}
+		fmt.Fprintf(stdout, "version=%d dirty=%v\n", snapshot.Core.Version, snapshot.Core.Dirty)
+		return 0
+	}
+
+	current, err := snapshot.ValidateCoreUp()
+	if err != nil {
+		fmt.Fprintf(stderr, "migrate %s preflight: %v\n", cmd, err)
+		return 1
+	}
+	if cmd == "check" {
+		state := "fresh"
+		if current {
+			state = "current"
+		}
+		fmt.Fprintf(stdout, "migrate check: state=%s\n", state)
+		return 0
+	}
+	if current {
+		fmt.Fprintln(stdout, "migrate up: ok")
+		return 0
+	}
+
 	m, err := newMigrator("file://"+src, dbURL)
 	if err != nil {
 		fmt.Fprintf(stderr, "migrate init: %v\n", err)
@@ -733,30 +778,23 @@ func runMigrateWith(args []string, getenv func(string) string, newMigrator func(
 	}
 	defer func() { _, _ = m.Close() }()
 
-	switch cmd {
-	case "up":
-		if err := m.Up(); err != nil && !errors.Is(err, migratecmd.ErrNoChange) {
-			fmt.Fprintf(stderr, "migrate up: %v\n", err)
-			return 1
-		}
-		fmt.Fprintln(stdout, "migrate up: ok")
-	case "down":
-		if err := m.Steps(-1); err != nil {
-			fmt.Fprintf(stderr, "migrate down: %v\n", err)
-			return 1
-		}
-		fmt.Fprintln(stdout, "migrate down 1 step: ok")
-	case "status":
-		v, dirty, err := m.Version()
-		if err != nil {
-			fmt.Fprintf(stderr, "status: %v\n", err)
-			return 1
-		}
-		fmt.Fprintf(stdout, "version=%d dirty=%v\n", v, dirty)
-	default:
-		fmt.Fprintf(stderr, "unknown migrate command: %s\n", cmd)
-		return 2
+	if err := m.Up(); err != nil && !errors.Is(err, migratecmd.ErrNoChange) {
+		fmt.Fprintf(stderr, "migrate up: %v\n", err)
+		return 1
 	}
+	postCtx, postCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer postCancel()
+	postSnapshot, err := inspect(postCtx, dbURL)
+	if err != nil {
+		fmt.Fprintf(stderr, "migrate up postflight: %v\n", err)
+		return 1
+	}
+	postCurrent, err := postSnapshot.ValidateCoreUp()
+	if err != nil || !postCurrent {
+		fmt.Fprintf(stderr, "migrate up postflight: schema is not the exact current Core state: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "migrate up: ok")
 	return 0
 }
 
