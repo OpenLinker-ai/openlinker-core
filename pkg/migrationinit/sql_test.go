@@ -47,8 +47,12 @@ func TestCoreInitializerContainsCurrentContracts(t *testing.T) {
 		"input_schema_fingerprint bytea",
 		"CREATE TABLE public.oauth_login_codes",
 		"jwt text,",
+		"scopes text[] DEFAULT ARRAY['agents:run'::text] NOT NULL",
+		"ADD CONSTRAINT api_keys_pkey PRIMARY KEY (id)",
+		"ADD CONSTRAINT api_keys_user_id_fkey FOREIGN KEY (user_id)",
 		"INSERT INTO public.runtime_wire_contracts",
 		"INSERT INTO public.runtime_schema_contracts",
+		"(79, '079_runtime_attempt_transport_evidence'",
 	} {
 		if !strings.Contains(up, fragment) {
 			t.Fatalf("Core initializer missing %q", fragment)
@@ -77,6 +81,7 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",
 		"Core initializer built-in skills are incomplete",
 		"Core Runtime schema contract initialization is inconsistent",
+		"count(*) FROM runtime_schema_contracts) <> 10",
 		"Core Runtime wire contract initialization is inconsistent",
 		"idx_runtime_node_certificates_retention",
 		"idx_runtime_sessions_credential_lifecycle",

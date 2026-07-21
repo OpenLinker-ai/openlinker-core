@@ -845,7 +845,7 @@ func currentCoreMigrationSnapshot() migrationinit.Snapshot {
 		CoreShape: migrationinit.SchemaShape{
 			Digest: migrationinit.CoreSchemaDigest,
 			Tables: 69, Constraints: 587, Indexes: 259, Triggers: 70,
-			CoreIdentities: 1, RuntimeControls: 1, RuntimeSchemas: 9,
+			CoreIdentities: 1, RuntimeControls: 1, RuntimeSchemas: 10,
 			CurrentRuntime: 1, RuntimeWires: 5, CurrentWire: 1, PreviousWire: 1,
 			BuiltInSkills: 30, BuiltInSkillCases: 15,
 		},
