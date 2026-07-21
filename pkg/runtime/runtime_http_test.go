@@ -141,6 +141,61 @@ func TestRuntimeHTTPTransportPolicyAdmissionPreservesAuthenticationPrecedence(t 
 	require.Equal(t, 0, fixture.sessions.createCalls)
 }
 
+func TestRuntimeTokenOnlyRequiresCanonicalNodeSelectorAndNeverAuthenticatesDevice(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
+	fixture.sessions.create = func(
+		_ context.Context,
+		_ AuthenticatedRuntimePrincipal,
+		_ RuntimeSessionRequest,
+	) (RuntimeSessionState, error) {
+		return fixture.sessionState(), nil
+	}
+	binder := &runtimePrincipalBinderFake{device: fixture.authenticated.Device}
+	controller := fixture.controller()
+	controller.dependencies.TokenOnlyTransport = true
+	controller.dependencies.DeviceAuthenticator = nil
+	controller.dependencies.PrincipalBinder = binder
+	hello := fixture.hello()
+	body, err := json.Marshal(hello)
+	require.NoError(t, err)
+
+	serve := func(values ...string) *httptest.ResponseRecorder {
+		e := echo.New()
+		controller.Register(e.Group("/api/v1"))
+		request := httptest.NewRequest(
+			http.MethodPost, "/api/v1/agent-runtime/sessions", strings.NewReader(string(body)),
+		)
+		request.Header.Set(echo.HeaderAuthorization, "Bearer runtime-secret")
+		request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		for _, value := range values {
+			request.Header.Add(RuntimeNodeIDHeader, value)
+		}
+		recorder := httptest.NewRecorder()
+		e.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	for _, values := range [][]string{
+		nil,
+		{" " + fixture.authenticated.Device.NodeID.String()},
+		{strings.ToUpper(fixture.authenticated.Device.NodeID.String())},
+		{fixture.authenticated.Device.NodeID.String(), uuid.NewString()},
+	} {
+		response := serve(values...)
+		require.Equal(t, http.StatusUnauthorized, response.Code, response.Body.String())
+	}
+	require.Zero(t, binder.resolveCalls)
+	require.Zero(t, fixture.devices.calls)
+
+	response := serve(fixture.authenticated.Device.NodeID.String())
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	require.Equal(t, 1, binder.resolveCalls)
+	require.Equal(t, fixture.authenticated.CredentialID, binder.credentialID)
+	require.Equal(t, fixture.authenticated.Device.NodeID, binder.nodeID)
+	require.Zero(t, binder.verifyCalls)
+	require.Zero(t, fixture.devices.calls)
+}
+
 func TestRuntimePullClaimWakeDoesNotWaitForDatabasePollTick(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
@@ -709,6 +764,33 @@ func TestRuntimeCallAgentPreservesProofBodyAndAuthenticatesDeviceBeforeService(t
 	require.Equal(t, 1, fixture.delegation.calls)
 }
 
+func TestRuntimeCallAgentTokenOnlyResolvesDeviceFromSignedInvocation(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
+	fixture.delegation.summary = RunSummary{
+		RunID: uuid.New(), Status: RuntimeRunRunning, DispatchState: RuntimeDispatchPending,
+	}
+	fixture.delegation.resolvedDevice = fixture.authenticated.Device
+	controller := fixture.controller()
+	controller.dependencies.TokenOnlyTransport = true
+	controller.dependencies.DeviceAuthenticator = nil
+	body := `{"target_agent_id":"` + uuid.NewString() + `","input":{"q":"delegate"}}`
+	e := echo.New()
+	controller.Register(e.Group("/api/v1"))
+	req := httptest.NewRequest(http.MethodPost, runtimeCallAgentPath, strings.NewReader(body))
+	req.Header.Set(echo.HeaderAuthorization, "Bearer invocation-token")
+	req.Header.Set("Idempotency-Key", "delegate-token-only")
+	req.Header.Set("OpenLinker-Invocation-Context", "node-envelope")
+	req.Header.Set("OpenLinker-Invocation-Proof", "request-proof")
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, req)
+
+	require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
+	require.Equal(t, 0, fixture.devices.calls)
+	require.Equal(t, 1, fixture.delegation.resolveCalls)
+	require.Equal(t, "invocation-token", fixture.delegation.resolvedToken)
+	require.Equal(t, fixture.authenticated.Device, fixture.delegation.authorization.Device)
+}
+
 func TestRuntimeCommandsBindExplicitSessionAndCancelAck(t *testing.T) {
 	fixture := newRuntimeHandlerFixture()
 	identity := fixture.attemptIdentity()
@@ -1108,6 +1190,46 @@ type runtimeDeviceAuthenticatorFake struct {
 	calls  int
 }
 
+type runtimePrincipalBinderFake struct {
+	device       RuntimeDeviceIdentity
+	err          error
+	credentialID uuid.UUID
+	nodeID       uuid.UUID
+	resolveCalls int
+	verifyCalls  int
+}
+
+func (f *runtimePrincipalBinderFake) VerifyRuntimePrincipalBinding(
+	_ context.Context,
+	credentialID uuid.UUID,
+	device RuntimeDeviceIdentity,
+) error {
+	f.verifyCalls++
+	f.credentialID = credentialID
+	f.nodeID = device.NodeID
+	return f.err
+}
+
+func (f *runtimePrincipalBinderFake) ResolveRuntimeDeviceIdentity(
+	_ context.Context,
+	credentialID uuid.UUID,
+) (RuntimeDeviceIdentity, error) {
+	f.resolveCalls++
+	f.credentialID = credentialID
+	return f.device, f.err
+}
+
+func (f *runtimePrincipalBinderFake) ResolveTokenOnlyRuntimeDeviceIdentity(
+	_ context.Context,
+	credentialID uuid.UUID,
+	nodeID uuid.UUID,
+) (RuntimeDeviceIdentity, error) {
+	f.resolveCalls++
+	f.credentialID = credentialID
+	f.nodeID = nodeID
+	return f.device, f.err
+}
+
 func (f *runtimeDeviceAuthenticatorFake) AuthenticateHTTP(context.Context, *http.Request) (RuntimeDeviceIdentity, error) {
 	f.calls++
 	return f.device, f.err
@@ -1246,10 +1368,14 @@ type runtimeResumeServiceFake struct {
 }
 
 type runtimeDelegationServiceFake struct {
-	summary       RunSummary
-	err           error
-	authorization RuntimeDelegationAuthorization
-	calls         int
+	summary        RunSummary
+	err            error
+	authorization  RuntimeDelegationAuthorization
+	calls          int
+	resolvedDevice RuntimeDeviceIdentity
+	resolvedToken  string
+	resolveErr     error
+	resolveCalls   int
 }
 
 type runtimeCancellationServiceFake struct {
@@ -1302,6 +1428,15 @@ func (f *runtimeDelegationServiceFake) CallAgent(
 	f.calls++
 	f.authorization = authorization
 	return f.summary, f.err
+}
+
+func (f *runtimeDelegationServiceFake) ResolveInvocationDevice(
+	_ context.Context,
+	token string,
+) (RuntimeDeviceIdentity, error) {
+	f.resolveCalls++
+	f.resolvedToken = token
+	return f.resolvedDevice, f.resolveErr
 }
 
 func (f *runtimeResumeServiceFake) Resume(

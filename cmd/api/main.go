@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +42,7 @@ import (
 	openlinkerlog "github.com/OpenLinker-ai/openlinker-core/pkg/log"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/ratelimit"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runtimepki"
 )
 
 const maxRequestBodySize = "8M"
@@ -118,6 +120,14 @@ func main() {
 	}
 	defer pool.Close()
 	log.Info().Msg("database connected")
+	var runtimePKI *runtimepki.Manager
+	if cfg.RuntimePKIMode == "auto" {
+		runtimePKI, err = runtimepki.NewManager(rootCtx, pool, cfg)
+		if err != nil {
+			log.Fatal().Err(err).Msg("initialize automatic runtime PKI failed")
+		}
+		runtimePKI.Start(rootCtx)
+	}
 	if !runtimeAttachOnly {
 		if err := autoBootstrapAdminIfNeeded(rootCtx, pool, cfg.Env); err != nil {
 			log.Fatal().Err(err).Msg("bootstrap admin failed")
@@ -195,6 +205,7 @@ func main() {
 	opts := coreapi.Options{
 		CoreInstanceID:   coreInstanceID,
 		RuntimeSignalBus: runtimeSignalBus,
+		RuntimePKI:       runtimePKI,
 	}
 	if !runtimeAttachOnly {
 		if redisClient != nil {
@@ -223,7 +234,14 @@ func main() {
 			log.Fatal().Err(err).Msg("start a2a grpc server failed")
 		}
 	}
-	runtimeMTLSServer, runtimeMTLSListener, err := startRuntimeMTLSListener(cfg, e)
+	var automaticRuntimeTLS *tls.Config
+	if cfg.RuntimeMTLSEnabled && runtimePKI != nil {
+		automaticRuntimeTLS, err = runtimePKI.ServerTLSConfig()
+		if err != nil {
+			log.Fatal().Err(err).Msg("configure automatic runtime mTLS failed")
+		}
+	}
+	runtimeMTLSServer, runtimeMTLSListener, err := startRuntimeMTLSListener(cfg, e, automaticRuntimeTLS)
 	if err != nil {
 		log.Fatal().Err(err).Msg("start runtime mTLS listener failed")
 	}
@@ -368,7 +386,7 @@ func newEcho(cfg *config.Config, stores ...emw.RateLimiterStore) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
-	e.Use(runtimeListenerIsolation)
+	e.Use(runtimeListenerIsolationForConfig(cfg))
 	e.Use(emw.Recover())
 	e.Use(emw.RequestID())
 	e.Use(emw.BodyLimit(maxRequestBodySize))

@@ -40,6 +40,9 @@ type ManifestBaseURLs struct {
 type ManifestRuntime struct {
 	Enabled                  bool                           `json:"enabled"`
 	MTLSRequired             bool                           `json:"mtls_required"`
+	CredentialEndpoint       string                         `json:"credential_endpoint"`
+	TrustBundleEndpoint      string                         `json:"trust_bundle_endpoint"`
+	CertificateLifetimeHours int                            `json:"certificate_lifetime_hours"`
 	Transports               []string                       `json:"transports"`
 	DefaultTransport         string                         `json:"default_transport"`
 	CurrentContractDigest    string                         `json:"current_contract_digest"`
@@ -224,7 +227,10 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 		},
 		Runtime: ManifestRuntime{
 			Enabled:                  runtimeEnabled,
-			MTLSRequired:             true,
+			MTLSRequired:             cfg.RuntimeMTLSEnabled,
+			CredentialEndpoint:       apiBase + "/api/v1/runtime-credentials",
+			TrustBundleEndpoint:      apiBase + "/.well-known/openlinker-runtime-ca.pem",
+			CertificateLifetimeHours: 24,
 			Transports:               transports,
 			DefaultTransport:         transportPolicy.DefaultTransport,
 			CurrentContractDigest:    wireCompatibility.CurrentContractDigest,
@@ -259,8 +265,12 @@ func trimTrailingSlash(value string) string {
 // deliberately fail-closed: a disabled or malformed configuration never
 // falls back to the ordinary API origin.
 func manifestRuntimeOrigin(cfg *config.Config) (string, bool) {
-	if cfg == nil || !cfg.RuntimeMTLSEnabled {
+	if cfg == nil {
 		return "", false
+	}
+	if !cfg.RuntimeMTLSEnabled {
+		origin := trimTrailingSlash(cfg.APIURL)
+		return origin, origin != ""
 	}
 	origin, err := config.NormalizeRuntimePublicOrigin(cfg.RuntimeMTLSAPIURL)
 	if err != nil {

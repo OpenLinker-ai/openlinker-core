@@ -845,7 +845,7 @@ WHERE runtime_session_id = ANY($1::uuid[])
 			return err
 		}
 	}
-	_, err := tx.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 UPDATE runtime_nodes
 SET status = 'revoked',
     capacity = GREATEST(capacity, inflight),
@@ -853,7 +853,13 @@ SET status = 'revoked',
     revoke_reason = $2,
     updated_at = clock_timestamp()
 WHERE node_id = $1
-  AND status <> 'revoked'`, nodeID, reason)
+  AND status <> 'revoked'`, nodeID, reason); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+UPDATE runtime_node_certificates
+SET revoked_at = COALESCE(revoked_at, clock_timestamp())
+WHERE node_id = $1`, nodeID)
 	return err
 }
 

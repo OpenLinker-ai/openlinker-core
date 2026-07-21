@@ -33,10 +33,14 @@ const (
 // mutually-authenticated TLS peer certificate. None of these fields may be
 // sourced from an HTTP header or a runtime hello body.
 type RuntimeDeviceIdentity struct {
-	NodeID                       uuid.UUID `json:"node_id"`
-	CertificateSerial            string    `json:"certificate_serial"`
-	CertificateFingerprintSHA256 string    `json:"certificate_fingerprint_sha256"`
-	PublicKeyThumbprintSHA256    string    `json:"public_key_thumbprint_sha256"`
+	NodeID uuid.UUID `json:"node_id"`
+	// CertificateSerial is the stable enrolled credential serial used by
+	// durable Sessions. PresentedCertificateSerial is the current rotating leaf
+	// serial and is never accepted from request data.
+	CertificateSerial            string `json:"certificate_serial"`
+	PresentedCertificateSerial   string `json:"-"`
+	CertificateFingerprintSHA256 string `json:"certificate_fingerprint_sha256"`
+	PublicKeyThumbprintSHA256    string `json:"public_key_thumbprint_sha256"`
 }
 
 // RuntimePresentedCertificate is the canonical certificate identity passed
@@ -102,7 +106,6 @@ func (v *DBRuntimeNodeCredentialVerifier) VerifyRuntimeNodeCredential(
 		return RuntimeDeviceIdentity{}, newRuntimeSessionError(RuntimeSessionErrorAuthenticationFailed, err)
 	}
 	if (node.Status != "active" && node.Status != "draining") || node.NodeID == uuid.Nil ||
-		!constantTimeStringEqual(node.DeviceCertificateSerial, presented.Serial) ||
 		!constantTimeStringEqual(node.DevicePublicKeyThumbprint, presented.PublicKeyThumbprintSHA256) {
 		return RuntimeDeviceIdentity{}, newRuntimeSessionError(RuntimeSessionErrorAuthenticationFailed, nil)
 	}
@@ -117,7 +120,8 @@ func (v *DBRuntimeNodeCredentialVerifier) VerifyRuntimeNodeCredential(
 
 	return RuntimeDeviceIdentity{
 		NodeID:                       node.NodeID,
-		CertificateSerial:            presented.Serial,
+		CertificateSerial:            node.DeviceCertificateSerial,
+		PresentedCertificateSerial:   presented.Serial,
 		CertificateFingerprintSHA256: presented.FingerprintSHA256,
 		PublicKeyThumbprintSHA256:    presented.PublicKeyThumbprintSHA256,
 	}, nil
@@ -161,8 +165,13 @@ func (a *MTLSRuntimeDeviceAuthenticator) AuthenticateHTTP(
 	if err != nil {
 		return RuntimeDeviceIdentity{}, newRuntimeSessionError(RuntimeSessionErrorAuthenticationFailed, err)
 	}
+	presentedSerial := identity.PresentedCertificateSerial
+	if presentedSerial == "" {
+		// Compatibility for custom verifiers written before rotating leaves.
+		presentedSerial = identity.CertificateSerial
+	}
 	if identity.NodeID == uuid.Nil ||
-		!constantTimeStringEqual(identity.CertificateSerial, presented.Serial) ||
+		!constantTimeStringEqual(presentedSerial, presented.Serial) ||
 		!constantTimeStringEqual(identity.CertificateFingerprintSHA256, presented.FingerprintSHA256) ||
 		!constantTimeStringEqual(identity.PublicKeyThumbprintSHA256, presented.PublicKeyThumbprintSHA256) {
 		return RuntimeDeviceIdentity{}, newRuntimeSessionError(RuntimeSessionErrorAuthenticationFailed, nil)

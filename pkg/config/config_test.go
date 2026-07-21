@@ -41,6 +41,7 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	t.Setenv("OPENLINKER_GIT_SHA", "0123456789abcdef")
 	t.Setenv("RUNTIME_HA_MODE", "true")
 	unsetEnv(t, "OAUTH_CODE_STORAGE_MODE")
+	unsetEnv(t, "RUNTIME_INVOCATION_SIGNING_SECRET")
 
 	cfg, err := Load()
 	if err != nil {
@@ -91,7 +92,9 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	if !cfg.AllowLocalHTTPEndpoints {
 		t.Fatalf("expected AllowLocalHTTPEndpoints from env")
 	}
-	if cfg.RuntimeMTLSEnabled || cfg.RuntimeMTLSPort != 8443 || cfg.RuntimeMTLSMaxConnections != 4096 || cfg.RuntimeInvocationSigningKeyID != "current" {
+	if !cfg.RuntimeMTLSEnabled || cfg.RuntimeMTLSPort != 8443 || cfg.RuntimeMTLSMaxConnections != 4096 ||
+		cfg.RuntimeMTLSAPIURL != "https://localhost:8443" || cfg.RuntimePKIMode != "auto" ||
+		cfg.RuntimeInvocationSigningKeyID != "current" || len(cfg.RuntimeInvocationSigningSecret) != 64 {
 		t.Fatalf("unexpected runtime mTLS defaults: %#v", cfg)
 	}
 	if cfg.HTTPRateLimitRate != 50 || cfg.HTTPRateLimitBurst != 200 || cfg.HTTPRateLimitPeriodSec != 1 {

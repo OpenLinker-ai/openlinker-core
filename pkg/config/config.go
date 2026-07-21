@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -91,13 +93,16 @@ type Config struct {
 	// Runtime parameters.
 	RunTimeoutSeconds       int  `envconfig:"RUN_TIMEOUT_SECONDS" default:"60"`
 	AllowLocalHTTPEndpoints bool `envconfig:"ALLOW_LOCAL_HTTP_ENDPOINTS" default:"false"`
-	// Agent Runtime device traffic terminates mTLS directly in Core. It is a
-	// separate listener so a reverse proxy cannot replace verified peer
-	// certificates with spoofable headers.
-	RuntimeMTLSEnabled        bool   `envconfig:"RUNTIME_MTLS_ENABLED" default:"false"`
+	// Agent Runtime device traffic uses Core-terminated mTLS by default. Set
+	// RUNTIME_MTLS_ENABLED=false only to use Agent Token-only HTTPS transport.
+	// In auto mode Core owns the CA and server certificate; the legacy file
+	// fields remain an explicit external-PKI compatibility mode.
+	RuntimeMTLSEnabled        bool   `envconfig:"RUNTIME_MTLS_ENABLED" default:"true"`
 	RuntimeMTLSPort           int    `envconfig:"RUNTIME_MTLS_PORT" default:"8443"`
 	RuntimeMTLSMaxConnections int    `envconfig:"RUNTIME_MTLS_MAX_CONNECTIONS" default:"4096"`
 	RuntimeMTLSAPIURL         string `envconfig:"RUNTIME_MTLS_API_URL"`
+	RuntimePKIMode            string `envconfig:"RUNTIME_PKI_MODE" default:"auto"`
+	RuntimePKIMasterSecret    string `envconfig:"RUNTIME_PKI_MASTER_SECRET"`
 	RuntimeMTLSCertFile       string `envconfig:"RUNTIME_MTLS_CERT_FILE"`
 	RuntimeMTLSKeyFile        string `envconfig:"RUNTIME_MTLS_KEY_FILE"`
 	RuntimeMTLSClientCAFile   string `envconfig:"RUNTIME_MTLS_CLIENT_CA_FILE"`
@@ -105,8 +110,9 @@ type Config struct {
 	// PostgreSQL remains the fact source and its workers continue if Redis is
 	// unavailable; production HA readiness fails closed until Redis recovers.
 	RuntimeHAMode bool `envconfig:"RUNTIME_HA_MODE" default:"false"`
-	// Separate from JWT_SECRET so runtime capability key rotation cannot
-	// invalidate user sessions or reuse one key across protocols.
+	// Domain-separated from JWT_SECRET by default so Runtime needs no extra
+	// bootstrap secret. An explicit value remains available for independent
+	// rotation without invalidating user sessions.
 	RuntimeInvocationSigningKeyID          string `envconfig:"RUNTIME_INVOCATION_SIGNING_KEY_ID" default:"current"`
 	RuntimeInvocationSigningSecret         string `envconfig:"RUNTIME_INVOCATION_SIGNING_SECRET"`
 	RuntimeInvocationPreviousSigningKeyID  string `envconfig:"RUNTIME_INVOCATION_PREVIOUS_SIGNING_KEY_ID"`
@@ -145,7 +151,39 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	cfg.OAuthCodeStorageMode = mode
+	if err := normalizeRuntimePKIConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
 	return &cfg, nil
+}
+
+func normalizeRuntimePKIConfig(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	cfg.RuntimePKIMode = strings.ToLower(strings.TrimSpace(cfg.RuntimePKIMode))
+	if cfg.RuntimePKIMode == "" {
+		cfg.RuntimePKIMode = "auto"
+	}
+	if cfg.RuntimePKIMode != "auto" && cfg.RuntimePKIMode != "files" {
+		return fmt.Errorf("RUNTIME_PKI_MODE must be auto or files")
+	}
+	if strings.TrimSpace(cfg.RuntimeInvocationSigningSecret) == "" {
+		if strings.TrimSpace(cfg.JWTSecret) == "" {
+			return fmt.Errorf("RUNTIME_INVOCATION_SIGNING_SECRET cannot be derived without JWT_SECRET")
+		}
+		digest := sha256.Sum256([]byte("openlinker/runtime-invocation/signing/v1\x00" + cfg.JWTSecret))
+		cfg.RuntimeInvocationSigningSecret = hex.EncodeToString(digest[:])
+	}
+	if !cfg.RuntimeMTLSEnabled || strings.TrimSpace(cfg.RuntimeMTLSAPIURL) != "" {
+		return nil
+	}
+	origin, err := DeriveRuntimePublicOrigin(cfg.APIURL, cfg.RuntimeMTLSPort)
+	if err != nil {
+		return err
+	}
+	cfg.RuntimeMTLSAPIURL = origin
+	return nil
 }
 
 func normalizeOAuthCodeStorageMode(value string) (string, error) {

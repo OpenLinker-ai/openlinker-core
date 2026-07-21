@@ -159,7 +159,7 @@ func TestNewManifestFallsBackToLocalPublicEntrypoints(t *testing.T) {
 	require.Equal(t, "http://localhost:3000", manifest.BaseURLs.Web)
 	require.Empty(t, manifest.BaseURLs.Runtime)
 	require.False(t, manifest.Runtime.Enabled)
-	require.True(t, manifest.Runtime.MTLSRequired)
+	require.False(t, manifest.Runtime.MTLSRequired)
 	require.Equal(t, []string{"websocket", "long_poll"}, manifest.Runtime.Transports)
 	require.Equal(t, "auto", manifest.Runtime.DefaultTransport)
 	require.Equal(t, int64(45), manifest.Runtime.TransportPolicy.SessionStaleAfterSeconds)
