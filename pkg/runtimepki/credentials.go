@@ -110,49 +110,44 @@ func (s *CredentialService) issue(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	issued, err := s.authority.IssueClientCertificate(csr, nodeID)
+	response, err := s.issueOrReplayCredential(c.Request().Context(), token, nodeID, request, csr)
 	if err != nil {
-		return httpx.BadRequest("CSR 无法签发")
-	}
-	if err = s.persistIssuedCredential(c.Request().Context(), token, nodeID, request, issued); err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, CredentialResponse{
-		NodeID:                nodeID.String(),
-		AgentID:               token.AgentID.String(),
-		CertificatePEM:        issued.CertificatePEM,
-		CertificateChainPEM:   issued.CertificateChainPEM,
-		TrustBundlePEM:        issued.TrustBundlePEM,
-		CertificateSerial:     issued.Serial,
-		PublicKeyThumbprint:   issued.PublicKeySHA256,
-		NotBefore:             issued.NotBefore,
-		NotAfter:              issued.NotAfter,
-		RenewAfter:            issued.RenewAfter,
-		CertificateLifetimeHr: int(ClientCertificateLifetime / time.Hour),
-	})
+	return c.JSON(http.StatusOK, response)
 }
 
-func (s *CredentialService) persistIssuedCredential(
+func (s *CredentialService) issueOrReplayCredential(
 	ctx context.Context,
 	token db.AgentRuntimeToken,
 	nodeID uuid.UUID,
 	request CredentialRequest,
-	issued ClientCertificate,
-) error {
+	csr *x509.CertificateRequest,
+) (CredentialResponse, error) {
+	if csr == nil || len(csr.RawSubjectPublicKeyInfo) == 0 {
+		return CredentialResponse{}, httpx.BadRequest("CSR 无法签发")
+	}
+	publicKeyDigest := sha256.Sum256(csr.RawSubjectPublicKeyInfo)
+	publicKeyThumbprint := hex.EncodeToString(publicKeyDigest[:])
+
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return httpx.Internal("签发 Runtime 证书失败")
+		return CredentialResponse{}, httpx.Internal("签发 Runtime 证书失败")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err = tx.Exec(ctx, `
+SELECT pg_advisory_xact_lock(hashtextextended('runtime-credential-issuance:' || $1::text, 0))`, token.ID); err != nil {
+		return CredentialResponse{}, httpx.Internal("锁定 Runtime 凭证签发失败")
+	}
 
 	var boundNodeID uuid.UUID
-	var boundThumbprint string
+	var boundThumbprint, bindingMode string
 	bindingErr := tx.QueryRow(ctx, `
-SELECT node_id, public_key_thumbprint
+SELECT node_id, public_key_thumbprint, binding_mode
 FROM runtime_node_bindings
-WHERE credential_id = $1`, token.ID).Scan(&boundNodeID, &boundThumbprint)
+WHERE credential_id = $1`, token.ID).Scan(&boundNodeID, &boundThumbprint, &bindingMode)
 	if bindingErr != nil && !errors.Is(bindingErr, pgx.ErrNoRows) {
-		return httpx.Internal("查询 Runtime 凭证绑定失败")
+		return CredentialResponse{}, httpx.Internal("查询 Runtime 凭证绑定失败")
 	}
 
 	var nodeStatus string
@@ -162,12 +157,12 @@ SELECT status
 FROM runtime_nodes
 WHERE node_id = $1
 FOR UPDATE`, boundNodeID).Scan(&nodeStatus); err != nil {
-			return httpx.Internal("查询 Runtime Node 失败")
+			return CredentialResponse{}, httpx.Internal("查询 Runtime Node 失败")
 		}
 	} else {
 		if _, err = tx.Exec(ctx, `
 SELECT pg_advisory_xact_lock(hashtextextended('runtime-node-enrollment:' || $1::text, 0))`, nodeID); err != nil {
-			return httpx.Internal("锁定 Runtime Node 登记失败")
+			return CredentialResponse{}, httpx.Internal("锁定 Runtime Node 登记失败")
 		}
 		var existingStatus string
 		err = tx.QueryRow(ctx, `
@@ -176,37 +171,40 @@ FROM runtime_nodes
 WHERE node_id = $1
 FOR UPDATE`, nodeID).Scan(&existingStatus)
 		if err == nil {
-			return httpx.NewError(http.StatusConflict, "RUNTIME_NODE_ENROLLMENT_CONFLICT", "Runtime Node 标识或公钥已被使用")
+			return CredentialResponse{}, httpx.NewError(http.StatusConflict, "RUNTIME_NODE_ENROLLMENT_CONFLICT", "Runtime Node 标识或公钥已被使用")
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return httpx.Internal("查询 Runtime Node 失败")
+			return CredentialResponse{}, httpx.Internal("查询 Runtime Node 失败")
 		}
 	}
 
 	var lockedAgentID uuid.UUID
-	var status string
-	var revokedAt *time.Time
 	err = tx.QueryRow(ctx, `
-SELECT agent_id, status, revoked_at
+SELECT agent_id
 FROM agent_tokens
 WHERE id = $1
-FOR UPDATE`, token.ID).Scan(&lockedAgentID, &status, &revokedAt)
-	if err != nil || lockedAgentID != token.AgentID || status != "active_runtime" || revokedAt != nil {
-		return httpx.Unauthorized("Agent Token 无效或已撤销")
+  AND agent_id = $2
+  AND status = 'active_runtime'
+  AND revoked_at IS NULL
+  AND scopes @> ARRAY['agent:pull']::text[]
+  AND (expires_at IS NULL OR expires_at > clock_timestamp())
+FOR UPDATE`, token.ID, token.AgentID).Scan(&lockedAgentID)
+	if err != nil || lockedAgentID != token.AgentID {
+		return CredentialResponse{}, httpx.Unauthorized("Agent Token 无效、已撤销或已过期")
 	}
 
 	err = tx.QueryRow(ctx, `
-SELECT node_id, public_key_thumbprint
+SELECT node_id, public_key_thumbprint, binding_mode
 FROM runtime_node_bindings
 WHERE credential_id = $1
-FOR UPDATE`, token.ID).Scan(&boundNodeID, &boundThumbprint)
+FOR UPDATE`, token.ID).Scan(&boundNodeID, &boundThumbprint, &bindingMode)
 	switch {
 	case err == nil:
-		if boundNodeID != nodeID || boundThumbprint != issued.PublicKeySHA256 {
-			return httpx.NewError(http.StatusConflict, "RUNTIME_CREDENTIAL_BOUND", "Agent Token 已绑定其他 Runtime Node 或公钥")
+		if bindingMode != "mtls" || boundNodeID != nodeID || boundThumbprint != publicKeyThumbprint {
+			return CredentialResponse{}, httpx.NewError(http.StatusConflict, "RUNTIME_CREDENTIAL_BOUND", "Agent Token 已绑定其他 Runtime Node、公钥或认证模式")
 		}
 		if nodeStatus == "revoked" {
-			return httpx.NewError(http.StatusForbidden, "RUNTIME_NODE_REVOKED", "Runtime Node 已撤销")
+			return CredentialResponse{}, httpx.NewError(http.StatusForbidden, "RUNTIME_NODE_REVOKED", "Runtime Node 已撤销")
 		}
 		if _, err = tx.Exec(ctx, `
 UPDATE runtime_nodes
@@ -221,11 +219,15 @@ SET display_name = $2,
 WHERE node_id = $1`, nodeID, request.DisplayName, request.NodeVersion,
 			request.ProtocolVersion, request.RuntimeContractID, request.RuntimeContractDigest,
 			request.Features, request.Capacity); err != nil {
-			return httpx.NewError(http.StatusConflict, "RUNTIME_NODE_UPDATE_REJECTED", "Runtime Node 状态不允许续期")
+			return CredentialResponse{}, httpx.NewError(http.StatusConflict, "RUNTIME_NODE_UPDATE_REJECTED", "Runtime Node 状态不允许续期")
 		}
 	case errors.Is(err, pgx.ErrNoRows):
 		if bindingErr == nil {
-			return httpx.NewError(http.StatusConflict, "RUNTIME_CREDENTIAL_BOUND", "Agent Token 凭证绑定已发生变化")
+			return CredentialResponse{}, httpx.NewError(http.StatusConflict, "RUNTIME_CREDENTIAL_BOUND", "Agent Token 凭证绑定已发生变化")
+		}
+		issued, issueErr := s.authority.IssueClientCertificate(csr, nodeID)
+		if issueErr != nil {
+			return CredentialResponse{}, httpx.BadRequest("CSR 无法签发")
 		}
 		_, err = tx.Exec(ctx, `
 INSERT INTO runtime_nodes (
@@ -233,36 +235,101 @@ INSERT INTO runtime_nodes (
     device_public_key_thumbprint, node_version, protocol_version,
     runtime_contract_id, runtime_contract_digest, features, capacity
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-			nodeID, request.DisplayName, issued.Serial, issued.PublicKeySHA256,
+			nodeID, request.DisplayName, issued.Serial, publicKeyThumbprint,
 			request.NodeVersion, request.ProtocolVersion, request.RuntimeContractID,
 			request.RuntimeContractDigest, request.Features, request.Capacity)
 		if err != nil {
-			return httpx.NewError(http.StatusConflict, "RUNTIME_NODE_ENROLLMENT_CONFLICT", "Runtime Node 标识或公钥已被使用")
+			return CredentialResponse{}, httpx.NewError(http.StatusConflict, "RUNTIME_NODE_ENROLLMENT_CONFLICT", "Runtime Node 标识或公钥已被使用")
 		}
 		_, err = tx.Exec(ctx, `
 INSERT INTO runtime_node_bindings (
-    credential_id, node_id, agent_id, public_key_thumbprint
-) VALUES ($1,$2,$3,$4)`, token.ID, nodeID, token.AgentID, issued.PublicKeySHA256)
+    credential_id, node_id, agent_id, public_key_thumbprint, binding_mode
+) VALUES ($1,$2,$3,$4,'mtls')`, token.ID, nodeID, token.AgentID, publicKeyThumbprint)
 		if err != nil {
-			return httpx.NewError(http.StatusConflict, "RUNTIME_CREDENTIAL_BOUND", "Agent Token 已绑定其他 Runtime Node 或公钥")
+			return CredentialResponse{}, httpx.NewError(http.StatusConflict, "RUNTIME_CREDENTIAL_BOUND", "Agent Token 已绑定其他 Runtime Node 或公钥")
 		}
+		if err = insertRuntimeNodeCertificate(ctx, tx, nodeID, issued); err != nil {
+			return CredentialResponse{}, err
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return CredentialResponse{}, httpx.Internal("签发 Runtime 证书失败")
+		}
+		return credentialResponse(token.AgentID, nodeID, issued), nil
 	default:
-		return httpx.Internal("查询 Runtime 凭证绑定失败")
+		return CredentialResponse{}, httpx.Internal("查询 Runtime 凭证绑定失败")
 	}
 
-	_, err = tx.Exec(ctx, `
+	var replayed ClientCertificate
+	err = tx.QueryRow(ctx, `
+SELECT certificate_pem, certificate_chain_pem, trust_bundle_pem,
+       certificate_serial, certificate_fingerprint, public_key_thumbprint,
+       not_before, not_after, renew_after
+FROM runtime_node_certificates
+WHERE node_id = $1
+  AND public_key_thumbprint = $2
+  AND issued_at > clock_timestamp() - INTERVAL '12 hours'
+  AND certificate_pem IS NOT NULL
+  AND certificate_chain_pem IS NOT NULL
+  AND trust_bundle_pem IS NOT NULL
+  AND renew_after IS NOT NULL
+ORDER BY issued_at DESC, certificate_serial DESC
+LIMIT 1`, nodeID, publicKeyThumbprint).Scan(
+		&replayed.CertificatePEM, &replayed.CertificateChainPEM, &replayed.TrustBundlePEM,
+		&replayed.Serial, &replayed.FingerprintSHA256, &replayed.PublicKeySHA256,
+		&replayed.NotBefore, &replayed.NotAfter, &replayed.RenewAfter,
+	)
+	if err == nil {
+		if err = tx.Commit(ctx); err != nil {
+			return CredentialResponse{}, httpx.Internal("重放 Runtime 证书失败")
+		}
+		return credentialResponse(token.AgentID, nodeID, replayed), nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return CredentialResponse{}, httpx.Internal("查询 Runtime 证书重放记录失败")
+	}
+
+	issued, err := s.authority.IssueClientCertificate(csr, nodeID)
+	if err != nil {
+		return CredentialResponse{}, httpx.BadRequest("CSR 无法签发")
+	}
+	if err = insertRuntimeNodeCertificate(ctx, tx, nodeID, issued); err != nil {
+		return CredentialResponse{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return CredentialResponse{}, httpx.Internal("签发 Runtime 证书失败")
+	}
+	return credentialResponse(token.AgentID, nodeID, issued), nil
+}
+
+func insertRuntimeNodeCertificate(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, issued ClientCertificate) error {
+	_, err := tx.Exec(ctx, `
 INSERT INTO runtime_node_certificates (
     certificate_serial, node_id, public_key_thumbprint,
-    certificate_fingerprint, not_before, not_after
-) VALUES ($1,$2,$3,$4,$5,$6)`, issued.Serial, nodeID, issued.PublicKeySHA256,
-		issued.FingerprintSHA256, issued.NotBefore, issued.NotAfter)
+    certificate_fingerprint, not_before, not_after,
+    certificate_pem, certificate_chain_pem, trust_bundle_pem, renew_after
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, issued.Serial, nodeID, issued.PublicKeySHA256,
+		issued.FingerprintSHA256, issued.NotBefore, issued.NotAfter,
+		issued.CertificatePEM, issued.CertificateChainPEM, issued.TrustBundlePEM, issued.RenewAfter)
 	if err != nil {
 		return httpx.Internal("保存 Runtime 证书失败")
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return httpx.Internal("签发 Runtime 证书失败")
-	}
 	return nil
+}
+
+func credentialResponse(agentID, nodeID uuid.UUID, issued ClientCertificate) CredentialResponse {
+	return CredentialResponse{
+		NodeID:                nodeID.String(),
+		AgentID:               agentID.String(),
+		CertificatePEM:        issued.CertificatePEM,
+		CertificateChainPEM:   issued.CertificateChainPEM,
+		TrustBundlePEM:        issued.TrustBundlePEM,
+		CertificateSerial:     issued.Serial,
+		PublicKeyThumbprint:   issued.PublicKeySHA256,
+		NotBefore:             issued.NotBefore.UTC(),
+		NotAfter:              issued.NotAfter.UTC(),
+		RenewAfter:            issued.RenewAfter.UTC(),
+		CertificateLifetimeHr: int(ClientCertificateLifetime / time.Hour),
+	}
 }
 
 func validateCredentialRequest(request *CredentialRequest) (uuid.UUID, *x509.CertificateRequest, error) {

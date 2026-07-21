@@ -171,6 +171,27 @@ func TestRuntimeSessionServiceCreateLocksPrincipalAndPersistsAuthenticatedIdenti
 	}
 }
 
+func TestRuntimeSessionServiceEnrollsTokenOnlyNodeOnlyInsideCreateTransaction(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSessionFixture()
+	fixture.principal.Device.AuthenticationMode = RuntimeAuthenticationTokenOnly
+	tx := newSessionTransactionFake(fixture)
+	tx.getErr = pgx.ErrNoRows
+	service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+
+	if _, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request); err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := []string{
+		"lock_session_identity", "ensure_token_only_enrollment",
+		"lock_lifecycle_sessions", "lock_nodes", "lock_tokens", "lock_attachments",
+	}
+	if len(tx.operations) < len(wantPrefix) || !reflect.DeepEqual(tx.operations[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("token-only enrollment order = %#v, want prefix %#v", tx.operations, wantPrefix)
+	}
+}
+
 func TestRuntimeSessionServiceCreatesDrainingSuccessorWithServerEvidence(t *testing.T) {
 	t.Parallel()
 
@@ -1062,6 +1083,15 @@ func (f *sessionTransactionFake) RequireRuntimeClusterOperation(_ context.Contex
 
 func (f *sessionTransactionFake) LockSessionIdentity(context.Context, uuid.UUID) error {
 	f.op("lock_session_identity")
+	return nil
+}
+
+func (f *sessionTransactionFake) EnsureTokenOnlyRuntimeNodeEnrollment(
+	context.Context,
+	AuthenticatedRuntimePrincipal,
+	RuntimeSessionRequest,
+) error {
+	f.op("ensure_token_only_enrollment")
 	return nil
 }
 

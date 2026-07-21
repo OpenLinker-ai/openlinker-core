@@ -74,7 +74,7 @@ func TestBindingVerifierAcceptsOnlyExactHistoricalPrincipal(t *testing.T) {
 func TestBindingVerifierDoesNotFallbackForMismatchedDurableBinding(t *testing.T) {
 	credentialID, selectedNodeID := uuid.New(), uuid.New()
 	queries := &runtimeBindingQueryFake{rows: []pgx.Row{
-		boundRuntimeIdentityRow(uuid.New()),
+		boundMTLSRuntimeIdentityRow(uuid.New()),
 	}}
 	device := coreruntime.RuntimeDeviceIdentity{
 		NodeID:                       selectedNodeID,
@@ -114,6 +114,7 @@ func TestBindingVerifierResolvesTokenOnlyHistoricalNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	if identity.NodeID != nodeID || identity.CertificateSerial != "abc" ||
+		identity.AuthenticationMode != coreruntime.RuntimeAuthenticationTokenOnly ||
 		identity.PublicKeyThumbprintSHA256 != thumbprint || identity.CertificateFingerprintSHA256 != thumbprint {
 		t.Fatalf("token-only identity = %#v", identity)
 	}
@@ -123,7 +124,7 @@ func TestBindingVerifierResolvesTokenOnlyHistoricalNode(t *testing.T) {
 }
 
 func TestBindingVerifierRejectsTokenOnlyNodeDifferentFromDurableBinding(t *testing.T) {
-	queries := &runtimeBindingQueryFake{rows: []pgx.Row{boundRuntimeIdentityRow(uuid.New())}}
+	queries := &runtimeBindingQueryFake{rows: []pgx.Row{boundTokenOnlyRuntimeIdentityRow(uuid.New(), "token_only")}}
 	if _, err := (&BindingVerifier{pool: queries}).ResolveTokenOnlyRuntimeDeviceIdentity(
 		context.Background(), uuid.New(), uuid.New(),
 	); err == nil {
@@ -134,13 +135,83 @@ func TestBindingVerifierRejectsTokenOnlyNodeDifferentFromDurableBinding(t *testi
 	}
 }
 
-func boundRuntimeIdentityRow(nodeID uuid.UUID) pgx.Row {
+func TestBindingVerifierResolvesExistingTokenOnlyBinding(t *testing.T) {
+	credentialID, nodeID := uuid.New(), uuid.New()
+	queries := &runtimeBindingQueryFake{rows: []pgx.Row{boundTokenOnlyRuntimeIdentityRow(nodeID, "token_only")}}
+
+	identity, err := (&BindingVerifier{pool: queries}).ResolveTokenOnlyRuntimeDeviceIdentity(
+		context.Background(), credentialID, nodeID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.NodeID != nodeID || identity.AuthenticationMode != coreruntime.RuntimeAuthenticationTokenOnly ||
+		identity.CertificateFingerprintSHA256 != identity.PublicKeyThumbprintSHA256 {
+		t.Fatalf("token-only identity = %#v", identity)
+	}
+}
+
+func TestBindingVerifierCreatesOnlyPendingIdentityForUnusedNode(t *testing.T) {
+	credentialID, nodeID := uuid.New(), uuid.New()
+	queries := &runtimeBindingQueryFake{rows: []pgx.Row{
+		runtimeBindingRowFunc(func(...any) error { return pgx.ErrNoRows }),
+		runtimeBindingRowFunc(func(...any) error { return pgx.ErrNoRows }),
+		runtimeBindingRowFunc(func(dest ...any) error {
+			*(dest[0].(*bool)) = false
+			return nil
+		}),
+	}}
+
+	identity, err := (&BindingVerifier{pool: queries}).ResolveTokenOnlyRuntimeDeviceIdentity(
+		context.Background(), credentialID, nodeID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := pendingTokenOnlyRuntimeDeviceIdentity(credentialID, nodeID)
+	if identity != want || identity.AuthenticationMode != coreruntime.RuntimeAuthenticationTokenOnly {
+		t.Fatalf("pending identity = %#v, want %#v", identity, want)
+	}
+	if len(queries.queries) != 3 || !strings.Contains(queries.queries[2], "SELECT EXISTS") {
+		t.Fatalf("pending enrollment queries = %#v", queries.queries)
+	}
+}
+
+func TestBindingVerifierRejectsPendingIdentityForOccupiedNode(t *testing.T) {
+	queries := &runtimeBindingQueryFake{rows: []pgx.Row{
+		runtimeBindingRowFunc(func(...any) error { return pgx.ErrNoRows }),
+		runtimeBindingRowFunc(func(...any) error { return pgx.ErrNoRows }),
+		runtimeBindingRowFunc(func(dest ...any) error {
+			*(dest[0].(*bool)) = true
+			return nil
+		}),
+	}}
+	if _, err := (&BindingVerifier{pool: queries}).ResolveTokenOnlyRuntimeDeviceIdentity(
+		context.Background(), uuid.New(), uuid.New(),
+	); err == nil {
+		t.Fatal("occupied Node received a pending identity")
+	}
+}
+
+func boundMTLSRuntimeIdentityRow(nodeID uuid.UUID) pgx.Row {
 	return runtimeBindingRowFunc(func(dest ...any) error {
 		*(dest[0].(*uuid.UUID)) = nodeID
 		*(dest[1].(*string)) = "abc"
 		*(dest[2].(*string)) = strings.Repeat("a", 64)
 		*(dest[3].(*string)) = strings.Repeat("b", 64)
 		*(dest[4].(*string)) = "active"
+		*(dest[5].(*string)) = "mtls"
+		return nil
+	})
+}
+
+func boundTokenOnlyRuntimeIdentityRow(nodeID uuid.UUID, mode string) pgx.Row {
+	return runtimeBindingRowFunc(func(dest ...any) error {
+		*(dest[0].(*uuid.UUID)) = nodeID
+		*(dest[1].(*string)) = "abc"
+		*(dest[2].(*string)) = strings.Repeat("b", 64)
+		*(dest[3].(*string)) = "active"
+		*(dest[4].(*string)) = mode
 		return nil
 	})
 }

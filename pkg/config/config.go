@@ -93,12 +93,12 @@ type Config struct {
 	// Runtime parameters.
 	RunTimeoutSeconds       int  `envconfig:"RUN_TIMEOUT_SECONDS" default:"60"`
 	AllowLocalHTTPEndpoints bool `envconfig:"ALLOW_LOCAL_HTTP_ENDPOINTS" default:"false"`
-	// Agent Runtime device traffic uses Core-terminated mTLS by default. Set
-	// RUNTIME_MTLS_ENABLED=false only to use Agent Token-only HTTPS transport.
-	// In auto mode Core owns the CA and server certificate; the legacy file
-	// fields remain an explicit external-PKI compatibility mode.
-	RuntimeMTLSEnabled        bool   `envconfig:"RUNTIME_MTLS_ENABLED" default:"true"`
-	RuntimeMTLSPort           int    `envconfig:"RUNTIME_MTLS_PORT" default:"8443"`
+	// Agent Runtime device traffic uses Agent Token-only HTTPS by default.
+	// Core-terminated mTLS is an explicit high-security mode. In auto mode Core
+	// owns the CA and server certificate; the legacy file fields remain an
+	// explicit external-PKI compatibility mode.
+	RuntimeMTLSEnabled        bool   `envconfig:"RUNTIME_MTLS_ENABLED" default:"false"`
+	RuntimeMTLSPort           int    `envconfig:"RUNTIME_MTLS_PORT" default:"9443"`
 	RuntimeMTLSMaxConnections int    `envconfig:"RUNTIME_MTLS_MAX_CONNECTIONS" default:"4096"`
 	RuntimeMTLSAPIURL         string `envconfig:"RUNTIME_MTLS_API_URL"`
 	RuntimePKIMode            string `envconfig:"RUNTIME_PKI_MODE" default:"auto"`

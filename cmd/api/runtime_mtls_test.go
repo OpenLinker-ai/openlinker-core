@@ -115,6 +115,51 @@ func TestRuntimeMTLSConfigAndPathFailClosed(t *testing.T) {
 	}
 }
 
+func TestRuntimeListenerPortsMustNotConflict(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.Config
+	}{
+		{
+			name: "a2a grpc conflicts with api",
+			cfg:  config.Config{Port: 8080, A2AGRPCEnabled: true, A2AGRPCPort: 8080},
+		},
+		{
+			name: "runtime mtls conflicts with a2a grpc",
+			cfg: config.Config{
+				Port: 8080, A2AGRPCEnabled: true, A2AGRPCPort: 9443,
+				RuntimeMTLSEnabled: true, RuntimeMTLSPort: 9443,
+			},
+		},
+		{
+			name: "invalid a2a grpc port",
+			cfg:  config.Config{Port: 8080, A2AGRPCEnabled: true, A2AGRPCPort: 0},
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if err := validateRuntimeMTLSConfig(&testCase.cfg); err == nil {
+				t.Fatal("listener conflict must fail before startup")
+			}
+		})
+	}
+}
+
+func TestProductionA2AGRPCRequiresExplicitHTTPSPublicOrigin(t *testing.T) {
+	cfg := &config.Config{Env: "production", Port: 8080, A2AGRPCEnabled: true, A2AGRPCPort: 9090}
+	if err := validateRuntimeMTLSConfig(cfg); err == nil {
+		t.Fatal("missing production A2A gRPC public URL succeeded")
+	}
+	cfg.A2AGRPCPublicURL = "http://twv1.kinzhi.net:8443"
+	if err := validateRuntimeMTLSConfig(cfg); err == nil {
+		t.Fatal("plaintext production A2A gRPC public URL succeeded")
+	}
+	cfg.A2AGRPCPublicURL = "https://twv1.kinzhi.net:8443"
+	if err := validateRuntimeMTLSConfig(cfg); err != nil {
+		t.Fatalf("valid production A2A gRPC public URL failed: %v", err)
+	}
+}
+
 func TestValidateRuntimeMTLSConfigRejectsNonOriginPublicURL(t *testing.T) {
 	cfg := &config.Config{
 		Port:                           8080,

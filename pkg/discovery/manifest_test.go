@@ -167,6 +167,26 @@ func TestNewManifestFallsBackToLocalPublicEntrypoints(t *testing.T) {
 	require.Equal(t, "http://localhost:3000/connect", manifest.Docs.Connect)
 }
 
+func TestNewManifestTokenOnlyUsesAPIOriginWithoutCertificateCapabilities(t *testing.T) {
+	manifest := NewManifest(&config.Config{
+		APIURL:             "https://twv1.kinzhi.net/",
+		RuntimeMTLSEnabled: false,
+	})
+
+	require.True(t, manifest.Runtime.Enabled)
+	require.False(t, manifest.Runtime.MTLSRequired)
+	require.Equal(t, "https://twv1.kinzhi.net", manifest.BaseURLs.Runtime)
+	require.Empty(t, manifest.Runtime.CredentialEndpoint)
+	require.Empty(t, manifest.Runtime.TrustBundleEndpoint)
+	require.Zero(t, manifest.Runtime.CertificateLifetimeHours)
+
+	body, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	require.NotContains(t, string(body), "credential_endpoint")
+	require.NotContains(t, string(body), "trust_bundle_endpoint")
+	require.NotContains(t, string(body), "certificate_lifetime_hours")
+}
+
 func TestNewManifestRuntimeDiscoveryFailsClosed(t *testing.T) {
 	tests := []string{
 		"",

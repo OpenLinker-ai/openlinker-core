@@ -139,7 +139,26 @@ func buildRuntimeMTLSConfig(cfg *config.Config, automatic ...*tls.Config) (*tls.
 }
 
 func validateRuntimeMTLSConfig(cfg *config.Config) error {
-	if cfg == nil || !cfg.RuntimeMTLSEnabled {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.A2AGRPCEnabled {
+		if cfg.A2AGRPCPort < 1 || cfg.A2AGRPCPort > 65535 {
+			return fmt.Errorf("A2A_GRPC_PORT must be between 1 and 65535")
+		}
+		if cfg.A2AGRPCPort == cfg.Port {
+			return fmt.Errorf("A2A_GRPC_PORT must differ from PORT")
+		}
+		if cfg.IsProduction() {
+			if strings.TrimSpace(cfg.A2AGRPCPublicURL) == "" {
+				return fmt.Errorf("A2A_GRPC_PUBLIC_URL is required when A2A_GRPC_ENABLED=true in production")
+			}
+			if _, err := config.NormalizeRuntimePublicOrigin(cfg.A2AGRPCPublicURL); err != nil {
+				return fmt.Errorf("A2A_GRPC_PUBLIC_URL must be an HTTPS origin without credentials, path, query, or fragment")
+			}
+		}
+	}
+	if !cfg.RuntimeMTLSEnabled {
 		return nil
 	}
 	if cfg.RuntimeMTLSPort < 1 || cfg.RuntimeMTLSPort > 65535 {
@@ -147,6 +166,9 @@ func validateRuntimeMTLSConfig(cfg *config.Config) error {
 	}
 	if cfg.RuntimeMTLSPort == cfg.Port {
 		return fmt.Errorf("RUNTIME_MTLS_PORT must differ from PORT")
+	}
+	if cfg.A2AGRPCEnabled && cfg.RuntimeMTLSPort == cfg.A2AGRPCPort {
+		return fmt.Errorf("RUNTIME_MTLS_PORT must differ from A2A_GRPC_PORT")
 	}
 	if cfg.RuntimeMTLSMaxConnections < minimumRuntimeMTLSMaxConnections ||
 		cfg.RuntimeMTLSMaxConnections > maximumRuntimeMTLSMaxConnections {

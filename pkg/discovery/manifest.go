@@ -40,9 +40,9 @@ type ManifestBaseURLs struct {
 type ManifestRuntime struct {
 	Enabled                  bool                           `json:"enabled"`
 	MTLSRequired             bool                           `json:"mtls_required"`
-	CredentialEndpoint       string                         `json:"credential_endpoint"`
-	TrustBundleEndpoint      string                         `json:"trust_bundle_endpoint"`
-	CertificateLifetimeHours int                            `json:"certificate_lifetime_hours"`
+	CredentialEndpoint       string                         `json:"credential_endpoint,omitempty"`
+	TrustBundleEndpoint      string                         `json:"trust_bundle_endpoint,omitempty"`
+	CertificateLifetimeHours int                            `json:"certificate_lifetime_hours,omitempty"`
 	Transports               []string                       `json:"transports"`
 	DefaultTransport         string                         `json:"default_transport"`
 	CurrentContractDigest    string                         `json:"current_contract_digest"`
@@ -133,6 +133,14 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 		transports = append(transports, string(transport))
 	}
 
+	credentialEndpoint := ""
+	trustBundleEndpoint := ""
+	certificateLifetimeHours := 0
+	if cfg.RuntimeMTLSEnabled && strings.ToLower(strings.TrimSpace(cfg.RuntimePKIMode)) != "files" {
+		credentialEndpoint = apiBase + "/api/v1/runtime-credentials"
+		trustBundleEndpoint = apiBase + "/.well-known/openlinker-runtime-ca.pem"
+		certificateLifetimeHours = 24
+	}
 	return OpenLinkerManifest{
 		Name:        "OpenLinker",
 		Version:     manifestVersion,
@@ -201,7 +209,7 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			"agent-tokens:read":   "read non-secret metadata for owned Agent Tokens",
 			"agent-tokens:issue":  "issue or rotate credentials for owned Agents",
 			"agent-tokens:revoke": "revoke credentials for owned Agents",
-			"agent:pull":          "Runtime Workers use WebSocket first and automatically fall back to long polling under the same mTLS, ACK, lease, resume, fence, and persistent-spool contract",
+			"agent:pull":          "Runtime Workers use WebSocket first and automatically fall back to long polling under the same authenticated Session, ACK, lease, resume, fence, and persistent-spool contract",
 			"agent:call":          "an agent currently handling a run can delegate to another agent",
 			"register:agent":      "one-time or short-lived creator invitation for agent self-registration",
 		},
@@ -228,9 +236,9 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 		Runtime: ManifestRuntime{
 			Enabled:                  runtimeEnabled,
 			MTLSRequired:             cfg.RuntimeMTLSEnabled,
-			CredentialEndpoint:       apiBase + "/api/v1/runtime-credentials",
-			TrustBundleEndpoint:      apiBase + "/.well-known/openlinker-runtime-ca.pem",
-			CertificateLifetimeHours: 24,
+			CredentialEndpoint:       credentialEndpoint,
+			TrustBundleEndpoint:      trustBundleEndpoint,
+			CertificateLifetimeHours: certificateLifetimeHours,
 			Transports:               transports,
 			DefaultTransport:         transportPolicy.DefaultTransport,
 			CurrentContractDigest:    wireCompatibility.CurrentContractDigest,

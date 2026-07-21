@@ -121,12 +121,15 @@ func main() {
 	defer pool.Close()
 	log.Info().Msg("database connected")
 	var runtimePKI *runtimepki.Manager
-	if cfg.RuntimePKIMode == "auto" {
+	if cfg.RuntimeMTLSEnabled && cfg.RuntimePKIMode == "auto" {
 		runtimePKI, err = runtimepki.NewManager(rootCtx, pool, cfg)
 		if err != nil {
 			log.Fatal().Err(err).Msg("initialize automatic runtime PKI failed")
 		}
 		runtimePKI.Start(rootCtx)
+	}
+	if !runtimeAttachOnly {
+		runtimepki.StartCertificateRetentionWorker(rootCtx, pool)
 	}
 	if !runtimeAttachOnly {
 		if err := autoBootstrapAdminIfNeeded(rootCtx, pool, cfg.Env); err != nil {
