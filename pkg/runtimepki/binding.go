@@ -2,6 +2,8 @@ package runtimepki
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 
 	"github.com/google/uuid"
@@ -34,13 +36,14 @@ func (v *BindingVerifier) ResolveRuntimeDeviceIdentity(ctx context.Context, cred
 	}
 	var identity coreruntime.RuntimeDeviceIdentity
 	var status string
+	var bindingMode string
 	err := v.pool.QueryRow(ctx, `
 SELECT node.node_id, node.device_certificate_serial,
-       certificate.certificate_fingerprint,
-       binding.public_key_thumbprint, node.status
+       COALESCE(certificate.certificate_fingerprint, ''),
+       binding.public_key_thumbprint, node.status, binding.binding_mode
 FROM runtime_node_bindings binding
 JOIN runtime_nodes node ON node.node_id = binding.node_id
-JOIN LATERAL (
+LEFT JOIN LATERAL (
     SELECT issued.certificate_fingerprint
     FROM runtime_node_certificates issued
     WHERE issued.node_id = node.node_id
@@ -54,13 +57,17 @@ WHERE binding.credential_id = $1`, credentialID).Scan(
 		&identity.CertificateFingerprintSHA256,
 		&identity.PublicKeyThumbprintSHA256,
 		&status,
+		&bindingMode,
 	)
-	if err != nil || (status != "active" && status != "draining") {
+	if err != nil || bindingMode != "mtls" ||
+		(status != "active" && status != "draining") ||
+		identity.CertificateFingerprintSHA256 == "" {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return coreruntime.RuntimeDeviceIdentity{}, errRuntimeCredentialNotEnrolled
 		}
 		return coreruntime.RuntimeDeviceIdentity{}, errRuntimeCredentialInvalid
 	}
+	identity.AuthenticationMode = coreruntime.RuntimeAuthenticationMTLS
 	return identity, nil
 }
 
@@ -89,24 +96,38 @@ func (v *BindingVerifier) ResolveTokenOnlyRuntimeDeviceIdentity(
 	credentialID uuid.UUID,
 	nodeID uuid.UUID,
 ) (coreruntime.RuntimeDeviceIdentity, error) {
-	if nodeID == uuid.Nil {
-		return coreruntime.RuntimeDeviceIdentity{}, errRuntimeCredentialInvalid
-	}
-	bound, err := v.ResolveRuntimeDeviceIdentity(ctx, credentialID)
-	if err == nil {
-		if bound.NodeID != nodeID {
-			return coreruntime.RuntimeDeviceIdentity{}, errors.New("Agent Token is not bound to the selected Runtime Node")
-		}
-		return bound, nil
-	}
-	if !errors.Is(err, errRuntimeCredentialNotEnrolled) {
-		return coreruntime.RuntimeDeviceIdentity{}, err
-	}
-	if v == nil || v.pool == nil || credentialID == uuid.Nil {
+	if v == nil || v.pool == nil || credentialID == uuid.Nil || nodeID == uuid.Nil {
 		return coreruntime.RuntimeDeviceIdentity{}, errRuntimeCredentialInvalid
 	}
 	var identity coreruntime.RuntimeDeviceIdentity
 	var status string
+	var bindingMode string
+	err := v.pool.QueryRow(ctx, `
+SELECT node.node_id, node.device_certificate_serial,
+       node.device_public_key_thumbprint, node.status, binding.binding_mode
+FROM runtime_node_bindings binding
+JOIN runtime_nodes node ON node.node_id = binding.node_id
+WHERE binding.credential_id = $1`, credentialID).Scan(
+		&identity.NodeID,
+		&identity.CertificateSerial,
+		&identity.PublicKeyThumbprintSHA256,
+		&status,
+		&bindingMode,
+	)
+	if err == nil {
+		if identity.NodeID != nodeID ||
+			(status != "active" && status != "draining") ||
+			(bindingMode != "token_only" && bindingMode != "mtls") {
+			return coreruntime.RuntimeDeviceIdentity{}, errors.New("Agent Token is not bound to the selected Runtime Node")
+		}
+		identity.AuthenticationMode = coreruntime.RuntimeAuthenticationTokenOnly
+		identity.CertificateFingerprintSHA256 = identity.PublicKeyThumbprintSHA256
+		return identity, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return coreruntime.RuntimeDeviceIdentity{}, errRuntimeCredentialInvalid
+	}
+
 	err = v.pool.QueryRow(ctx, `
 SELECT node.node_id, node.device_certificate_serial,
        node.device_public_key_thumbprint, node.status
@@ -124,14 +145,42 @@ WHERE node.node_id = $2
 		&identity.PublicKeyThumbprintSHA256,
 		&status,
 	)
-	if err != nil || (status != "active" && status != "draining") {
+	if err == nil {
+		if status != "active" && status != "draining" {
+			return coreruntime.RuntimeDeviceIdentity{}, errRuntimeCredentialInvalid
+		}
+		identity.AuthenticationMode = coreruntime.RuntimeAuthenticationTokenOnly
+		identity.CertificateFingerprintSHA256 = identity.PublicKeyThumbprintSHA256
+		return identity, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return coreruntime.RuntimeDeviceIdentity{}, errRuntimeCredentialInvalid
 	}
-	// Token-only transport has no presented leaf. This field remains populated
-	// with a stable database-backed digest so the shared Runtime principal shape
-	// stays valid; it is not treated as a certificate authentication factor.
-	identity.CertificateFingerprintSHA256 = identity.PublicKeyThumbprintSHA256
-	return identity, nil
+
+	var occupied bool
+	if err = v.pool.QueryRow(ctx, `
+SELECT EXISTS (SELECT 1 FROM runtime_nodes WHERE node_id = $1)`, nodeID).Scan(&occupied); err != nil || occupied {
+		return coreruntime.RuntimeDeviceIdentity{}, errRuntimeCredentialInvalid
+	}
+	return pendingTokenOnlyRuntimeDeviceIdentity(credentialID, nodeID), nil
+}
+
+func pendingTokenOnlyRuntimeDeviceIdentity(credentialID, nodeID uuid.UUID) coreruntime.RuntimeDeviceIdentity {
+	thumbprint := tokenOnlyIdentityDigest("identity", credentialID, nodeID)
+	return coreruntime.RuntimeDeviceIdentity{
+		NodeID:                       nodeID,
+		AuthenticationMode:           coreruntime.RuntimeAuthenticationTokenOnly,
+		CertificateSerial:            tokenOnlyIdentityDigest("serial", credentialID, nodeID),
+		CertificateFingerprintSHA256: thumbprint,
+		PublicKeyThumbprintSHA256:    thumbprint,
+	}
+}
+
+func tokenOnlyIdentityDigest(purpose string, credentialID, nodeID uuid.UUID) string {
+	digest := sha256.Sum256([]byte(
+		"openlinker/runtime/token-only/" + purpose + "/v1\x00" + credentialID.String() + "\x00" + nodeID.String(),
+	))
+	return hex.EncodeToString(digest[:])
 }
 
 func (v *BindingVerifier) verifyLegacyRuntimePrincipalBinding(

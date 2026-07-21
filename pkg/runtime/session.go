@@ -29,11 +29,21 @@ const (
 	maxRuntimeDisconnectReasonRunes = 200
 )
 
-// RuntimeDeviceIdentity is the immutable Node identity established from a
-// mutually-authenticated TLS peer certificate. None of these fields may be
-// sourced from an HTTP header or a runtime hello body.
+type RuntimeAuthenticationMode string
+
+const (
+	RuntimeAuthenticationMTLS      RuntimeAuthenticationMode = "mtls"
+	RuntimeAuthenticationTokenOnly RuntimeAuthenticationMode = "token_only"
+)
+
+// RuntimeDeviceIdentity is the immutable Node identity established by either
+// a verified mTLS peer certificate or a durable token-only credential binding.
+// The Node selector may come from a strict header in token-only mode, but the
+// durable identity values are always resolved or deterministically derived by
+// the server and never trusted from a Runtime hello body.
 type RuntimeDeviceIdentity struct {
-	NodeID uuid.UUID `json:"node_id"`
+	NodeID             uuid.UUID                 `json:"node_id"`
+	AuthenticationMode RuntimeAuthenticationMode `json:"-"`
 	// CertificateSerial is the stable enrolled credential serial used by
 	// durable Sessions. PresentedCertificateSerial is the current rotating leaf
 	// serial and is never accepted from request data.
@@ -120,6 +130,7 @@ func (v *DBRuntimeNodeCredentialVerifier) VerifyRuntimeNodeCredential(
 
 	return RuntimeDeviceIdentity{
 		NodeID:                       node.NodeID,
+		AuthenticationMode:           RuntimeAuthenticationMTLS,
 		CertificateSerial:            node.DeviceCertificateSerial,
 		PresentedCertificateSerial:   presented.Serial,
 		CertificateFingerprintSHA256: presented.FingerprintSHA256,
@@ -176,6 +187,7 @@ func (a *MTLSRuntimeDeviceAuthenticator) AuthenticateHTTP(
 		!constantTimeStringEqual(identity.PublicKeyThumbprintSHA256, presented.PublicKeyThumbprintSHA256) {
 		return RuntimeDeviceIdentity{}, newRuntimeSessionError(RuntimeSessionErrorAuthenticationFailed, nil)
 	}
+	identity.AuthenticationMode = RuntimeAuthenticationMTLS
 	return identity, nil
 }
 
@@ -552,6 +564,15 @@ func (s *RuntimeSessionService) CreateOrAttachSession(
 	err = s.repository.WithTransaction(ctx, func(tx runtimeSessionTransaction) error {
 		if lockErr := tx.LockSessionIdentity(ctx, normalized.RuntimeSessionID); lockErr != nil {
 			return lockErr
+		}
+		if principal.Device.AuthenticationMode == RuntimeAuthenticationTokenOnly {
+			enroller, ok := tx.(runtimeTokenOnlyNodeEnroller)
+			if !ok {
+				return newRuntimeSessionError(RuntimeSessionErrorAuthenticationFailed, nil)
+			}
+			if enrollmentErr := enroller.EnsureTokenOnlyRuntimeNodeEnrollment(ctx, principal, normalized); enrollmentErr != nil {
+				return enrollmentErr
+			}
 		}
 		lockedSessionIDs, lockErr := lockRuntimeSessionPrincipal(
 			ctx,
@@ -1597,6 +1618,10 @@ type runtimeSessionTransaction interface {
 	CloseStaleRuntimeSession(context.Context, db.CloseStaleRuntimeSessionParams) (db.RuntimeSession, error)
 }
 
+type runtimeTokenOnlyNodeEnroller interface {
+	EnsureTokenOnlyRuntimeNodeEnrollment(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionRequest) error
+}
+
 type postgresRuntimeSessionRepository struct {
 	pool    *pgxpool.Pool
 	queries *db.Queries
@@ -1779,6 +1804,118 @@ func (t *postgresRuntimeSessionTransaction) LockSessionIdentity(ctx context.Cont
 		sessionID,
 	)
 	return err
+}
+
+func (t *postgresRuntimeSessionTransaction) EnsureTokenOnlyRuntimeNodeEnrollment(
+	ctx context.Context,
+	principal AuthenticatedRuntimePrincipal,
+	request RuntimeSessionRequest,
+) error {
+	if principal.Device.AuthenticationMode != RuntimeAuthenticationTokenOnly {
+		return nil
+	}
+	if _, err := t.tx.Exec(ctx, `
+SELECT pg_advisory_xact_lock(hashtextextended('runtime-token-enrollment:credential:' || $1::text, 0))`,
+		principal.CredentialID); err != nil {
+		return err
+	}
+	if _, err := t.tx.Exec(ctx, `
+SELECT pg_advisory_xact_lock(hashtextextended('runtime-token-enrollment:node:' || $1::text, 0))`,
+		principal.Device.NodeID); err != nil {
+		return err
+	}
+
+	var boundNodeID, boundAgentID uuid.UUID
+	var boundThumbprint, bindingMode string
+	err := t.tx.QueryRow(ctx, `
+SELECT node_id, agent_id, public_key_thumbprint, binding_mode
+FROM runtime_node_bindings
+WHERE credential_id = $1`, principal.CredentialID).Scan(
+		&boundNodeID, &boundAgentID, &boundThumbprint, &bindingMode,
+	)
+	if err == nil {
+		if boundNodeID != principal.Device.NodeID || boundAgentID != principal.AgentID ||
+			!constantTimeStringEqual(boundThumbprint, principal.Device.PublicKeyThumbprintSHA256) ||
+			(bindingMode != "token_only" && bindingMode != "mtls") {
+			return newRuntimeSessionError(RuntimeSessionErrorDeviceMismatch, nil)
+		}
+		return nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+
+	var nodeSerial, nodeThumbprint, nodeStatus string
+	err = t.tx.QueryRow(ctx, `
+SELECT device_certificate_serial, device_public_key_thumbprint, status
+FROM runtime_nodes
+WHERE node_id = $1`, principal.Device.NodeID).Scan(&nodeSerial, &nodeThumbprint, &nodeStatus)
+	if err == nil {
+		var exactHistory bool
+		historyErr := t.tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM runtime_sessions session
+    WHERE session.credential_id = $1
+      AND session.agent_id = $2
+      AND session.node_id = $3
+      AND session.device_certificate_serial = $4
+)`, principal.CredentialID, principal.AgentID, principal.Device.NodeID, nodeSerial).Scan(&exactHistory)
+		if historyErr != nil {
+			return historyErr
+		}
+		if !exactHistory || (nodeStatus != "active" && nodeStatus != "draining") ||
+			!constantTimeStringEqual(nodeSerial, principal.Device.CertificateSerial) ||
+			!constantTimeStringEqual(nodeThumbprint, principal.Device.PublicKeyThumbprintSHA256) {
+			return newRuntimeSessionError(RuntimeSessionErrorDeviceMismatch, nil)
+		}
+		return nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+
+	var tokenActive bool
+	if err = t.tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM agent_tokens
+    WHERE id = $1
+      AND agent_id = $2
+      AND status = 'active_runtime'
+      AND revoked_at IS NULL
+      AND scopes @> ARRAY['agent:pull']::text[]
+      AND (expires_at IS NULL OR expires_at > clock_timestamp())
+)`, principal.CredentialID, principal.AgentID).Scan(&tokenActive); err != nil {
+		return err
+	}
+	if !tokenActive {
+		return newRuntimeSessionError(RuntimeSessionErrorPrincipalInactive, nil)
+	}
+
+	displayName := "token-only-" + principal.Device.NodeID.String()
+	if _, err = t.tx.Exec(ctx, `
+INSERT INTO runtime_nodes (
+    node_id, display_name, device_certificate_serial,
+    device_public_key_thumbprint, node_version, protocol_version,
+    runtime_contract_id, runtime_contract_digest, features, capacity
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		principal.Device.NodeID, displayName, principal.Device.CertificateSerial,
+		principal.Device.PublicKeyThumbprintSHA256, request.NodeVersion, request.ProtocolVersion,
+		request.RuntimeContractID, request.RuntimeContractDigest, request.Features, request.Capacity,
+	); err != nil {
+		return newRuntimeSessionError(RuntimeSessionErrorDeviceMismatch, err)
+	}
+	if _, err = t.tx.Exec(ctx, `
+INSERT INTO runtime_node_bindings (
+    credential_id, node_id, agent_id, public_key_thumbprint, binding_mode
+) VALUES ($1,$2,$3,$4,'token_only')`,
+		principal.CredentialID, principal.Device.NodeID, principal.AgentID,
+		principal.Device.PublicKeyThumbprintSHA256,
+	); err != nil {
+		return newRuntimeSessionError(RuntimeSessionErrorDeviceMismatch, err)
+	}
+	return nil
 }
 
 func (t *postgresRuntimeSessionTransaction) GetRuntimeSessionForUpdate(ctx context.Context, id uuid.UUID) (db.RuntimeSession, error) {

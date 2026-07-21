@@ -169,13 +169,17 @@ func (m *Manager) IssueClientCertificate(csr *x509.CertificateRequest, nodeID uu
 	if err := validateClientPublicKey(csr.PublicKey); err != nil {
 		return ClientCertificate{}, err
 	}
-	now := time.Now().UTC()
+	// PostgreSQL persists timestamptz with microsecond precision, while X.509
+	// validity encodes whole seconds. Normalize before returning the first
+	// response so a retry can replay byte-for-byte equivalent JSON from the
+	// committed inventory row.
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	serialNumber, err := randomSerial()
 	if err != nil {
 		return ClientCertificate{}, err
 	}
 	nodeURI, _ := url.Parse(runtimeNodeURIPrefix + nodeID.String())
-	notBefore := now.Add(-5 * time.Minute)
+	notBefore := now.Add(-5 * time.Minute).Truncate(time.Second)
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject:      pkix.Name{CommonName: "runtime-node-" + nodeID.String()},
@@ -206,7 +210,7 @@ func (m *Manager) IssueClientCertificate(csr *x509.CertificateRequest, nodeID uu
 		PublicKeySHA256:     hex.EncodeToString(publicKey[:]),
 		NotBefore:           template.NotBefore,
 		NotAfter:            template.NotAfter,
-		RenewAfter:          now.Add(clientRenewMinimum + jitter),
+		RenewAfter:          now.Add(clientRenewMinimum + jitter).Truncate(time.Microsecond),
 	}, nil
 }
 

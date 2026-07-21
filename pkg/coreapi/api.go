@@ -108,9 +108,11 @@ func RegisterRuntimeAttachOnly(
 	agent.NewRegistrationHandler(registrationSvc).RegisterRuntimeAttachReadOnly(api, jwtMiddleware)
 
 	runtimeSvc := runtime.NewService(pool, cfg)
-	runtimeCredentials := runtimepki.NewCredentialService(pool, opts.RuntimePKI, runtimeSvc)
-	runtimeCredentials.Register(api)
-	runtimeCredentials.RegisterTrustBundle(e)
+	if cfg.RuntimeMTLSEnabled && opts.RuntimePKI != nil {
+		runtimeCredentials := runtimepki.NewCredentialService(pool, opts.RuntimePKI, runtimeSvc)
+		runtimeCredentials.Register(api)
+		runtimeCredentials.RegisterTrustBundle(e)
+	}
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
 	runtimeSessions := configureRuntimeAttachOnly(runtimeHandler, runtimeSvc, pool, cfg, opts.CoreInstanceID)
 	runtimeHandler.RegisterAgentRuntimeAttachOnly(api)
@@ -192,9 +194,11 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	skillHandler.RegisterProtected(api, jwtMiddleware)
 
 	runtimeSvc := runtime.NewService(pool, cfg)
-	runtimeCredentials := runtimepki.NewCredentialService(pool, opts.RuntimePKI, runtimeSvc)
-	runtimeCredentials.Register(api)
-	runtimeCredentials.RegisterTrustBundle(e)
+	if cfg.RuntimeMTLSEnabled && opts.RuntimePKI != nil {
+		runtimeCredentials := runtimepki.NewCredentialService(pool, opts.RuntimePKI, runtimeSvc)
+		runtimeCredentials.Register(api)
+		runtimeCredentials.RegisterTrustBundle(e)
+	}
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
 	runtimeHandler.SetRunUpdateSource(runUpdates)
 	configureRuntime(
