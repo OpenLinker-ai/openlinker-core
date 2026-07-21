@@ -248,6 +248,10 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		"GET /api/v1/a2a/agents/:slug/tasks/:taskID/subscribe",
 		"GET /api/v1/mcp/tools",
 		"POST /api/v1/mcp/run_agent",
+		"POST /api/v1/mcp/start_agent_run",
+		"POST /api/v1/mcp/list_run_events",
+		"POST /api/v1/mcp/list_run_artifacts",
+		"POST /api/v1/mcp/cancel_run",
 		"POST /api/v1/workflows/:id/run",
 		"GET /api/v1/skills",
 		"POST /api/v1/skills/proposals",
@@ -319,6 +323,10 @@ func TestRegisterRuntimeAttachOnlyMountsStrictReadOnlySurface(t *testing.T) {
 		"POST /api/v1/agent-runtime/call-agent",
 		"POST /api/v1/runs",
 		"POST /api/v1/mcp/run_agent",
+		"POST /api/v1/mcp/start_agent_run",
+		"POST /api/v1/mcp/list_run_events",
+		"POST /api/v1/mcp/list_run_artifacts",
+		"POST /api/v1/mcp/cancel_run",
 		"POST /api/v1/workflows/:id/run",
 	} {
 		if routes[forbidden] {

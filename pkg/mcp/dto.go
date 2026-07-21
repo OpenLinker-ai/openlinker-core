@@ -7,7 +7,7 @@ package mcp
 //
 // 鉴权：仅访问令牌（ol_user_xxx；兼容历史 ol_user_xxx）。
 //
-// 不引入 mark3labs/mcp-go SDK —— 5 个工具直接转发到既有 service，
+// 不引入 mark3labs/mcp-go SDK —— 9 个工具直接转发到既有 service，
 // 鉴权直接复用 HybridAuthMiddleware + User Token verifier。
 
 // ToolDescriptor 暴露给 MCP 客户端的工具元信息。
@@ -18,6 +18,7 @@ type ToolDescriptor struct {
 	Description  string                 `json:"description"`
 	InputSchema  map[string]interface{} `json:"input_schema"`
 	OutputSchema map[string]interface{} `json:"output_schema,omitempty"`
+	Annotations  map[string]interface{} `json:"annotations,omitempty"`
 }
 
 // ToolsResponse GET /api/v1/mcp/tools 响应。
@@ -56,6 +57,23 @@ type RunAgentRequest struct {
 
 // GetRunRequest POST /api/v1/mcp/get_run 请求体。
 type GetRunRequest struct {
+	RunID string `json:"run_id" validate:"required,uuid"`
+}
+
+// ListRunEventsRequest POST /api/v1/mcp/list_run_events 请求体。
+type ListRunEventsRequest struct {
+	RunID         string `json:"run_id" validate:"required,uuid"`
+	AfterSequence int32  `json:"after_sequence,omitempty" validate:"min=0"`
+	Limit         int32  `json:"limit,omitempty" validate:"omitempty,min=1,max=500"`
+}
+
+// ListRunArtifactsRequest POST /api/v1/mcp/list_run_artifacts 请求体。
+type ListRunArtifactsRequest struct {
+	RunID string `json:"run_id" validate:"required,uuid"`
+}
+
+// CancelRunRequest POST /api/v1/mcp/cancel_run 请求体。
+type CancelRunRequest struct {
 	RunID string `json:"run_id" validate:"required,uuid"`
 }
 

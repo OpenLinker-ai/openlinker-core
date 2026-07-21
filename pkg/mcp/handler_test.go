@@ -89,7 +89,7 @@ func TestMCPToolDescriptionsStayNeutralAndMachineReadable(t *testing.T) {
 		collectDescriptions(tool.InputSchema)
 		collectDescriptions(tool.OutputSchema)
 	}
-	require.Equal(t, []string{"search_agents", "get_agent", "run_agent", "get_run", "create_task"}, names)
+	require.Equal(t, []string{"search_agents", "get_agent", "run_agent", "start_agent_run", "get_run", "list_run_events", "list_run_artifacts", "cancel_run", "create_task"}, names)
 
 	for _, description := range descriptions {
 		require.NotEmpty(t, strings.TrimSpace(description))
@@ -101,6 +101,26 @@ func TestMCPToolDescriptionsStayNeutralAndMachineReadable(t *testing.T) {
 			require.NotContains(t, lower, forbidden)
 		}
 	}
+}
+
+func TestMCPToolAnnotationsDescribeSafetySemantics(t *testing.T) {
+	tools := NewService(nil, nil, nil).Tools()
+	byName := make(map[string]ToolDescriptor, len(tools))
+	for _, tool := range tools {
+		byName[tool.Name] = tool
+		for _, key := range []string{"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"} {
+			_, ok := tool.Annotations[key].(bool)
+			require.Truef(t, ok, "%s must declare boolean %s", tool.Name, key)
+		}
+	}
+	require.Equal(t, true, byName["get_run"].Annotations["readOnlyHint"])
+	require.Equal(t, true, byName["start_agent_run"].Annotations["idempotentHint"])
+	require.Equal(t, true, byName["start_agent_run"].Annotations["openWorldHint"])
+	require.Equal(t, true, byName["cancel_run"].Annotations["destructiveHint"])
+	require.Equal(t, false, byName["cancel_run"].Annotations["idempotentHint"])
+
+	encoded := toMCPTools(tools)
+	require.Equal(t, tools[0].Annotations, encoded[0].Annotations)
 }
 
 func TestRunAgentToolRequiresPrintableIdempotencyKey(t *testing.T) {
@@ -171,6 +191,28 @@ func TestGetEndpointInfoDocumentsHTTPTransportAndRejectsSSE(t *testing.T) {
 	c = e.NewContext(req, rec)
 	require.NoError(t, NewHandler(nil).GetEndpointInfo(c))
 	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+func TestRegisterExposesAllMCPRoutes(t *testing.T) {
+	e := echo.New()
+	identity := func(next echo.HandlerFunc) echo.HandlerFunc { return next }
+	NewHandler(nil).Register(e.Group("/api/v1"), identity)
+
+	paths := make(map[string]struct{})
+	for _, route := range e.Routes() {
+		paths[route.Method+" "+route.Path] = struct{}{}
+	}
+	for _, path := range []string{
+		"GET /api/v1/mcp", "POST /api/v1/mcp", "GET /api/v1/mcp/tools",
+		"POST /api/v1/mcp/search_agents", "POST /api/v1/mcp/get_agent",
+		"POST /api/v1/mcp/run_agent", "POST /api/v1/mcp/start_agent_run",
+		"POST /api/v1/mcp/get_run", "POST /api/v1/mcp/list_run_events",
+		"POST /api/v1/mcp/list_run_artifacts", "POST /api/v1/mcp/cancel_run",
+		"POST /api/v1/mcp/create_task",
+	} {
+		_, ok := paths[path]
+		require.Truef(t, ok, "missing route %s", path)
+	}
 }
 
 func TestPostRPCErrorsForMalformedAndUnsupportedRequests(t *testing.T) {
@@ -314,6 +356,21 @@ func TestPostRPCToolCallValidatesParamsBeforeServiceDispatch(t *testing.T) {
 			wantMsg: "Invalid arguments:",
 		},
 		{
+			name:    "start_agent_run validation",
+			params:  `{"name":"start_agent_run","arguments":{"agent_id":"8582c7a4-0f02-4895-8570-7c7cce357e5f","input":{"text":"hi"}}}`,
+			wantMsg: "Invalid arguments:",
+		},
+		{
+			name:    "list_run_events validation",
+			params:  `{"name":"list_run_events","arguments":{"run_id":"8582c7a4-0f02-4895-8570-7c7cce357e5f","limit":501}}`,
+			wantMsg: "Invalid arguments:",
+		},
+		{
+			name:    "cancel_run validation",
+			params:  `{"name":"cancel_run","arguments":{"run_id":"not-a-uuid"}}`,
+			wantMsg: "Invalid arguments:",
+		},
+		{
 			name:    "create_task validation",
 			params:  `{"name":"create_task","arguments":{"query":"abc"}}`,
 			wantMsg: "Invalid arguments:",
@@ -331,7 +388,7 @@ func TestPostRPCToolCallValidatesParamsBeforeServiceDispatch(t *testing.T) {
 			rec := httptest.NewRecorder()
 			c := newRPCContext(body, rec)
 			c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
-			c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read", "agents:run", "runs:read", "tasks:create"})
+			c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read", "agents:run", "runs:read", "runs:cancel", "tasks:create"})
 			c.Set(string(httpx.CtxKeyUserID), "8582c7a4-0f02-4895-8570-7c7cce357e5f")
 
 			require.NoError(t, NewHandler(nil).PostRPC(c))
@@ -545,6 +602,69 @@ func TestRESTHandlersDispatchToService(t *testing.T) {
 			},
 		},
 		{
+			name: "start agent run",
+			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
+				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/start_agent_run", `{"agent_id":"`+agentID.String()+`","input":{"text":"async"},"idempotency_key":"mcp-rest-start-1"}`), rec)
+				setAPIKeyScopes(c, "agents:run")
+				c.Set(string(httpx.CtxKeyUserID), userID.String())
+				return c
+			},
+			call:     (*Handler).PostStartAgentRun,
+			wantHTTP: http.StatusOK,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.startUserID)
+				require.Equal(t, agentID.String(), svc.startReq.AgentID)
+				require.Equal(t, "mcp-rest-start-1", svc.startReq.IdempotencyKey)
+			},
+		},
+		{
+			name: "list run events",
+			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
+				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/list_run_events", `{"run_id":"`+runID.String()+`","after_sequence":7,"limit":25}`), rec)
+				setAPIKeyScopes(c, "runs:read")
+				c.Set(string(httpx.CtxKeyUserID), userID.String())
+				return c
+			},
+			call:     (*Handler).PostListRunEvents,
+			wantHTTP: http.StatusOK,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.eventsUserID)
+				require.Equal(t, runID, svc.eventsRunID)
+				require.Equal(t, int32(7), svc.eventsAfter)
+				require.Equal(t, int32(25), svc.eventsLimit)
+			},
+		},
+		{
+			name: "list run artifacts",
+			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
+				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/list_run_artifacts", `{"run_id":"`+runID.String()+`"}`), rec)
+				setAPIKeyScopes(c, "runs:read")
+				c.Set(string(httpx.CtxKeyUserID), userID.String())
+				return c
+			},
+			call:     (*Handler).PostListRunArtifacts,
+			wantHTTP: http.StatusOK,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.artifactsUserID)
+				require.Equal(t, runID, svc.artifactsRunID)
+			},
+		},
+		{
+			name: "cancel run",
+			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
+				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/cancel_run", `{"run_id":"`+runID.String()+`"}`), rec)
+				setAPIKeyScopes(c, "runs:cancel")
+				c.Set(string(httpx.CtxKeyUserID), userID.String())
+				return c
+			},
+			call:     (*Handler).PostCancelRun,
+			wantHTTP: http.StatusOK,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.cancelUserID)
+				require.Equal(t, runID, svc.cancelRunID)
+			},
+		},
+		{
 			name: "create task",
 			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
 				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/create_task", `{"query":"summarize a long document","skill_ids":["summary"],"mcp_tools":["search_agents"]}`), rec)
@@ -617,6 +737,41 @@ func TestPostRPCToolCallDispatchesAllTools(t *testing.T) {
 			},
 		},
 		{
+			name:   "start_agent_run",
+			params: `{"name":"start_agent_run","arguments":{"agent_id":"` + agentID.String() + `","input":{"text":"async"},"idempotency_key":"mcp-rpc-start-1"}}`,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.startUserID)
+				require.Equal(t, agentID.String(), svc.startReq.AgentID)
+				require.Equal(t, "mcp-rpc-start-1", svc.startReq.IdempotencyKey)
+			},
+		},
+		{
+			name:   "list_run_events",
+			params: `{"name":"list_run_events","arguments":{"run_id":"` + runID.String() + `","after_sequence":3,"limit":10}}`,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.eventsUserID)
+				require.Equal(t, runID, svc.eventsRunID)
+				require.Equal(t, int32(3), svc.eventsAfter)
+				require.Equal(t, int32(10), svc.eventsLimit)
+			},
+		},
+		{
+			name:   "list_run_artifacts",
+			params: `{"name":"list_run_artifacts","arguments":{"run_id":"` + runID.String() + `"}}`,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.artifactsUserID)
+				require.Equal(t, runID, svc.artifactsRunID)
+			},
+		},
+		{
+			name:   "cancel_run",
+			params: `{"name":"cancel_run","arguments":{"run_id":"` + runID.String() + `"}}`,
+			assert: func(t *testing.T) {
+				require.Equal(t, userID, svc.cancelUserID)
+				require.Equal(t, runID, svc.cancelRunID)
+			},
+		},
+		{
 			name:   "create_task",
 			params: `{"name":"create_task","arguments":{"query":"summarize a long document"}}`,
 			assert: func(t *testing.T) {
@@ -631,7 +786,7 @@ func TestPostRPCToolCallDispatchesAllTools(t *testing.T) {
 			rec := httptest.NewRecorder()
 			c := newRPCContext(`{"jsonrpc":"2.0","id":"ok","method":"tools/call","params":`+tt.params+`}`, rec)
 			c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
-			c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read", "agents:run", "runs:read", "tasks:create"})
+			c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read", "agents:run", "runs:read", "runs:cancel", "tasks:create"})
 			c.Set(string(httpx.CtxKeyUserID), userID.String())
 
 			require.NoError(t, NewHandler(svc).PostRPC(c))
@@ -727,19 +882,31 @@ func jsonFieldNameForToolDescriptorInput(t *testing.T, tool ToolDescriptor) stri
 }
 
 type fakeMCPService struct {
-	searchResp *agent.MarketListResponse
-	getResp    *agent.AgentDetailResponse
-	runResp    *runtime.RunResponse
-	taskResp   *task.RecommendResponse
+	searchResp    *agent.MarketListResponse
+	getResp       *agent.AgentDetailResponse
+	runResp       *runtime.RunResponse
+	taskResp      *task.RecommendResponse
+	eventsResp    *runtime.RunEventPageResponse
+	artifactsResp []runtime.RunArtifactResponse
 
-	searchReq    SearchAgentsRequest
-	getReq       GetAgentRequest
-	runUserID    uuid.UUID
-	runReq       RunAgentRequest
-	getRunUserID uuid.UUID
-	getRunID     uuid.UUID
-	taskUserID   uuid.UUID
-	taskReq      CreateTaskRequest
+	searchReq       SearchAgentsRequest
+	getReq          GetAgentRequest
+	runUserID       uuid.UUID
+	runReq          RunAgentRequest
+	startUserID     uuid.UUID
+	startReq        RunAgentRequest
+	getRunUserID    uuid.UUID
+	getRunID        uuid.UUID
+	eventsUserID    uuid.UUID
+	eventsRunID     uuid.UUID
+	eventsAfter     int32
+	eventsLimit     int32
+	artifactsUserID uuid.UUID
+	artifactsRunID  uuid.UUID
+	cancelUserID    uuid.UUID
+	cancelRunID     uuid.UUID
+	taskUserID      uuid.UUID
+	taskReq         CreateTaskRequest
 }
 
 func newFakeMCPService() *fakeMCPService {
@@ -766,6 +933,8 @@ func newFakeMCPService() *fakeMCPService {
 			Visibility: "private",
 			MCPTools:   []string{"search_agents"},
 		},
+		eventsResp:    &runtime.RunEventPageResponse{},
+		artifactsResp: []runtime.RunArtifactResponse{},
 	}
 }
 
@@ -785,9 +954,35 @@ func (f *fakeMCPService) RunAgent(_ context.Context, userID uuid.UUID, req *RunA
 	return f.runResp, nil
 }
 
+func (f *fakeMCPService) StartAgentRun(_ context.Context, userID uuid.UUID, req *RunAgentRequest) (*runtime.RunResponse, error) {
+	f.startUserID = userID
+	f.startReq = *req
+	return f.runResp, nil
+}
+
 func (f *fakeMCPService) GetRun(_ context.Context, userID, runID uuid.UUID) (*runtime.RunResponse, error) {
 	f.getRunUserID = userID
 	f.getRunID = runID
+	return f.runResp, nil
+}
+
+func (f *fakeMCPService) ListRunEvents(_ context.Context, userID, runID uuid.UUID, afterSequence, limit int32) (*runtime.RunEventPageResponse, error) {
+	f.eventsUserID = userID
+	f.eventsRunID = runID
+	f.eventsAfter = afterSequence
+	f.eventsLimit = limit
+	return f.eventsResp, nil
+}
+
+func (f *fakeMCPService) ListRunArtifacts(_ context.Context, userID, runID uuid.UUID) ([]runtime.RunArtifactResponse, error) {
+	f.artifactsUserID = userID
+	f.artifactsRunID = runID
+	return f.artifactsResp, nil
+}
+
+func (f *fakeMCPService) CancelRun(_ context.Context, userID, runID uuid.UUID) (*runtime.RunResponse, error) {
+	f.cancelUserID = userID
+	f.cancelRunID = runID
 	return f.runResp, nil
 }
 

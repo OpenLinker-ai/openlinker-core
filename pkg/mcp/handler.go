@@ -34,7 +34,11 @@ type service interface {
 	SearchAgents(ctx context.Context, req *SearchAgentsRequest) (*agent.MarketListResponse, error)
 	GetAgent(ctx context.Context, req *GetAgentRequest) (*agent.AgentDetailResponse, error)
 	RunAgent(ctx context.Context, userID uuid.UUID, req *RunAgentRequest) (*runtime.RunResponse, error)
+	StartAgentRun(ctx context.Context, userID uuid.UUID, req *RunAgentRequest) (*runtime.RunResponse, error)
 	GetRun(ctx context.Context, userID, runID uuid.UUID) (*runtime.RunResponse, error)
+	ListRunEvents(ctx context.Context, userID, runID uuid.UUID, afterSequence, limit int32) (*runtime.RunEventPageResponse, error)
+	ListRunArtifacts(ctx context.Context, userID, runID uuid.UUID) ([]runtime.RunArtifactResponse, error)
+	CancelRun(ctx context.Context, userID, runID uuid.UUID) (*runtime.RunResponse, error)
 	CreateTask(ctx context.Context, userID uuid.UUID, req *CreateTaskRequest) (*task.RecommendResponse, error)
 	Tools() []ToolDescriptor
 }
@@ -55,7 +59,11 @@ func NewHandler(svc service) *Handler {
 //	POST /mcp/search_agents   市场搜索
 //	POST /mcp/get_agent       Agent 详情
 //	POST /mcp/run_agent       调用 Agent（写 runs.source='mcp'）
+//	POST /mcp/start_agent_run 异步启动 Agent 调用
 //	POST /mcp/get_run         查询调用结果
+//	POST /mcp/list_run_events 查询调用事件页
+//	POST /mcp/list_run_artifacts 查询调用产物
+//	POST /mcp/cancel_run      取消调用
 //	POST /mcp/create_task     自然语言 → 推荐 Agent
 func (h *Handler) Register(api *echo.Group, mw echo.MiddlewareFunc) {
 	g := api.Group("/mcp", mw)
@@ -65,7 +73,11 @@ func (h *Handler) Register(api *echo.Group, mw echo.MiddlewareFunc) {
 	g.POST("/search_agents", h.PostSearchAgents)
 	g.POST("/get_agent", h.PostGetAgent)
 	g.POST("/run_agent", h.PostRunAgent)
+	g.POST("/start_agent_run", h.PostStartAgentRun)
 	g.POST("/get_run", h.PostGetRun)
+	g.POST("/list_run_events", h.PostListRunEvents)
+	g.POST("/list_run_artifacts", h.PostListRunArtifacts)
+	g.POST("/cancel_run", h.PostCancelRun)
 	g.POST("/create_task", h.PostCreateTask)
 }
 
@@ -83,7 +95,7 @@ func (h *Handler) GetEndpointInfo(c echo.Context) error {
 		"auth":             "Authorization: Bearer ol_user_...",
 		"methods":          []string{"initialize", "tools/list", "tools/call"},
 		"tools":            toMCPTools(h.tools()),
-		"rest_fallback":    "/api/v1/mcp/tools, /api/v1/mcp/search_agents, /api/v1/mcp/run_agent, /api/v1/mcp/get_run, /api/v1/mcp/create_task",
+		"rest_fallback":    "/api/v1/mcp/tools, /api/v1/mcp/search_agents, /api/v1/mcp/get_agent, /api/v1/mcp/run_agent, /api/v1/mcp/start_agent_run, /api/v1/mcp/get_run, /api/v1/mcp/list_run_events, /api/v1/mcp/list_run_artifacts, /api/v1/mcp/cancel_run, /api/v1/mcp/create_task",
 	})
 }
 
@@ -139,7 +151,7 @@ func (h *Handler) PostRPC(c echo.Context) error {
 	}
 }
 
-// GetTools 列出工具描述。所有 5 个工具都列出来；客户端按 name 选择调用。
+// GetTools 列出工具描述。所有 9 个工具都列出来；客户端按 name 选择调用。
 func (h *Handler) GetTools(c echo.Context) error {
 	if err := assertAPIKeyAuth(c); err != nil {
 		return err
@@ -212,8 +224,29 @@ func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage) (m
 		}
 		resp, err := h.svc.RunAgent(c.Request().Context(), uid, &req)
 		return toolResult(resp, err), nil
+	case "start_agent_run":
+		if err := auth.RequireAnyPermission(c, "agents:run", "agent"); err != nil {
+			return toolError(err), nil
+		}
+		uid, err := userIDFromCtx(c)
+		if err != nil {
+			return toolError(err), nil
+		}
+		var req RunAgentRequest
+		if err := decodeToolArguments(args, &req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		if err := h.validator.Struct(&req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		agentID, _ := uuid.Parse(req.AgentID)
+		if err := requireAPIKeyScope(c, "agents:run", &agentID); err != nil {
+			return toolError(err), nil
+		}
+		resp, err := h.svc.StartAgentRun(c.Request().Context(), uid, &req)
+		return toolResult(resp, err), nil
 	case "get_run":
-		if err := requireAPIKeyScope(c, "runs:read"); err != nil {
+		if err := auth.RequireAnyPermission(c, "runs:read", "run"); err != nil {
 			return toolError(err), nil
 		}
 		uid, err := userIDFromCtx(c)
@@ -231,7 +264,73 @@ func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage) (m
 		if err != nil {
 			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: run_id is not a uuid"}
 		}
+		if err := requireAPIKeyScope(c, "runs:read", &runID); err != nil {
+			return toolError(err), nil
+		}
 		resp, err := h.svc.GetRun(c.Request().Context(), uid, runID)
+		return toolResult(resp, err), nil
+	case "list_run_events":
+		if err := auth.RequireAnyPermission(c, "runs:read", "run"); err != nil {
+			return toolError(err), nil
+		}
+		uid, err := userIDFromCtx(c)
+		if err != nil {
+			return toolError(err), nil
+		}
+		var req ListRunEventsRequest
+		if err := decodeToolArguments(args, &req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		if err := h.validator.Struct(&req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		runID, _ := uuid.Parse(req.RunID)
+		if err := requireAPIKeyScope(c, "runs:read", &runID); err != nil {
+			return toolError(err), nil
+		}
+		resp, err := h.svc.ListRunEvents(c.Request().Context(), uid, runID, req.AfterSequence, req.Limit)
+		return toolResult(resp, err), nil
+	case "list_run_artifacts":
+		if err := auth.RequireAnyPermission(c, "runs:read", "run"); err != nil {
+			return toolError(err), nil
+		}
+		uid, err := userIDFromCtx(c)
+		if err != nil {
+			return toolError(err), nil
+		}
+		var req ListRunArtifactsRequest
+		if err := decodeToolArguments(args, &req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		if err := h.validator.Struct(&req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		runID, _ := uuid.Parse(req.RunID)
+		if err := requireAPIKeyScope(c, "runs:read", &runID); err != nil {
+			return toolError(err), nil
+		}
+		resp, err := h.svc.ListRunArtifacts(c.Request().Context(), uid, runID)
+		return toolResult(resp, err), nil
+	case "cancel_run":
+		if err := auth.RequireAnyPermission(c, "runs:cancel", "run"); err != nil {
+			return toolError(err), nil
+		}
+		uid, err := userIDFromCtx(c)
+		if err != nil {
+			return toolError(err), nil
+		}
+		var req CancelRunRequest
+		if err := decodeToolArguments(args, &req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		if err := h.validator.Struct(&req); err != nil {
+			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		runID, _ := uuid.Parse(req.RunID)
+		if err := requireAPIKeyScope(c, "runs:cancel", &runID); err != nil {
+			return toolError(err), nil
+		}
+		resp, err := h.svc.CancelRun(c.Request().Context(), uid, runID)
 		return toolResult(resp, err), nil
 	case "create_task":
 		if err := requireAPIKeyScope(c, "tasks:create"); err != nil {
@@ -292,6 +391,15 @@ func (h *Handler) PostGetAgent(c echo.Context) error {
 
 // PostRunAgent 同步调用。把 source 设为 'mcp'。
 func (h *Handler) PostRunAgent(c echo.Context) error {
+	return h.postRunAgent(c, false)
+}
+
+// PostStartAgentRun 异步启动调用。把 source 设为 'mcp'。
+func (h *Handler) PostStartAgentRun(c echo.Context) error {
+	return h.postRunAgent(c, true)
+}
+
+func (h *Handler) postRunAgent(c echo.Context, async bool) error {
 	if err := auth.RequireAnyPermission(c, "agents:run", "agent"); err != nil {
 		return err
 	}
@@ -310,7 +418,12 @@ func (h *Handler) PostRunAgent(c echo.Context) error {
 	if err := requireAPIKeyScope(c, "agents:run", &agentID); err != nil {
 		return err
 	}
-	resp, err := h.svc.RunAgent(c.Request().Context(), uid, &req)
+	var resp *runtime.RunResponse
+	if async {
+		resp, err = h.svc.StartAgentRun(c.Request().Context(), uid, &req)
+	} else {
+		resp, err = h.svc.RunAgent(c.Request().Context(), uid, &req)
+	}
 	if err != nil {
 		return err
 	}
@@ -319,7 +432,7 @@ func (h *Handler) PostRunAgent(c echo.Context) error {
 
 // PostGetRun 查 run 详情。
 func (h *Handler) PostGetRun(c echo.Context) error {
-	if err := requireAPIKeyScope(c, "runs:read"); err != nil {
+	if err := auth.RequireAnyPermission(c, "runs:read", "run"); err != nil {
 		return err
 	}
 	uid, err := userIDFromCtx(c)
@@ -337,7 +450,91 @@ func (h *Handler) PostGetRun(c echo.Context) error {
 	if err != nil {
 		return httpx.BadRequest("run_id 不是合法 uuid")
 	}
+	if err := requireAPIKeyScope(c, "runs:read", &runID); err != nil {
+		return err
+	}
 	resp, err := h.svc.GetRun(c.Request().Context(), uid, runID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// PostListRunEvents 查询 owned run 的持久事件页。
+func (h *Handler) PostListRunEvents(c echo.Context) error {
+	if err := auth.RequireAnyPermission(c, "runs:read", "run"); err != nil {
+		return err
+	}
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	var req ListRunEventsRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	runID, _ := uuid.Parse(req.RunID)
+	if err := requireAPIKeyScope(c, "runs:read", &runID); err != nil {
+		return err
+	}
+	resp, err := h.svc.ListRunEvents(c.Request().Context(), uid, runID, req.AfterSequence, req.Limit)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// PostListRunArtifacts 查询 owned run 的持久产物。
+func (h *Handler) PostListRunArtifacts(c echo.Context) error {
+	if err := auth.RequireAnyPermission(c, "runs:read", "run"); err != nil {
+		return err
+	}
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	var req ListRunArtifactsRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	runID, _ := uuid.Parse(req.RunID)
+	if err := requireAPIKeyScope(c, "runs:read", &runID); err != nil {
+		return err
+	}
+	resp, err := h.svc.ListRunArtifacts(c.Request().Context(), uid, runID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// PostCancelRun 取消 owned run。
+func (h *Handler) PostCancelRun(c echo.Context) error {
+	if err := auth.RequireAnyPermission(c, "runs:cancel", "run"); err != nil {
+		return err
+	}
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	var req CancelRunRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	runID, _ := uuid.Parse(req.RunID)
+	if err := requireAPIKeyScope(c, "runs:cancel", &runID); err != nil {
+		return err
+	}
+	resp, err := h.svc.CancelRun(c.Request().Context(), uid, runID)
 	if err != nil {
 		return err
 	}
@@ -450,6 +647,7 @@ type mcpToolDefinition struct {
 	Description  string                 `json:"description"`
 	InputSchema  map[string]interface{} `json:"inputSchema"`
 	OutputSchema map[string]interface{} `json:"outputSchema,omitempty"`
+	Annotations  map[string]interface{} `json:"annotations,omitempty"`
 }
 
 type mcpTextContent struct {
@@ -578,6 +776,7 @@ func toMCPTools(tools []ToolDescriptor) []mcpToolDefinition {
 			Description:  tool.Description,
 			InputSchema:  inputSchema,
 			OutputSchema: tool.OutputSchema,
+			Annotations:  tool.Annotations,
 		})
 	}
 	return out
