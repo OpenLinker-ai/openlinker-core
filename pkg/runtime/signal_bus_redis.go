@@ -157,6 +157,13 @@ func (b *RedisSignalBus) RuntimePresenceStore() (RuntimePresenceStore, error) {
 	return NewRedisRuntimePresenceStore(b.client, "")
 }
 
+func (b *RedisSignalBus) RuntimeSessionLeaseStore() (RuntimeSessionLeaseStore, error) {
+	if b == nil || runtimeRedisClientUnavailable(b.client) {
+		return nil, ErrRuntimeSignalBusUnavailable
+	}
+	return NewRedisRuntimeSessionLeaseStore(b.client, "", "")
+}
+
 func (b *RedisSignalBus) Close() error {
 	if b == nil {
 		return nil
@@ -212,3 +219,4 @@ func runtimeRedisClientUnavailable(client redis.UniversalClient) bool {
 
 var _ RuntimeSignalBus = (*RedisSignalBus)(nil)
 var _ RuntimePresenceStoreProvider = (*RedisSignalBus)(nil)
+var _ RuntimeSessionLeaseStoreProvider = (*RedisSignalBus)(nil)

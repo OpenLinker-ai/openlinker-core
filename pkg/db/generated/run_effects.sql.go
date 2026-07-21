@@ -177,6 +177,34 @@ func (q *Queries) DeadLetterExpiredRunEffectsAtLimit(ctx context.Context) ([]Run
 	return items, rows.Err()
 }
 
+const nextRunEffectDue = `-- name: NextRunEffectDue :one
+SELECT MIN(candidate.next_due_at)::timestamptz AS next_due_at,
+    clock_timestamp() AS database_now
+FROM (
+    (SELECT available_at AS next_due_at
+     FROM run_effect_outbox
+     WHERE status = 'pending' AND attempt_count < max_attempts
+     ORDER BY available_at
+     LIMIT 1)
+    UNION ALL
+    (SELECT lease_expires_at AS next_due_at
+     FROM run_effect_outbox
+     WHERE status = 'processing'
+     ORDER BY lease_expires_at
+     LIMIT 1)
+) AS candidate`
+
+type NextRunEffectDueRow struct {
+	NextDueAt   *time.Time `db:"next_due_at" json:"next_due_at"`
+	DatabaseNow time.Time  `db:"database_now" json:"database_now"`
+}
+
+func (q *Queries) NextRunEffectDue(ctx context.Context) (NextRunEffectDueRow, error) {
+	var row NextRunEffectDueRow
+	err := q.db.QueryRow(ctx, nextRunEffectDue).Scan(&row.NextDueAt, &row.DatabaseNow)
+	return row, err
+}
+
 const deadLetterRunEffect = `-- name: DeadLetterRunEffect :one
 UPDATE run_effect_outbox
 SET status = 'dead_letter', lease_owner = NULL, lease_expires_at = NULL,

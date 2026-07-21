@@ -64,6 +64,23 @@ WHERE status = 'processing'
   AND attempt_count >= max_attempts
 RETURNING *;
 
+-- name: NextRunEffectDue :one
+SELECT MIN(candidate.next_due_at)::timestamptz AS next_due_at,
+    clock_timestamp() AS database_now
+FROM (
+    (SELECT available_at AS next_due_at
+     FROM run_effect_outbox
+     WHERE status = 'pending' AND attempt_count < max_attempts
+     ORDER BY available_at
+     LIMIT 1)
+    UNION ALL
+    (SELECT lease_expires_at AS next_due_at
+     FROM run_effect_outbox
+     WHERE status = 'processing'
+     ORDER BY lease_expires_at
+     LIMIT 1)
+) AS candidate;
+
 -- name: DeadLetterRunEffect :one
 -- In-lease permanent failure path. The claim generation is fenced by both
 -- owner and attempt_count so a stale worker cannot dead-letter a newer claim.

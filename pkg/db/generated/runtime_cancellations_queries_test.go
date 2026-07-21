@@ -13,6 +13,19 @@ import (
 
 func TestRuntimeCancellationQueriesAreFencedAndOrdered(t *testing.T) {
 	t.Parallel()
+	for _, fragment := range []string{
+		"WITH database_clock AS MATERIALIZED",
+		"eligible_attempts AS MATERIALIZED",
+		"FROM run_attempts",
+		"WHERE finished_at IS NULL",
+		"SELECT (SELECT MIN(due_at) FROM eligible) AS next_due_at",
+		"c.state IN ('requested', 'delivered', 'stopping', 'unsupported', 'failed')",
+		"a.executor_type IN ('core_http', 'core_mcp')",
+	} {
+		if !strings.Contains(nextRuntimeCancellationReapDue, fragment) {
+			t.Fatalf("next cancellation reap query missing %q", fragment)
+		}
+	}
 
 	for _, fragment := range []string{
 		"r.status = 'canceled'",
@@ -108,10 +121,22 @@ func TestRuntimeCancellationGeneratedCommandScanAndArgumentOrder(t *testing.T) {
 	now := time.Date(2026, 7, 11, 18, 30, 0, 0, time.UTC)
 	runID, agentID, cancellationID, attemptID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	nodeID, credentialID, sessionID := uuid.New(), uuid.New(), uuid.New()
-	dbtx := &fakeDBTX{row: fakeRow{values: []any{
+	commandValues := []any{
 		runID, agentID, cancellationID, attemptID, now,
-	}}}
+	}
+	dbtx := &fakeDBTX{row: fakeRow{values: commandValues}}
 	q := New(dbtx)
+	dueAt := now.Add(time.Minute)
+	dbtx.row = fakeRow{values: []any{&dueAt, now}}
+	next, err := q.NextRuntimeCancellationReapDue(context.Background(), 30_000)
+	if err != nil || next.NextDueAt == nil || !next.NextDueAt.Equal(dueAt) || next.DatabaseNow != now {
+		t.Fatalf("NextRuntimeCancellationReapDue = %#v, %v", next, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "NextRuntimeCancellationReapDue")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{int64(30_000)}) {
+		t.Fatalf("next cancellation reap args = %#v", dbtx.queryRowArgs)
+	}
+	dbtx.row = fakeRow{values: commandValues}
 	params := LockNextRuntimeCancellationCommandRunParams{
 		AgentID: agentID, NodeID: nodeID, CredentialID: credentialID,
 		WorkerID: "cancel-worker", RuntimeSessionID: sessionID, CommandDeadlineMs: 30_000,

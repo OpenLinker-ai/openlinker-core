@@ -511,12 +511,21 @@ func TestRuntimeHandlerStreamRunEventsEdges(t *testing.T) {
 	ctx, cancel := context.WithTimeout(streamCtx.Request().Context(), 2*time.Second)
 	defer cancel()
 	streamCtx.SetRequest(streamCtx.Request().WithContext(ctx))
-	if err := NewHandler(streamSvc).StreamRunEvents(streamCtx); err != nil {
+	var observations []WorkerObservation
+	handler := NewHandler(streamSvc)
+	handler.SetWorkerObserver(WorkerObserverFunc(func(observation WorkerObservation) {
+		observations = append(observations, observation)
+	}))
+	if err := handler.StreamRunEvents(streamCtx); err != nil {
 		t.Fatalf("StreamRunEvents poll error path returned error = %v", err)
 	}
 	if streamRec.Code != http.StatusOK || !strings.Contains(streamRec.Body.String(), "event: run.stream.error") || streamSvc.calls < 2 {
 		t.Fatalf("stream poll error code=%d calls=%d body=%s", streamRec.Code, streamSvc.calls, streamRec.Body.String())
 	}
+	require.Equal(t, []WorkerObservation{
+		{Category: "runtime.sse.run_events_query", Reason: "initial", BatchSize: 1},
+		{Category: "runtime.sse.run_events_query", Reason: "ticker", BatchSize: 1},
+	}, observations)
 }
 
 func TestRuntimeHandlerRunEventPageIncludesRetentionMetadata(t *testing.T) {

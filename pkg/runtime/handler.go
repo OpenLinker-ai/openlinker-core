@@ -25,10 +25,12 @@ const ssePollInterval = time.Second
 
 // Handler 调用执行 HTTP 入口。
 type Handler struct {
-	svc       runtimeService
-	validator *validator.Validate
-	cfg       *config.Config
-	runtime   *RuntimeHTTPController
+	svc        runtimeService
+	validator  *validator.Validate
+	cfg        *config.Config
+	runtime    *RuntimeHTTPController
+	observer   WorkerObserver
+	runUpdates RunUpdateSource
 }
 
 type runtimeService interface {
@@ -53,6 +55,20 @@ func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 		h.cfg = cfg[0]
 	}
 	return h
+}
+
+// SetWorkerObserver installs payload-free test instrumentation. It does not
+// change response, retry, timeout, or query behavior.
+func (h *Handler) SetWorkerObserver(observer WorkerObserver) {
+	if h != nil {
+		h.observer = observer
+	}
+}
+
+func (h *Handler) SetRunUpdateSource(source RunUpdateSource) {
+	if h != nil {
+		h.runUpdates = source
+	}
 }
 
 // RegisterProtected 注册需要鉴权的端点，分别接收 /run 与 /runs/:id 的 middleware。
@@ -377,25 +393,24 @@ func (h *Handler) sendRunCreationResponse(c echo.Context, userID uuid.UUID, resp
 		if parseErr != nil {
 			return httpx.Internal("创建调用记录失败")
 		}
-		deadline := time.NewTimer(wait)
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer deadline.Stop()
-		defer ticker.Stop()
-	waitLoop:
-		for resp.Status == "running" {
-			select {
-			case <-c.Request().Context().Done():
-				return c.Request().Context().Err()
-			case <-deadline.C:
-				break waitLoop
-			case <-ticker.C:
-				current, getErr := h.svc.GetRun(c.Request().Context(), userID, runID)
-				if getErr != nil {
-					return getErr
+		if h.runUpdates != nil && h.runUpdates.Healthy() {
+			subscription, subscribeErr := h.runUpdates.SubscribeRun(runID)
+			if subscribeErr == nil {
+				defer subscription.Close()
+				resp, err = h.waitForRunCreationUpdate(
+					c.Request().Context(), userID, runID, resp, wasReplayed, wait, subscription,
+				)
+				if err != nil {
+					return err
 				}
-				resp = current
-				resp.Replayed = wasReplayed
+			} else {
+				resp, err = h.pollRunCreationUpdate(c.Request().Context(), userID, runID, resp, wasReplayed, time.Now().Add(wait))
 			}
+		} else {
+			resp, err = h.pollRunCreationUpdate(c.Request().Context(), userID, runID, resp, wasReplayed, time.Now().Add(wait))
+		}
+		if err != nil {
+			return err
 		}
 	}
 	location := "/api/v1/runs/" + resp.RunID
@@ -415,6 +430,97 @@ func (h *Handler) sendRunCreationResponse(c echo.Context, userID uuid.UUID, resp
 		}
 	}
 	return c.JSON(status, resp)
+}
+
+func (h *Handler) waitForRunCreationUpdate(
+	ctx context.Context,
+	userID, runID uuid.UUID,
+	current *RunResponse,
+	wasReplayed bool,
+	wait time.Duration,
+	subscription RunUpdateSubscription,
+) (*RunResponse, error) {
+	deadline := time.Now().Add(wait)
+	reason := "event_initial"
+	for current.Status == "running" {
+		observeWorker(h.observer, "runtime.prefer_wait.run_query", reason, 1)
+		updated, err := h.svc.GetRun(ctx, userID, runID)
+		if err != nil {
+			return nil, err
+		}
+		current = updated
+		current.Replayed = wasReplayed
+		if current.Status != "running" {
+			break
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		healthCheck := 2 * time.Second
+		if remaining < healthCheck {
+			healthCheck = remaining
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, healthCheck)
+		waitErr := subscription.Wait(waitCtx)
+		cancel()
+		if waitErr == nil {
+			reason = "event_wake"
+			continue
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if time.Until(deadline) <= 0 {
+			reason = "deadline_final"
+			continue
+		}
+		if !h.runUpdates.Healthy() {
+			return h.pollRunCreationUpdate(ctx, userID, runID, current, wasReplayed, deadline)
+		}
+		if !errors.Is(waitErr, context.DeadlineExceeded) {
+			// The wake channel is advisory. Its failure must never become an
+			// HTTP failure when the authoritative polling path is available.
+			return h.pollRunCreationUpdate(ctx, userID, runID, current, wasReplayed, deadline)
+		}
+	}
+	return current, nil
+}
+
+func (h *Handler) pollRunCreationUpdate(
+	ctx context.Context,
+	userID, runID uuid.UUID,
+	current *RunResponse,
+	wasReplayed bool,
+	deadline time.Time,
+) (*RunResponse, error) {
+	for current.Status == "running" {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		wait := 100 * time.Millisecond
+		if remaining < wait {
+			wait = remaining
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		observeWorker(h.observer, "runtime.prefer_wait.run_query", "ticker", 1)
+		updated, err := h.svc.GetRun(ctx, userID, runID)
+		if err != nil {
+			return nil, err
+		}
+		current = updated
+		current.Replayed = wasReplayed
+	}
+	return current, nil
 }
 
 func parseRunPreferWait(raw string) (time.Duration, bool, error) {
@@ -559,7 +665,15 @@ func (h *Handler) StreamRunEvents(c echo.Context) error {
 	if err != nil {
 		return httpx.BadRequest("after_sequence / Last-Event-ID 不是合法整数")
 	}
+	var runSubscription RunUpdateSubscription
+	if h.runUpdates != nil && h.runUpdates.Healthy() {
+		runSubscription, _ = h.runUpdates.SubscribeRun(runID)
+		if runSubscription != nil {
+			defer runSubscription.Close()
+		}
+	}
 
+	observeWorker(h.observer, "runtime.sse.run_events_query", "initial", 1)
 	page, err := h.svc.ListRunEventsPage(c.Request().Context(), uid, runID, afterSequence, defaultRunEventsLimit)
 	if err != nil {
 		return err
@@ -576,10 +690,23 @@ func (h *Handler) StreamRunEvents(c echo.Context) error {
 	res.WriteHeader(http.StatusOK)
 
 	ctx := c.Request().Context()
-	pollTicker := time.NewTicker(ssePollInterval)
-	defer pollTicker.Stop()
-	heartbeatTicker := time.NewTicker(sseHeartbeatInterval)
-	defer heartbeatTicker.Stop()
+	var pollTicker, heartbeatTicker *time.Ticker
+	startPolling := func() {
+		if pollTicker == nil {
+			pollTicker = time.NewTicker(ssePollInterval)
+			heartbeatTicker = time.NewTicker(sseHeartbeatInterval)
+		}
+	}
+	defer func() {
+		if pollTicker != nil {
+			pollTicker.Stop()
+			heartbeatTicker.Stop()
+		}
+	}()
+	if runSubscription == nil {
+		startPolling()
+	}
+	nextHeartbeat := time.Now().Add(sseHeartbeatInterval)
 
 	for {
 		if page.Meta.RetentionGap {
@@ -605,24 +732,77 @@ func (h *Handler) StreamRunEvents(c echo.Context) error {
 			return nil
 		}
 
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-heartbeatTicker.C:
-			if err := writeSSEHeartbeat(res.Writer); err != nil {
+		if runSubscription == nil {
+			select {
+			case <-ctx.Done():
 				return nil
-			}
-			flusher.Flush()
-		case <-pollTicker.C:
-			page, err = h.svc.ListRunEventsPage(ctx, uid, runID, afterSequence, defaultRunEventsLimit)
-			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			case <-heartbeatTicker.C:
+				if err := writeSSEHeartbeat(res.Writer); err != nil {
 					return nil
 				}
-				_ = writeSSEStreamError(res.Writer, err)
 				flusher.Flush()
+			case <-pollTicker.C:
+				observeWorker(h.observer, "runtime.sse.run_events_query", "ticker", 1)
+				page, err = h.svc.ListRunEventsPage(ctx, uid, runID, afterSequence, defaultRunEventsLimit)
+				if err != nil {
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						return nil
+					}
+					_ = writeSSEStreamError(res.Writer, err)
+					flusher.Flush()
+					return nil
+				}
+			}
+			continue
+		}
+
+		for runSubscription != nil {
+			wait := 2 * time.Second
+			if untilHeartbeat := time.Until(nextHeartbeat); untilHeartbeat < wait {
+				wait = untilHeartbeat
+			}
+			if wait <= 0 {
+				if err := writeSSEHeartbeat(res.Writer); err != nil {
+					return nil
+				}
+				flusher.Flush()
+				nextHeartbeat = time.Now().Add(sseHeartbeatInterval)
+				continue
+			}
+			waitCtx, cancel := context.WithTimeout(ctx, wait)
+			waitErr := runSubscription.Wait(waitCtx)
+			cancel()
+			if waitErr == nil {
+				observeWorker(h.observer, "runtime.sse.run_events_query", "event_wake", 1)
+				page, err = h.svc.ListRunEventsPage(ctx, uid, runID, afterSequence, defaultRunEventsLimit)
+				break
+			}
+			if ctx.Err() != nil {
 				return nil
 			}
+			if time.Now().After(nextHeartbeat) || time.Now().Equal(nextHeartbeat) {
+				if err := writeSSEHeartbeat(res.Writer); err != nil {
+					return nil
+				}
+				flusher.Flush()
+				nextHeartbeat = time.Now().Add(sseHeartbeatInterval)
+			}
+			if !h.runUpdates.Healthy() || !errors.Is(waitErr, context.DeadlineExceeded) {
+				runSubscription.Close()
+				runSubscription = nil
+				startPolling()
+				observeWorker(h.observer, "runtime.sse.run_events_query", "degraded_reconcile", 1)
+				page, err = h.svc.ListRunEventsPage(ctx, uid, runID, afterSequence, defaultRunEventsLimit)
+				break
+			}
+		}
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil
+			}
+			_ = writeSSEStreamError(res.Writer, err)
+			flusher.Flush()
+			return nil
 		}
 	}
 }

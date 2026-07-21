@@ -83,6 +83,15 @@ type Service struct {
 	bestEffortDBSem chan struct{}
 }
 
+// StartCoreAttemptCancellationCoordinator starts the single Core-scoped
+// database fallback for local HTTP/MCP Attempts. Redis run.cancel signals
+// remain the immediate path; this coordinator only closes missed-signal gaps.
+func (s *Service) StartCoreAttemptCancellationCoordinator(ctx context.Context) {
+	if s != nil && s.coreExecutions != nil {
+		s.coreExecutions.startCancellationCoordinator(ctx)
+	}
+}
+
 type runInvocation struct {
 	runID            uuid.UUID
 	userID           uuid.UUID

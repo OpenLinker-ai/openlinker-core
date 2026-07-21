@@ -271,11 +271,36 @@ func TestConfigValidateDefaultsSlowConnectionCapacityProfile(t *testing.T) {
 	if cfg.ConnectionStepHold != 30*time.Second {
 		t.Fatalf("connection step hold = %s, want 30s", cfg.ConnectionStepHold)
 	}
+	if cfg.CapacityHealthInterval != time.Second {
+		t.Fatalf("capacity health interval = %s, want 1s", cfg.CapacityHealthInterval)
+	}
+	if cfg.DBStatsSettle != 0 {
+		t.Fatalf("database stats settle = %s, want disabled", cfg.DBStatsSettle)
+	}
 	if cfg.ConnectStagger != 500*time.Millisecond {
 		t.Fatalf("connect stagger = %s, want 500ms", cfg.ConnectStagger)
 	}
 	if cfg.HoldAfter != 5*time.Minute {
 		t.Fatalf("final hold = %s, want 5m", cfg.HoldAfter)
+	}
+
+	cfg.DatabaseURL = "postgres://example.invalid/openlinker"
+	cfg.DBStrictIdleCommitRate = 2
+	cfg.DBActivitySampleInterval = time.Second
+	if err := cfg.validate(); err == nil {
+		t.Fatal("strict database slope accepted periodic observer traffic")
+	}
+	cfg.DBActivitySampleInterval = 0
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("strict database slope validate error = %v", err)
+	}
+	cfg.DBStrictIdleMinDuration = 10 * time.Minute
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("strict database minimum duration validate error = %v", err)
+	}
+	cfg.DBStrictIdleCommitRate = 0
+	if err := cfg.validate(); err == nil {
+		t.Fatal("strict database minimum duration accepted without a strict rate")
 	}
 }
 
@@ -306,7 +331,8 @@ func TestObserveConnectionCapacityStageUsesCoreHealthAndRetention(t *testing.T) 
 	stableMetrics.c.workersConnected.Store(100)
 	stableStage := connectionCapacityStage{}
 	if err := observeConnectionCapacityStage(
-		context.Background(), 30*time.Millisecond, 100, api, stableMetrics, &stableStage,
+		context.Background(), 60*time.Millisecond, 20*time.Millisecond,
+		100, api, stableMetrics, &stableStage,
 	); err != nil {
 		t.Fatalf("stable stage error = %v", err)
 	}
@@ -318,9 +344,24 @@ func TestObserveConnectionCapacityStageUsesCoreHealthAndRetention(t *testing.T) 
 	unstableMetrics.c.workersConnected.Store(98)
 	unstableStage := connectionCapacityStage{}
 	if err := observeConnectionCapacityStage(
-		context.Background(), 50*time.Millisecond, 100, api, unstableMetrics, &unstableStage,
+		context.Background(), 50*time.Millisecond, 20*time.Millisecond,
+		100, api, unstableMetrics, &unstableStage,
 	); err == nil {
 		t.Fatal("unstable stage was accepted")
+	}
+}
+
+func TestMinimumConnectionCapacityTimeoutIncludesDatabaseStatsSettle(t *testing.T) {
+	cfg := config{
+		Agents: 4, WorkersPerAgent: 1, ConnectionStepSize: 2,
+		ConnectStagger: 100 * time.Millisecond, ConnectionStepHold: time.Second,
+		DBStatsSettle: 3 * time.Second, HoldAfter: 5 * time.Second,
+		ReadyTimeout: 7 * time.Second,
+	}
+	want := 300*time.Millisecond + 2*time.Second + 9*time.Second +
+		5*time.Second + 7*time.Second + 2*time.Minute
+	if got := minimumConnectionCapacityTimeout(cfg); got != want {
+		t.Fatalf("minimum timeout = %s, want %s", got, want)
 	}
 }
 

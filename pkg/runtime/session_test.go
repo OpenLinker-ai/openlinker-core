@@ -917,6 +917,10 @@ type sessionRepositoryFake struct {
 	staleListErr        error
 	staleTTL            time.Duration
 	staleLimit          int
+	staleListCalls      int
+	reapCandidateNow    time.Time
+	reapCandidateErr    error
+	reapCandidateCalls  int
 }
 
 func (r *sessionRepositoryFake) WithTransaction(ctx context.Context, fn func(runtimeSessionTransaction) error) error {
@@ -930,7 +934,25 @@ func (r *sessionRepositoryFake) ListStaleRuntimeSessionCandidates(_ context.Cont
 	defer r.staleMu.Unlock()
 	r.staleTTL = ttl
 	r.staleLimit = limit
+	r.staleListCalls++
 	return append([]db.RuntimeSession(nil), r.staleCandidates...), r.staleListErr
+}
+
+func (r *sessionRepositoryFake) GetRuntimeSessionReapCandidate(
+	_ context.Context,
+	_ uuid.UUID,
+) (db.RuntimeSession, time.Time, error) {
+	r.staleMu.Lock()
+	defer r.staleMu.Unlock()
+	r.reapCandidateCalls++
+	if r.reapCandidateErr != nil {
+		return db.RuntimeSession{}, time.Time{}, r.reapCandidateErr
+	}
+	now := r.reapCandidateNow
+	if now.IsZero() {
+		now = r.tx.session.HeartbeatAt.Add(time.Hour)
+	}
+	return r.tx.session, now, nil
 }
 
 func (r *sessionRepositoryFake) ResolveRuntimeSessionPrincipal(_ context.Context, params runtimeSessionResolveParams) (RuntimeSessionPrincipal, error) {

@@ -1980,6 +1980,28 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			_, err := q.AggregateAgentRunsForWindow(ctx, "24 hours")
 			return err
 		}},
+		{name: "RefreshAgentMetricSnapshotsForWindow", run: func() error {
+			_, err := q.RefreshAgentMetricSnapshotsForWindow(ctx, RefreshAgentMetricSnapshotsForWindowParams{
+				TimeWindow: "24h", Interval: "24 hours",
+			})
+			return err
+		}},
+		{name: "RefreshAgentMetricSnapshotsForAgentsAndWindow", run: func() error {
+			_, err := q.RefreshAgentMetricSnapshotsForAgentsAndWindow(ctx, RefreshAgentMetricSnapshotsForAgentsAndWindowParams{
+				AgentIDs: []uuid.UUID{id}, TimeWindow: "24h", Interval: "24 hours",
+			})
+			return err
+		}},
+		{name: "AgentMetricDatabaseNow", run: func() error {
+			_, err := q.AgentMetricDatabaseNow(ctx)
+			return err
+		}},
+		{name: "ListAgentMetricChangesAfter", run: func() error {
+			_, err := q.ListAgentMetricChangesAfter(ctx, ListAgentMetricChangesAfterParams{
+				CursorTime: time.Now(), CursorID: id, BatchLimit: 10,
+			})
+			return err
+		}},
 		{name: "ListAgentTokensByCreator", run: func() error {
 			_, err := q.ListAgentTokensByCreator(ctx, ListAgentTokensByCreatorParams{CreatorUserID: id, Limit: 10, SortBy: "created_at", SortDir: "desc"})
 			return err
@@ -3288,6 +3310,68 @@ func TestAvailabilityMetricApprovalRequirementQueriesScanRowsAndArgs(t *testing.
 	requireSQLName(t, dbtx.querySQL, "AggregateAgentRunsForWindow")
 	if !aggregateRows.closed || len(aggregates) != 1 || aggregates[0].FailureCount != 2 {
 		t.Fatalf("AggregateAgentRunsForWindow scan = %#v closed=%v", aggregates, aggregateRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(7)}}
+	refreshed, err := q.RefreshAgentMetricSnapshotsForWindow(
+		context.Background(),
+		RefreshAgentMetricSnapshotsForWindowParams{TimeWindow: "24h", Interval: "24 hours"},
+	)
+	if err != nil || refreshed != 7 {
+		t.Fatalf("RefreshAgentMetricSnapshotsForWindow = %d, %v", refreshed, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "RefreshAgentMetricSnapshotsForWindow")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{"24h", "24 hours"}) {
+		t.Fatalf("RefreshAgentMetricSnapshotsForWindow args = %#v", dbtx.queryRowArgs)
+	}
+	for _, fragment := range []string{
+		"INSERT INTO agent_metric_snapshots", "IS DISTINCT FROM", "RETURNING 1",
+		"COUNT(*)::int AS refreshed_count",
+	} {
+		if !strings.Contains(dbtx.queryRowSQL, fragment) {
+			t.Fatalf("RefreshAgentMetricSnapshotsForWindow missing %q: %s", fragment, dbtx.queryRowSQL)
+		}
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(2)}}
+	refreshed, err = q.RefreshAgentMetricSnapshotsForAgentsAndWindow(
+		context.Background(),
+		RefreshAgentMetricSnapshotsForAgentsAndWindowParams{
+			AgentIDs: []uuid.UUID{agentID}, TimeWindow: "7d", Interval: "7 days",
+		},
+	)
+	if err != nil || refreshed != 2 {
+		t.Fatalf("RefreshAgentMetricSnapshotsForAgentsAndWindow = %d, %v", refreshed, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "RefreshAgentMetricSnapshotsForAgentsAndWindow")
+	if !strings.Contains(dbtx.queryRowSQL, "a.id = ANY($1::uuid[])") ||
+		!strings.Contains(dbtx.queryRowSQL, "IS DISTINCT FROM") {
+		t.Fatal("selected Agent metric refresh lost its set/fencing predicates")
+	}
+
+	dbtx.row = fakeRow{values: []any{now}}
+	databaseNow, err := q.AgentMetricDatabaseNow(context.Background())
+	if err != nil || !databaseNow.Equal(now) {
+		t.Fatalf("AgentMetricDatabaseNow = %s, %v", databaseNow, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "AgentMetricDatabaseNow")
+
+	cursorID := uuid.New()
+	changeRows := &fakeRows{rows: [][]any{{now, cursorID, agentID}}}
+	dbtx.queryRows = changeRows
+	changes, err := q.ListAgentMetricChangesAfter(context.Background(), ListAgentMetricChangesAfterParams{
+		CursorTime: now.Add(-time.Minute), CursorID: uuid.Nil, BatchLimit: 1000,
+	})
+	if err != nil || len(changes) != 1 || changes[0].CursorID != cursorID || changes[0].AgentID != agentID {
+		t.Fatalf("ListAgentMetricChangesAfter = %#v, %v", changes, err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListAgentMetricChangesAfter")
+	for _, fragment := range []string{
+		"(e.created_at, e.id) >", "ORDER BY e.created_at, e.id", "JOIN runs r",
+	} {
+		if !strings.Contains(dbtx.querySQL, fragment) {
+			t.Fatalf("ListAgentMetricChangesAfter missing %q: %s", fragment, dbtx.querySQL)
+		}
 	}
 
 	dbtx.row = fakeRow{values: approvalValues}

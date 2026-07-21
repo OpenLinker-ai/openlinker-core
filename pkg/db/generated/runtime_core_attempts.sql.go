@@ -51,6 +51,55 @@ func (q *Queries) CoreAttemptCancellationRequested(ctx context.Context, arg Core
 	return exists, err
 }
 
+const listRequestedCoreAttemptCancellations = `-- name: ListRequestedCoreAttemptCancellations :many
+SELECT r.id AS run_id,
+       a.id AS attempt_id,
+       a.lease_id,
+       a.fencing_token
+FROM runs r
+JOIN run_cancellations c
+  ON c.run_id = r.id
+ AND c.id = r.cancel_request_id
+JOIN run_attempts a
+  ON a.run_id = r.id
+ AND a.id = c.target_attempt_id
+WHERE r.id = ANY($1::uuid[])
+  AND r.runtime_contract_id = 'openlinker.runtime.v2'
+  AND r.status = 'canceled'
+  AND r.dispatch_state = 'terminal'
+  AND c.state IN ('requested', 'delivered', 'stopping')
+  AND a.executor_type IN ('core_http', 'core_mcp')
+  AND a.finished_at IS NULL
+  AND a.outcome IS NULL
+  AND a.result_id IS NULL`
+
+type ListRequestedCoreAttemptCancellationsRow struct {
+	RunID        uuid.UUID `db:"run_id" json:"run_id"`
+	AttemptID    uuid.UUID `db:"attempt_id" json:"attempt_id"`
+	LeaseID      uuid.UUID `db:"lease_id" json:"lease_id"`
+	FencingToken int64     `db:"fencing_token" json:"fencing_token"`
+}
+
+func (q *Queries) ListRequestedCoreAttemptCancellations(
+	ctx context.Context,
+	runIDs []uuid.UUID,
+) ([]ListRequestedCoreAttemptCancellationsRow, error) {
+	rows, err := q.db.Query(ctx, listRequestedCoreAttemptCancellations, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]ListRequestedCoreAttemptCancellationsRow, 0)
+	for rows.Next() {
+		var item ListRequestedCoreAttemptCancellationsRow
+		if err := rows.Scan(&item.RunID, &item.AttemptID, &item.LeaseID, &item.FencingToken); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 const lockCoreRunForExecution = `-- name: LockCoreRunForExecution :one
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now

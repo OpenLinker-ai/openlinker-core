@@ -18,6 +18,7 @@ import (
 
 const (
 	defaultCoreCancellationPollInterval = 2 * time.Second
+	defaultCoreCancellationBatchSize    = 512
 	coreFinalizationTimeout             = 15 * time.Second
 	corePersistenceAttempts             = 3
 	corePersistenceRetryDelay           = 100 * time.Millisecond
@@ -37,7 +38,7 @@ type coreAttemptExecution struct {
 }
 
 type coreAttemptCancellationQueries interface {
-	CoreAttemptCancellationRequested(context.Context, db.CoreAttemptCancellationRequestedParams) (bool, error)
+	ListRequestedCoreAttemptCancellations(context.Context, []uuid.UUID) ([]db.ListRequestedCoreAttemptCancellationsRow, error)
 }
 
 type activeCoreAttempt struct {
@@ -45,15 +46,17 @@ type activeCoreAttempt struct {
 	cancel   context.CancelCauseFunc
 }
 
-// coreAttemptRegistry is process-local acceleration only. The polling loop
-// always returns to PostgreSQL, so Redis loss or a dropped signal cannot make
-// owner cancellation depend on this map.
+// coreAttemptRegistry is process-local acceleration only. One shared fallback
+// coordinator always returns to PostgreSQL, so Redis loss or a dropped signal
+// cannot make owner cancellation depend on this map.
 type coreAttemptRegistry struct {
 	queries   coreAttemptCancellationQueries
 	pollEvery time.Duration
 
 	mu      sync.Mutex
 	entries map[uuid.UUID]map[uuid.UUID]activeCoreAttempt
+	start   sync.Once
+	changed chan struct{}
 }
 
 func newCoreAttemptRegistry(queries coreAttemptCancellationQueries, pollEvery time.Duration) *coreAttemptRegistry {
@@ -63,6 +66,7 @@ func newCoreAttemptRegistry(queries coreAttemptCancellationQueries, pollEvery ti
 	return &coreAttemptRegistry{
 		queries: queries, pollEvery: pollEvery,
 		entries: make(map[uuid.UUID]map[uuid.UUID]activeCoreAttempt),
+		changed: make(chan struct{}, 1),
 	}
 }
 
@@ -85,12 +89,10 @@ func (r *coreAttemptRegistry) register(
 	}
 	byAttempt[execution.identity.AttemptID] = entry
 	r.mu.Unlock()
-
-	pollDone := make(chan struct{})
-	go func() {
-		defer close(pollDone)
-		r.pollCancellation(callCtx, execution.identity, cancel)
-	}()
+	select {
+	case r.changed <- struct{}{}:
+	default:
+	}
 
 	var once sync.Once
 	unregister := func() {
@@ -105,7 +107,6 @@ func (r *coreAttemptRegistry) register(
 			r.mu.Unlock()
 			cancel(nil)
 			deadlineCancel()
-			<-pollDone
 		})
 	}
 	return callCtx, unregister
@@ -126,43 +127,65 @@ func (r *coreAttemptRegistry) cancelRun(runID uuid.UUID) {
 	}
 }
 
-func (r *coreAttemptRegistry) pollCancellation(
-	ctx context.Context,
-	identity RuntimeAttemptIdentity,
-	cancel context.CancelCauseFunc,
-) {
+func (r *coreAttemptRegistry) startCancellationCoordinator(ctx context.Context) {
 	if r == nil || r.queries == nil {
 		return
 	}
-	check := func() bool {
-		queryCtx, queryCancel := context.WithTimeout(ctx, r.pollEvery)
-		defer queryCancel()
-		requested, err := r.queries.CoreAttemptCancellationRequested(queryCtx, db.CoreAttemptCancellationRequestedParams{
-			RunID: identity.RunID, AttemptID: identity.AttemptID,
-			LeaseID: identity.LeaseID, FencingToken: identity.FencingToken,
-		})
-		if err != nil && ctx.Err() == nil {
-			log.Warn().Err(err).Str("run_id", identity.RunID.String()).
-				Msg("runtime core cancellation poll failed")
-		}
-		if requested {
-			cancel(errCoreAttemptOwnerCanceled)
-		}
-		return requested
-	}
-	if check() {
+	r.start.Do(func() {
+		go func() {
+			ticker := time.NewTicker(r.pollEvery)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-r.changed:
+					r.reconcileCancellations(ctx)
+				case <-ticker.C:
+					r.reconcileCancellations(ctx)
+				}
+			}
+		}()
+	})
+}
+
+func (r *coreAttemptRegistry) reconcileCancellations(ctx context.Context) {
+	if r == nil || r.queries == nil || ctx.Err() != nil {
 		return
 	}
-	ticker := time.NewTicker(r.pollEvery)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if check() {
-				return
+	r.mu.Lock()
+	runIDs := make([]uuid.UUID, 0, len(r.entries))
+	for runID := range r.entries {
+		runIDs = append(runIDs, runID)
+	}
+	r.mu.Unlock()
+	if len(runIDs) == 0 {
+		return
+	}
+	for start := 0; start < len(runIDs); start += defaultCoreCancellationBatchSize {
+		end := start + defaultCoreCancellationBatchSize
+		if end > len(runIDs) {
+			end = len(runIDs)
+		}
+		queryCtx, cancel := context.WithTimeout(ctx, r.pollEvery)
+		requested, err := r.queries.ListRequestedCoreAttemptCancellations(queryCtx, runIDs[start:end])
+		cancel()
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Warn().Err(err).Int("active_runs", len(runIDs)).
+					Msg("runtime core cancellation batch reconciliation failed")
 			}
+			return
+		}
+		for _, item := range requested {
+			r.mu.Lock()
+			entry, ok := r.entries[item.RunID][item.AttemptID]
+			r.mu.Unlock()
+			if !ok || entry.identity.LeaseID != item.LeaseID ||
+				entry.identity.FencingToken != item.FencingToken {
+				continue
+			}
+			entry.cancel(errCoreAttemptOwnerCanceled)
 		}
 	}
 }

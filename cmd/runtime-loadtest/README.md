@@ -200,3 +200,31 @@ stage, the first rejected target, the five-minute confirmed stable value, and
 the recommended value after retaining 20% operating headroom. Reaching the
 configured target without a rejected stage is a lower bound, not proof that
 the host cannot accept more connections.
+
+When `-database-url` is set, every capacity stage also reports separate
+`db_connect` and `db_hold` counter deltas. This keeps the one-time attach
+cost separate from the steady idle slope and includes transaction, scan, and
+write deltas for the Runtime/outbox/metric tables. The report subtracts the
+single transaction created by the starting counter snapshot; it does not hide
+health-check or server traffic.
+
+PostgreSQL statistics can become visible just after the final authenticated
+attach has returned. Use `-db-stats-settle` to keep that delayed attach tail in
+`db_connect`, before the `db_hold` snapshot. Capacity health/readiness probes
+remain active during both settle and hold; `-connection-health-sample-interval`
+controls their cadence and defaults to the historical one-second interval.
+
+The existing one-second `pg_stat_activity` sampler is useful for lock
+diagnostics, but it creates observer transactions. Disable it when enforcing a
+strict idle slope:
+
+```bash
+go run ./cmd/runtime-loadtest +  -database-url "$DATABASE_URL" +  -db-activity-sample-interval 0 +  -db-strict-idle-commit-rate 2 +  -db-strict-idle-min-duration 10m +  -connection-capacity +  ...the remaining Runtime flags...
+```
+
+The strict rate is opt-in. It fails when PostgreSQL statistics reset during a
+hold, tracked table statistics are unavailable, or adjusted commits per second
+exceed the configured limit. `-db-strict-idle-min-duration` keeps shorter
+staircase holds as diagnostic samples while applying the hard gate only to a
+hold long enough for the stated acceptance window; its default `0` preserves
+the historical behavior of checking every hold.

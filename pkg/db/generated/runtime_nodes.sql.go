@@ -890,17 +890,22 @@ func (q *Queries) HeartbeatRuntimeNode(ctx context.Context, arg HeartbeatRuntime
 }
 
 const claimRuntimeNodeSlot = `-- name: ClaimRuntimeNodeSlot :one
+-- Reaching this query means the exact Session, Node, credential and Attachment
+-- were locked and validated in the same claim transaction. The authenticated
+-- claim is positive Node activity, so refresh durable liveness here instead of
+-- requiring the periodic PostgreSQL heartbeat that WebSocket Sessions replace
+-- with an advisory Redis lease.
 WITH candidate AS (
     SELECT node_id
     FROM runtime_nodes
     WHERE node_id = $1
       AND status = 'active'
-      AND last_seen_at >= $2
       AND inflight < capacity
     FOR UPDATE SKIP LOCKED
 )
 UPDATE runtime_nodes n
 SET inflight = n.inflight + 1,
+    last_seen_at = clock_timestamp(),
     updated_at = clock_timestamp()
 FROM candidate
 WHERE n.node_id = candidate.node_id
@@ -910,13 +915,8 @@ RETURNING n.node_id, n.display_name, n.device_certificate_serial,
           n.inflight, n.status, n.last_seen_at, n.draining_at, n.revoked_at,
           n.revoke_reason, n.created_at, n.updated_at`
 
-type ClaimRuntimeNodeSlotParams struct {
-	NodeID        uuid.UUID `db:"node_id" json:"node_id"`
-	LastSeenAfter time.Time `db:"last_seen_after" json:"last_seen_after"`
-}
-
-func (q *Queries) ClaimRuntimeNodeSlot(ctx context.Context, arg ClaimRuntimeNodeSlotParams) (RuntimeNode, error) {
-	row := q.db.QueryRow(ctx, claimRuntimeNodeSlot, arg.NodeID, arg.LastSeenAfter)
+func (q *Queries) ClaimRuntimeNodeSlot(ctx context.Context, nodeID uuid.UUID) (RuntimeNode, error) {
+	row := q.db.QueryRow(ctx, claimRuntimeNodeSlot, nodeID)
 	var node RuntimeNode
 	err := scanRuntimeNode(row, &node)
 	return node, err
@@ -1644,6 +1644,12 @@ func (q *Queries) HeartbeatRuntimeSession(ctx context.Context, arg HeartbeatRunt
 }
 
 const claimRuntimeSessionSlot = `-- name: ClaimRuntimeSessionSlot :one
+-- The exact active Session and Attachment are already locked by ClaimOffer.
+-- A claim from that authenticated connection is positive Session activity, so
+-- refresh heartbeat_at atomically with capacity instead of rejecting a healthy
+-- Redis-leased WebSocket because its durable idle heartbeat is intentionally
+-- old. Status, attachment ownership, credential and generation fences remain
+-- authoritative PostgreSQL checks.
 WITH candidate AS (
     SELECT s.runtime_session_id
     FROM runtime_sessions s
@@ -1655,7 +1661,6 @@ WITH candidate AS (
       AND s.agent_id = $2
       AND s.attached_core_instance_id = $3
       AND s.status = 'active'
-      AND s.heartbeat_at >= $4
       AND s.inflight < s.capacity
       AND n.status = 'active'
       AND n.protocol_version = s.protocol_version
@@ -1675,6 +1680,7 @@ WITH candidate AS (
 )
 UPDATE runtime_sessions s
 SET inflight = s.inflight + 1,
+    heartbeat_at = clock_timestamp(),
     updated_at = clock_timestamp()
 FROM candidate
 WHERE s.runtime_session_id = candidate.runtime_session_id
@@ -1689,7 +1695,6 @@ type ClaimRuntimeSessionSlotParams struct {
 	RuntimeSessionID uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`
 	AgentID          uuid.UUID `db:"agent_id" json:"agent_id"`
 	CoreInstanceID   uuid.UUID `db:"core_instance_id" json:"core_instance_id"`
-	HeartbeatAfter   time.Time `db:"heartbeat_after" json:"heartbeat_after"`
 }
 
 func (q *Queries) ClaimRuntimeSessionSlot(ctx context.Context, arg ClaimRuntimeSessionSlotParams) (RuntimeSession, error) {
@@ -1697,7 +1702,6 @@ func (q *Queries) ClaimRuntimeSessionSlot(ctx context.Context, arg ClaimRuntimeS
 		arg.RuntimeSessionID,
 		arg.AgentID,
 		arg.CoreInstanceID,
-		arg.HeartbeatAfter,
 	)
 	var session RuntimeSession
 	err := scanRuntimeSession(row, &session)

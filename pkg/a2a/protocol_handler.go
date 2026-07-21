@@ -1,6 +1,7 @@
 package a2a
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 const a2aTargetAgentIDContextKey = "a2a_target_agent_id"
@@ -833,6 +835,13 @@ func (h *Handler) streamProtocolTask(c echo.Context, userID uuid.UUID, slug, tas
 	if err != nil {
 		return httpx.BadRequest("after_sequence / Last-Event-ID 不是合法整数")
 	}
+	var runSubscription runtime.RunUpdateSubscription
+	if runID, parseErr := uuid.Parse(taskID); parseErr == nil && h.runUpdates != nil && h.runUpdates.Healthy() {
+		runSubscription, _ = h.runUpdates.SubscribeRun(runID)
+		if runSubscription != nil {
+			defer runSubscription.Close()
+		}
+	}
 	res := c.Response()
 	flusher, ok := res.Writer.(http.Flusher)
 	if !ok {
@@ -861,10 +870,23 @@ func (h *Handler) streamProtocolTask(c echo.Context, userID uuid.UUID, slug, tas
 	}
 
 	ctx := c.Request().Context()
-	pollTicker := time.NewTicker(a2aSSEPollInterval)
-	defer pollTicker.Stop()
-	heartbeatTicker := time.NewTicker(a2aSSEHeartbeat)
-	defer heartbeatTicker.Stop()
+	var pollTicker, heartbeatTicker *time.Ticker
+	startPolling := func() {
+		if pollTicker == nil {
+			pollTicker = time.NewTicker(a2aSSEPollInterval)
+			heartbeatTicker = time.NewTicker(a2aSSEHeartbeat)
+		}
+	}
+	defer func() {
+		if pollTicker != nil {
+			pollTicker.Stop()
+			heartbeatTicker.Stop()
+		}
+	}()
+	if runSubscription == nil {
+		startPolling()
+	}
+	nextHeartbeat := time.Now().Add(a2aSSEHeartbeat)
 
 	for {
 		items, terminal, nextSequence, err := h.svc.ListProtocolTaskEvents(ctx, userID, slug, taskID, afterSequence)
@@ -897,15 +919,47 @@ func (h *Handler) streamProtocolTask(c echo.Context, userID uuid.UUID, slug, tas
 			return nil
 		}
 
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-heartbeatTicker.C:
-			if _, err := fmt.Fprint(res.Writer, ": heartbeat\n\n"); err != nil {
+		if runSubscription == nil {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-heartbeatTicker.C:
+				if _, err := fmt.Fprint(res.Writer, ": heartbeat\n\n"); err != nil {
+					return nil
+				}
+				flusher.Flush()
+			case <-pollTicker.C:
+			}
+			continue
+		}
+		for runSubscription != nil {
+			wait := 2 * time.Second
+			if untilHeartbeat := time.Until(nextHeartbeat); untilHeartbeat < wait {
+				wait = untilHeartbeat
+			}
+			if wait <= 0 {
+				if _, err := fmt.Fprint(res.Writer, ": heartbeat\n\n"); err != nil {
+					return nil
+				}
+				flusher.Flush()
+				nextHeartbeat = time.Now().Add(a2aSSEHeartbeat)
+				continue
+			}
+			waitCtx, cancel := context.WithTimeout(ctx, wait)
+			waitErr := runSubscription.Wait(waitCtx)
+			cancel()
+			if waitErr == nil {
+				break
+			}
+			if ctx.Err() != nil {
 				return nil
 			}
-			flusher.Flush()
-		case <-pollTicker.C:
+			if !h.runUpdates.Healthy() || !errors.Is(waitErr, context.DeadlineExceeded) {
+				runSubscription.Close()
+				runSubscription = nil
+				startPolling()
+				break
+			}
 		}
 	}
 }

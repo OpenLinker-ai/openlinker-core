@@ -235,6 +235,7 @@ type runtimeWSConnection struct {
 	sessionPrincipal   RuntimeSessionPrincipal
 	attachmentID       uuid.UUID
 	attached           bool
+	leaseRegistered    bool
 	maintenanceStarted bool
 	connectionID       string
 	reportedReason     RuntimeTransportReason
@@ -374,6 +375,20 @@ func (c *runtimeWSConnection) run() {
 		return
 	}
 	c.sessionPrincipal = principal
+	if c.controller.dependencies.SessionLeases != nil {
+		record, leaseErr := runtimeSessionLeaseRecordFromState(state, c.connectionID)
+		if leaseErr == nil {
+			leaseErr = c.controller.dependencies.SessionLeases.Register(record)
+		}
+		if leaseErr != nil {
+			log.Warn().Err(leaseErr).Msg("Runtime websocket Session lease registration failed; using database heartbeat")
+		} else {
+			c.leaseRegistered = true
+			if leaseErr = c.controller.dependencies.SessionLeases.RefreshConnection(c.ctx, c.connectionID); leaseErr != nil {
+				log.Warn().Err(leaseErr).Msg("Runtime websocket initial Session lease refresh failed; using database heartbeat")
+			}
+		}
+	}
 
 	ready, err := runtimeReadyFromSessionState(state)
 	if err != nil {
@@ -506,6 +521,13 @@ func (c *runtimeWSConnection) scheduleMaintenanceContinuation(messageType Runtim
 			default:
 			}
 		}
+	case RuntimeMessageResume:
+		if c.controlPending.Load() {
+			select {
+			case c.controlContinue <- struct{}{}:
+			default:
+			}
+		}
 	}
 }
 
@@ -513,6 +535,7 @@ func (c *runtimeWSConnection) refreshSession() error {
 	if admissionErr := c.controller.runtimeTransportAdmission(RuntimeTransportWebSocket, true); admissionErr != nil {
 		return admissionErr
 	}
+	observeWorker(c.controller.dependencies.Observer, "runtime.websocket.session_principal_query", "maintenance", 1)
 	principal, err := c.controller.dependencies.Sessions.ResolveSessionPrincipal(
 		c.ctx, c.authenticated, c.sessionPrincipal.RuntimeSessionID,
 	)
@@ -687,6 +710,10 @@ func (c *runtimeWSConnection) handleResume(envelope RuntimeEnvelope) error {
 			return err
 		}
 	}
+	// Only a Session that actually resumes durable Attempts can own a pending
+	// cancellation command. Fresh idle Sessions stay database-silent and rely
+	// on the typed run.cancel wake for future work.
+	c.controlPending.Store(true)
 	return nil
 }
 
@@ -721,42 +748,39 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 			case <-c.ctx.Done():
 				return
 			case <-heartbeatTicker.C:
-				if !c.refreshMaintenanceSession() {
+				if !c.heartbeatMaintenanceSession("attach_only") {
 					return
 				}
-				state, err := c.controller.dependencies.Sessions.HeartbeatSession(
-					c.ctx, c.authenticated, c.sessionRequest,
-				)
-				if err != nil {
-					c.closeForError(mapRuntimeHTTPError(err))
-					return
-				}
-				c.controller.refreshPresence(c.ctx, state, c.connectionID)
 			}
 		}
 	}
 
-	policyTicker := time.NewTicker(runtimeWSPolicyCheckInterval)
-	defer policyTicker.Stop()
+	var policyChecks <-chan time.Time
+	var policyTicker *time.Ticker
+	if c.controller.dependencies.TransportPolicy != nil {
+		policyTicker = time.NewTicker(runtimeWSPolicyCheckInterval)
+		policyChecks = policyTicker.C
+		defer policyTicker.Stop()
+	}
 
 	var dispatchWake, controlWake, nodeDispatchWake <-chan struct{}
 	if c.controller.dependencies.WakeHub != nil {
-		dispatchWake = c.controller.dependencies.WakeHub.WaitDispatch(c.sessionPrincipal.AgentID)
+		dispatchWake, _ = c.controller.dependencies.WakeHub.RegisterWebSocketDispatch(
+			c.sessionPrincipal.AgentID,
+		)
+		defer c.controller.dependencies.WakeHub.UnregisterWebSocketDispatch(c.sessionPrincipal.AgentID)
 		controlWake = c.controller.dependencies.WakeHub.WaitControl(c.sessionPrincipal.AgentID)
 		nodeDispatchWake = c.controller.dependencies.WakeHub.WaitNodeDispatch(c.sessionPrincipal.NodeID)
 	}
-	// Ready is a real lifecycle event: probe once for durable work that existed
-	// before this Session attached, then remain database-silent until a typed
-	// signal or an in-flight protocol transition creates more work.
-	c.controlPending.Store(true)
-	c.commandPendingAndSend()
-	c.dispatchPending.Store(true)
-	c.claimPendingAndSend()
+	// Ready completes attachment without a per-Session database probe. New work
+	// arrives through a typed dispatch token; work that predates attachment is
+	// recovered by the bounded process-level PostgreSQL reconciliation pass.
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
-		case <-policyTicker.C:
+		case <-policyChecks:
+			observeWorker(c.controller.dependencies.Observer, "runtime.websocket.policy_check", "ticker", 1)
 			// Policy providers are in-memory. Preserve fast policy cutover without
 			// reintroducing the former per-connection PostgreSQL poll.
 			if admissionErr := c.controller.runtimeTransportAdmission(RuntimeTransportWebSocket, true); admissionErr != nil {
@@ -764,20 +788,11 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 				return
 			}
 		case <-dispatchWake:
-			if c.controller.dependencies.WakeHub != nil {
-				dispatchWake = c.controller.dependencies.WakeHub.WaitDispatch(c.sessionPrincipal.AgentID)
-			}
-			if !c.refreshMaintenanceSession() {
-				return
-			}
 			c.dispatchPending.Store(true)
 			c.claimPendingAndSend()
 		case <-controlWake:
 			if c.controller.dependencies.WakeHub != nil {
 				controlWake = c.controller.dependencies.WakeHub.WaitControl(c.sessionPrincipal.AgentID)
-			}
-			if !c.refreshMaintenanceSession() {
-				return
 			}
 			c.controlPending.Store(true)
 			c.commandPendingAndSend()
@@ -791,19 +806,41 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 			}
 			c.claimPendingAndSend()
 		case <-heartbeatTicker.C:
-			if !c.refreshMaintenanceSession() {
+			if !c.heartbeatMaintenanceSession("ticker") {
 				return
 			}
-			state, err := c.controller.dependencies.Sessions.HeartbeatSession(
-				c.ctx, c.authenticated, c.sessionRequest,
-			)
-			if err != nil {
-				c.closeForError(mapRuntimeHTTPError(err))
-				return
-			}
-			c.controller.refreshPresence(c.ctx, state, c.connectionID)
 		}
 	}
+}
+
+func (c *runtimeWSConnection) heartbeatMaintenanceSession(reason string) bool {
+	if c.leaseRegistered && c.controller.dependencies.SessionLeases != nil &&
+		c.controller.dependencies.SessionLeases.HealthyFor(c.connectionID) {
+		observeWorker(c.controller.dependencies.Observer, "runtime.websocket.session_heartbeat", "redis_lease", 1)
+		return true
+	}
+	if !c.refreshMaintenanceSession() {
+		return false
+	}
+	observeWorker(c.controller.dependencies.Observer, "runtime.websocket.session_heartbeat", reason, 1)
+	state, err := c.controller.dependencies.Sessions.HeartbeatSession(
+		c.ctx, c.authenticated, c.sessionRequest,
+	)
+	if err != nil {
+		c.closeForError(mapRuntimeHTTPError(err))
+		return false
+	}
+	c.sessionState = state
+	if c.leaseRegistered && c.controller.dependencies.SessionLeases != nil {
+		record, recordErr := runtimeSessionLeaseRecordFromState(state, c.connectionID)
+		if recordErr == nil && c.controller.dependencies.SessionLeases.UpdatePresence(c.connectionID, record.Presence) {
+			if refreshErr := c.controller.dependencies.SessionLeases.RefreshConnection(c.ctx, c.connectionID); refreshErr == nil {
+				return true
+			}
+		}
+	}
+	c.controller.refreshPresence(c.ctx, state, c.connectionID)
+	return true
 }
 
 func (c *runtimeWSConnection) refreshMaintenanceSession() bool {
@@ -1186,7 +1223,18 @@ func (c *runtimeWSConnection) cleanup() {
 			} else {
 				detached = !state.Replayed
 			}
-			c.controller.removePresence(closeCtx, c.sessionState, c.connectionID)
+			if c.leaseRegistered && c.controller.dependencies.SessionLeases != nil {
+				removed, leaseErr := c.controller.dependencies.SessionLeases.Unregister(
+					closeCtx, c.connectionID, c.attachmentID,
+				)
+				if leaseErr != nil {
+					log.Warn().Err(leaseErr).Msg("Runtime websocket remove Session lease")
+				} else if !removed {
+					c.controller.removePresence(closeCtx, c.sessionState, c.connectionID)
+				}
+			} else {
+				c.controller.removePresence(closeCtx, c.sessionState, c.connectionID)
+			}
 			closeCancel()
 			// This call is deliberately after durable detach/offline evidence.
 			// Lease implementations must use the exact offline cleanup path: only

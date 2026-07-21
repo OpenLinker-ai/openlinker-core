@@ -12,6 +12,7 @@ import (
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 type Handler struct {
@@ -19,6 +20,7 @@ type Handler struct {
 	cardProvider          AgentCardProvider
 	validator             *validator.Validate
 	requiredA2AExtensions []string
+	runUpdates            runtime.RunUpdateSource
 }
 
 type service interface {
@@ -50,6 +52,12 @@ type AgentCardProvider interface {
 
 func (h *Handler) SetAgentCardProvider(provider AgentCardProvider) {
 	h.cardProvider = provider
+}
+
+func (h *Handler) SetRunUpdateSource(source runtime.RunUpdateSource) {
+	if h != nil {
+		h.runUpdates = source
+	}
 }
 
 // Register mounts creator controls and user-visible A2A trace lookup. Runtime

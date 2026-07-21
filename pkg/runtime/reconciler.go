@@ -51,6 +51,16 @@ func NewRuntimeDeadlineReconciler(
 	return &RuntimeDeadlineReconciler{pool: pool, retryPlanner: retryPlanner}
 }
 
+func (r *RuntimeDeadlineReconciler) nextReconcileDue(
+	ctx context.Context,
+) (*time.Time, time.Time, error) {
+	if r == nil || r.pool == nil {
+		return nil, time.Time{}, ErrRuntimeReconcilerNotConfigured
+	}
+	next, err := db.New(r.pool).NextRuntimeReconcileDue(ctx)
+	return next.NextDueAt, next.DatabaseNow, err
+}
+
 type runtimeReconcileDisposition uint8
 
 const (

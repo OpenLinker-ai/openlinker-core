@@ -1736,6 +1736,24 @@ func (r *postgresRuntimeSessionRepository) ListStaleRuntimeSessionCandidates(
 	})
 }
 
+func (r *postgresRuntimeSessionRepository) GetRuntimeSessionReapCandidate(
+	ctx context.Context,
+	runtimeSessionID uuid.UUID,
+) (db.RuntimeSession, time.Time, error) {
+	if r == nil || r.pool == nil || r.queries == nil {
+		return db.RuntimeSession{}, time.Time{}, errors.New("runtime session repository is not configured")
+	}
+	candidate, err := r.queries.GetRuntimeSession(ctx, runtimeSessionID)
+	if err != nil {
+		return db.RuntimeSession{}, time.Time{}, err
+	}
+	var databaseNow time.Time
+	if err = r.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&databaseNow); err != nil {
+		return db.RuntimeSession{}, time.Time{}, err
+	}
+	return candidate, databaseNow, nil
+}
+
 type postgresRuntimeSessionTransaction struct {
 	tx      pgx.Tx
 	queries *db.Queries

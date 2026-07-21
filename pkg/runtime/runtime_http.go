@@ -91,7 +91,9 @@ type RuntimeHTTPDependencies struct {
 	Cancellations       RuntimeCancellationAPI
 	WakeHub             *RuntimeWakeHub
 	Presence            RuntimePresenceStore
+	SessionLeases       *RuntimeSessionLeaseManager
 	AdmissionLimiter    RuntimeAdmissionLimiter
+	Observer            WorkerObserver
 	CoreInstanceID      uuid.UUID
 	// AttachOnly is a release-cutover safety mode. It permits authenticated
 	// Session lifecycle traffic, but never claims Runs or accepts execution
@@ -807,6 +809,7 @@ func (h *RuntimeHTTPController) resolveSession(
 	authenticated AuthenticatedRuntimePrincipal,
 	sessionID uuid.UUID,
 ) (RuntimeSessionPrincipal, error) {
+	observeWorker(h.dependencies.Observer, "runtime.http.session_principal_query", "session", 1)
 	principal, err := h.dependencies.Sessions.ResolveSessionPrincipal(c.Request().Context(), authenticated, sessionID)
 	if err != nil {
 		return RuntimeSessionPrincipal{}, err
@@ -825,6 +828,7 @@ func (h *RuntimeHTTPController) resolveEventResultSession(
 	authenticated AuthenticatedRuntimePrincipal,
 	workerID string,
 ) (RuntimeSessionPrincipal, error) {
+	observeWorker(h.dependencies.Observer, "runtime.http.session_principal_query", "worker", 1)
 	principal, err := h.dependencies.Sessions.ResolveWorkerSessionPrincipal(
 		c.Request().Context(), authenticated, workerID,
 	)
@@ -853,12 +857,14 @@ func (h *RuntimeHTTPController) claimWithWait(
 	// traffic by the number of connected workers.
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
+	reason := "entry"
 	for {
 		var dispatchWake, nodeDispatchWake <-chan struct{}
 		if h.dependencies.WakeHub != nil {
 			dispatchWake = h.dependencies.WakeHub.WaitDispatch(principal.AgentID)
 			nodeDispatchWake = h.dependencies.WakeHub.WaitNodeDispatch(principal.NodeID)
 		}
+		observeWorker(h.dependencies.Observer, "runtime.http.run_claim_query", reason, 1)
 		assignment, err := h.dependencies.Leases.ClaimOffer(ctx, principal)
 		if err != nil || assignment != nil || wait == 0 {
 			return assignment, err
@@ -871,6 +877,7 @@ func (h *RuntimeHTTPController) claimWithWait(
 		case <-dispatchWake:
 		case <-nodeDispatchWake:
 		}
+		reason = "wake"
 	}
 }
 
@@ -883,11 +890,13 @@ func (h *RuntimeHTTPController) pollCommandsWithWait(
 	// the bounded fallback without a 200ms PostgreSQL loop.
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
+	reason := "entry"
 	for {
 		var wake <-chan struct{}
 		if h.dependencies.WakeHub != nil {
 			wake = h.dependencies.WakeHub.WaitControl(principal.AgentID)
 		}
+		observeWorker(h.dependencies.Observer, "runtime.http.command_query", reason, 1)
 		response, err := h.dependencies.Cancellations.PollCommands(ctx, principal)
 		if err != nil || len(response.Commands) > 0 || wait == 0 {
 			return response, err
@@ -899,6 +908,7 @@ func (h *RuntimeHTTPController) pollCommandsWithWait(
 			return response, nil
 		case <-wake:
 		}
+		reason = "wake"
 	}
 }
 

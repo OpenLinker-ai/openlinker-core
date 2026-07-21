@@ -110,6 +110,34 @@ func TestRuntimeAttemptAndCancellationQueries(t *testing.T) {
 	requireSQLName(t, dbtx.queryRowSQL, "CreateRunCancellation")
 }
 
+func TestListRequestedCoreAttemptCancellationsBatchesAndReturnsFencedIdentity(t *testing.T) {
+	runID, attemptID, leaseID := uuid.New(), uuid.New(), uuid.New()
+	dbtx := &fakeDBTX{queryRows: &fakeRows{rows: [][]any{{
+		runID, attemptID, leaseID, int64(7),
+	}}}}
+	queries := New(dbtx)
+	items, err := queries.ListRequestedCoreAttemptCancellations(
+		context.Background(), []uuid.UUID{runID},
+	)
+	if err != nil || len(items) != 1 || items[0].RunID != runID ||
+		items[0].AttemptID != attemptID || items[0].LeaseID != leaseID ||
+		items[0].FencingToken != 7 {
+		t.Fatalf("ListRequestedCoreAttemptCancellations = %#v, %v", items, err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRequestedCoreAttemptCancellations")
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{[]uuid.UUID{runID}}) {
+		t.Fatalf("ListRequestedCoreAttemptCancellations args = %#v", dbtx.queryArgs)
+	}
+	for _, fragment := range []string{
+		"r.id = ANY($1::uuid[])", "a.id = c.target_attempt_id",
+		"a.lease_id", "a.fencing_token", "a.finished_at IS NULL",
+	} {
+		if !strings.Contains(dbtx.querySQL, fragment) {
+			t.Fatalf("ListRequestedCoreAttemptCancellations missing %q: %s", fragment, dbtx.querySQL)
+		}
+	}
+}
+
 func TestResultFinalizationQueries(t *testing.T) {
 	now := time.Date(2026, 7, 11, 8, 30, 0, 0, time.UTC)
 	runID, userID, agentID := uuid.New(), uuid.New(), uuid.New()
@@ -445,6 +473,33 @@ func TestRuntimeOutboxLedgerAndDLQQueries(t *testing.T) {
 		t.Fatalf("ClaimRunEffects = %#v, %v", effects, err)
 	}
 	requireSQLName(t, dbtx.querySQL, "ClaimRunEffects")
+
+	nextDue := now.Add(2 * time.Minute)
+	dbtx.row = fakeRow{values: []any{&nextDue, now}}
+	nextSignal, err := q.NextRuntimeSignalDue(context.Background())
+	if err != nil || nextSignal.NextDueAt == nil || !nextSignal.NextDueAt.Equal(nextDue) ||
+		!nextSignal.DatabaseNow.Equal(now) {
+		t.Fatalf("NextRuntimeSignalDue = %#v, %v", nextSignal, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "NextRuntimeSignalDue")
+	for _, fragment := range []string{"MIN(candidate.next_due_at)", "ORDER BY available_at", "ORDER BY lease_expires_at", "UNION ALL", "clock_timestamp()"} {
+		if !strings.Contains(dbtx.queryRowSQL, fragment) {
+			t.Fatalf("NextRuntimeSignalDue missing %q: %s", fragment, dbtx.queryRowSQL)
+		}
+	}
+
+	dbtx.row = fakeRow{values: []any{&nextDue, now}}
+	nextEffect, err := q.NextRunEffectDue(context.Background())
+	if err != nil || nextEffect.NextDueAt == nil || !nextEffect.NextDueAt.Equal(nextDue) ||
+		!nextEffect.DatabaseNow.Equal(now) {
+		t.Fatalf("NextRunEffectDue = %#v, %v", nextEffect, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "NextRunEffectDue")
+	for _, fragment := range []string{"MIN(candidate.next_due_at)", "attempt_count < max_attempts", "ORDER BY lease_expires_at", "UNION ALL", "clock_timestamp()"} {
+		if !strings.Contains(dbtx.queryRowSQL, fragment) {
+			t.Fatalf("NextRunEffectDue missing %q: %s", fragment, dbtx.queryRowSQL)
+		}
+	}
 
 	dbtx.row = fakeRow{values: effectValues}
 	createdEffect, err := q.CreateRunEffect(context.Background(), CreateRunEffectParams{

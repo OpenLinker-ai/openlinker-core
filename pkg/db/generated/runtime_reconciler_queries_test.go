@@ -13,6 +13,17 @@ import (
 
 func TestRuntimeReconcilerQueriesUseDatabaseClockAndCapacityFirstSkipLocks(t *testing.T) {
 	t.Parallel()
+	for _, fragment := range []string{
+		"WITH database_clock AS MATERIALIZED",
+		"SELECT (SELECT MIN(due_at) FROM eligible) AS next_due_at",
+		"r.dispatch_state = 'offered'",
+		"r.dispatch_state = 'executing'",
+		"r.dispatch_state IN ('pending', 'retry_wait')",
+	} {
+		if !strings.Contains(nextRuntimeReconcileDue, fragment) {
+			t.Fatalf("next reconcile due query missing %q", fragment)
+		}
+	}
 
 	for _, fragment := range []string{
 		"WITH database_clock AS MATERIALIZED",
@@ -118,6 +129,13 @@ func TestRuntimeReconcilerGeneratedScanAndArgumentOrder(t *testing.T) {
 	}}}
 	dbtx := &fakeDBTX{queryRows: rows}
 	queries := New(dbtx)
+	dueAt := now.Add(time.Minute)
+	dbtx.row = fakeRow{values: []any{&dueAt, now}}
+	next, err := queries.NextRuntimeReconcileDue(context.Background())
+	if err != nil || next.NextDueAt == nil || !next.NextDueAt.Equal(dueAt) || next.DatabaseNow != now {
+		t.Fatalf("NextRuntimeReconcileDue = %#v, %v", next, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "NextRuntimeReconcileDue")
 
 	candidates, err := queries.ListDueRuntimeReconcileCandidates(context.Background(), 25)
 	if err != nil || len(candidates) != 1 || candidates[0].RunID != runID ||

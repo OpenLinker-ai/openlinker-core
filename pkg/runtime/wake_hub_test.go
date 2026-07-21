@@ -11,26 +11,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRuntimeWakeHubBroadcastsAndRearms(t *testing.T) {
+func TestRuntimeWakeHubBroadWakeSignalsBothTypedChannels(t *testing.T) {
 	hub := NewRuntimeWakeHub()
 	agentID := uuid.New()
-	first := hub.Wait(agentID)
-	require.Equal(t, first, hub.Wait(agentID))
+	dispatch := hub.Wait(agentID)
+	control := hub.WaitControl(agentID)
+	require.Equal(t, dispatch, hub.Wait(agentID))
 
 	hub.Wake(agentID)
 	select {
-	case <-first:
+	case <-dispatch:
 	case <-time.After(time.Second):
-		t.Fatal("wake did not reach the registered waiter")
+		t.Fatal("wake did not reach the dispatch waiter")
 	}
-
-	second := hub.Wait(agentID)
-	require.NotEqual(t, first, second)
 	select {
-	case <-second:
-		t.Fatal("replacement wake channel was already closed")
-	default:
+	case <-control:
+	case <-time.After(time.Second):
+		t.Fatal("wake did not reach the control waiter")
 	}
+	require.Equal(t, dispatch, hub.Wait(agentID), "dispatch uses a stable coalescing channel")
 }
 
 func TestRuntimeWakeHubSeparatesDispatchAndControl(t *testing.T) {
@@ -63,6 +62,54 @@ func TestRuntimeWakeHubSeparatesDispatchAndControl(t *testing.T) {
 		t.Fatal("control wake reached the dispatch waiter")
 	default:
 	}
+}
+
+func TestRuntimeWakeHubConditionalDispatchWakeDoesNotRegisterRemoteAgent(t *testing.T) {
+	hub := NewRuntimeWakeHub()
+	remoteAgentID := uuid.New()
+	require.False(t, hub.WakeDispatchIfRegistered(remoteAgentID))
+	require.Empty(t, hub.channels)
+
+	localAgentID := uuid.New()
+	dispatch := hub.WaitDispatch(localAgentID)
+	require.True(t, hub.WakeDispatchIfRegistered(localAgentID))
+	select {
+	case <-dispatch:
+	default:
+		t.Fatal("registered local dispatch waiter was not woken")
+	}
+	require.Len(t, hub.channels, 1)
+}
+
+func TestRuntimeWakeHubDispatchWakesOneWaiterAndCoalesces(t *testing.T) {
+	hub := NewRuntimeWakeHub()
+	agentID := uuid.New()
+	first, firstForAgent := hub.RegisterWebSocketDispatch(agentID)
+	second, secondForAgent := hub.RegisterWebSocketDispatch(agentID)
+	require.True(t, firstForAgent)
+	require.False(t, secondForAgent)
+	require.Equal(t, first, second)
+
+	hub.WakeDispatch(agentID)
+	hub.WakeDispatch(agentID)
+	select {
+	case <-first:
+	default:
+		t.Fatal("dispatch token was not delivered")
+	}
+	select {
+	case <-second:
+		t.Fatal("duplicate dispatch hints were not coalesced")
+	default:
+	}
+
+	hub.UnregisterWebSocketDispatch(agentID)
+	_, firstAfterOneDisconnect := hub.RegisterWebSocketDispatch(agentID)
+	require.False(t, firstAfterOneDisconnect)
+	hub.UnregisterWebSocketDispatch(agentID)
+	hub.UnregisterWebSocketDispatch(agentID)
+	_, firstAfterAllDisconnected := hub.RegisterWebSocketDispatch(agentID)
+	require.True(t, firstAfterAllDisconnected)
 }
 
 func TestRuntimeWakeHubScopesCapacityReleaseToNode(t *testing.T) {

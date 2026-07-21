@@ -369,17 +369,22 @@ RETURNING node_id, display_name, device_certificate_serial,
           created_at, updated_at;
 
 -- name: ClaimRuntimeNodeSlot :one
+-- Reaching this query means the exact Session, Node, credential and Attachment
+-- were locked and validated in the same claim transaction. The authenticated
+-- claim is positive Node activity, so refresh durable liveness here instead of
+-- requiring the periodic PostgreSQL heartbeat that WebSocket Sessions replace
+-- with an advisory Redis lease.
 WITH candidate AS (
     SELECT node_id
     FROM runtime_nodes
-    WHERE node_id = $1
+    WHERE node_id = sqlc.arg(node_id)
       AND status = 'active'
-      AND last_seen_at >= $2
       AND inflight < capacity
     FOR UPDATE SKIP LOCKED
 )
 UPDATE runtime_nodes n
 SET inflight = n.inflight + 1,
+    last_seen_at = clock_timestamp(),
     updated_at = clock_timestamp()
 FROM candidate
 WHERE n.node_id = candidate.node_id
@@ -801,6 +806,12 @@ RETURNING runtime_session_id, node_id, agent_id, credential_id, worker_id,
           connected_at, heartbeat_at, disconnected_at, created_at, updated_at;
 
 -- name: ClaimRuntimeSessionSlot :one
+-- The exact active Session and Attachment are already locked by ClaimOffer.
+-- A claim from that authenticated connection is positive Session activity, so
+-- refresh heartbeat_at atomically with capacity instead of rejecting a healthy
+-- Redis-leased WebSocket because its durable idle heartbeat is intentionally
+-- old. Status, attachment ownership, credential and generation fences remain
+-- authoritative PostgreSQL checks.
 WITH candidate AS (
     SELECT s.runtime_session_id
     FROM runtime_sessions s
@@ -812,7 +823,6 @@ WITH candidate AS (
       AND s.agent_id = $2
       AND s.attached_core_instance_id = $3
       AND s.status = 'active'
-      AND s.heartbeat_at >= $4
       AND s.inflight < s.capacity
       AND n.status = 'active'
       AND n.protocol_version = s.protocol_version
@@ -832,6 +842,7 @@ WITH candidate AS (
 )
 UPDATE runtime_sessions s
 SET inflight = s.inflight + 1,
+    heartbeat_at = clock_timestamp(),
     updated_at = clock_timestamp()
 FROM candidate
 WHERE s.runtime_session_id = candidate.runtime_session_id

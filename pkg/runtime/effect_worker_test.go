@@ -51,6 +51,9 @@ type effectWorkerFakeStore struct {
 	delegationCalls  []uuid.UUID
 	runCalls         []uuid.UUID
 	parentEventCalls []db.CreateRunEffectParentEventParams
+	nextDueCalls     int
+	nextDue          db.NextRunEffectDueRow
+	nextDueErr       error
 
 	claimFn       func(int, db.ClaimRunEffectsParams) ([]db.RunEffectOutbox, error)
 	markFn        func(int, db.MarkRunEffectSucceededParams) (db.RunEffectOutbox, error)
@@ -64,6 +67,15 @@ type effectWorkerFakeStore struct {
 
 	reapEffects []db.RunEffectOutbox
 	reapErr     error
+}
+
+func (s *effectWorkerFakeStore) NextRunEffectDue(
+	context.Context,
+) (db.NextRunEffectDueRow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextDueCalls++
+	return s.nextDue, s.nextDueErr
 }
 
 func (s *effectWorkerFakeStore) ClaimRunEffects(

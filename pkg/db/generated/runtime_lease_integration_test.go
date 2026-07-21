@@ -126,18 +126,24 @@ func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
 		q := New(tx)
+		staleAt := time.Now().UTC().Add(-30 * time.Minute)
 		lockRuntimeFixturePrincipal(t, ctx, q, fixture, fixture.sourceSessionID)
-		freshAfter := time.Now().Add(-time.Minute)
-		if _, err := q.ClaimRuntimeSessionSlot(ctx, ClaimRuntimeSessionSlotParams{
+		claimedSession, err := q.ClaimRuntimeSessionSlot(ctx, ClaimRuntimeSessionSlotParams{
 			RuntimeSessionID: fixture.sourceSessionID, AgentID: fixture.agentID,
-			CoreInstanceID: fixture.coreID, HeartbeatAfter: freshAfter,
-		}); err != nil {
+			CoreInstanceID: fixture.coreID,
+		})
+		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := q.ClaimRuntimeNodeSlot(ctx, ClaimRuntimeNodeSlotParams{
-			NodeID: fixture.nodeID, LastSeenAfter: freshAfter,
-		}); err != nil {
+		if !claimedSession.HeartbeatAt.After(staleAt) {
+			t.Fatalf("authenticated claim did not refresh Session liveness: %s", claimedSession.HeartbeatAt)
+		}
+		claimedNode, err := q.ClaimRuntimeNodeSlot(ctx, fixture.nodeID)
+		if err != nil {
 			t.Fatal(err)
+		}
+		if !claimedNode.LastSeenAt.After(staleAt) {
+			t.Fatalf("authenticated claim did not refresh Node liveness: %s", claimedNode.LastSeenAt)
 		}
 
 		candidate, err := q.LockNextClaimableRuntimeRunForAgent(ctx, fixture.agentID)
@@ -463,7 +469,8 @@ func insertRuntimeLeaseFixture(t *testing.T, ctx context.Context, pool *pgxpool.
 			     runtime_contract_id, runtime_contract_digest, features,
 			     capacity, last_seen_at
 			 ) VALUES ($1, 'Runtime Lease Test', $2, $3, 'test-v2', 2,
-			           'openlinker.runtime.v2', $4, $5, 2, clock_timestamp())`,
+			           'openlinker.runtime.v2', $4, $5, 2,
+			           clock_timestamp() - INTERVAL '30 minutes')`,
 			[]any{f.nodeID, f.certificateSerial, f.thumbprint, runtimeContractDigest, runtimeRequiredFeatures},
 		},
 		{
@@ -471,9 +478,10 @@ func insertRuntimeLeaseFixture(t *testing.T, ctx context.Context, pool *pgxpool.
 			     runtime_session_id, node_id, agent_id, credential_id, worker_id,
 			     session_epoch, device_certificate_serial, node_version,
 			     protocol_version, runtime_contract_id, runtime_contract_digest,
-			     features, capacity, attached_core_instance_id
+			     features, capacity, attached_core_instance_id, heartbeat_at
 			 ) VALUES ($1, $2, $3, $4, $5, 1, $6, 'test-v2', 2,
-			           'openlinker.runtime.v2', $7, $8, 2, $9)`,
+			           'openlinker.runtime.v2', $7, $8, 2, $9,
+			           clock_timestamp() - INTERVAL '30 minutes')`,
 			[]any{f.sourceSessionID, f.nodeID, f.agentID, f.tokenID, f.workerID, f.certificateSerial, runtimeContractDigest, runtimeRequiredFeatures, f.coreID},
 		},
 		{
