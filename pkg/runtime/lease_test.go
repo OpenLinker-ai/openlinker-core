@@ -29,8 +29,8 @@ func TestRuntimeLeaseClaimUsesGlobalLockAndCapacityOrder(t *testing.T) {
 	require.NotEqual(t, assigned.AttemptIdentity.AttemptID, assigned.AttemptIdentity.LeaseID)
 	require.Equal(t, map[string]any{"prompt": "hello"}, assigned.Input)
 	require.Equal(t, map[string]any{"trace": "a"}, assigned.Metadata)
-	require.Equal(t, fixture.databaseNow.Add(-fixture.service.config.HeartbeatTTL), fixture.tx.sessionSlotParams.HeartbeatAfter)
-	require.Equal(t, fixture.tx.sessionSlotParams.HeartbeatAfter, fixture.tx.nodeSlotParams.LastSeenAfter)
+	require.Equal(t, fixture.principal.RuntimeSessionID, fixture.tx.sessionSlotParams.RuntimeSessionID)
+	require.Equal(t, fixture.principal.NodeID, fixture.tx.nodeSlotID)
 	require.Equal(t, fixture.principal.CoreInstanceID, fixture.tx.mirrorOfferParams.CoreInstanceID)
 	require.Equal(t, int32(1), fixture.tx.sessionInflight)
 	require.Equal(t, int32(1), fixture.tx.nodeInflight)
@@ -481,7 +481,7 @@ type runtimeLeaseTransactionFake struct {
 	candidateErr error
 
 	sessionSlotParams db.ClaimRuntimeSessionSlotParams
-	nodeSlotParams    db.ClaimRuntimeNodeSlotParams
+	nodeSlotID        uuid.UUID
 	sessionInflight   int32
 	nodeInflight      int32
 	nodeSlotErr       error
@@ -601,9 +601,9 @@ func (f *runtimeLeaseTransactionFake) ClaimRuntimeSessionSlot(_ context.Context,
 	return db.RuntimeSession{RuntimeSessionID: f.principal.RuntimeSessionID, Inflight: f.sessionInflight}, nil
 }
 
-func (f *runtimeLeaseTransactionFake) ClaimRuntimeNodeSlot(_ context.Context, params db.ClaimRuntimeNodeSlotParams) (db.RuntimeNode, error) {
+func (f *runtimeLeaseTransactionFake) ClaimRuntimeNodeSlot(_ context.Context, nodeID uuid.UUID) (db.RuntimeNode, error) {
 	f.call("claim_node_slot")
-	f.nodeSlotParams = params
+	f.nodeSlotID = nodeID
 	if f.nodeSlotErr != nil {
 		return db.RuntimeNode{}, f.nodeSlotErr
 	}

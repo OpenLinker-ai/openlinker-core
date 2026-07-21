@@ -130,6 +130,34 @@ func TestRuntimeSignalRetryDelayIsBounded(t *testing.T) {
 	require.Equal(t, 2*time.Second, runtimeSignalRetryDelay(cfg, 10_000))
 }
 
+func TestRuntimeSignalOutboxWorkerObserverMarksStartupWithoutChangingStop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	observed := make(chan WorkerObservation, 1)
+	done := make(chan struct{})
+	go func() {
+		StartRuntimeSignalOutboxWorker(ctx, &RuntimeSignalOutboxWorker{}, RuntimeSignalOutboxWorkerConfig{
+			Observer: WorkerObserverFunc(func(observation WorkerObservation) {
+				observed <- observation
+				cancel()
+			}),
+		})
+		close(done)
+	}()
+	select {
+	case observation := <-observed:
+		require.Equal(t, WorkerObservation{
+			Category: "runtime.signal_outbox.claim", Reason: "startup", BatchSize: 64,
+		}, observation)
+	case <-time.After(time.Second):
+		t.Fatal("runtime signal observer was not called")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runtime signal worker did not stop after observer canceled context")
+	}
+}
+
 type runtimeSignalOutboxStoreFake struct {
 	claimed    []db.RuntimeSignalOutbox
 	claimErr   error

@@ -11,6 +11,7 @@ import (
 
 	a2apb "github.com/OpenLinker-ai/openlinker-core/pkg/a2a/pb"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	coreruntime "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/google/uuid"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
@@ -29,6 +30,13 @@ type GRPCServer struct {
 	cardProvider AgentCardProvider
 	auth         GRPCAuthenticator
 	pollInterval time.Duration
+	runUpdates   coreruntime.RunUpdateSource
+}
+
+func (s *GRPCServer) SetRunUpdateSource(source coreruntime.RunUpdateSource) {
+	if s != nil {
+		s.runUpdates = source
+	}
 }
 
 func NewGRPCServer(svc service, cardProvider AgentCardProvider, auth GRPCAuthenticator) *GRPCServer {
@@ -362,6 +370,13 @@ func requireGRPCA2AVersion(ctx context.Context) error {
 }
 
 func (s *GRPCServer) streamTask(ctx context.Context, send func(*a2apb.StreamResponse) error, userID uuid.UUID, slug string, taskID string, initial *A2ATask) error {
+	var runSubscription coreruntime.RunUpdateSubscription
+	if runID, err := uuid.Parse(taskID); err == nil && s.runUpdates != nil && s.runUpdates.Healthy() {
+		runSubscription, _ = s.runUpdates.SubscribeRun(runID)
+		if runSubscription != nil {
+			defer runSubscription.Close()
+		}
+	}
 	maxStateOrder := -1
 	if initial != nil {
 		if initial.ResponseMessage != nil {
@@ -375,8 +390,20 @@ func (s *GRPCServer) streamTask(ctx context.Context, send func(*a2apb.StreamResp
 			return nil
 		}
 	}
-	ticker := time.NewTicker(s.pollInterval)
-	defer ticker.Stop()
+	var ticker *time.Ticker
+	startPolling := func() {
+		if ticker == nil {
+			ticker = time.NewTicker(s.pollInterval)
+		}
+	}
+	defer func() {
+		if ticker != nil {
+			ticker.Stop()
+		}
+	}()
+	if runSubscription == nil {
+		startPolling()
+	}
 	var afterSequence int32
 	for {
 		events, terminal, nextSequence, err := s.svc.ListProtocolTaskEvents(ctx, userID, slug, taskID, afterSequence)
@@ -403,10 +430,27 @@ func (s *GRPCServer) streamTask(ctx context.Context, send func(*a2apb.StreamResp
 		if terminal {
 			return nil
 		}
-		select {
-		case <-ctx.Done():
+		if runSubscription == nil {
+			select {
+			case <-ctx.Done():
+				return status.FromContextError(ctx.Err()).Err()
+			case <-ticker.C:
+			}
+			continue
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		waitErr := runSubscription.Wait(waitCtx)
+		cancel()
+		if waitErr == nil {
+			continue
+		}
+		if ctx.Err() != nil {
 			return status.FromContextError(ctx.Err()).Err()
-		case <-ticker.C:
+		}
+		if !s.runUpdates.Healthy() || !errors.Is(waitErr, context.DeadlineExceeded) {
+			runSubscription.Close()
+			runSubscription = nil
+			startPolling()
 		}
 	}
 }

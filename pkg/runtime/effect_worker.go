@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/eventwake"
 )
 
 const (
@@ -170,12 +171,14 @@ const (
 	defaultRunEffectWorkerInterval      = time.Second
 	defaultRunEffectWorkerLeaseDuration = 30 * time.Second
 	defaultRunEffectWorkerBatchSize     = int32(16)
+	runEffectWorkerWakeTopic            = "work.run_effect.available"
 )
 
 type RunEffectWorkerConfig struct {
 	Interval      time.Duration
 	LeaseDuration time.Duration
 	BatchSize     int32
+	Observer      WorkerObserver
 }
 
 func normalizeRunEffectWorkerConfig(cfg RunEffectWorkerConfig) RunEffectWorkerConfig {
@@ -209,6 +212,10 @@ type runEffectStore interface {
 	GetRunDelegationByChild(context.Context, uuid.UUID) (db.RunDelegation, error)
 	GetRunByID(context.Context, uuid.UUID) (db.Run, error)
 	CreateRunEffectParentEvent(context.Context, db.CreateRunEffectParentEventParams) (db.RunEvent, error)
+}
+
+type runEffectNextDueStore interface {
+	NextRunEffectDue(context.Context) (db.NextRunEffectDueRow, error)
 }
 
 type RunEffectWorker struct {
@@ -542,17 +549,115 @@ func StartRunEffectWorker(
 	}
 }
 
+// StartRunEffectWorkerWithWake preserves the legacy worker as the degraded
+// path. While LISTEN is healthy, a topic notification, the earliest durable
+// due timestamp, or the 60-second reconciliation pass is the only reason to
+// query/claim Effects.
+func StartRunEffectWorkerWithWake(
+	ctx context.Context,
+	svc *Service,
+	cfg RunEffectWorkerConfig,
+	source eventwake.TopicSource,
+) {
+	if svc == nil || svc.effectWorker == nil {
+		return
+	}
+	cfg = normalizeRunEffectWorkerConfig(cfg)
+	worker := svc.effectWorker
+	if source == nil {
+		StartRunEffectWorker(ctx, svc, cfg)
+		return
+	}
+	if _, ok := worker.queries.(runEffectNextDueStore); !ok {
+		StartRunEffectWorker(ctx, svc, cfg)
+		return
+	}
+
+	log.Info().
+		Dur("fallback_interval", cfg.Interval).
+		Dur("lease_duration", cfg.LeaseDuration).
+		Int32("batch_size", cfg.BatchSize).
+		Msg("runtime: event-driven run effect worker started")
+	defer log.Info().Msg("runtime: event-driven run effect worker stopped")
+
+	for ctx.Err() == nil {
+		if !eventWakeSourceHealthy(source) {
+			runEffectWorkerPass(ctx, worker, cfg, "degraded_poll")
+			if !waitWorkerFallbackInterval(ctx, cfg.Interval) {
+				return
+			}
+			continue
+		}
+
+		subscription, err := source.SubscribeTopic(runEffectWorkerWakeTopic)
+		if err != nil {
+			runEffectWorkerPass(ctx, worker, cfg, "degraded_poll")
+			if !waitWorkerFallbackInterval(ctx, cfg.Interval) {
+				return
+			}
+			continue
+		}
+		if !eventWakeSourceHealthy(source) {
+			subscription.Close()
+			continue
+		}
+		err = eventwake.RunScheduler(ctx, subscription, eventwake.SchedulerConfig{
+			ReconcileInterval: time.Minute,
+			ErrorRetry:        cfg.Interval,
+			HealthCheck:       cfg.Interval,
+			Healthy:           func() bool { return eventWakeSourceHealthy(source) },
+		}, func(runCtx context.Context, reason string) (eventwake.SchedulerResult, error) {
+			if passErr := runEffectWorkerPass(runCtx, worker, cfg, reason); passErr != nil {
+				return eventwake.SchedulerResult{}, passErr
+			}
+			return worker.nextDueSchedule(runCtx)
+		})
+		subscription.Close()
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil && !errors.Is(err, eventwake.ErrWakeSourceDegraded) {
+			log.Warn().Err(err).Msg("runtime: run effect event scheduler stopped; polling fallback enabled")
+		}
+	}
+}
+
 func runEffectWorkerTick(
 	ctx context.Context,
 	worker *RunEffectWorker,
 	cfg RunEffectWorkerConfig,
 ) {
+	_ = runEffectWorkerPass(ctx, worker, cfg, "tick")
+}
+
+func runEffectWorkerPass(
+	ctx context.Context,
+	worker *RunEffectWorker,
+	cfg RunEffectWorkerConfig,
+	reason string,
+) error {
+	observeWorker(cfg.Observer, "runtime.run_effect.claim", reason, int(cfg.BatchSize))
 	processed, err := worker.ProcessOnce(ctx, cfg)
 	if err != nil {
 		log.Warn().Err(err).Msg("runtime: run effect worker tick failed")
-		return
+		return err
 	}
 	if processed > 0 {
 		log.Debug().Int("processed", processed).Msg("runtime: run effects processed")
 	}
+	return nil
+}
+
+func (w *RunEffectWorker) nextDueSchedule(
+	ctx context.Context,
+) (eventwake.SchedulerResult, error) {
+	store, ok := w.queries.(runEffectNextDueStore)
+	if !ok {
+		return eventwake.SchedulerResult{}, errors.New("run effect next-due query is not configured")
+	}
+	next, err := store.NextRunEffectDue(ctx)
+	if err != nil {
+		return eventwake.SchedulerResult{}, fmt.Errorf("read next run effect due time: %w", err)
+	}
+	return databaseDueSchedule(next.NextDueAt, next.DatabaseNow), nil
 }

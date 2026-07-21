@@ -1038,6 +1038,21 @@ func TestWorkflowRetryRerunWaitAndClaimedRunErrorEdges(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "runID") {
 		t.Fatalf("waitForRuntimeRunCompletion nil runID error = %v", err)
 	}
+	var waitObservations []runtimemod.WorkerObservation
+	waitSvc := &Service{runtime: &workflowRuntimeFake{getRunResponse: &runtimemod.RunResponse{
+		RunID: runID.String(), Status: runtimeRunStatusSuccess,
+	}}}
+	waitSvc.SetWorkerObserver(runtimemod.WorkerObserverFunc(func(observation runtimemod.WorkerObservation) {
+		waitObservations = append(waitObservations, observation)
+	}))
+	if _, err = waitSvc.waitForRuntimeRunCompletion(context.Background(), userID, runID); err != nil {
+		t.Fatalf("waitForRuntimeRunCompletion terminal error = %v", err)
+	}
+	if !reflect.DeepEqual(waitObservations, []runtimemod.WorkerObservation{{
+		Category: "workflow.child_run.query", Reason: "poll", BatchSize: 1,
+	}}) {
+		t.Fatalf("workflow wait observations = %#v", waitObservations)
+	}
 
 	claimedBadInput := db.WorkflowRun{
 		ID:           runID,

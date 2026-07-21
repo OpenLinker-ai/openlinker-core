@@ -31,6 +31,13 @@ func TestCoreAttemptRegistryFallsBackToDatabasePoll(t *testing.T) {
 	queries := &coreCancellationPollFake{}
 	registry := newCoreAttemptRegistry(queries, 10*time.Millisecond)
 	execution := testCoreAttemptExecution()
+	queries.rows = []db.ListRequestedCoreAttemptCancellationsRow{{
+		RunID: execution.identity.RunID, AttemptID: execution.identity.AttemptID,
+		LeaseID: execution.identity.LeaseID, FencingToken: execution.identity.FencingToken,
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	registry.startCancellationCoordinator(ctx)
 	callCtx, unregister := registry.register(context.Background(), execution)
 	queries.requested.Store(true)
 
@@ -42,6 +49,47 @@ func TestCoreAttemptRegistryFallsBackToDatabasePoll(t *testing.T) {
 	}
 	require.Greater(t, queries.calls.Load(), int32(0))
 	unregister()
+}
+
+func TestCoreAttemptRegistryBatchesCancellationFallback(t *testing.T) {
+	queries := &coreCancellationPollFake{}
+	registry := newCoreAttemptRegistry(queries, time.Second)
+	executions := []coreAttemptExecution{testCoreAttemptExecution(), testCoreAttemptExecution()}
+	contexts := make([]context.Context, 0, len(executions))
+	for _, execution := range executions {
+		callCtx, unregister := registry.register(context.Background(), execution)
+		defer unregister()
+		contexts = append(contexts, callCtx)
+		queries.rows = append(queries.rows, db.ListRequestedCoreAttemptCancellationsRow{
+			RunID: execution.identity.RunID, AttemptID: execution.identity.AttemptID,
+			LeaseID: execution.identity.LeaseID, FencingToken: execution.identity.FencingToken,
+		})
+	}
+	queries.requested.Store(true)
+	registry.reconcileCancellations(context.Background())
+	require.Equal(t, int32(1), queries.calls.Load(), "one coordinator pass must issue one query")
+	for _, callCtx := range contexts {
+		require.ErrorIs(t, context.Cause(callCtx), errCoreAttemptOwnerCanceled)
+	}
+}
+
+func TestCoreAttemptRegistryRejectsStaleBatchIdentity(t *testing.T) {
+	queries := &coreCancellationPollFake{requested: atomic.Bool{}}
+	registry := newCoreAttemptRegistry(queries, time.Second)
+	execution := testCoreAttemptExecution()
+	callCtx, unregister := registry.register(context.Background(), execution)
+	defer unregister()
+	queries.rows = []db.ListRequestedCoreAttemptCancellationsRow{{
+		RunID: execution.identity.RunID, AttemptID: execution.identity.AttemptID,
+		LeaseID: uuid.New(), FencingToken: execution.identity.FencingToken,
+	}}
+	queries.requested.Store(true)
+	registry.reconcileCancellations(context.Background())
+	select {
+	case <-callCtx.Done():
+		t.Fatal("stale lease identity canceled the active Core Attempt")
+	default:
+	}
 }
 
 func TestCoreAttemptRegistryCapsCancellationPollAtTwoSeconds(t *testing.T) {
@@ -63,12 +111,16 @@ func testCoreAttemptExecution() coreAttemptExecution {
 type coreCancellationPollFake struct {
 	requested atomic.Bool
 	calls     atomic.Int32
+	rows      []db.ListRequestedCoreAttemptCancellationsRow
 }
 
-func (f *coreCancellationPollFake) CoreAttemptCancellationRequested(
+func (f *coreCancellationPollFake) ListRequestedCoreAttemptCancellations(
 	context.Context,
-	db.CoreAttemptCancellationRequestedParams,
-) (bool, error) {
+	[]uuid.UUID,
+) ([]db.ListRequestedCoreAttemptCancellationsRow, error) {
 	f.calls.Add(1)
-	return f.requested.Load(), nil
+	if !f.requested.Load() {
+		return nil, nil
+	}
+	return append([]db.ListRequestedCoreAttemptCancellationsRow(nil), f.rows...), nil
 }

@@ -25,12 +25,13 @@ var allowedRuntimeSignalTypes = map[string]struct{}{
 }
 
 type runtimeWakeChannels struct {
-	dispatch chan struct{}
-	control  chan struct{}
+	dispatch  chan struct{}
+	control   chan struct{}
+	wsWaiters int
 }
 
 func newRuntimeWakeChannels() *runtimeWakeChannels {
-	return &runtimeWakeChannels{dispatch: make(chan struct{}), control: make(chan struct{})}
+	return &runtimeWakeChannels{dispatch: make(chan struct{}, 1), control: make(chan struct{})}
 }
 
 // RuntimeWakeHub broadcasts typed, edge-triggered hints to all local HTTP Pull
@@ -69,6 +70,37 @@ func (h *RuntimeWakeHub) WaitDispatch(agentID uuid.UUID) <-chan struct{} {
 	return channels.dispatch
 }
 
+// RegisterWebSocketDispatch registers one persistent WebSocket waiter and
+// reports whether it is the first live Session for this Agent. Dispatch hints
+// are coalesced tokens, so one waiter claims durable work without waking every
+// sibling Session on the same Agent.
+func (h *RuntimeWakeHub) RegisterWebSocketDispatch(agentID uuid.UUID) (<-chan struct{}, bool) {
+	if h == nil || agentID == uuid.Nil {
+		return nil, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	channels := h.channels[agentID]
+	if channels == nil {
+		channels = newRuntimeWakeChannels()
+		h.channels[agentID] = channels
+	}
+	channels.wsWaiters++
+	return channels.dispatch, channels.wsWaiters == 1
+}
+
+func (h *RuntimeWakeHub) UnregisterWebSocketDispatch(agentID uuid.UUID) {
+	if h == nil || agentID == uuid.Nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	channels := h.channels[agentID]
+	if channels != nil && channels.wsWaiters > 0 {
+		channels.wsWaiters--
+	}
+}
+
 func (h *RuntimeWakeHub) WaitControl(agentID uuid.UUID) <-chan struct{} {
 	if h == nil || agentID == uuid.Nil {
 		return nil
@@ -91,6 +123,26 @@ func (h *RuntimeWakeHub) Wake(agentID uuid.UUID) {
 
 func (h *RuntimeWakeHub) WakeDispatch(agentID uuid.UUID) {
 	h.wake(agentID, true, false)
+}
+
+// WakeDispatchIfRegistered wakes only an Agent that has registered a local
+// waiter. Recovery scans use this form so a durable backlog owned by another
+// Core cannot grow this process's in-memory wake map.
+func (h *RuntimeWakeHub) WakeDispatchIfRegistered(agentID uuid.UUID) bool {
+	if h == nil || agentID == uuid.Nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	channels := h.channels[agentID]
+	if channels == nil {
+		return false
+	}
+	select {
+	case channels.dispatch <- struct{}{}:
+	default:
+	}
+	return true
 }
 
 func (h *RuntimeWakeHub) WakeControl(agentID uuid.UUID) {
@@ -138,8 +190,10 @@ func (h *RuntimeWakeHub) wake(agentID uuid.UUID, dispatch, control bool) {
 		h.channels[agentID] = channels
 	}
 	if dispatch {
-		close(channels.dispatch)
-		channels.dispatch = make(chan struct{})
+		select {
+		case channels.dispatch <- struct{}{}:
+		default:
+		}
 	}
 	if control {
 		close(channels.control)
@@ -157,9 +211,11 @@ func (h *RuntimeWakeHub) WakeAll() {
 	}
 	h.mu.Lock()
 	for _, channels := range h.channels {
-		close(channels.dispatch)
+		select {
+		case channels.dispatch <- struct{}{}:
+		default:
+		}
 		close(channels.control)
-		channels.dispatch = make(chan struct{})
 		channels.control = make(chan struct{})
 	}
 	for nodeID, wake := range h.nodes {

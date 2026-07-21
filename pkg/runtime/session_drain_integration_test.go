@@ -73,7 +73,6 @@ UPDATE runtime_nodes SET inflight = 0 WHERE node_id = $1`, fixture.nodeID)
 				RuntimeSessionID: fixture.sessionID,
 				AgentID:          fixture.agentID,
 				CoreInstanceID:   fixture.coreInstanceID,
-				HeartbeatAfter:   time.Now().Add(-time.Minute),
 			})
 			claims <- claimResult{claimed: claimErr == nil, err: claimErr}
 		}()
@@ -158,7 +157,6 @@ FROM runtime_sessions WHERE runtime_session_id = $1`, fixture.sessionID).Scan(
 		RuntimeSessionID: fixture.sessionID,
 		AgentID:          fixture.agentID,
 		CoreInstanceID:   fixture.coreInstanceID,
-		HeartbeatAfter:   time.Now().Add(-time.Minute),
 	})
 	require.ErrorIs(t, err, pgx.ErrNoRows, "no claim may cross the committed drain fence")
 }

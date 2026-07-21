@@ -25,6 +25,7 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/delivery"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/discovery"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/eventwake"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/externalexecution"
 	corellm "github.com/OpenLinker-ai/openlinker-core/pkg/llm"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/mcp"
@@ -44,6 +45,7 @@ type Options struct {
 	UserProvisioner             auth.UserProvisioner
 	CoreInstanceID              uuid.UUID
 	RuntimeSignalBus            runtime.RuntimeSignalBus
+	AgentMetricDirtyStore       agent.AgentMetricDirtyStore
 	ExternalExecutionAuthorizer *externalexecution.Authorizer
 }
 
@@ -71,6 +73,10 @@ type Services struct {
 	Delivery          *delivery.Service
 	UserToken         *usertoken.Service
 	UserStatus        auth.UserStatusChecker
+	// EventWake is advisory infrastructure. PostgreSQL remains authoritative;
+	// selected wait paths use it only to decide when to re-read database facts.
+	EventWake  *eventwake.Infrastructure
+	RunUpdates *runtime.RunUpdateHub
 }
 
 // RegisterRuntimeAttachOnly mounts the deliberately narrow Core surface used
@@ -140,6 +146,8 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	}
 	userDashHandler := userdash.NewHandler(userdash.NewService(pool))
 	userDashHandler.RegisterCoreAPI(api, hybridMw)
+	eventWake := configureEventWake(rootCtx, pool)
+	runUpdates := runtime.NewRunUpdateHub(eventWake)
 
 	agentMarketSvc := agent.NewMarketService(pool)
 	agentMarketHandler := agent.NewMarketHandler(agentMarketSvc)
@@ -166,7 +174,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	metricSvc := agent.NewMetricService(pool)
 	metricHandler := agent.NewMetricHandler(metricSvc)
 	metricHandler.Register(api)
-	agent.StartMetricWorker(rootCtx, metricSvc, approvalSvc)
+	agent.StartMetricWorkerWithDirty(
+		rootCtx, metricSvc, approvalSvc, opts.AgentMetricDirtyStore, eventWake,
+	)
 
 	e.GET("/skill/publish-agent", agent.ServePublishAgentSkill)
 	e.GET("/skill/consume-agent", agent.ServeConsumeAgentSkill)
@@ -178,7 +188,11 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 
 	runtimeSvc := runtime.NewService(pool, cfg)
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
-	configureRuntime(rootCtx, runtimeHandler, runtimeSvc, pool, cfg, opts.CoreInstanceID, opts.RuntimeSignalBus)
+	runtimeHandler.SetRunUpdateSource(runUpdates)
+	configureRuntime(
+		rootCtx, runtimeHandler, runtimeSvc, pool, cfg, opts.CoreInstanceID,
+		opts.RuntimeSignalBus, eventWake,
+	)
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
 	runtimeHandler.RegisterAgentRuntime(api)
 	if opts.AdminMiddleware != nil {
@@ -218,6 +232,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	a2aSvc.SetTaskCallbackManager(webhookSvc)
 	a2aHandler := a2a.NewHandler(a2aSvc)
 	a2aHandler.SetAgentCardProvider(agentMarketSvc)
+	a2aHandler.SetRunUpdateSource(runUpdates)
 	a2aHandler.Register(api, jwtMiddleware, hybridMw)
 	a2aHandler.RegisterAgentRuntimeProxy(
 		api,
@@ -226,6 +241,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	configureA2AGRPCAgentCard(cfg, &Services{AgentMarket: agentMarketSvc})
 
 	workflowSvc := workflow.NewService(pool, runtimeSvc)
+	workflowSvc.SetRunUpdateSource(runUpdates)
 	workflowHandler := workflow.NewHandler(workflowSvc)
 	workflowHandler.RegisterProtected(api, hybridMw)
 	externalExecutionSvc := externalexecution.NewService(
@@ -236,7 +252,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	)
 	if opts.ExternalExecutionAuthorizer != nil {
 		externalexecution.NewHandler(externalExecutionSvc, opts.ExternalExecutionAuthorizer).Register(e)
-		go externalexecution.StartCancellationMaintenanceWorker(rootCtx, externalExecutionSvc, time.Second, 100)
+		go externalexecution.StartCancellationMaintenanceWorkerWithWake(
+			rootCtx, externalExecutionSvc, time.Second, 100, eventWake,
+		)
 	}
 	if cfg.WorkflowRunWorkerEnabled {
 		go workflow.StartRunWorker(rootCtx, workflowSvc, workflow.RunWorkerConfig{
@@ -276,7 +294,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	runtimeSvc.SetRunEffectHandlers(webhookSvc, deliverySvc)
 	if pool != nil {
 		go delivery.StartWorker(rootCtx, deliverySvc)
-		go runtime.StartRunEffectWorker(rootCtx, runtimeSvc, runtime.RunEffectWorkerConfig{})
+		go runtime.StartRunEffectWorkerWithWake(
+			rootCtx, runtimeSvc, runtime.RunEffectWorkerConfig{}, eventWake,
+		)
 	}
 
 	return &Services{
@@ -298,7 +318,35 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 		Delivery:          deliverySvc,
 		UserToken:         userTokenSvc,
 		UserStatus:        userStatusChecker,
+		EventWake:         eventWake,
+		RunUpdates:        runUpdates,
 	}
+}
+
+func configureEventWake(rootCtx context.Context, pool *pgxpool.Pool) *eventwake.Infrastructure {
+	if pool == nil {
+		return nil
+	}
+	infrastructure, err := eventwake.NewPostgresInfrastructure(
+		pool,
+		[]string{"openlinker_run_v1", "openlinker_work_v1", "openlinker_external_v1"},
+		[]string{
+			"run.changed",
+			"external_execution.changed",
+			"work.runtime_signal.available",
+			"work.run_effect.available",
+		},
+	)
+	if err != nil {
+		log.Error().Str("reason", "event_wake_configuration_invalid").Msg("event wake shadow listener is disabled")
+		return nil
+	}
+	go func() {
+		if err := infrastructure.Run(rootCtx); err != nil {
+			log.Error().Str("reason", "event_wake_listener_stopped").Msg("event wake shadow listener stopped")
+		}
+	}()
+	return infrastructure
 }
 
 func newAuthService(pool *pgxpool.Pool, cfg *config.Config) *auth.Service {
@@ -401,6 +449,7 @@ func configureRuntime(
 	cfg *config.Config,
 	coreInstanceID uuid.UUID,
 	signalBus runtime.RuntimeSignalBus,
+	eventWake eventwake.TopicSource,
 ) {
 	if handler == nil || runtimeService == nil || pool == nil || cfg == nil {
 		return
@@ -410,6 +459,7 @@ func configureRuntime(
 		return
 	}
 	runtimeService.ConfigureCoreRuntime(coreInstanceID)
+	runtimeService.StartCoreAttemptCancellationCoordinator(rootCtx)
 	sessions := runtime.NewRuntimeSessionService(pool, coreInstanceID)
 	verifier := runtime.NewDBRuntimeNodeCredentialVerifier(pool)
 	cancellations := runtime.NewRuntimeCancellationCoordinator(pool)
@@ -431,11 +481,34 @@ func configureRuntime(
 
 	wakeHub := runtime.NewRuntimeWakeHub()
 	var presence runtime.RuntimePresenceStore
+	var sessionLeases *runtime.RuntimeSessionLeaseManager
 	if provider, ok := signalBus.(runtime.RuntimePresenceStoreProvider); ok {
 		presence, err = provider.RuntimePresenceStore()
 		if err != nil {
 			log.Warn().Err(err).Msg("agent runtime Redis presence is unavailable")
 		}
+	}
+	if provider, ok := signalBus.(runtime.RuntimeSessionLeaseStoreProvider); ok {
+		leaseStore, leaseErr := provider.RuntimeSessionLeaseStore()
+		if leaseErr != nil {
+			log.Warn().Err(leaseErr).Msg("agent runtime Redis Session leases are unavailable; using database heartbeat")
+		} else {
+			sessionLeases, leaseErr = runtime.NewRuntimeSessionLeaseManager(
+				leaseStore,
+				runtime.RuntimeSessionLeaseManagerConfig{},
+			)
+			if leaseErr != nil {
+				log.Warn().Err(leaseErr).Msg("agent runtime Session lease manager is unavailable; using database heartbeat")
+				sessionLeases = nil
+			}
+		}
+	}
+	if sessionLeases != nil {
+		go func() {
+			if leaseErr := sessionLeases.Run(rootCtx); leaseErr != nil && rootCtx.Err() == nil {
+				log.Error().Err(leaseErr).Msg("agent runtime Session lease manager stopped")
+			}
+		}()
 	}
 	handler.SetRuntimeDependencies(runtime.RuntimeHTTPDependencies{
 		TokenValidator:      runtimeService,
@@ -449,22 +522,34 @@ func configureRuntime(
 		Cancellations:       cancellations,
 		WakeHub:             wakeHub,
 		Presence:            presence,
+		SessionLeases:       sessionLeases,
 		AdmissionLimiter:    runtime.NewRuntimeAdmissionLimiter(runtime.RuntimeAdmissionLimitConfig{}),
 		CoreInstanceID:      coreInstanceID,
 	})
-	go runtime.StartRuntimeMaintenanceWorker(
+	go runtime.StartRuntimeMaintenanceWorkerWithWake(
 		rootCtx,
 		runtime.NewRuntimeDeadlineReconciler(pool, nil),
 		cancellations,
-		runtime.NewRuntimeSessionReaper(pool, runtime.DefaultRuntimeLeaseConfig().HeartbeatTTL),
+		runtime.NewRuntimeSessionReaperWithLeases(
+			pool,
+			runtime.DefaultRuntimeLeaseConfig().HeartbeatTTL,
+			sessionLeases,
+		),
 		runtime.RuntimeMaintenanceWorkerConfig{},
+		eventWake,
+	)
+	go runtime.StartRuntimeDispatchWakeReconciler(
+		rootCtx,
+		runtime.NewRuntimeDispatchWakeReconciler(pool, wakeHub),
+		runtime.RuntimeDispatchWakeReconcilerConfig{},
 	)
 	if signalBus != nil {
 		go runtime.StartRuntimeSignalSubscriber(rootCtx, signalBus, coreInstanceID, wakeHub, runtimeService)
-		go runtime.StartRuntimeSignalOutboxWorker(
+		go runtime.StartRuntimeSignalOutboxWorkerWithWake(
 			rootCtx,
 			runtime.NewRuntimeSignalOutboxWorker(db.New(pool), signalBus),
 			runtime.RuntimeSignalOutboxWorkerConfig{},
+			eventWake,
 		)
 	}
 }

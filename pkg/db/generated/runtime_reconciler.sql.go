@@ -9,6 +9,73 @@ import (
 	"github.com/google/uuid"
 )
 
+const nextRuntimeReconcileDue = `-- name: NextRuntimeReconcileDue :one
+WITH database_clock AS MATERIALIZED (
+    SELECT clock_timestamp() AS database_now
+), eligible AS (
+    SELECT CASE r.dispatch_state
+               WHEN 'offered' THEN LEAST(
+                   a.offer_expires_at,
+                   r.dispatch_deadline_at,
+                   r.run_deadline_at
+               )
+               WHEN 'executing' THEN LEAST(
+                   a.lease_expires_at,
+                   a.attempt_deadline_at,
+                   r.run_deadline_at
+               )
+               ELSE LEAST(r.dispatch_deadline_at, r.run_deadline_at)
+           END AS due_at
+    FROM runs r
+    LEFT JOIN run_attempts a
+      ON a.run_id = r.id
+     AND a.id = r.active_attempt_id
+    WHERE r.runtime_contract_id = 'openlinker.runtime.v2'
+      AND r.status = 'running'
+      AND r.cancel_request_id IS NULL
+      AND (
+          (
+              r.dispatch_state = 'offered'
+              AND r.active_attempt_id IS NOT NULL
+              AND a.id = r.active_attempt_id
+              AND a.finished_at IS NULL
+              AND a.outcome IS NULL
+              AND a.result_id IS NULL
+              AND a.accepted_at IS NULL
+              AND a.attempt_no IS NULL
+          )
+          OR (
+              r.dispatch_state = 'executing'
+              AND r.active_attempt_id IS NOT NULL
+              AND a.id = r.active_attempt_id
+              AND a.finished_at IS NULL
+              AND a.outcome IS NULL
+              AND a.result_id IS NULL
+              AND a.accepted_at IS NOT NULL
+              AND a.attempt_no IS NOT NULL
+          )
+          OR (
+              r.dispatch_state IN ('pending', 'retry_wait')
+              AND r.active_attempt_id IS NULL
+          )
+      )
+)
+SELECT (SELECT MIN(due_at) FROM eligible) AS next_due_at,
+       database_clock.database_now
+FROM database_clock`
+
+type NextRuntimeReconcileDueRow struct {
+	NextDueAt   *time.Time `db:"next_due_at" json:"next_due_at"`
+	DatabaseNow time.Time  `db:"database_now" json:"database_now"`
+}
+
+func (q *Queries) NextRuntimeReconcileDue(ctx context.Context) (NextRuntimeReconcileDueRow, error) {
+	row := q.db.QueryRow(ctx, nextRuntimeReconcileDue)
+	var i NextRuntimeReconcileDueRow
+	err := row.Scan(&i.NextDueAt, &i.DatabaseNow)
+	return i, err
+}
+
 const listDueRuntimeReconcileCandidates = `-- name: ListDueRuntimeReconcileCandidates :many
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now

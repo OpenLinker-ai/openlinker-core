@@ -204,6 +204,9 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		services.Delivery == nil || services.UserToken == nil {
 		t.Fatalf("Register returned incomplete services: %#v", services)
 	}
+	if services.EventWake != nil {
+		t.Fatal("Register configured event wake without a PostgreSQL pool")
+	}
 
 	routes := routeSet(e)
 	expected := []string{

@@ -135,3 +135,31 @@ func (q *Queries) CountPendingRuntimeSignals(ctx context.Context) (int32, error)
 	err := q.db.QueryRow(ctx, countPendingRuntimeSignals).Scan(&count)
 	return count, err
 }
+
+const nextRuntimeSignalDue = `-- name: NextRuntimeSignalDue :one
+SELECT MIN(candidate.next_due_at)::timestamptz AS next_due_at,
+    clock_timestamp() AS database_now
+FROM (
+    (SELECT available_at AS next_due_at
+     FROM runtime_signal_outbox
+     WHERE status = 'pending'
+     ORDER BY available_at
+     LIMIT 1)
+    UNION ALL
+    (SELECT lease_expires_at AS next_due_at
+     FROM runtime_signal_outbox
+     WHERE status = 'processing'
+     ORDER BY lease_expires_at
+     LIMIT 1)
+) AS candidate`
+
+type NextRuntimeSignalDueRow struct {
+	NextDueAt   *time.Time `db:"next_due_at" json:"next_due_at"`
+	DatabaseNow time.Time  `db:"database_now" json:"database_now"`
+}
+
+func (q *Queries) NextRuntimeSignalDue(ctx context.Context) (NextRuntimeSignalDueRow, error) {
+	var row NextRuntimeSignalDueRow
+	err := q.db.QueryRow(ctx, nextRuntimeSignalDue).Scan(&row.NextDueAt, &row.DatabaseNow)
+	return row, err
+}

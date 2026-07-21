@@ -66,6 +66,16 @@ func newRuntimeCancellationCoordinator(
 	return &RuntimeCancellationCoordinator{repository: repository, commandDeadline: commandDeadline}
 }
 
+func (c *RuntimeCancellationCoordinator) nextReapDue(
+	ctx context.Context,
+) (*time.Time, time.Time, error) {
+	if c == nil || c.repository == nil || c.commandDeadline < time.Millisecond || c.commandDeadline > time.Hour {
+		return nil, time.Time{}, errRuntimeCancellationNotReady
+	}
+	next, err := c.repository.nextReapDue(ctx, c.commandDeadline.Milliseconds())
+	return next.NextDueAt, next.DatabaseNow, err
+}
+
 // CancelOwnedRun atomically creates cancellation evidence and the complete
 // public canceled terminal fact. Any active Attempt remains unfinished until
 // its executor has actually stopped (or the deadline reaper records an
@@ -1133,6 +1143,7 @@ func mapRuntimeCancellationPrincipalError(err error) error {
 
 type runtimeCancellationRepository interface {
 	WithTransaction(context.Context, func(runtimeCancellationTransaction) error) error
+	nextReapDue(context.Context, int64) (db.NextRuntimeCancellationReapDueRow, error)
 }
 
 type runtimeCancellationTransaction interface {
@@ -1179,6 +1190,16 @@ func (r *postgresRuntimeCancellationRepository) WithTransaction(
 		queries := db.New(tx)
 		return fn(&postgresRuntimeCancellationTransaction{queries: queries})
 	})
+}
+
+func (r *postgresRuntimeCancellationRepository) nextReapDue(
+	ctx context.Context,
+	commandDeadlineMS int64,
+) (db.NextRuntimeCancellationReapDueRow, error) {
+	if r == nil || r.pool == nil {
+		return db.NextRuntimeCancellationReapDueRow{}, errRuntimeCancellationNotReady
+	}
+	return db.New(r.pool).NextRuntimeCancellationReapDue(ctx, commandDeadlineMS)
 }
 
 type postgresRuntimeCancellationTransaction struct {

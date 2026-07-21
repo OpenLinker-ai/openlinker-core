@@ -25,9 +25,11 @@ import (
 
 // Service persists workflows and executes Agent nodes through the runtime service.
 type Service struct {
-	queries *db.Queries
-	pool    *pgxpool.Pool
-	runtime workflowRuntime
+	queries    *db.Queries
+	pool       *pgxpool.Pool
+	runtime    workflowRuntime
+	observer   runtime.WorkerObserver
+	runUpdates runtime.RunUpdateSource
 }
 
 type workflowRuntime interface {
@@ -71,6 +73,22 @@ func normalizeRunStatus(status string) string {
 
 func NewService(pool *pgxpool.Pool, runtimeSvc *runtime.Service) *Service {
 	return &Service{queries: db.New(pool), pool: pool, runtime: runtimeSvc}
+}
+
+// SetWorkerObserver installs payload-free test instrumentation only.
+func (s *Service) SetWorkerObserver(observer runtime.WorkerObserver) {
+	if s != nil {
+		s.observer = observer
+	}
+}
+
+// SetRunUpdateSource enables advisory event-driven child Run waits. The Run
+// row remains authoritative and the legacy polling path remains the degraded
+// fallback when the shared listener is unavailable.
+func (s *Service) SetRunUpdateSource(source runtime.RunUpdateSource) {
+	if s != nil {
+		s.runUpdates = source
+	}
 }
 
 func (s *Service) CreateWorkflow(ctx context.Context, userID uuid.UUID, req *CreateWorkflowRequest) (*WorkflowResponse, error) {
@@ -1375,7 +1393,26 @@ func (s *Service) waitForRuntimeRunCompletion(ctx context.Context, userID, runID
 	if runID == uuid.Nil {
 		return nil, fmt.Errorf("workflow node runID 为空")
 	}
+	if s.runUpdates != nil && s.runUpdates.Healthy() {
+		subscription, err := s.runUpdates.SubscribeRun(runID)
+		if err == nil {
+			defer subscription.Close()
+			return s.waitForRuntimeRunCompletionByEvent(ctx, userID, runID, subscription)
+		}
+	}
+	return s.waitForRuntimeRunCompletionByPolling(ctx, userID, runID)
+}
+
+func (s *Service) waitForRuntimeRunCompletionByPolling(
+	ctx context.Context,
+	userID, runID uuid.UUID,
+) (*runtime.RunResponse, error) {
 	for i := 0; i < workflowNodeRunPollMaxLoops; i += 1 {
+		if s.observer != nil {
+			s.observer.ObserveWorker(runtime.WorkerObservation{
+				Category: "workflow.child_run.query", Reason: "poll", BatchSize: 1,
+			})
+		}
 		childRun, err := s.runtime.GetRun(ctx, userID, runID)
 		if err != nil {
 			return nil, err
@@ -1397,6 +1434,110 @@ func (s *Service) waitForRuntimeRunCompletion(ctx context.Context, userID, runID
 		}
 	}
 	return nil, fmt.Errorf("workflow node run %s did not finish within %s", runID.String(), (workflowNodeRunPollInterval * workflowNodeRunPollMaxLoops))
+}
+
+func (s *Service) waitForRuntimeRunCompletionByEvent(
+	ctx context.Context,
+	userID, runID uuid.UUID,
+	subscription runtime.RunUpdateSubscription,
+) (*runtime.RunResponse, error) {
+	timeout := workflowNodeRunPollInterval * workflowNodeRunPollMaxLoops
+	deadline := time.Now().Add(timeout)
+	reason := "event_initial"
+	for {
+		if s.observer != nil {
+			s.observer.ObserveWorker(runtime.WorkerObservation{
+				Category: "workflow.child_run.query", Reason: reason, BatchSize: 1,
+			})
+		}
+		childRun, err := s.runtime.GetRun(ctx, userID, runID)
+		if err != nil {
+			return nil, err
+		}
+		childRun.Status = normalizeRunStatus(childRun.Status)
+		switch childRun.Status {
+		case runtimeRunStatusSuccess, runtimeRunStatusFailed, runtimeRunStatusTimeout, runtimeRunStatusCanceled:
+			return childRun, nil
+		case runtimeRunStatusRunning, runtimeRunStatusPending:
+		default:
+			return childRun, nil
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("workflow node run %s did not finish within %s", runID.String(), timeout)
+		}
+		healthCheck := 2 * time.Second
+		if remaining < healthCheck {
+			healthCheck = remaining
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, healthCheck)
+		waitErr := subscription.Wait(waitCtx)
+		cancel()
+		if waitErr == nil {
+			reason = "event_wake"
+			continue
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if time.Until(deadline) <= 0 {
+			reason = "deadline_final"
+			continue
+		}
+		if !s.runUpdates.Healthy() {
+			return s.waitForRuntimeRunCompletionByPollingUntil(ctx, userID, runID, deadline, timeout)
+		}
+		if !errors.Is(waitErr, context.DeadlineExceeded) {
+			// Advisory wake failures degrade to the pre-existing database path;
+			// they are not Workflow business failures.
+			return s.waitForRuntimeRunCompletionByPollingUntil(ctx, userID, runID, deadline, timeout)
+		}
+	}
+}
+
+func (s *Service) waitForRuntimeRunCompletionByPollingUntil(
+	ctx context.Context,
+	userID, runID uuid.UUID,
+	deadline time.Time,
+	timeout time.Duration,
+) (*runtime.RunResponse, error) {
+	for time.Now().Before(deadline) {
+		if s.observer != nil {
+			s.observer.ObserveWorker(runtime.WorkerObservation{
+				Category: "workflow.child_run.query", Reason: "degraded_poll", BatchSize: 1,
+			})
+		}
+		childRun, err := s.runtime.GetRun(ctx, userID, runID)
+		if err != nil {
+			return nil, err
+		}
+		childRun.Status = normalizeRunStatus(childRun.Status)
+		switch childRun.Status {
+		case runtimeRunStatusSuccess, runtimeRunStatusFailed, runtimeRunStatusTimeout, runtimeRunStatusCanceled:
+			return childRun, nil
+		case runtimeRunStatusRunning, runtimeRunStatusPending:
+		default:
+			return childRun, nil
+		}
+		wait := workflowNodeRunPollInterval
+		if remaining := time.Until(deadline); remaining < wait {
+			wait = remaining
+		}
+		if wait <= 0 {
+			break
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, fmt.Errorf("workflow node run %s did not finish within %s", runID.String(), timeout)
 }
 
 func (s *Service) GetWorkflowRun(ctx context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {

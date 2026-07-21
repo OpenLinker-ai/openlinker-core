@@ -385,6 +385,15 @@ func runtimeCancellationInt32Pointer(value int32) *int32        { return &value 
 type runtimeCancellationRepositoryFake struct {
 	tx        *runtimeCancellationTransactionFake
 	committed bool
+	nextDue   db.NextRuntimeCancellationReapDueRow
+	nextErr   error
+}
+
+func (r *runtimeCancellationRepositoryFake) nextReapDue(
+	_ context.Context,
+	_ int64,
+) (db.NextRuntimeCancellationReapDueRow, error) {
+	return r.nextDue, r.nextErr
 }
 
 func (r *runtimeCancellationRepositoryFake) WithTransaction(_ context.Context, fn func(runtimeCancellationTransaction) error) error {

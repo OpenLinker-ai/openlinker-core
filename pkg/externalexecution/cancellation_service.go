@@ -279,15 +279,29 @@ func cancellationToResponse(record CancellationRecord) *ExecutionCancellationRes
 // ReconcilePendingCancellations is the maintenance-only mutation path. GET
 // never calls it and therefore remains strictly read-only.
 func (s *Service) ReconcilePendingCancellations(ctx context.Context, limit int) (int, error) {
+	result, err := s.reconcilePendingCancellations(ctx, limit)
+	return result.Completed, err
+}
+
+type cancellationReconcilePass struct {
+	Completed int
+	Pending   bool
+}
+
+func (s *Service) reconcilePendingCancellations(
+	ctx context.Context,
+	limit int,
+) (cancellationReconcilePass, error) {
 	records, err := s.store.ListPendingCancellations(ctx, limit)
 	if err != nil {
-		return 0, err
+		return cancellationReconcilePass{}, err
 	}
-	completed := 0
+	result := cancellationReconcilePass{Pending: len(records) == limit}
 	for _, cancellation := range records {
 		key, err := s.store.GetKey(ctx, cancellation.CallerServiceID, cancellation.ExternalRequestID)
 		if err != nil {
-			return completed, err
+			result.Pending = true
+			return result, err
 		}
 		execution, err := s.store.Get(ctx, cancellation.CallerServiceID, cancellation.ExternalRequestID)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -296,24 +310,29 @@ func (s *Service) ReconcilePendingCancellations(ctx context.Context, limit int) 
 			)
 			_ = executionPtr
 			if advanceErr != nil {
-				return completed, advanceErr
+				result.Pending = true
+				return result, advanceErr
 			}
-			completed++
+			result.Completed++
 			continue
 		}
 		if err != nil {
-			return completed, err
+			result.Pending = true
+			return result, err
 		}
 		principal := &Principal{CallerServiceID: key.CallerServiceID, ActorUserID: key.ActorUserID}
 		_, updated, reconcileErr := s.reconcileExternalCancellation(
 			ctx, principal, cancellation.ExternalRequestID, &execution, cancellation,
 		)
 		if reconcileErr != nil {
+			result.Pending = true
 			continue
 		}
 		if updated.State != "requested" && updated.State != "stopping" {
-			completed++
+			result.Completed++
+		} else {
+			result.Pending = true
 		}
 	}
-	return completed, nil
+	return result, nil
 }

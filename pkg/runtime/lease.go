@@ -172,8 +172,7 @@ func (s *RuntimeLeaseService) ClaimOffer(
 		if gateErr := tx.RequireRuntimeClusterOperation(ctx, RuntimeClusterClaim); gateErr != nil {
 			return gateErr
 		}
-		locked, err := s.lockPrincipal(ctx, tx, principal)
-		if err != nil {
+		if _, err := s.lockPrincipal(ctx, tx, principal); err != nil {
 			return err
 		}
 
@@ -206,22 +205,17 @@ func (s *RuntimeLeaseService) ClaimOffer(
 			return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 		}
 
-		heartbeatAfter := locked.session.DatabaseNow.Add(-s.config.HeartbeatTTL)
 		if _, err = tx.ClaimRuntimeSessionSlot(ctx, db.ClaimRuntimeSessionSlotParams{
 			RuntimeSessionID: principal.RuntimeSessionID,
 			AgentID:          principal.AgentID,
 			CoreInstanceID:   s.coreInstanceID,
-			HeartbeatAfter:   heartbeatAfter,
 		}); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return newRuntimeLeaseError(RuntimeLeaseErrorNodeAtCapacity, err)
 			}
 			return err
 		}
-		if _, err = tx.ClaimRuntimeNodeSlot(ctx, db.ClaimRuntimeNodeSlotParams{
-			NodeID:        principal.NodeID,
-			LastSeenAfter: heartbeatAfter,
-		}); err != nil {
+		if _, err = tx.ClaimRuntimeNodeSlot(ctx, principal.NodeID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return newRuntimeLeaseError(RuntimeLeaseErrorNodeAtCapacity, err)
 			}
@@ -1085,7 +1079,7 @@ type runtimeLeaseTransaction interface {
 	GetExistingUnacceptedRunOfferForSession(context.Context, db.GetExistingUnacceptedRunOfferForSessionParams) (db.GetExistingUnacceptedRunOfferForSessionRow, error)
 	LockNextClaimableRuntimeRunForAgent(context.Context, uuid.UUID) (db.LockNextClaimableRuntimeRunForAgentRow, error)
 	ClaimRuntimeSessionSlot(context.Context, db.ClaimRuntimeSessionSlotParams) (db.RuntimeSession, error)
-	ClaimRuntimeNodeSlot(context.Context, db.ClaimRuntimeNodeSlotParams) (db.RuntimeNode, error)
+	ClaimRuntimeNodeSlot(context.Context, uuid.UUID) (db.RuntimeNode, error)
 	ReleaseRuntimeSessionSlot(context.Context, uuid.UUID) (db.RuntimeSession, error)
 	ReleaseRuntimeNodeSlot(context.Context, uuid.UUID) (db.RuntimeNode, error)
 	CreateRuntimeRunOffer(context.Context, db.CreateRuntimeRunOfferParams) (db.RunAttempt, error)
@@ -1158,8 +1152,8 @@ func (t *postgresRuntimeLeaseTransaction) LockNextClaimableRuntimeRunForAgent(ct
 func (t *postgresRuntimeLeaseTransaction) ClaimRuntimeSessionSlot(ctx context.Context, params db.ClaimRuntimeSessionSlotParams) (db.RuntimeSession, error) {
 	return t.queries.ClaimRuntimeSessionSlot(ctx, params)
 }
-func (t *postgresRuntimeLeaseTransaction) ClaimRuntimeNodeSlot(ctx context.Context, params db.ClaimRuntimeNodeSlotParams) (db.RuntimeNode, error) {
-	return t.queries.ClaimRuntimeNodeSlot(ctx, params)
+func (t *postgresRuntimeLeaseTransaction) ClaimRuntimeNodeSlot(ctx context.Context, nodeID uuid.UUID) (db.RuntimeNode, error) {
+	return t.queries.ClaimRuntimeNodeSlot(ctx, nodeID)
 }
 func (t *postgresRuntimeLeaseTransaction) ReleaseRuntimeSessionSlot(ctx context.Context, id uuid.UUID) (db.RuntimeSession, error) {
 	return t.queries.ReleaseRuntimeSessionSlot(ctx, id)

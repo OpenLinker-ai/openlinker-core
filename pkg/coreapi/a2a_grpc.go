@@ -48,11 +48,13 @@ func StartA2AGRPCServer(rootCtx context.Context, cfg *config.Config, services *S
 		return nil, fmt.Errorf("listen a2a grpc %s: %w", addr, err)
 	}
 	server := grpc.NewServer()
-	a2apb.RegisterA2AServiceServer(server, a2a.NewGRPCServer(
+	a2aServer := a2a.NewGRPCServer(
 		services.A2A,
 		services.AgentMarket,
 		a2a.NewBearerGRPCAuthenticatorWithUserStatus(cfg.JWTSecret, services.UserToken, services.UserStatus),
-	))
+	)
+	a2aServer.SetRunUpdateSource(services.RunUpdates)
+	a2apb.RegisterA2AServiceServer(server, a2aServer)
 
 	serveDone := make(chan error, 1)
 	go func() {

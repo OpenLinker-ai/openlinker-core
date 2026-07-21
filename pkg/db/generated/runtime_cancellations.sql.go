@@ -12,6 +12,64 @@ import (
 	"github.com/google/uuid"
 )
 
+const nextRuntimeCancellationReapDue = `-- name: NextRuntimeCancellationReapDue :one
+WITH database_clock AS MATERIALIZED (
+    SELECT clock_timestamp() AS database_now
+), eligible_attempts AS MATERIALIZED (
+    SELECT id, run_id, executor_type, active_runtime_session_id, node_id,
+           outcome, result_id, slot_acquired_at, slot_released_at
+    FROM run_attempts
+    WHERE finished_at IS NULL
+), eligible AS (
+    SELECT c.requested_at
+           + ($1::bigint * INTERVAL '1 millisecond') AS due_at
+    FROM eligible_attempts a
+    JOIN runs r
+      ON r.id = a.run_id
+    JOIN run_cancellations c
+      ON c.run_id = r.id
+     AND c.id = r.cancel_request_id
+     AND c.target_attempt_id = a.id
+    WHERE r.runtime_contract_id = 'openlinker.runtime.v2'
+      AND r.status = 'canceled'
+      AND r.dispatch_state = 'terminal'
+      AND r.cancel_state = c.state
+      AND a.outcome IS NULL
+      AND (
+          (
+              c.state IN ('requested', 'delivered', 'stopping', 'unsupported', 'failed')
+              AND a.executor_type = 'runtime'
+              AND a.slot_acquired_at IS NOT NULL
+              AND a.slot_released_at IS NULL
+              AND a.active_runtime_session_id IS NOT NULL
+              AND a.node_id IS NOT NULL
+          )
+          OR (
+              c.state IN ('requested', 'delivered', 'stopping')
+              AND a.executor_type IN ('core_http', 'core_mcp')
+              AND a.result_id IS NULL
+          )
+      )
+)
+SELECT (SELECT MIN(due_at) FROM eligible) AS next_due_at,
+       database_clock.database_now
+FROM database_clock`
+
+type NextRuntimeCancellationReapDueRow struct {
+	NextDueAt   *time.Time `db:"next_due_at" json:"next_due_at"`
+	DatabaseNow time.Time  `db:"database_now" json:"database_now"`
+}
+
+func (q *Queries) NextRuntimeCancellationReapDue(
+	ctx context.Context,
+	commandDeadlineMs int64,
+) (NextRuntimeCancellationReapDueRow, error) {
+	row := q.db.QueryRow(ctx, nextRuntimeCancellationReapDue, commandDeadlineMs)
+	var i NextRuntimeCancellationReapDueRow
+	err := row.Scan(&i.NextDueAt, &i.DatabaseNow)
+	return i, err
+}
+
 const lockNextRuntimeCancellationCommandRun = `-- name: LockNextRuntimeCancellationCommandRun :one
 SELECT r.id AS run_id,
        r.agent_id,
