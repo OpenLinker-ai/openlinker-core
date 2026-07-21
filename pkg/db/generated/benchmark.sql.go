@@ -371,8 +371,9 @@ func (q *Queries) ListTopAgentsBySkill(ctx context.Context, arg ListTopAgentsByS
 
 const listAgentsBySkillsWithVerified = `-- name: ListAgentsBySkillsWithVerified :many
 -- RecommendAgentsBySkills 加 verified/availability 加权。Runtime Worker 必须有
--- PostgreSQL 证明的 current-contract ready Session；Agent Token 的使用时间
--- 不是在线性证据。Direct/MCP Agent 仍需 healthy 或成功运行证据。
+-- PostgreSQL 证明的 current-contract ready Session；周期在线性由 Redis Session
+-- lease 与 Runtime reaper 收敛，已被替代的数据库 heartbeat 只用于排序。Agent Token
+-- 的使用时间不是在线性证据。Direct/MCP Agent 仍需 healthy 或成功运行证据。
 -- 排序：命中 skill 数 desc → 可用性 → 最近 Session/成功证据 → verified 数 desc → total_calls desc。
 -- 同时返回 verified_count 让上层决定排序权重。
 SELECT a.id AS agent_id,
@@ -397,7 +398,6 @@ LEFT JOIN LATERAL (
       AND session.status = 'active'
       AND session.attached_core_instance_id IS NOT NULL
       AND session.disconnected_at IS NULL
-      AND session.heartbeat_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
       AND session.protocol_version = 2
       AND session.runtime_contract_id = 'openlinker.runtime.v2'
       AND session.features @> ARRAY[
@@ -413,8 +413,6 @@ LEFT JOIN LATERAL (
       AND node.node_version = session.node_version
       AND node.features @> session.features
       AND session.features @> node.features
-      AND node.last_seen_at IS NOT NULL
-      AND node.last_seen_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
       AND credential.status = 'active_runtime'
       AND credential.revoked_at IS NULL
       AND credential.scopes @> ARRAY['agent:pull']::text[]
@@ -475,13 +473,8 @@ type AgentSkillMatchVerified struct {
 	TotalCalls    int32     `db:"total_calls" json:"total_calls"`
 }
 
-type ListAgentsBySkillsWithVerifiedParams struct {
-	SkillIDs            []string `db:"skill_ids" json:"skill_ids"`
-	RuntimeStaleAfterMs int64    `db:"runtime_stale_after_ms" json:"runtime_stale_after_ms"`
-}
-
-func (q *Queries) ListAgentsBySkillsWithVerified(ctx context.Context, arg ListAgentsBySkillsWithVerifiedParams) ([]AgentSkillMatchVerified, error) {
-	rows, err := q.db.Query(ctx, listAgentsBySkillsWithVerified, arg.SkillIDs, arg.RuntimeStaleAfterMs)
+func (q *Queries) ListAgentsBySkillsWithVerified(ctx context.Context, skillIDs []string) ([]AgentSkillMatchVerified, error) {
+	rows, err := q.db.Query(ctx, listAgentsBySkillsWithVerified, skillIDs)
 	if err != nil {
 		return nil, err
 	}

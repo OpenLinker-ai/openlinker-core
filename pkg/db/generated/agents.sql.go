@@ -289,7 +289,6 @@ LEFT JOIN LATERAL (
       AND session.status IN ('active', 'draining')
       AND session.attached_core_instance_id IS NOT NULL
       AND session.disconnected_at IS NULL
-      AND session.heartbeat_at >= clock_timestamp() - ($10::bigint * INTERVAL '1 millisecond')
       AND session.protocol_version = 2
       AND session.runtime_contract_id = 'openlinker.runtime.v2'
       AND session.features @> ARRAY[
@@ -305,8 +304,6 @@ LEFT JOIN LATERAL (
       AND node.node_version = session.node_version
       AND node.features @> session.features
       AND session.features @> node.features
-      AND node.last_seen_at IS NOT NULL
-      AND node.last_seen_at >= clock_timestamp() - ($10::bigint * INTERVAL '1 millisecond')
       AND credential.status = 'active_runtime'
       AND credential.revoked_at IS NULL
       AND credential.scopes @> ARRAY['agent:pull']::text[]
@@ -395,7 +392,6 @@ type ListAgentsByCreatorPageParams struct {
 	Limit               int32     `db:"limit" json:"limit"`
 	Offset              int32     `db:"offset" json:"offset"`
 	SkillIds            []string  `db:"skill_ids" json:"skill_ids"`
-	RuntimeStaleAfterMs int64     `db:"runtime_stale_after_ms" json:"runtime_stale_after_ms"`
 }
 
 type ListAgentsByCreatorPageRow struct {
@@ -411,7 +407,7 @@ type ListAgentsByCreatorPageRow struct {
 }
 
 func (q *Queries) ListAgentsByCreatorPage(ctx context.Context, arg ListAgentsByCreatorPageParams) ([]ListAgentsByCreatorPageRow, error) {
-	rows, err := q.db.Query(ctx, listAgentsByCreatorPage, arg.CreatorID, arg.Query, arg.Status, arg.Visibility, arg.CertificationStatus, arg.SortBy, arg.Limit, arg.Offset, arg.SkillIds, arg.RuntimeStaleAfterMs)
+	rows, err := q.db.Query(ctx, listAgentsByCreatorPage, arg.CreatorID, arg.Query, arg.Status, arg.Visibility, arg.CertificationStatus, arg.SortBy, arg.Limit, arg.Offset, arg.SkillIds)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +475,6 @@ LEFT JOIN LATERAL (
       AND session.status IN ('active', 'draining')
       AND session.attached_core_instance_id IS NOT NULL
       AND session.disconnected_at IS NULL
-      AND session.heartbeat_at >= clock_timestamp() - ($7::bigint * INTERVAL '1 millisecond')
       AND session.protocol_version = 2
       AND session.runtime_contract_id = 'openlinker.runtime.v2'
       AND session.features @> ARRAY[
@@ -495,8 +490,6 @@ LEFT JOIN LATERAL (
       AND node.node_version = session.node_version
       AND node.features @> session.features
       AND session.features @> node.features
-      AND node.last_seen_at IS NOT NULL
-      AND node.last_seen_at >= clock_timestamp() - ($7::bigint * INTERVAL '1 millisecond')
       AND credential.status = 'active_runtime'
       AND credential.revoked_at IS NULL
       AND credential.scopes @> ARRAY['agent:pull']::text[]
@@ -566,11 +559,10 @@ type CountAgentsByCreatorFilteredParams struct {
 	Visibility          string    `db:"visibility" json:"visibility"`
 	CertificationStatus string    `db:"certification_status" json:"certification_status"`
 	SkillIds            []string  `db:"skill_ids" json:"skill_ids"`
-	RuntimeStaleAfterMs int64     `db:"runtime_stale_after_ms" json:"runtime_stale_after_ms"`
 }
 
 func (q *Queries) CountAgentsByCreatorFiltered(ctx context.Context, arg CountAgentsByCreatorFilteredParams) (int32, error) {
-	row := q.db.QueryRow(ctx, countAgentsByCreatorFiltered, arg.CreatorID, arg.Query, arg.Status, arg.Visibility, arg.CertificationStatus, arg.SkillIds, arg.RuntimeStaleAfterMs)
+	row := q.db.QueryRow(ctx, countAgentsByCreatorFiltered, arg.CreatorID, arg.Query, arg.Status, arg.Visibility, arg.CertificationStatus, arg.SkillIds)
 	var total int32
 	err := row.Scan(&total)
 	return total, err
@@ -610,7 +602,6 @@ LEFT JOIN LATERAL (
       AND session.status IN ('active', 'draining')
       AND session.attached_core_instance_id IS NOT NULL
       AND session.disconnected_at IS NULL
-      AND session.heartbeat_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
       AND session.protocol_version = 2
       AND session.runtime_contract_id = 'openlinker.runtime.v2'
       AND session.features @> ARRAY[
@@ -626,8 +617,6 @@ LEFT JOIN LATERAL (
       AND node.node_version = session.node_version
       AND node.features @> session.features
       AND session.features @> node.features
-      AND node.last_seen_at IS NOT NULL
-      AND node.last_seen_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
       AND credential.status = 'active_runtime'
       AND credential.revoked_at IS NULL
       AND credential.scopes @> ARRAY['agent:pull']::text[]
@@ -651,13 +640,8 @@ type CountAgentBucketsByCreatorRow struct {
 	Pending  int32 `db:"pending" json:"pending"`
 }
 
-type CountAgentBucketsByCreatorParams struct {
-	CreatorID           uuid.UUID `db:"creator_id" json:"creator_id"`
-	RuntimeStaleAfterMs int64     `db:"runtime_stale_after_ms" json:"runtime_stale_after_ms"`
-}
-
-func (q *Queries) CountAgentBucketsByCreator(ctx context.Context, arg CountAgentBucketsByCreatorParams) (CountAgentBucketsByCreatorRow, error) {
-	row := q.db.QueryRow(ctx, countAgentBucketsByCreator, arg.CreatorID, arg.RuntimeStaleAfterMs)
+func (q *Queries) CountAgentBucketsByCreator(ctx context.Context, creatorID uuid.UUID) (CountAgentBucketsByCreatorRow, error) {
+	row := q.db.QueryRow(ctx, countAgentBucketsByCreator, creatorID)
 	var r CountAgentBucketsByCreatorRow
 	err := row.Scan(&r.Total, &r.Online, &r.Public, &r.Unlisted, &r.Private, &r.Pending)
 	return r, err

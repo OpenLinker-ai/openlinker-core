@@ -1803,10 +1803,7 @@ func hasReservedWorkflowAgentTag(tags []string) bool {
 
 func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, requireRuntimeOnline bool) (bool, error) {
 	if agentRow.ConnectionMode == "runtime" {
-		hasActiveSession, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, db.HasActiveRuntimeSessionForAgentParams{
-			AgentID:             agentRow.ID,
-			RuntimeStaleAfterMs: runtime.CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
-		})
+		hasActiveSession, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, agentRow.ID)
 		if err != nil {
 			log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: HasActiveRuntimeSessionForAgent")
 			return false, httpx.Internal("校验 Workflow 的 Runtime Worker 连接状态失败")

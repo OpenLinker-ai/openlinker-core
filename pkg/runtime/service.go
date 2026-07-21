@@ -833,10 +833,7 @@ func (s *Service) createRunningRun(
 			return nil, nil, httpx.Forbidden("Agent endpoint 当前不可调用")
 		}
 	} else {
-		available, checkErr := s.queries.HasActiveRuntimeSessionForAgent(ctx, db.HasActiveRuntimeSessionForAgentParams{
-			AgentID:             agent.ID,
-			RuntimeStaleAfterMs: CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
-		})
+		available, checkErr := s.queries.HasActiveRuntimeSessionForAgent(ctx, agent.ID)
 		if checkErr != nil {
 			log.Error().Err(checkErr).Str("agent_id", agent.ID.String()).Msg("runtime.Run: HasActiveRuntimeSessionForAgent")
 			return nil, nil, httpx.Internal("检查 Runtime Worker 连接状态失败")

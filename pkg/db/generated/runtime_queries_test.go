@@ -1041,13 +1041,13 @@ func TestRuntimeAvailabilityQueriesContainNoEmbeddedFreshnessSeconds(t *testing.
 		}
 	}
 
-	for _, path := range []string{"../queries/runtime_nodes.sql", "../queries/agents.sql", "../queries/benchmark.sql"} {
+	for _, path := range paths {
 		contents, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(contents), "runtime_stale_after_ms") {
-			t.Fatalf("%s does not accept the server-owned Runtime stale threshold", path)
+		if strings.Contains(string(contents), "runtime_stale_after_ms") {
+			t.Fatalf("%s still uses replaced database heartbeat freshness as Runtime liveness", path)
 		}
 	}
 }

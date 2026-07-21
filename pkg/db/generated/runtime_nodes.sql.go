@@ -136,7 +136,6 @@ SELECT EXISTS (
       AND s.status IN ('active', 'draining')
       AND s.attached_core_instance_id IS NOT NULL
       AND s.disconnected_at IS NULL
-      AND s.heartbeat_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
       AND s.protocol_version = 2
       AND s.runtime_contract_id = 'openlinker.runtime.v2'
       AND s.features @> ARRAY[
@@ -152,9 +151,6 @@ SELECT EXISTS (
       AND n.node_version = s.node_version
       AND n.features @> s.features
       AND s.features @> n.features
-      AND n.last_seen_at IS NOT NULL
-      -- Use the same server-owned freshness window for Node and Session.
-      AND n.last_seen_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
       AND t.status = 'active_runtime'
       AND t.revoked_at IS NULL
       AND t.scopes @> ARRAY['agent:pull']::text[]
@@ -168,14 +164,9 @@ SELECT EXISTS (
       )
 )`
 
-type HasActiveRuntimeSessionForAgentParams struct {
-	AgentID             uuid.UUID `db:"agent_id" json:"agent_id"`
-	RuntimeStaleAfterMs int64     `db:"runtime_stale_after_ms" json:"runtime_stale_after_ms"`
-}
-
-func (q *Queries) HasActiveRuntimeSessionForAgent(ctx context.Context, arg HasActiveRuntimeSessionForAgentParams) (bool, error) {
+func (q *Queries) HasActiveRuntimeSessionForAgent(ctx context.Context, agentID uuid.UUID) (bool, error) {
 	var active bool
-	err := q.db.QueryRow(ctx, hasActiveRuntimeSessionForAgent, arg.AgentID, arg.RuntimeStaleAfterMs).Scan(&active)
+	err := q.db.QueryRow(ctx, hasActiveRuntimeSessionForAgent, agentID).Scan(&active)
 	return active, err
 }
 
