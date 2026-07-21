@@ -152,6 +152,40 @@ WHERE binding.credential_id = $1`, credentialID, sessionID).Scan(
 	if _, err = binder.ResolveTokenOnlyRuntimeDeviceIdentity(ctx, otherCredentialID, nodeID); err == nil {
 		t.Fatal("new Token borrowed an existing Node identity")
 	}
+
+	signer, err := runtime.NewRuntimeInvocationSigner("token-only-delegation-test-secret-00000000")
+	if err != nil {
+		t.Fatalf("create Runtime invocation signer: %v", err)
+	}
+	issuedAt := time.Now().UTC().Add(-time.Second)
+	_, invocationToken, err := signer.Issue(runtime.RuntimeInvocationCapability{
+		RunID:            uuid.New(),
+		AttemptID:        uuid.New(),
+		LeaseID:          uuid.New(),
+		FencingToken:     1,
+		AgentID:          agentID,
+		CredentialID:     credentialID,
+		NodeID:           nodeID,
+		WorkerID:         "token-only-integration-worker",
+		RuntimeSessionID: sessionID,
+		IssuedAt:         issuedAt,
+		ExpiresAt:        issuedAt.Add(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("issue Runtime invocation capability: %v", err)
+	}
+	invocationDevice, err := runtime.NewRuntimeDelegationService(pool, nil, signer).
+		ResolveInvocationDevice(ctx, invocationToken)
+	if err != nil {
+		t.Fatalf("resolve token-only Runtime delegation device: %v", err)
+	}
+	if invocationDevice.AuthenticationMode != runtime.RuntimeAuthenticationTokenOnly ||
+		invocationDevice.NodeID != nodeID ||
+		invocationDevice.CertificateSerial != device.CertificateSerial ||
+		invocationDevice.PublicKeyThumbprintSHA256 != device.PublicKeyThumbprintSHA256 ||
+		invocationDevice.CertificateFingerprintSHA256 != device.CertificateFingerprintSHA256 {
+		t.Fatalf("token-only Runtime delegation device = %#v; want %#v", invocationDevice, device)
+	}
 }
 
 func TestTokenOnlyEnrollmentRollsBackWhenSessionAdmissionFails(t *testing.T) {
