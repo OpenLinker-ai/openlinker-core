@@ -119,8 +119,6 @@ LEFT JOIN LATERAL (
       AND session.status IN ('active', 'draining')
       AND session.attached_core_instance_id IS NOT NULL
       AND session.disconnected_at IS NULL
-      AND session.heartbeat_at >= clock_timestamp()
-          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND session.protocol_version = 2
       AND session.runtime_contract_id = 'openlinker.runtime.v2'
       AND session.features @> ARRAY[
@@ -136,9 +134,6 @@ LEFT JOIN LATERAL (
       AND node.node_version = session.node_version
       AND node.features @> session.features
       AND session.features @> node.features
-      AND node.last_seen_at IS NOT NULL
-      AND node.last_seen_at >= clock_timestamp()
-          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND credential.status = 'active_runtime'
       AND credential.revoked_at IS NULL
       AND credential.scopes @> ARRAY['agent:pull']::text[]
@@ -236,8 +231,6 @@ LEFT JOIN LATERAL (
       AND session.status IN ('active', 'draining')
       AND session.attached_core_instance_id IS NOT NULL
       AND session.disconnected_at IS NULL
-      AND session.heartbeat_at >= clock_timestamp()
-          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND session.protocol_version = 2
       AND session.runtime_contract_id = 'openlinker.runtime.v2'
       AND session.features @> ARRAY[
@@ -253,9 +246,6 @@ LEFT JOIN LATERAL (
       AND node.node_version = session.node_version
       AND node.features @> session.features
       AND session.features @> node.features
-      AND node.last_seen_at IS NOT NULL
-      AND node.last_seen_at >= clock_timestamp()
-          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND credential.status = 'active_runtime'
       AND credential.revoked_at IS NULL
       AND credential.scopes @> ARRAY['agent:pull']::text[]
@@ -352,8 +342,6 @@ LEFT JOIN LATERAL (
       AND session.status IN ('active', 'draining')
       AND session.attached_core_instance_id IS NOT NULL
       AND session.disconnected_at IS NULL
-      AND session.heartbeat_at >= clock_timestamp()
-          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND session.protocol_version = 2
       AND session.runtime_contract_id = 'openlinker.runtime.v2'
       AND session.features @> ARRAY[
@@ -369,9 +357,6 @@ LEFT JOIN LATERAL (
       AND node.node_version = session.node_version
       AND node.features @> session.features
       AND session.features @> node.features
-      AND node.last_seen_at IS NOT NULL
-      AND node.last_seen_at >= clock_timestamp()
-          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND credential.status = 'active_runtime'
       AND credential.revoked_at IS NULL
       AND credential.scopes @> ARRAY['agent:pull']::text[]
@@ -573,8 +558,6 @@ WITH active_runtime_agents AS (
     WHERE s.status IN ('active', 'draining')
       AND s.attached_core_instance_id IS NOT NULL
       AND s.disconnected_at IS NULL
-      AND s.heartbeat_at >= clock_timestamp()
-          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND s.protocol_version = 2
       AND s.runtime_contract_id = 'openlinker.runtime.v2'
       AND s.features @> ARRAY[
@@ -596,9 +579,6 @@ WITH active_runtime_agents AS (
       AND n.node_version = s.node_version
       AND n.features @> s.features
       AND s.features @> n.features
-      AND n.last_seen_at IS NOT NULL
-      AND n.last_seen_at >= clock_timestamp()
-          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND t.status = 'active_runtime'
       AND t.revoked_at IS NULL
       AND t.scopes @> ARRAY['agent:pull']::text[]
@@ -760,8 +740,6 @@ WITH active_runtime_agents AS (
     WHERE s.status IN ('active', 'draining')
       AND s.attached_core_instance_id IS NOT NULL
       AND s.disconnected_at IS NULL
-      AND s.heartbeat_at >= clock_timestamp()
-          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND s.protocol_version = 2
       AND s.runtime_contract_id = 'openlinker.runtime.v2'
       AND s.features @> ARRAY[
@@ -783,9 +761,6 @@ WITH active_runtime_agents AS (
       AND n.node_version = s.node_version
       AND n.features @> s.features
       AND s.features @> n.features
-      AND n.last_seen_at IS NOT NULL
-      AND n.last_seen_at >= clock_timestamp()
-          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND t.status = 'active_runtime'
       AND t.revoked_at IS NULL
       AND t.scopes @> ARRAY['agent:pull']::text[]

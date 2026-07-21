@@ -11,9 +11,9 @@
 -- callers must not rely on input-array order or lock a principal first.
 
 -- name: HasActiveRuntimeSessionForAgent :one
--- Availability is PostgreSQL truth. Redis presence is only an advisory hint.
--- The Server passes its strongly typed liveness policy explicitly so SQL
--- cannot silently drift from transport heartbeat behavior.
+-- Durable status, attachment, credential and contract are PostgreSQL truth.
+-- Periodic network liveness is owned by the Redis Session lease and Runtime
+-- reaper; database heartbeat timestamps are not an admission boundary.
 SELECT EXISTS (
     SELECT 1
     FROM runtime_sessions s
@@ -30,8 +30,6 @@ SELECT EXISTS (
       AND s.status IN ('active', 'draining')
       AND s.attached_core_instance_id IS NOT NULL
       AND s.disconnected_at IS NULL
-      AND s.heartbeat_at >= clock_timestamp()
-          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND s.protocol_version = 2
       AND s.runtime_contract_id = 'openlinker.runtime.v2'
       AND s.features @> ARRAY[
@@ -53,10 +51,6 @@ SELECT EXISTS (
       AND n.node_version = s.node_version
       AND n.features @> s.features
       AND s.features @> n.features
-      AND n.last_seen_at IS NOT NULL
-      -- Use the same server-owned freshness window for Node and Session.
-      AND n.last_seen_at >= clock_timestamp()
-          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND t.status = 'active_runtime'
       AND t.revoked_at IS NULL
       AND t.scopes @> ARRAY['agent:pull']::text[]

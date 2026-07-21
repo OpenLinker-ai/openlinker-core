@@ -219,7 +219,7 @@ func TestSetListAndRecommendAgentSkills(t *testing.T) {
 	assert.Equal(t, best, limited[0].AgentID)
 }
 
-func TestRecommendAgentsBySkillsUsesCurrentRuntimeSessionsForAgentNodes(t *testing.T) {
+func TestRecommendAgentsBySkillsUsesDurableRuntimeSessionsAfterDatabaseHeartbeatReplacement(t *testing.T) {
 	pool := setupSkillTestDB(t)
 	svc := skill.NewService(pool)
 	creatorID := insertSkillCreator(t, pool)
@@ -228,7 +228,7 @@ func TestRecommendAgentsBySkillsUsesCurrentRuntimeSessionsForAgentNodes(t *testi
 
 	readyRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-ready-"+uuid.NewString()[:8], 100, nil)
 	tokenOnlyRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-token-only-"+uuid.NewString()[:8], 1000, &recentTokenUse)
-	staleSessionRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-stale-session-"+uuid.NewString()[:8], 500, &recentTokenUse)
+	leaseBackedRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-lease-backed-"+uuid.NewString()[:8], 500, &recentTokenUse)
 	unreachableRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-down-"+uuid.NewString()[:8], 2000, nil)
 	betterDirect := insertSkillAgent(t, pool, creatorID, "skill-direct-better-"+uuid.NewString()[:8], "approved", 1)
 	direct := insertSkillAgent(t, pool, creatorID, "skill-direct-"+uuid.NewString()[:8], "approved", 1)
@@ -236,26 +236,26 @@ func TestRecommendAgentsBySkillsUsesCurrentRuntimeSessionsForAgentNodes(t *testi
 	markSkillAgentAvailability(t, pool, betterDirect, "healthy")
 	markSkillAgentAvailability(t, pool, direct, "healthy")
 	insertSkillRuntimeSession(t, pool, readyRuntime, time.Now())
-	insertSkillRuntimeSession(t, pool, staleSessionRuntime, time.Now().Add(-time.Minute))
+	insertSkillRuntimeSession(t, pool, leaseBackedRuntime, time.Now().Add(-time.Minute))
 	insertSkillRuntimeSession(t, pool, unreachableRuntime, time.Now())
 
 	require.NoError(t, svc.SetAgentSkills(ctx, betterDirect, []string{"data/sql-query", "data/analysis"}))
 	require.NoError(t, svc.SetAgentSkills(ctx, readyRuntime, []string{"data/sql-query"}))
 	require.NoError(t, svc.SetAgentSkills(ctx, tokenOnlyRuntime, []string{"data/sql-query"}))
-	require.NoError(t, svc.SetAgentSkills(ctx, staleSessionRuntime, []string{"data/sql-query"}))
+	require.NoError(t, svc.SetAgentSkills(ctx, leaseBackedRuntime, []string{"data/sql-query"}))
 	require.NoError(t, svc.SetAgentSkills(ctx, unreachableRuntime, []string{"data/sql-query"}))
 	require.NoError(t, svc.SetAgentSkills(ctx, direct, []string{"data/sql-query"}))
 
 	matches, err := svc.RecommendAgentsBySkills(ctx, []string{"data/sql-query", "data/analysis"}, 10)
 	require.NoError(t, err)
-	require.Len(t, matches, 3)
+	require.Len(t, matches, 4)
 	assert.Equal(t, betterDirect, matches[0].AgentID)
 	assert.Equal(t, int32(2), matches[0].MatchCount)
 	assert.Equal(t, direct, matches[1].AgentID)
 	assert.Equal(t, readyRuntime, matches[2].AgentID, "a current ready Session must qualify even when Agent Token last_used_at is NULL")
-	recommendedIDs := []uuid.UUID{matches[0].AgentID, matches[1].AgentID, matches[2].AgentID}
+	assert.Equal(t, leaseBackedRuntime, matches[3].AgentID, "Redis lease and reaper own periodic liveness after database heartbeat replacement")
+	recommendedIDs := []uuid.UUID{matches[0].AgentID, matches[1].AgentID, matches[2].AgentID, matches[3].AgentID}
 	assert.NotContains(t, recommendedIDs, tokenOnlyRuntime, "recent Agent Token use is not online evidence")
-	assert.NotContains(t, recommendedIDs, staleSessionRuntime)
 	assert.NotContains(t, recommendedIDs, unreachableRuntime)
 }
 

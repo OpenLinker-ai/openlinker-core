@@ -15,23 +15,18 @@ import (
 func TestHasActiveRuntimeSessionForAgentUsesDurableSupportedTruth(t *testing.T) {
 	agentID := uuid.New()
 	dbtx := &signalQueryDBTX{row: signalQueryRow{values: []any{true}}}
-	active, err := New(dbtx).HasActiveRuntimeSessionForAgent(context.Background(), HasActiveRuntimeSessionForAgentParams{
-		AgentID:             agentID,
-		RuntimeStaleAfterMs: 45_000,
-	})
+	active, err := New(dbtx).HasActiveRuntimeSessionForAgent(context.Background(), agentID)
 	if err != nil || !active {
 		t.Fatalf("HasActiveRuntimeSessionForAgent = %v, %v", active, err)
 	}
 	requireSignalQueryName(t, dbtx.queryRowSQL, "HasActiveRuntimeSessionForAgent")
-	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, int64(45_000)}) {
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID}) {
 		t.Fatalf("HasActiveRuntimeSessionForAgent args = %#v", dbtx.queryRowArgs)
 	}
 	for _, guard := range []string{
 		"s.status IN ('active', 'draining')",
 		"n.status IN ('active', 'draining')",
 		"n.revoked_at IS NULL",
-		"s.heartbeat_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')",
-		"n.last_seen_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')",
 		"t.status = 'active_runtime'",
 		"t.revoked_at IS NULL",
 		"t.scopes @> ARRAY['agent:pull']::text[]",
@@ -43,6 +38,11 @@ func TestHasActiveRuntimeSessionForAgentUsesDurableSupportedTruth(t *testing.T) 
 	} {
 		if !strings.Contains(dbtx.queryRowSQL, guard) {
 			t.Fatalf("HasActiveRuntimeSessionForAgent missing guard %q:\n%s", guard, dbtx.queryRowSQL)
+		}
+	}
+	for _, obsoleteGuard := range []string{"s.heartbeat_at >=", "n.last_seen_at >="} {
+		if strings.Contains(dbtx.queryRowSQL, obsoleteGuard) {
+			t.Fatalf("HasActiveRuntimeSessionForAgent retains replaced database heartbeat guard %q:\n%s", obsoleteGuard, dbtx.queryRowSQL)
 		}
 	}
 }

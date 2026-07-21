@@ -2051,7 +2051,7 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			return err
 		}},
 		{name: "ListAgentsBySkillsWithVerified", run: func() error {
-			_, err := q.ListAgentsBySkillsWithVerified(ctx, ListAgentsBySkillsWithVerifiedParams{SkillIDs: []string{"data/sql-query"}, RuntimeStaleAfterMs: 45_000})
+			_, err := q.ListAgentsBySkillsWithVerified(ctx, []string{"data/sql-query"})
 			return err
 		}},
 		{name: "ListBenchmarkBatchSummariesByAgent", run: func() error {
@@ -3687,10 +3687,7 @@ func TestTaskAndBenchmarkQueriesScanRowsAndArgs(t *testing.T) {
 
 	matchRows := &fakeRows{rows: [][]any{{agentID, int32(2), int32(1), int32(34)}}}
 	dbtx.queryRows = matchRows
-	matches, err := q.ListAgentsBySkillsWithVerified(context.Background(), ListAgentsBySkillsWithVerifiedParams{
-		SkillIDs:            []string{"data/sql-query", "writing/summary"},
-		RuntimeStaleAfterMs: 45_000,
-	})
+	matches, err := q.ListAgentsBySkillsWithVerified(context.Background(), []string{"data/sql-query", "writing/summary"})
 	if err != nil {
 		t.Fatalf("ListAgentsBySkillsWithVerified error = %v", err)
 	}
@@ -4790,7 +4787,7 @@ func TestPublicMarketCallableQueriesUseDurableRuntimeTruth(t *testing.T) {
 	queries := New(dbtx)
 	_, err := queries.ListPublicAgents(context.Background(), ListPublicAgentsParams{
 		Tags: []string{}, Keyword: "", Limit: 12, Offset: 0,
-		CallableOnly: true, SkillIDs: []string{}, RuntimeStaleAfterMs: 45_000,
+		CallableOnly: true, SkillIDs: []string{},
 	})
 	if err != nil {
 		t.Fatalf("ListPublicAgents: %v", err)
@@ -4799,7 +4796,7 @@ func TestPublicMarketCallableQueriesUseDurableRuntimeTruth(t *testing.T) {
 
 	dbtx.row = fakeRow{values: []any{int32(0)}}
 	_, err = queries.CountPublicAgents(context.Background(), CountPublicAgentsParams{
-		Tags: []string{}, Keyword: "", CallableOnly: true, SkillIDs: []string{}, RuntimeStaleAfterMs: 45_000,
+		Tags: []string{}, Keyword: "", CallableOnly: true, SkillIDs: []string{},
 	})
 	if err != nil {
 		t.Fatalf("CountPublicAgents: %v", err)
@@ -4817,7 +4814,6 @@ func TestPublicMarketCallableQueriesUseDurableRuntimeTruth(t *testing.T) {
 			"s.status IN ('active', 'draining')",
 			"s.attached_core_instance_id IS NOT NULL",
 			"s.disconnected_at IS NULL",
-			"s.heartbeat_at >= clock_timestamp() - (",
 			"s.protocol_version = 2",
 			"s.runtime_contract_id = 'openlinker.runtime.v2'",
 			"'persistent_spool'",
@@ -4829,8 +4825,6 @@ func TestPublicMarketCallableQueriesUseDurableRuntimeTruth(t *testing.T) {
 			"n.node_version = s.node_version",
 			"n.features @> s.features",
 			"s.features @> n.features",
-			"n.last_seen_at >= clock_timestamp() - (",
-			"INTERVAL '1 millisecond'",
 			"t.status = 'active_runtime'",
 			"t.revoked_at IS NULL",
 			"t.scopes @> ARRAY['agent:pull']::text[]",
@@ -4845,8 +4839,14 @@ func TestPublicMarketCallableQueriesUseDurableRuntimeTruth(t *testing.T) {
 				t.Fatalf("%s missing Runtime callable guard %q:\n%s", name, guard, query)
 			}
 		}
-		if strings.Contains(query, "last_runtime_token_used_at < NOW() - INTERVAL '5 minutes'") {
-			t.Fatalf("%s still treats recent token use as Runtime presence:\n%s", name, query)
+		for _, obsoleteGuard := range []string{
+			"s.heartbeat_at >=",
+			"n.last_seen_at >=",
+			"last_runtime_token_used_at < NOW() - INTERVAL '5 minutes'",
+		} {
+			if strings.Contains(query, obsoleteGuard) {
+				t.Fatalf("%s still treats replaced timestamp freshness as Runtime presence: %q\n%s", name, obsoleteGuard, query)
+			}
 		}
 	}
 }
@@ -4865,10 +4865,7 @@ func TestCreatorAgentStatusQueriesUseDurableRuntimeSessionTruth(t *testing.T) {
 			"session.status IN ('active', 'draining')",
 			"session.attached_core_instance_id IS NOT NULL",
 			"session.disconnected_at IS NULL",
-			"session.heartbeat_at >= clock_timestamp() - (",
 			"node.runtime_contract_digest = session.runtime_contract_digest",
-			"node.last_seen_at >= clock_timestamp() - (",
-			"INTERVAL '1 millisecond'",
 			"credential.scopes @> ARRAY['agent:pull']::text[]",
 			"attachment.detached_at IS NULL",
 		} {
@@ -4879,6 +4876,8 @@ func TestCreatorAgentStatusQueriesUseDurableRuntimeSessionTruth(t *testing.T) {
 		for _, forbidden := range []string{
 			"SELECT MAX(last_used_at)",
 			"last_runtime_token_used_at < NOW() - INTERVAL '5 minutes'",
+			"session.heartbeat_at >=",
+			"node.last_seen_at >=",
 		} {
 			if strings.Contains(query, forbidden) {
 				t.Fatalf("%s still treats Agent Token activity as Runtime presence: %q\n%s", name, forbidden, query)

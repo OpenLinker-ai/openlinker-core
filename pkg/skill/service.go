@@ -16,7 +16,6 @@ import (
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
-	coreruntime "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 // MaxSkillsPerAgent 单个 Agent 最多可声明的 skill 数量（PRD：5 个上限）。
@@ -348,7 +347,8 @@ func (s *Service) SetAgentSkills(ctx context.Context, agentID uuid.UUID, skillID
 // 拿到候选 Agent。limit <= 0 时不截断。
 //
 // runtime Agent 复用市场 readiness，并且必须有 PostgreSQL 证明的
-// current-contract ready Session。Agent Token 使用记录不是在线性证据。
+// current-contract ready Session。周期在线性由 Redis Session lease 与 Runtime
+// reaper 收敛；数据库 heartbeat 只用于排序。Agent Token 使用记录不是在线性证据。
 // Direct/MCP Agent 则需要 healthy 或成功运行证据，避免推荐到当前不可执行的供给。
 // 排序：match_count desc → availability → recent Session/success evidence → verified_count desc → total_calls desc → agent_id（稳定）。
 // verified_count 来自 agent_skill_scores（模块 B 写入），把 verified 过的命中数当作信任加权。
@@ -357,10 +357,7 @@ func (s *Service) RecommendAgentsBySkills(ctx context.Context, skillIDs []string
 	if len(cleaned) == 0 {
 		return []AgentMatch{}, nil
 	}
-	rows, err := s.q.ListAgentsBySkillsWithVerified(ctx, db.ListAgentsBySkillsWithVerifiedParams{
-		SkillIDs:            cleaned,
-		RuntimeStaleAfterMs: coreruntime.CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
-	})
+	rows, err := s.q.ListAgentsBySkillsWithVerified(ctx, cleaned)
 	if err != nil {
 		log.Error().Err(err).Msg("skill.RecommendAgentsBySkills: ListAgentsBySkillsWithVerified")
 		return nil, httpx.Internal("查询推荐 Agent 失败")

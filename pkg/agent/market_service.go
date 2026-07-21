@@ -19,7 +19,6 @@ import (
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
-	coreruntime "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 // MarketService 市场（用户侧只读）业务逻辑。
@@ -82,13 +81,12 @@ func (s *MarketService) ListMarketWithSkills(ctx context.Context, tags []string,
 	offset := (page - 1) * size
 
 	rows, err := s.queries.ListPublicAgents(ctx, db.ListPublicAgentsParams{
-		Tags:                tags,
-		Keyword:             keyword,
-		Limit:               size,
-		Offset:              offset,
-		CallableOnly:        callableOnly,
-		SkillIDs:            skillIDs,
-		RuntimeStaleAfterMs: coreruntime.CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
+		Tags:         tags,
+		Keyword:      keyword,
+		Limit:        size,
+		Offset:       offset,
+		CallableOnly: callableOnly,
+		SkillIDs:     skillIDs,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("agent.MarketService.ListMarket: ListPublicAgents")
@@ -96,11 +94,10 @@ func (s *MarketService) ListMarketWithSkills(ctx context.Context, tags []string,
 	}
 
 	total, err := s.queries.CountPublicAgents(ctx, db.CountPublicAgentsParams{
-		Tags:                tags,
-		Keyword:             keyword,
-		CallableOnly:        callableOnly,
-		SkillIDs:            skillIDs,
-		RuntimeStaleAfterMs: coreruntime.CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
+		Tags:         tags,
+		Keyword:      keyword,
+		CallableOnly: callableOnly,
+		SkillIDs:     skillIDs,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("agent.MarketService.ListMarket: CountPublicAgents")
@@ -572,10 +569,7 @@ func (s *MarketService) runtimeAwareAvailability(ctx context.Context, agentID uu
 	if !isQueuedRuntimeConnectionMode(connectionMode) {
 		return availability
 	}
-	hasRuntime, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, db.HasActiveRuntimeSessionForAgentParams{
-		AgentID:             agentID,
-		RuntimeStaleAfterMs: coreruntime.CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
-	})
+	hasRuntime, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, agentID)
 	if err != nil {
 		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.MarketService.runtimeAwareAvailability")
 		return availability
