@@ -3688,11 +3688,11 @@ CREATE TABLE public.user_tokens (
     name text NOT NULL,
     prefix text NOT NULL,
     token_hash text NOT NULL,
-    scopes text[] DEFAULT '{}'::text[] NOT NULL,
-    expires_at timestamp with time zone,
     last_used_at timestamp with time zone,
     revoked_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    scopes text[] DEFAULT ARRAY['agents:run'::text] NOT NULL,
+    expires_at timestamp with time zone,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT user_tokens_name_len CHECK (((char_length(name) >= 1) AND (char_length(name) <= 80))),
     CONSTRAINT user_tokens_prefix_format CHECK ((prefix ~ '^ol_user_[a-f0-9]+$'::text))
@@ -3714,10 +3714,10 @@ CREATE TABLE public.users (
     is_creator boolean DEFAULT false NOT NULL,
     creator_verified boolean DEFAULT false NOT NULL,
     is_admin boolean DEFAULT false NOT NULL,
-    disabled_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone,
+    disabled_at timestamp with time zone,
     CONSTRAINT users_must_have_credential CHECK (((password_hash IS NOT NULL) OR ((oauth_provider IS NOT NULL) AND (oauth_id IS NOT NULL))))
 );
 
@@ -4677,11 +4677,11 @@ ALTER TABLE ONLY public.user_token_core_grants
 
 
 --
--- Name: user_tokens user_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: user_tokens api_keys_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.user_tokens
-    ADD CONSTRAINT user_tokens_pkey PRIMARY KEY (id);
+    ADD CONSTRAINT api_keys_pkey PRIMARY KEY (id);
 
 
 --
@@ -7252,11 +7252,11 @@ ALTER TABLE ONLY public.user_token_core_grants
 
 
 --
--- Name: user_tokens user_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: user_tokens api_keys_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.user_tokens
-    ADD CONSTRAINT user_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+    ADD CONSTRAINT api_keys_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -7560,6 +7560,7 @@ INSERT INTO public.runtime_schema_contracts (
     (75, '075_runtime_wire_compatibility', 'openlinker.runtime.v2', '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9', FALSE),
     (76, '076_runtime_cancellation_terminal_reap', 'openlinker.runtime.v2', '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9', FALSE),
     (77, '077_external_execution_cancellation', 'openlinker.runtime.v2', '4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481', FALSE),
+    (79, '079_runtime_attempt_transport_evidence', 'openlinker.runtime.v2', '4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481', FALSE),
     (80, '080_runtime_attempt_transport_evidence', 'openlinker.runtime.v2', '4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481', TRUE);
 
 COMMIT;

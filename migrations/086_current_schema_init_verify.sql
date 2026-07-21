@@ -81,7 +81,7 @@ BEGIN
         RAISE EXCEPTION 'Core singleton initialization is incomplete';
     END IF;
 
-    IF (SELECT count(*) FROM runtime_schema_contracts) <> 9
+    IF (SELECT count(*) FROM runtime_schema_contracts) <> 10
        OR (SELECT count(*) FROM runtime_schema_contracts WHERE is_current) <> 1
        OR NOT EXISTS (
             SELECT 1 FROM runtime_schema_contracts

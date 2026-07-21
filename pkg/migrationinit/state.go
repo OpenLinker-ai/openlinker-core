@@ -17,7 +17,7 @@ import (
 const (
 	CoreVersion       int64 = 86
 	CloudVersion      int64 = 55
-	CoreSchemaDigest        = "07a6dcd648c4a57a2ef504abff65a637b4f4a674afbfeeb85ff1b88a18db5fd3"
+	CoreSchemaDigest        = "6c22808a8cd658cf827a5828a92d3343f040d7d6ff3302f9fdab691fe90aec5b"
 	CloudSchemaDigest       = "0cf21f9a518d9875e62e66e1b490148e45b67eaaeddf9cab118efd778575abd5"
 )
 
@@ -487,7 +487,7 @@ func validateCoreShape(shape SchemaShape) error {
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
-		RuntimeSchemas:    9,
+		RuntimeSchemas:    10,
 		CurrentRuntime:    1,
 		RuntimeWires:      5,
 		CurrentWire:       1,

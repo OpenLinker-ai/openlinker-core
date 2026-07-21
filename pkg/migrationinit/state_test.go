@@ -104,7 +104,7 @@ func currentCoreShape() SchemaShape {
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
-		RuntimeSchemas:    9,
+		RuntimeSchemas:    10,
 		CurrentRuntime:    1,
 		RuntimeWires:      5,
 		CurrentWire:       1,
