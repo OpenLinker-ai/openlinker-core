@@ -358,6 +358,43 @@ func conversationContextFromMapping(ctx context.Context, queries *db.Queries, ma
 		conversation.Truncated = true
 		return conversation
 	}
+	return populateConversationHistory(ctx, queries, mapping.RunID, conversation, historyMappings)
+}
+
+func conversationContextBeforeMapping(ctx context.Context, queries *db.Queries, mapping db.A2AContextMapping) *ConversationContext {
+	sessionKey := conversationSessionKey(mapping)
+	conversation := &ConversationContext{
+		ID:                  sessionKey,
+		SessionKey:          sessionKey,
+		ProtocolContextID:   mapping.ProtocolContextID,
+		RootContextID:       mapping.RootContextID,
+		CurrentRunID:        mapping.RunID.String(),
+		CurrentProtocolTask: mapping.ProtocolTaskID,
+		Source:              "core",
+	}
+	if queries == nil || sessionKey == "" {
+		return conversation
+	}
+	historyMappings, err := queries.ListRecentA2AContextMappingsByRoot(ctx, db.ListRecentA2AContextMappingsByRootParams{
+		UserID:        mapping.UserID,
+		RootContextID: mapping.RootContextID,
+		Limit:         maxConversationHistoryRuns,
+	})
+	if err != nil {
+		log.Warn().Err(err).Str("run_id", mapping.RunID.String()).Msg("runtime.conversationContextBeforeMapping.list")
+		conversation.Truncated = true
+		return conversation
+	}
+	return populateConversationHistory(ctx, queries, mapping.RunID, conversation, historyMappings)
+}
+
+func populateConversationHistory(
+	ctx context.Context,
+	queries *db.Queries,
+	runID uuid.UUID,
+	conversation *ConversationContext,
+	historyMappings []db.A2AContextMapping,
+) *ConversationContext {
 	if int32(len(historyMappings)) >= maxConversationHistoryRuns {
 		conversation.Truncated = true
 	}
@@ -370,7 +407,7 @@ func conversationContextFromMapping(ctx context.Context, queries *db.Queries, ma
 	}
 	messages, err := queries.ListRunMessagesByRuns(ctx, historyRunIDs)
 	if err != nil {
-		log.Warn().Err(err).Str("run_id", mapping.RunID.String()).Msg("runtime.conversationContextFromMapping.messages")
+		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.populateConversationHistory.messages")
 		conversation.Truncated = true
 		return conversation
 	}
@@ -389,6 +426,47 @@ func conversationContextFromMapping(ctx context.Context, queries *db.Queries, ma
 		}
 	}
 	return conversation
+}
+
+func runA2AContextMappingParams(
+	runID, userID, agentID uuid.UUID,
+	ctx *RunA2AContextRequest,
+) db.UpsertA2AContextMappingParams {
+	return db.UpsertA2AContextMappingParams{
+		RunID:             runID,
+		UserID:            userID,
+		AgentID:           agentID,
+		ProtocolContextID: ctx.ProtocolContextID,
+		ProtocolTaskID:    ctx.ProtocolTaskID,
+		RootContextID:     ctx.RootContextID,
+		ParentContextID:   ctx.ParentContextID,
+		ParentTaskID:      ctx.ParentTaskID,
+		ParentRunID:       parseOptionalUUID(ctx.ParentRunID),
+		CallerAgentID:     parseOptionalUUID(ctx.CallerAgentID),
+		TargetAgentID:     parseOptionalUUID(ctx.TargetAgentID),
+		TraceID:           ctx.TraceID,
+		ReferenceTaskIDs:  ctx.ReferenceTaskIDs,
+		Source:            ctx.Source,
+	}
+}
+
+func pendingA2AContextMapping(params db.UpsertA2AContextMappingParams) db.A2AContextMapping {
+	return db.A2AContextMapping{
+		RunID:             params.RunID,
+		UserID:            params.UserID,
+		AgentID:           params.AgentID,
+		ProtocolContextID: params.ProtocolContextID,
+		ProtocolTaskID:    params.ProtocolTaskID,
+		RootContextID:     params.RootContextID,
+		ParentContextID:   params.ParentContextID,
+		ParentTaskID:      params.ParentTaskID,
+		ParentRunID:       params.ParentRunID,
+		CallerAgentID:     params.CallerAgentID,
+		TargetAgentID:     params.TargetAgentID,
+		TraceID:           params.TraceID,
+		ReferenceTaskIDs:  append([]string(nil), params.ReferenceTaskIDs...),
+		Source:            params.Source,
+	}
 }
 
 func conversationSessionKey(mapping db.A2AContextMapping) string {
@@ -935,6 +1013,20 @@ func (s *Service) createRunningRun(
 				return authorizeErr
 			}
 		}
+		var a2aMappingParams *db.UpsertA2AContextMappingParams
+		createMetadataJSON := metadataJSON
+		if runA2AContext != nil {
+			params := runA2AContextMappingParams(runID, userID, agentID, runA2AContext)
+			a2aMappingParams = &params
+			trustedMetadata := trustedRunMetadata(req.Metadata)
+			trustedMetadata["a2a"] = agentA2AContextMap(s.agentA2AContextForRequest(runID, opts.delegation, runA2AContext))
+			trustedMetadata["conversation"] = conversationContextBeforeMapping(ctx, q, pendingA2AContextMapping(params))
+			marshaledMetadata, marshalErr := json.Marshal(trustedMetadata)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			createMetadataJSON = marshaledMetadata
+		}
 
 		run, createErr := q.CreateRun(ctx, db.CreateRunParams{
 			ID:                          runID,
@@ -947,7 +1039,7 @@ func (s *Service) createRunningRun(
 			Source:                      source,
 			IdempotencyKeyHash:          normalized.idempotencyKeyHash,
 			IdempotencyFingerprint:      normalized.idempotencyFingerprint,
-			RequestMetadata:             metadataJSON,
+			RequestMetadata:             createMetadataJSON,
 			ConnectionModeSnapshot:      agent.ConnectionMode,
 			EndpointIdempotencySnapshot: endpointIdempotencySnapshot,
 			MaxOfferCount:               20,
@@ -983,38 +1075,10 @@ func (s *Service) createRunningRun(
 				return createErr
 			}
 		}
-		if runA2AContext != nil {
-			mapping, mappingErr := q.UpsertA2AContextMapping(ctx, db.UpsertA2AContextMappingParams{
-				RunID:             runID,
-				UserID:            userID,
-				AgentID:           agentID,
-				ProtocolContextID: runA2AContext.ProtocolContextID,
-				ProtocolTaskID:    runA2AContext.ProtocolTaskID,
-				RootContextID:     runA2AContext.RootContextID,
-				ParentContextID:   runA2AContext.ParentContextID,
-				ParentTaskID:      runA2AContext.ParentTaskID,
-				ParentRunID:       parseOptionalUUID(runA2AContext.ParentRunID),
-				CallerAgentID:     parseOptionalUUID(runA2AContext.CallerAgentID),
-				TargetAgentID:     parseOptionalUUID(runA2AContext.TargetAgentID),
-				TraceID:           runA2AContext.TraceID,
-				ReferenceTaskIDs:  runA2AContext.ReferenceTaskIDs,
-				Source:            runA2AContext.Source,
-			})
+		if a2aMappingParams != nil {
+			_, mappingErr := q.UpsertA2AContextMapping(ctx, *a2aMappingParams)
 			if mappingErr != nil {
 				return mappingErr
-			}
-			trustedMetadata := trustedRunMetadata(req.Metadata)
-			trustedMetadata["a2a"] = agentA2AContextMap(s.agentA2AContextForRequest(runID, opts.delegation, runA2AContext))
-			trustedMetadata["conversation"] = conversationContextFromMapping(ctx, q, mapping)
-			trustedMetadataJSON, marshalErr := json.Marshal(trustedMetadata)
-			if marshalErr != nil {
-				return marshalErr
-			}
-			if createErr = q.UpdateRunRequestMetadata(ctx, db.UpdateRunRequestMetadataParams{
-				ID:              runID,
-				RequestMetadata: trustedMetadataJSON,
-			}); createErr != nil {
-				return createErr
 			}
 		}
 		if taskCallback != nil {

@@ -86,6 +86,26 @@ WHERE user_id = $1 AND root_context_id = $2
 ORDER BY created_at ASC, run_id ASC
 LIMIT $3;
 
+-- name: ListRecentA2AContextMappingsByRoot :many
+-- Run creation calls this before inserting the current Run so its immutable
+-- request metadata can include only previously committed conversation history.
+SELECT id, run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+       root_context_id, parent_context_id, parent_task_id, parent_run_id,
+       caller_agent_id, target_agent_id, trace_id, reference_task_ids,
+       source, created_at, updated_at
+FROM (
+    SELECT id, run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+           root_context_id, parent_context_id, parent_task_id, parent_run_id,
+           caller_agent_id, target_agent_id, trace_id, reference_task_ids,
+           source, created_at, updated_at
+    FROM a2a_context_mappings
+    WHERE user_id = $1
+      AND root_context_id = $2
+    ORDER BY created_at DESC, run_id DESC
+    LIMIT $3
+) history
+ORDER BY created_at ASC, run_id ASC;
+
 -- name: ListA2AContextMappingsBeforeRunByRoot :many
 SELECT id, run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
        root_context_id, parent_context_id, parent_task_id, parent_run_id,

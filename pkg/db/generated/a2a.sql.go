@@ -230,6 +230,53 @@ func (q *Queries) ListA2AContextMappingsByRoot(ctx context.Context, arg ListA2AC
 	return items, rows.Err()
 }
 
+const listRecentA2AContextMappingsByRoot = `-- name: ListRecentA2AContextMappingsByRoot :many
+SELECT id, run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+       root_context_id, parent_context_id, parent_task_id, parent_run_id,
+       caller_agent_id, target_agent_id, trace_id, reference_task_ids,
+       source, created_at, updated_at
+FROM (
+    SELECT id, run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+           root_context_id, parent_context_id, parent_task_id, parent_run_id,
+           caller_agent_id, target_agent_id, trace_id, reference_task_ids,
+           source, created_at, updated_at
+    FROM a2a_context_mappings
+    WHERE user_id = $1
+      AND root_context_id = $2
+    ORDER BY created_at DESC, run_id DESC
+    LIMIT $3
+) history
+ORDER BY created_at ASC, run_id ASC`
+
+type ListRecentA2AContextMappingsByRootParams struct {
+	UserID        uuid.UUID `db:"user_id" json:"user_id"`
+	RootContextID string    `db:"root_context_id" json:"root_context_id"`
+	Limit         int32     `db:"limit" json:"limit"`
+}
+
+func (q *Queries) ListRecentA2AContextMappingsByRoot(ctx context.Context, arg ListRecentA2AContextMappingsByRootParams) ([]A2AContextMapping, error) {
+	rows, err := q.db.Query(ctx, listRecentA2AContextMappingsByRoot, arg.UserID, arg.RootContextID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []A2AContextMapping
+	for rows.Next() {
+		var mapping A2AContextMapping
+		if err := rows.Scan(
+			&mapping.ID, &mapping.RunID, &mapping.UserID, &mapping.AgentID,
+			&mapping.ProtocolContextID, &mapping.ProtocolTaskID, &mapping.RootContextID,
+			&mapping.ParentContextID, &mapping.ParentTaskID, &mapping.ParentRunID,
+			&mapping.CallerAgentID, &mapping.TargetAgentID, &mapping.TraceID,
+			&mapping.ReferenceTaskIDs, &mapping.Source, &mapping.CreatedAt, &mapping.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, mapping)
+	}
+	return items, rows.Err()
+}
+
 const listA2AContextMappingsBeforeRunByRoot = `-- name: ListA2AContextMappingsBeforeRunByRoot :many
 SELECT id, run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
        root_context_id, parent_context_id, parent_task_id, parent_run_id,
