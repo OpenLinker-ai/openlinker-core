@@ -106,6 +106,11 @@ type Config struct {
 	RuntimeMTLSCertFile       string `envconfig:"RUNTIME_MTLS_CERT_FILE"`
 	RuntimeMTLSKeyFile        string `envconfig:"RUNTIME_MTLS_KEY_FILE"`
 	RuntimeMTLSClientCAFile   string `envconfig:"RUNTIME_MTLS_CLIENT_CA_FILE"`
+	// Runtime WebSocket data messages retain per-Attempt FIFO ordering while
+	// independent Attempts may execute within these bounded limits.
+	RuntimeWSConnectionMaxInflight int `envconfig:"RUNTIME_WS_CONNECTION_MAX_INFLIGHT" default:"8"`
+	RuntimeWSProcessMaxInflight    int `envconfig:"RUNTIME_WS_PROCESS_MAX_INFLIGHT" default:"16"`
+	RuntimeWSLaneQueueDepth        int `envconfig:"RUNTIME_WS_LANE_QUEUE_DEPTH" default:"16"`
 	// RuntimeHAMode selects the Redis-backed cross-instance signal dependency.
 	// PostgreSQL remains the fact source and its workers continue if Redis is
 	// unavailable; production HA readiness fails closed until Redis recovers.
@@ -154,7 +159,30 @@ func Load() (*Config, error) {
 	if err := normalizeRuntimePKIConfig(&cfg); err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
+	if err := validateRuntimeWebSocketConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
 	return &cfg, nil
+}
+
+func validateRuntimeWebSocketConfig(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	checks := []struct {
+		name       string
+		value, max int
+	}{
+		{name: "RUNTIME_WS_CONNECTION_MAX_INFLIGHT", value: cfg.RuntimeWSConnectionMaxInflight, max: 256},
+		{name: "RUNTIME_WS_PROCESS_MAX_INFLIGHT", value: cfg.RuntimeWSProcessMaxInflight, max: 1024},
+		{name: "RUNTIME_WS_LANE_QUEUE_DEPTH", value: cfg.RuntimeWSLaneQueueDepth, max: 1024},
+	}
+	for _, check := range checks {
+		if check.value < 1 || check.value > check.max {
+			return fmt.Errorf("%s must be between 1 and %d", check.name, check.max)
+		}
+	}
+	return nil
 }
 
 func normalizeRuntimePKIConfig(cfg *Config) error {

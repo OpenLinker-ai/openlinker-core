@@ -93,24 +93,25 @@ type RuntimeCancellationAPI interface {
 // RuntimeHTTPDependencies are deliberately narrow so the HTTP adapter has
 // no database access and cannot reconstruct trusted principals from JSON.
 type RuntimeHTTPDependencies struct {
-	TokenValidator      RuntimeTokenValidator
-	DeviceAuthenticator RuntimeDeviceAuthenticator
-	PrincipalBinder     RuntimePrincipalBinder
-	TokenOnlyTransport  bool
-	TransportPolicy     RuntimeTransportPolicyProvider
-	Sessions            RuntimeSessionAPI
-	Leases              RuntimeLeaseAPI
-	EventProjector      RuntimeEventProjector
-	Finalizer           RuntimeResultFinalizer
-	Resume              RuntimeResumeAPI
-	Delegation          RuntimeDelegationAPI
-	Cancellations       RuntimeCancellationAPI
-	WakeHub             *RuntimeWakeHub
-	Presence            RuntimePresenceStore
-	SessionLeases       *RuntimeSessionLeaseManager
-	AdmissionLimiter    RuntimeAdmissionLimiter
-	Observer            WorkerObserver
-	CoreInstanceID      uuid.UUID
+	TokenValidator       RuntimeTokenValidator
+	DeviceAuthenticator  RuntimeDeviceAuthenticator
+	PrincipalBinder      RuntimePrincipalBinder
+	TokenOnlyTransport   bool
+	TransportPolicy      RuntimeTransportPolicyProvider
+	Sessions             RuntimeSessionAPI
+	Leases               RuntimeLeaseAPI
+	EventProjector       RuntimeEventProjector
+	Finalizer            RuntimeResultFinalizer
+	Resume               RuntimeResumeAPI
+	Delegation           RuntimeDelegationAPI
+	Cancellations        RuntimeCancellationAPI
+	WakeHub              *RuntimeWakeHub
+	Presence             RuntimePresenceStore
+	SessionLeases        *RuntimeSessionLeaseManager
+	AdmissionLimiter     RuntimeAdmissionLimiter
+	Observer             WorkerObserver
+	CoreInstanceID       uuid.UUID
+	WebSocketConcurrency RuntimeWebSocketConcurrencyConfig
 	// AttachOnly is a release-cutover safety mode. It permits authenticated
 	// Session lifecycle traffic, but never claims Runs or accepts execution
 	// events/results before the normal Core producer boundary is crossed.
@@ -120,8 +121,37 @@ type RuntimeHTTPDependencies struct {
 // RuntimeHTTPController is the strict HTTP transport adapter for the durable
 // Runtime state machine.
 type RuntimeHTTPController struct {
-	dependencies RuntimeHTTPDependencies
-	webSockets   *runtimeWSRegistry
+	dependencies       RuntimeHTTPDependencies
+	webSockets         *runtimeWSRegistry
+	webSocketConfig    RuntimeWebSocketConcurrencyConfig
+	webSocketProcesses *runtimeWSProcessLimiter
+}
+
+const (
+	defaultRuntimeWSConnectionMaxInflight = 8
+	defaultRuntimeWSProcessMaxInflight    = 16
+	defaultRuntimeWSLaneQueueDepth        = 16
+)
+
+// RuntimeWebSocketConcurrencyConfig bounds independent Attempt work without
+// changing message ordering or protocol behavior.
+type RuntimeWebSocketConcurrencyConfig struct {
+	ConnectionMaxInflight int
+	ProcessMaxInflight    int
+	LaneQueueDepth        int
+}
+
+func normalizeRuntimeWebSocketConcurrencyConfig(cfg RuntimeWebSocketConcurrencyConfig) RuntimeWebSocketConcurrencyConfig {
+	if cfg.ConnectionMaxInflight < 1 {
+		cfg.ConnectionMaxInflight = defaultRuntimeWSConnectionMaxInflight
+	}
+	if cfg.ProcessMaxInflight < 1 {
+		cfg.ProcessMaxInflight = defaultRuntimeWSProcessMaxInflight
+	}
+	if cfg.LaneQueueDepth < 1 {
+		cfg.LaneQueueDepth = defaultRuntimeWSLaneQueueDepth
+	}
+	return cfg
 }
 
 // runtimePreviousReadyPayload is the strict pre-attachment-generation Ready
@@ -136,9 +166,12 @@ type runtimePreviousReadyPayload struct {
 }
 
 func NewRuntimeHTTPController(dependencies RuntimeHTTPDependencies) *RuntimeHTTPController {
+	webSocketConfig := normalizeRuntimeWebSocketConcurrencyConfig(dependencies.WebSocketConcurrency)
 	return &RuntimeHTTPController{
-		dependencies: dependencies,
-		webSockets:   newRuntimeWSRegistry(),
+		dependencies:       dependencies,
+		webSockets:         newRuntimeWSRegistry(),
+		webSocketConfig:    webSocketConfig,
+		webSocketProcesses: newRuntimeWSProcessLimiter(webSocketConfig.ProcessMaxInflight),
 	}
 }
 

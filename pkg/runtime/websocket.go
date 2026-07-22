@@ -230,6 +230,8 @@ type runtimeWSConnection struct {
 	maintenanceDone chan struct{}
 	cleanupOnce     sync.Once
 	revocationWake  <-chan struct{}
+	fatalCloseOnce  sync.Once
+	inbound         *runtimeWSInboundScheduler
 
 	sessionRequest     RuntimeSessionRequest
 	sessionState       RuntimeSessionState
@@ -242,12 +244,17 @@ type runtimeWSConnection struct {
 	connectionID       string
 	reportedReason     RuntimeTransportReason
 
-	operationMu   sync.Mutex
+	lifecycleMu   sync.RWMutex
+	dispatchMu    sync.Mutex
+	dispatchState sync.Mutex
+	controlMu     sync.Mutex
 	correlationMu sync.Mutex
 	assignments   map[uuid.UUID]runtimeWSAssignmentCorrelation
 	cancellations map[uuid.UUID]runtimeWSCancellationCorrelation
 
-	dispatchPending  atomic.Bool
+	dispatchPending  bool
+	dispatchCredits  int64
+	dispatchLimit    int64
 	controlPending   atomic.Bool
 	dispatchContinue chan struct{}
 	controlContinue  chan struct{}
@@ -291,6 +298,7 @@ func newRuntimeWSConnection(
 		controlContinue:  make(chan struct{}, 1),
 		assignments:      make(map[uuid.UUID]runtimeWSAssignmentCorrelation),
 		cancellations:    make(map[uuid.UUID]runtimeWSCancellationCorrelation),
+		dispatchLimit:    1,
 		connectionID:     "ws:" + uuid.NewString(),
 		reportedReason:   reportedReason,
 	}
@@ -418,6 +426,22 @@ func (c *runtimeWSConnection) run() {
 		c.closeForError(mapRuntimeHTTPError(err))
 		return
 	}
+	laneCount := int(state.Session.Capacity)
+	if laneCount < 1 {
+		laneCount = 1
+	}
+	if laneCount > c.controller.webSocketConfig.ConnectionMaxInflight {
+		laneCount = c.controller.webSocketConfig.ConnectionMaxInflight
+	}
+	c.setDispatchLimit(int64(state.Session.Capacity))
+	c.inbound = newRuntimeWSInboundScheduler(c.ctx, runtimeWSInboundSchedulerConfig{
+		LaneCount:      laneCount,
+		QueueDepth:     c.controller.webSocketConfig.LaneQueueDepth,
+		ProcessLimiter: c.controller.webSocketProcesses,
+		Handle:         c.handleScheduledEnvelope,
+		HandlePanic:    c.handleScheduledPanic,
+		Observer:       c.controller.dependencies.Observer,
+	})
 
 	if err = c.socket.SetReadDeadline(time.Now().Add(runtimeWSPongWait)); err != nil {
 		return
@@ -451,10 +475,45 @@ func (c *runtimeWSConnection) run() {
 			}
 			continue
 		}
-		if c.handleEnvelope(envelope) {
+		attemptID, scheduled, identityErr := runtimeWSAttemptID(envelope)
+		if identityErr != nil {
+			observeWorker(c.controller.dependencies.Observer, "runtime.websocket.inbound_validation", "rejected", 1)
+			if c.replyErrorAndMaybeClose(envelope, identityErr, false) {
+				return
+			}
+			continue
+		}
+		if scheduled {
+			observeWorker(c.controller.dependencies.Observer, "runtime.websocket.inbound_validation", "accepted", 1)
+			if err = c.inbound.enqueue(runtimeWSInboundWork{attemptID: attemptID, envelope: envelope}); err != nil {
+				return
+			}
+			continue
+		}
+		if err = c.inbound.barrier(c.ctx); err != nil {
+			return
+		}
+		c.lifecycleMu.Lock()
+		closeConnection := c.handleEnvelope(envelope)
+		c.lifecycleMu.Unlock()
+		if closeConnection {
 			return
 		}
 	}
+}
+
+func (c *runtimeWSConnection) handleScheduledEnvelope(work runtimeWSInboundWork) {
+	c.lifecycleMu.RLock()
+	closeConnection := c.handleEnvelope(work.envelope)
+	c.lifecycleMu.RUnlock()
+	if closeConnection {
+		c.shutdown()
+	}
+}
+
+func (c *runtimeWSConnection) handleScheduledPanic() {
+	log.Error().Msg("Runtime websocket inbound handler panicked")
+	c.closeForError(runtimeWSOutboundError(errors.New("Runtime websocket inbound handler panicked")))
 }
 
 func (c *runtimeWSConnection) readEnvelope() (RuntimeEnvelope, error) {
@@ -494,8 +553,6 @@ func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 		return c.replyErrorAndMaybeClose(envelope, runtimeUnavailableError(), false)
 	}
 
-	c.operationMu.Lock()
-	defer c.operationMu.Unlock()
 	var err error
 	switch envelope.Type {
 	case RuntimeMessageAssignmentAck:
@@ -527,12 +584,7 @@ func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 func (c *runtimeWSConnection) scheduleMaintenanceContinuation(messageType RuntimeMessageType) {
 	switch messageType {
 	case RuntimeMessageAssignmentAck:
-		if c.dispatchPending.Load() {
-			select {
-			case c.dispatchContinue <- struct{}{}:
-			default:
-			}
-		}
+		c.requestDispatch(1, false, "assignment_ack")
 	case RuntimeMessageRunCancelAck:
 		if c.controlPending.Load() {
 			select {
@@ -810,8 +862,7 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 				return
 			}
 		case <-dispatchWake:
-			c.dispatchPending.Store(true)
-			c.claimPendingAndSend()
+			c.requestDispatch(1, true, "run_available")
 		case <-controlWake:
 			if c.controller.dependencies.WakeHub != nil {
 				controlWake = c.controller.dependencies.WakeHub.WaitControl(c.sessionPrincipal.AgentID)
@@ -819,14 +870,14 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 			c.controlPending.Store(true)
 			c.commandPendingAndSend()
 		case <-c.dispatchContinue:
-			c.claimPendingAndSend()
+			c.drainDispatchDemand()
 		case <-c.controlContinue:
 			c.commandPendingAndSend()
 		case <-nodeDispatchWake:
 			if c.controller.dependencies.WakeHub != nil {
 				nodeDispatchWake = c.controller.dependencies.WakeHub.WaitNodeDispatch(c.sessionPrincipal.NodeID)
 			}
-			c.claimPendingAndSend()
+			c.requestDispatch(1, false, "node_capacity")
 		case <-heartbeatTicker.C:
 			if !c.heartbeatMaintenanceSession("ticker") {
 				return
@@ -877,8 +928,10 @@ func (c *runtimeWSConnection) commandPendingAndSend() {
 	if !c.controlPending.Load() {
 		return
 	}
-	c.operationMu.Lock()
-	defer c.operationMu.Unlock()
+	c.lifecycleMu.RLock()
+	defer c.lifecycleMu.RUnlock()
+	c.controlMu.Lock()
+	defer c.controlMu.Unlock()
 	if !c.controlPending.Load() {
 		return
 	}
@@ -918,40 +971,127 @@ func (c *runtimeWSConnection) commandPendingAndSend() {
 	}
 }
 
-func (c *runtimeWSConnection) claimPendingAndSend() {
-	if !c.dispatchPending.Load() {
+type runtimeDispatchClaimOutcome uint8
+
+const (
+	runtimeDispatchClaimDeferred runtimeDispatchClaimOutcome = iota
+	runtimeDispatchClaimed
+	runtimeDispatchEmpty
+)
+
+func (c *runtimeWSConnection) setDispatchLimit(limit int64) {
+	if limit < 1 {
+		limit = 1
+	}
+	c.dispatchState.Lock()
+	c.dispatchLimit = limit
+	if c.dispatchCredits > limit {
+		c.dispatchCredits = limit
+	}
+	c.dispatchState.Unlock()
+}
+
+func (c *runtimeWSConnection) requestDispatch(credits int64, establishDemand bool, reason string) {
+	if credits < 1 {
 		return
 	}
-	c.operationMu.Lock()
-	defer c.operationMu.Unlock()
-	if !c.dispatchPending.Load() {
-		return
+	c.dispatchState.Lock()
+	if establishDemand {
+		c.dispatchPending = true
 	}
+	if c.dispatchPending {
+		limit := c.dispatchLimit
+		if limit < 1 {
+			limit = 1
+		}
+		if credits > limit-c.dispatchCredits {
+			c.dispatchCredits = limit
+		} else {
+			c.dispatchCredits += credits
+		}
+	}
+	hasDemand := c.dispatchPending && c.dispatchCredits > 0
+	creditCount := c.dispatchCredits
+	c.dispatchState.Unlock()
+	var observer WorkerObserver
+	if c.controller != nil {
+		observer = c.controller.dependencies.Observer
+	}
+	observeWorker(observer, "runtime.websocket.dispatch_credit", reason, int(creditCount))
+	if hasDemand {
+		select {
+		case c.dispatchContinue <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (c *runtimeWSConnection) takeDispatchCredit() bool {
+	c.dispatchState.Lock()
+	defer c.dispatchState.Unlock()
+	if !c.dispatchPending || c.dispatchCredits < 1 {
+		return false
+	}
+	c.dispatchCredits--
+	return true
+}
+
+func (c *runtimeWSConnection) clearDispatchDemandIfIdle() bool {
+	c.dispatchState.Lock()
+	defer c.dispatchState.Unlock()
+	if c.dispatchCredits > 0 {
+		return false
+	}
+	c.dispatchPending = false
+	return true
+}
+
+func (c *runtimeWSConnection) drainDispatchDemand() {
+	for c.takeDispatchCredit() {
+		switch c.claimPendingAndSend() {
+		case runtimeDispatchClaimed:
+			continue
+		case runtimeDispatchEmpty:
+			if c.clearDispatchDemandIfIdle() {
+				return
+			}
+		case runtimeDispatchClaimDeferred:
+			return
+		}
+	}
+}
+
+func (c *runtimeWSConnection) claimPendingAndSend() runtimeDispatchClaimOutcome {
+	c.lifecycleMu.RLock()
+	defer c.lifecycleMu.RUnlock()
+	c.dispatchMu.Lock()
+	defer c.dispatchMu.Unlock()
 	assignment, err := c.controller.dependencies.Leases.ClaimOffer(c.ctx, c.sessionPrincipal)
 	if err != nil {
 		mapped := mapRuntimeHTTPError(err)
 		if _, fatal := RuntimeWebSocketCloseCode(mapped.Body.Code); fatal {
 			c.closeForError(mapped)
 		}
-		return
+		return runtimeDispatchClaimDeferred
 	}
 	if assignment == nil {
-		c.dispatchPending.Store(false)
-		return
+		return runtimeDispatchEmpty
 	}
 	if c.assignmentAlreadySent(assignment.AttemptIdentity) {
-		return
+		return runtimeDispatchClaimed
 	}
 	message, envelope, err := newRuntimeWSTypedMessage(RuntimeMessageRunAssigned, nil, *assignment)
 	if err != nil {
 		c.closeForError(runtimeWSOutboundError(err))
-		return
+		return runtimeDispatchClaimDeferred
 	}
 	c.recordAssignment(envelope, *assignment)
 	if err = c.writeMessage(message); err != nil {
 		c.removeAssignmentMessage(envelope.MessageID)
 		c.cancel()
+		return runtimeDispatchClaimDeferred
 	}
+	return runtimeDispatchClaimed
 }
 
 func (c *runtimeWSConnection) assignmentCorrelation(
@@ -1114,8 +1254,7 @@ func (c *runtimeWSConnection) replyErrorAndMaybeClose(
 		closeCode, fatal = RuntimeWSCloseProtocolError, true
 	}
 	if fatal {
-		_ = c.writeClose(closeCode, closeReason)
-		c.cancel()
+		c.closeTransport(closeCode, closeReason)
 		return true
 	}
 	return false
@@ -1133,8 +1272,14 @@ func (c *runtimeWSConnection) closeForError(mapped *RuntimeTransportError) {
 	if !fatal {
 		closeCode = RuntimeWSCloseInternalError
 	}
-	_ = c.writeClose(closeCode, closeReason)
-	c.cancel()
+	c.closeTransport(closeCode, closeReason)
+}
+
+func (c *runtimeWSConnection) closeTransport(code int, reason string) {
+	c.fatalCloseOnce.Do(func() {
+		_ = c.writeClose(code, reason)
+		c.cancel()
+	})
 }
 
 func (c *runtimeWSConnection) writeMessage(message any) error {
@@ -1220,6 +1365,13 @@ func (c *runtimeWSConnection) cleanup() {
 		c.cancel()
 		if c.controller.dependencies.WakeHub != nil {
 			c.controller.dependencies.WakeHub.UnregisterConnection(c.connectionIdentity)
+		}
+		if c.inbound != nil {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), runtimeWSCleanupTimeout)
+			if !c.inbound.stopWithin(stopCtx) {
+				log.Warn().Msg("Runtime websocket inbound handlers did not stop before cleanup")
+			}
+			stopCancel()
 		}
 		if c.maintenanceStarted {
 			select {

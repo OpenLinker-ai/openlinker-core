@@ -560,6 +560,11 @@ func configureRuntime(
 		SessionLeases:       sessionLeases,
 		AdmissionLimiter:    runtime.NewRuntimeAdmissionLimiter(runtime.RuntimeAdmissionLimitConfig{}),
 		CoreInstanceID:      coreInstanceID,
+		WebSocketConcurrency: runtime.RuntimeWebSocketConcurrencyConfig{
+			ConnectionMaxInflight: cfg.RuntimeWSConnectionMaxInflight,
+			ProcessMaxInflight:    cfg.RuntimeWSProcessMaxInflight,
+			LaneQueueDepth:        cfg.RuntimeWSLaneQueueDepth,
+		},
 	})
 	go runtime.StartRuntimeMaintenanceWorkerWithWake(
 		rootCtx,
@@ -622,6 +627,11 @@ func configureRuntimeAttachOnly(
 	}
 	if cfg != nil {
 		dependencies.TokenOnlyTransport = !cfg.RuntimeMTLSEnabled
+		dependencies.WebSocketConcurrency = runtime.RuntimeWebSocketConcurrencyConfig{
+			ConnectionMaxInflight: cfg.RuntimeWSConnectionMaxInflight,
+			ProcessMaxInflight:    cfg.RuntimeWSProcessMaxInflight,
+			LaneQueueDepth:        cfg.RuntimeWSLaneQueueDepth,
+		}
 	}
 	if pool == nil || coreInstanceID == uuid.Nil {
 		handler.SetRuntimeDependencies(dependencies)
