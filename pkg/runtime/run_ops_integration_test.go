@@ -34,6 +34,13 @@ func TestRuntimeDeadLetterReplayIsAppendOnlyAndIdempotent(t *testing.T) {
 	require.NoError(t, pool.QueryRow(context.Background(), `
 		SELECT user_id FROM runs WHERE id = $1`, fixture.identity.RunID,
 	).Scan(&ownerID))
+	queries := db.New(pool)
+	_, err = queries.UpsertA2AContextMapping(context.Background(), db.UpsertA2AContextMappingParams{
+		RunID: fixture.identity.RunID, UserID: ownerID, AgentID: fixture.identity.AgentID,
+		ProtocolContextID: "replay-conversation", ProtocolTaskID: "replay-source-task",
+		RootContextID: "replay-conversation", TraceID: "replay-trace", Source: "a2a_protocol",
+	})
+	require.NoError(t, err)
 	// Replay uses the current Agent configuration. Keep this fixture on the
 	// queued v2 path so the test does not depend on an external endpoint.
 	_, err = pool.Exec(context.Background(), `
@@ -113,8 +120,12 @@ func TestRuntimeDeadLetterReplayIsAppendOnlyAndIdempotent(t *testing.T) {
 	require.Equal(t, fixture.identity.RunID.String(), created.ReplayOfRunID)
 	require.Empty(t, created.ActiveAttemptID)
 	require.Nil(t, created.DeadLetteredAt)
+	replayedContext, err := queries.GetA2AContextMappingByRun(context.Background(), createdID)
+	require.NoError(t, err)
+	require.Equal(t, "replay-conversation", replayedContext.ProtocolContextID)
+	require.Equal(t, "replay-conversation", replayedContext.RootContextID)
+	require.Equal(t, "replay-source-task", replayedContext.ProtocolTaskID)
 
-	queries := db.New(pool)
 	listedRuns, err := queries.ListRunsByUserWithAgent(context.Background(), db.ListRunsByUserWithAgentParams{
 		UserID: ownerID,
 		Limit:  10,

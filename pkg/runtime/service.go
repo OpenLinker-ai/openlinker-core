@@ -329,6 +329,10 @@ func (s *Service) conversationContextForRun(ctx context.Context, runID uuid.UUID
 }
 
 func (s *Service) conversationContextFromMapping(ctx context.Context, mapping db.A2AContextMapping) *ConversationContext {
+	return conversationContextFromMapping(ctx, s.queries, mapping)
+}
+
+func conversationContextFromMapping(ctx context.Context, queries *db.Queries, mapping db.A2AContextMapping) *ConversationContext {
 	sessionKey := conversationSessionKey(mapping)
 	conversation := &ConversationContext{
 		ID:                  sessionKey,
@@ -339,10 +343,10 @@ func (s *Service) conversationContextFromMapping(ctx context.Context, mapping db
 		CurrentProtocolTask: mapping.ProtocolTaskID,
 		Source:              "core",
 	}
-	if s == nil || s.queries == nil || sessionKey == "" {
+	if queries == nil || sessionKey == "" {
 		return conversation
 	}
-	historyMappings, err := s.queries.ListA2AContextMappingsBeforeRunByRoot(ctx, db.ListA2AContextMappingsBeforeRunByRootParams{
+	historyMappings, err := queries.ListA2AContextMappingsBeforeRunByRoot(ctx, db.ListA2AContextMappingsBeforeRunByRootParams{
 		UserID:        mapping.UserID,
 		RootContextID: mapping.RootContextID,
 		CreatedAt:     mapping.CreatedAt,
@@ -361,7 +365,10 @@ func (s *Service) conversationContextFromMapping(ctx context.Context, mapping db
 	for _, historyMapping := range historyMappings {
 		historyRunIDs = append(historyRunIDs, historyMapping.RunID)
 	}
-	messages, err := s.queries.ListRunMessagesByRuns(ctx, historyRunIDs)
+	if len(historyRunIDs) == 0 {
+		return conversation
+	}
+	messages, err := queries.ListRunMessagesByRuns(ctx, historyRunIDs)
 	if err != nil {
 		log.Warn().Err(err).Str("run_id", mapping.RunID.String()).Msg("runtime.conversationContextFromMapping.messages")
 		conversation.Truncated = true
@@ -602,6 +609,15 @@ func copyRunInput(input map[string]interface{}) map[string]interface{} {
 	for k, v := range input {
 		out[k] = v
 	}
+	return out
+}
+
+func trustedRunMetadata(input map[string]interface{}) map[string]interface{} {
+	out := copyRunInput(input)
+	// These fields affect execution identity and session reuse. Only Core may
+	// populate them after persisting the matching A2A context mapping.
+	delete(out, "a2a")
+	delete(out, "conversation")
 	return out
 }
 
@@ -862,6 +878,7 @@ func (s *Service) createRunningRun(
 	runA2AContext := materializeRunA2AContext(req.A2AContext, runID)
 	normalizedReq := *req
 	normalizedReq.Input = copyRunInput(req.Input)
+	normalizedReq.Metadata = trustedRunMetadata(req.Metadata)
 	normalizedReq.A2AContext = runA2AContext
 	attachRunA2AContextToInput(normalizedReq.Input, runA2AContext)
 	req = &normalizedReq
@@ -967,7 +984,7 @@ func (s *Service) createRunningRun(
 			}
 		}
 		if runA2AContext != nil {
-			if _, createErr = q.UpsertA2AContextMapping(ctx, db.UpsertA2AContextMappingParams{
+			mapping, mappingErr := q.UpsertA2AContextMapping(ctx, db.UpsertA2AContextMappingParams{
 				RunID:             runID,
 				UserID:            userID,
 				AgentID:           agentID,
@@ -982,6 +999,20 @@ func (s *Service) createRunningRun(
 				TraceID:           runA2AContext.TraceID,
 				ReferenceTaskIDs:  runA2AContext.ReferenceTaskIDs,
 				Source:            runA2AContext.Source,
+			})
+			if mappingErr != nil {
+				return mappingErr
+			}
+			trustedMetadata := trustedRunMetadata(req.Metadata)
+			trustedMetadata["a2a"] = agentA2AContextMap(s.agentA2AContextForRequest(runID, opts.delegation, runA2AContext))
+			trustedMetadata["conversation"] = conversationContextFromMapping(ctx, q, mapping)
+			trustedMetadataJSON, marshalErr := json.Marshal(trustedMetadata)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			if createErr = q.UpdateRunRequestMetadata(ctx, db.UpdateRunRequestMetadataParams{
+				ID:              runID,
+				RequestMetadata: trustedMetadataJSON,
 			}); createErr != nil {
 				return createErr
 			}

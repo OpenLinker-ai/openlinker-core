@@ -217,6 +217,21 @@ func (q *Queries) GetRunReplayPayload(ctx context.Context, id uuid.UUID) (GetRun
 	return payload, err
 }
 
+const updateRunRequestMetadata = `-- name: UpdateRunRequestMetadata :exec
+UPDATE runs
+SET request_metadata = $2
+WHERE id = $1`
+
+type UpdateRunRequestMetadataParams struct {
+	ID              uuid.UUID `db:"id" json:"id"`
+	RequestMetadata []byte    `db:"request_metadata" json:"request_metadata"`
+}
+
+func (q *Queries) UpdateRunRequestMetadata(ctx context.Context, arg UpdateRunRequestMetadataParams) error {
+	_, err := q.db.Exec(ctx, updateRunRequestMetadata, arg.ID, arg.RequestMetadata)
+	return err
+}
+
 const lockRunForResultFinalization = `-- name: LockRunForResultFinalization :one
 SELECT r.id, r.user_id, r.agent_id, r.status, r.dispatch_state,
        r.runtime_contract_id, r.connection_mode_snapshot,
