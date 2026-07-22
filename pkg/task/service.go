@@ -35,7 +35,11 @@ var mcpToolCatalog = []MCPToolRef{
 	{Name: "search_agents", Description: "按关键词或标签查找 Agent"},
 	{Name: "get_agent", Description: "读取 Agent 详情、能力声明和示例"},
 	{Name: "run_agent", Description: "调用 Agent 并保存运行记录"},
+	{Name: "start_agent_run", Description: "异步启动 Agent 调用并立即返回运行记录"},
 	{Name: "get_run", Description: "查询运行状态和结果"},
+	{Name: "list_run_events", Description: "查询运行事件、保留边界和完成状态"},
+	{Name: "list_run_artifacts", Description: "查询运行产生的持久化产物"},
+	{Name: "cancel_run", Description: "取消仍在执行的运行"},
 }
 
 // AgentMatch skill 模块返回给推荐器的最小信息。
@@ -978,11 +982,20 @@ func attachPrivateTaskCompletion(t *db.TaskQuery, runID **string, completedAt **
 }
 
 func taskRunUsedMCPTools(required []string) []string {
-	out := make([]string, 0, 1)
+	out := make([]string, 0, 2)
+	seen := make(map[string]struct{}, 2)
 	for _, tool := range required {
-		if strings.TrimSpace(tool) == "run_agent" {
+		name := strings.TrimSpace(tool)
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		switch name {
+		case "run_agent":
 			out = append(out, "run_agent")
-			break
+			seen[name] = struct{}{}
+		case "start_agent_run":
+			out = append(out, "start_agent_run")
+			seen[name] = struct{}{}
 		}
 	}
 	return out

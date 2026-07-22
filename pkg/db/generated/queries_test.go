@@ -206,6 +206,18 @@ func TestRunQueriesScanRowsAndGuardAffectedRows(t *testing.T) {
 		t.Fatalf("GetRunIdempotencyRecord SQL missing runtime contract guard: %s", dbtx.queryRowSQL)
 	}
 
+	trustedMetadata := []byte(`{"conversation":{"session_key":"ctx-1","source":"core"}}`)
+	if err := q.UpdateRunRequestMetadata(context.Background(), UpdateRunRequestMetadataParams{
+		ID:              runID,
+		RequestMetadata: trustedMetadata,
+	}); err != nil {
+		t.Fatalf("UpdateRunRequestMetadata error = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "UpdateRunRequestMetadata")
+	if !reflect.DeepEqual(dbtx.execArgs, []any{runID, trustedMetadata}) {
+		t.Fatalf("UpdateRunRequestMetadata args = %#v", dbtx.execArgs)
+	}
+
 	listed, err := q.ListRunsByUserWithAgent(context.Background(), ListRunsByUserWithAgentParams{UserID: userID, Limit: 10, Offset: 5})
 	if err != nil {
 		t.Fatalf("ListRunsByUserWithAgent error = %v", err)

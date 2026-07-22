@@ -191,6 +191,7 @@ func TestTaskDTOHelpers(t *testing.T) {
 
 	require.Equal(t, "matched", taskStatus(&tq))
 	require.Equal(t, []string{"run_agent"}, taskRunUsedMCPTools([]string{"search_agents", "run_agent", "run_agent"}))
+	require.Equal(t, []string{"start_agent_run", "run_agent"}, taskRunUsedMCPTools([]string{"start_agent_run", "run_agent", "start_agent_run"}))
 	require.Empty(t, taskRunUsedMCPTools([]string{" search_agents ", " get_run "}))
 
 	history := toHistoryItem(&tq)

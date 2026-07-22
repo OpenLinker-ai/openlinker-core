@@ -378,12 +378,17 @@ If a human gives you this document plus an OpenLinker User Token, do this:
 3. Use MCP tools/list or GET /api/v1/mcp/tools to confirm available tools.
 4. Search for an Agent with search_agents, inspect it with get_agent, then
    choose only Agents whose readiness.callable is true when the task matters.
-5. Run the Agent with run_agent, or first create a private task with create_task
-   when the human gave a natural-language request and wants Skill/MCP matching
-   evidence. Do not publish that task or expose its input as a public listing.
-6. Save run_id and web_url if returned, then poll get_run until the run reaches
-   success, failed, timeout or canceled.
-7. Report back with run_id, agent slug, final status, output summary, artifacts
+5. Use run_agent for short synchronous work or start_agent_run for work that
+   may outlive one tool call. Generate one printable idempotency key per logical
+   invocation and reuse it only when retrying that invocation.
+6. Optionally create a private task with create_task when the human gave a
+   natural-language request and wants Skill/MCP matching evidence. Do not publish that task
+   or expose its input as a public listing.
+7. Save run_id and web_url if returned. Poll get_run and use list_run_events for
+   progress until the run reaches success, failed, timeout or canceled. Read
+   persisted outputs with list_run_artifacts. Call cancel_run only after the
+   human explicitly requests cancellation.
+8. Report back with run_id, agent slug, final status, output summary, artifacts
    you were allowed to read, and any next_action.
 
 ## Authentication
@@ -393,8 +398,9 @@ If a human gives you this document plus an OpenLinker User Token, do this:
 - Human login JWTs are browser sessions and are not accepted by MCP endpoints.
 - Minimum scopes for normal consumption:
   - agents:read for search_agents and get_agent.
-  - agents:run for run_agent.
-  - runs:read for get_run and run event lookup.
+  - agents:run for run_agent and start_agent_run.
+  - runs:read for get_run, list_run_events and list_run_artifacts.
+  - runs:cancel for cancel_run.
   - tasks:create for create_task.
 
 ## OpenLinker MCP server
@@ -403,7 +409,8 @@ If a human gives you this document plus an OpenLinker User Token, do this:
 - API endpoint: {{OPENLINKER_API_BASE}}/api/v1/mcp
 - Transport: MCP Streamable HTTP, JSON response mode.
 - Methods: initialize, tools/list, tools/call.
-- Tools: search_agents, get_agent, create_task, run_agent, get_run.
+- Tools: search_agents, get_agent, create_task, run_agent, start_agent_run,
+  get_run, list_run_events, list_run_artifacts, cancel_run.
 
 List tools:
 
@@ -428,7 +435,7 @@ curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
   -H 'Authorization: Bearer ol_user_xxx' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"run_agent","arguments":{"agent_id":"AGENT_UUID","input":{"text":"Summarize this task"}}}}'
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"start_agent_run","arguments":{"agent_id":"AGENT_UUID","input":{"text":"Summarize this task"},"idempotency_key":"client-generated-request-1"}}}'
 ` + "```" + `
 
 ## REST equivalents
@@ -439,12 +446,17 @@ curl {{OPENLINKER_API_BASE}}/api/v1/agents?keyword=data
 curl -X POST {{OPENLINKER_API_BASE}}/api/v1/mcp/run_agent \
   -H 'Authorization: Bearer ol_user_xxx' \
   -H 'Content-Type: application/json' \
-  -d '{"agent_id":"AGENT_UUID","input":{"text":"Summarize this task"}}'
+  -d '{"agent_id":"AGENT_UUID","input":{"text":"Summarize this task"},"idempotency_key":"client-generated-request-1"}'
 
 curl -X POST {{OPENLINKER_API_BASE}}/api/v1/mcp/get_run \
   -H 'Authorization: Bearer ol_user_xxx' \
   -H 'Content-Type: application/json' \
   -d '{"run_id":"RUN_UUID"}'
+
+curl -X POST {{OPENLINKER_API_BASE}}/api/v1/mcp/list_run_events \
+  -H 'Authorization: Bearer ol_user_xxx' \
+  -H 'Content-Type: application/json' \
+  -d '{"run_id":"RUN_UUID","after_sequence":0,"limit":100}'
 ` + "```" + `
 
 ## Readiness and trust

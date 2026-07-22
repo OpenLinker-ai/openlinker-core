@@ -773,6 +773,44 @@ func TestConversationContextFromMappingBuildsHistory(t *testing.T) {
 	require.Equal(t, "first answer", conversation.HistoryBeforeCurrent[1].Payload["text"])
 }
 
+func TestTrustedRunMetadataRejectsCallerOwnedSessionFields(t *testing.T) {
+	original := map[string]interface{}{
+		"tenant":       "seller-research",
+		"a2a":          map[string]interface{}{"root_context_id": "spoofed"},
+		"conversation": map[string]interface{}{"session_key": "spoofed", "source": "caller"},
+	}
+
+	trusted := trustedRunMetadata(original)
+	require.Equal(t, "seller-research", trusted["tenant"])
+	require.NotContains(t, trusted, "a2a")
+	require.NotContains(t, trusted, "conversation")
+	require.Contains(t, original, "a2a", "sanitizing metadata must not mutate the caller request")
+	require.Contains(t, original, "conversation", "sanitizing metadata must not mutate the caller request")
+}
+
+func TestReplayA2AContextPreservesCoreOwnedConversation(t *testing.T) {
+	parentRunID := uuid.New()
+	callerAgentID := uuid.New()
+	targetAgentID := uuid.New()
+	mapping := db.A2AContextMapping{
+		ProtocolContextID: "conversation-1", ProtocolTaskID: "task-1", RootContextID: "conversation-1",
+		ParentContextID: "parent-context", ParentTaskID: "parent-task", ParentRunID: &parentRunID,
+		CallerAgentID: &callerAgentID, TargetAgentID: &targetAgentID, TraceID: "trace-1",
+		ReferenceTaskIDs: []string{"ref-1"}, Source: "a2a_protocol",
+	}
+
+	replayed := replayA2AContext(mapping)
+	require.Equal(t, "conversation-1", replayed.ProtocolContextID)
+	require.Equal(t, "conversation-1", replayed.RootContextID)
+	require.Equal(t, "task-1", replayed.ProtocolTaskID)
+	require.Equal(t, parentRunID.String(), replayed.ParentRunID)
+	require.Equal(t, callerAgentID.String(), replayed.CallerAgentID)
+	require.Equal(t, targetAgentID.String(), replayed.TargetAgentID)
+	require.Equal(t, []string{"ref-1"}, replayed.ReferenceTaskIDs)
+	mapping.ReferenceTaskIDs[0] = "mutated"
+	require.Equal(t, []string{"ref-1"}, replayed.ReferenceTaskIDs)
+}
+
 func TestRuntimePersistenceHelperEdges(t *testing.T) {
 	ctx := context.Background()
 	runID := uuid.New()

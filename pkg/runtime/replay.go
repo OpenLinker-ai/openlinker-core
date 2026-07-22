@@ -75,12 +75,19 @@ func (s *Service) ReplayRun(
 	if !ok {
 		return nil, httpx.Internal("原调用元数据不可读取")
 	}
+	var replayContext *RunA2AContextRequest
+	if mapping, mappingErr := s.queries.GetA2AContextMappingByRun(ctx, sourceRunID); mappingErr == nil {
+		replayContext = replayA2AContext(mapping)
+	} else if !errors.Is(mappingErr, pgx.ErrNoRows) {
+		return nil, httpx.Internal("读取原调用会话上下文失败")
+	}
 
 	replayID := sourceRunID
 	req := &RunRequest{
 		AgentID:          original.AgentID.String(),
 		Input:            input,
 		Metadata:         metadata,
+		A2AContext:       replayContext,
 		IdempotencyKey:   idempotencyKey,
 		CreationProtocol: "rest",
 		CreationMethod:   "runs.replay",
@@ -91,6 +98,29 @@ func (s *Service) ReplayRun(
 	return s.startRunWithOptions(ctx, userID, req, source, createRunOptions{
 		replayOfRunID: &replayID,
 	})
+}
+
+func replayA2AContext(mapping db.A2AContextMapping) *RunA2AContextRequest {
+	context := &RunA2AContextRequest{
+		ProtocolContextID: mapping.ProtocolContextID,
+		ProtocolTaskID:    mapping.ProtocolTaskID,
+		RootContextID:     mapping.RootContextID,
+		ParentContextID:   mapping.ParentContextID,
+		ParentTaskID:      mapping.ParentTaskID,
+		TraceID:           mapping.TraceID,
+		ReferenceTaskIDs:  append([]string(nil), mapping.ReferenceTaskIDs...),
+		Source:            mapping.Source,
+	}
+	if mapping.ParentRunID != nil {
+		context.ParentRunID = mapping.ParentRunID.String()
+	}
+	if mapping.CallerAgentID != nil {
+		context.CallerAgentID = mapping.CallerAgentID.String()
+	}
+	if mapping.TargetAgentID != nil {
+		context.TargetAgentID = mapping.TargetAgentID.String()
+	}
+	return context
 }
 
 func decodeReplayObject(raw []byte) (map[string]interface{}, bool) {

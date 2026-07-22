@@ -121,6 +121,57 @@ func TestServiceRunAgentPropagatesStableCreationIdentity(t *testing.T) {
 	require.Equal(t, []string{"run_agent"}, runner.request.Metadata["used_mcp_tools"])
 }
 
+func TestServiceStartAgentRunPropagatesStableCreationIdentity(t *testing.T) {
+	runner := &fakeMCPRuntimeRunner{
+		response: &runtime.RunResponse{RunID: uuid.NewString(), Status: "running"},
+	}
+	svc := &Service{runtime: runner}
+	userID := uuid.New()
+
+	resp, err := svc.StartAgentRun(context.Background(), userID, &RunAgentRequest{
+		AgentID:        uuid.NewString(),
+		Input:          map[string]interface{}{"text": "hello"},
+		Metadata:       map[string]interface{}{"used_mcp_tools": []string{"search_agents"}},
+		IdempotencyKey: "mcp-start-2026-07-21-1",
+	})
+	require.NoError(t, err)
+	require.Same(t, runner.response, resp)
+	require.True(t, runner.started)
+	require.Equal(t, userID, runner.userID)
+	require.Equal(t, "mcp", runner.source)
+	require.Equal(t, "mcp", runner.request.CreationProtocol)
+	require.Equal(t, "start_agent_run", runner.request.CreationMethod)
+	require.Equal(t, []string{"search_agents", "start_agent_run"}, runner.request.Metadata["used_mcp_tools"])
+}
+
+func TestServiceForwardsRunInspectionAndCancellation(t *testing.T) {
+	runner := &fakeMCPRuntimeRunner{
+		response:          &runtime.RunResponse{RunID: uuid.NewString(), Status: "running"},
+		eventsResponse:    &runtime.RunEventPageResponse{Meta: runtime.RunEventPageMeta{RetentionGap: true}},
+		artifactsResponse: []runtime.RunArtifactResponse{{ID: uuid.NewString(), ArtifactType: "file"}},
+	}
+	svc := &Service{runtime: runner}
+	userID := uuid.New()
+	runID := uuid.New()
+
+	events, err := svc.ListRunEvents(context.Background(), userID, runID, 11, 42)
+	require.NoError(t, err)
+	require.Same(t, runner.eventsResponse, events)
+	require.Equal(t, userID, runner.inspectUserID)
+	require.Equal(t, runID, runner.inspectRunID)
+	require.Equal(t, int32(11), runner.afterSequence)
+	require.Equal(t, int32(42), runner.limit)
+
+	artifacts, err := svc.ListRunArtifacts(context.Background(), userID, runID)
+	require.NoError(t, err)
+	require.Equal(t, runner.artifactsResponse, artifacts)
+
+	canceled, err := svc.CancelRun(context.Background(), userID, runID)
+	require.NoError(t, err)
+	require.Same(t, runner.response, canceled)
+	require.True(t, runner.cancelCalled)
+}
+
 func TestServiceRunAgentRejectsUnsafeIdempotencyKeyBeforeRuntime(t *testing.T) {
 	runner := &fakeMCPRuntimeRunner{}
 	svc := &Service{runtime: runner}
@@ -141,10 +192,18 @@ func TestServiceRunAgentRejectsUnsafeIdempotencyKeyBeforeRuntime(t *testing.T) {
 }
 
 type fakeMCPRuntimeRunner struct {
-	userID   uuid.UUID
-	request  *runtime.RunRequest
-	source   string
-	response *runtime.RunResponse
+	userID            uuid.UUID
+	request           *runtime.RunRequest
+	source            string
+	response          *runtime.RunResponse
+	started           bool
+	inspectUserID     uuid.UUID
+	inspectRunID      uuid.UUID
+	afterSequence     int32
+	limit             int32
+	eventsResponse    *runtime.RunEventPageResponse
+	artifactsResponse []runtime.RunArtifactResponse
+	cancelCalled      bool
 }
 
 func (f *fakeMCPRuntimeRunner) Run(_ context.Context, userID uuid.UUID, req *runtime.RunRequest, source string) (*runtime.RunResponse, error) {
@@ -154,7 +213,36 @@ func (f *fakeMCPRuntimeRunner) Run(_ context.Context, userID uuid.UUID, req *run
 	return f.response, nil
 }
 
+func (f *fakeMCPRuntimeRunner) StartRun(_ context.Context, userID uuid.UUID, req *runtime.RunRequest, source string) (*runtime.RunResponse, error) {
+	f.started = true
+	f.userID = userID
+	f.request = req
+	f.source = source
+	return f.response, nil
+}
+
 func (f *fakeMCPRuntimeRunner) GetRun(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error) {
+	return f.response, nil
+}
+
+func (f *fakeMCPRuntimeRunner) ListRunEventsPage(_ context.Context, userID, runID uuid.UUID, afterSequence, limit int32) (*runtime.RunEventPageResponse, error) {
+	f.inspectUserID = userID
+	f.inspectRunID = runID
+	f.afterSequence = afterSequence
+	f.limit = limit
+	return f.eventsResponse, nil
+}
+
+func (f *fakeMCPRuntimeRunner) ListRunArtifacts(_ context.Context, userID, runID uuid.UUID) ([]runtime.RunArtifactResponse, error) {
+	f.inspectUserID = userID
+	f.inspectRunID = runID
+	return f.artifactsResponse, nil
+}
+
+func (f *fakeMCPRuntimeRunner) CancelRun(_ context.Context, userID, runID uuid.UUID) (*runtime.RunResponse, error) {
+	f.inspectUserID = userID
+	f.inspectRunID = runID
+	f.cancelCalled = true
 	return f.response, nil
 }
 
