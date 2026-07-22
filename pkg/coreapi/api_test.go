@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -294,6 +296,7 @@ func TestRegisterRuntimeAttachOnlyMountsStrictReadOnlySurface(t *testing.T) {
 
 	routes := routeSet(e)
 	for _, route := range []string{
+		"GET /.well-known/openlinker.json",
 		"POST /api/v1/auth/login",
 		"GET /api/v1/creator/agents",
 		"GET /api/v1/creator/agents/:id/onboarding",
@@ -307,6 +310,26 @@ func TestRegisterRuntimeAttachOnlyMountsStrictReadOnlySurface(t *testing.T) {
 		if !routes[route] {
 			t.Fatalf("attach-only route %s not registered; routes=%v", route, sortedRouteKeys(routes))
 		}
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/.well-known/openlinker.json", nil)
+	response := httptest.NewRecorder()
+	e.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("attach-only discovery returned status %d: %s", response.Code, response.Body.String())
+	}
+	var manifest struct {
+		Runtime struct {
+			MTLSRequired bool     `json:"mtls_required"`
+			Transports   []string `json:"transports"`
+		} `json:"runtime"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&manifest); err != nil {
+		t.Fatalf("decode attach-only discovery: %v", err)
+	}
+	if manifest.Runtime.MTLSRequired || len(manifest.Runtime.Transports) != 1 ||
+		manifest.Runtime.Transports[0] != "websocket" {
+		t.Fatalf("attach-only discovery published the wrong Runtime policy: %#v", manifest.Runtime)
 	}
 	for _, forbidden := range []string{
 		"POST /api/v1/auth/register",
