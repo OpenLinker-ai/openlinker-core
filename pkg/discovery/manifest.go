@@ -113,6 +113,16 @@ type ManifestStates struct {
 // only explicitly configured, validated public origins; it contains no
 // per-user secrets, credentials, certificate paths, or internal topology.
 func NewManifest(cfg *config.Config) OpenLinkerManifest {
+	return NewManifestWithRuntimeTransportPolicy(cfg, coreruntime.CurrentRuntimeTransportPolicy())
+}
+
+// NewManifestWithRuntimeTransportPolicy builds the same credential-free
+// discovery document while advertising the exact policy of a deliberately
+// restricted Core serving mode, such as runtime-attach-only cutover.
+func NewManifestWithRuntimeTransportPolicy(
+	cfg *config.Config,
+	transportPolicy coreruntime.RuntimeTransportPolicy,
+) OpenLinkerManifest {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
@@ -125,7 +135,6 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 		webBase = "http://localhost:3000"
 	}
 	runtimeOrigin, runtimeEnabled := manifestRuntimeOrigin(cfg)
-	transportPolicy := coreruntime.CurrentRuntimeTransportPolicy()
 	livenessPolicy := coreruntime.CurrentRuntimeLivenessPolicy()
 	wireCompatibility := coreruntime.CurrentRuntimeWireCompatibility()
 	transports := make([]string, 0, len(transportPolicy.OrderedTransports))
@@ -259,9 +268,21 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 
 // ServeOpenLinkerManifest returns an Echo handler for /.well-known/openlinker.json.
 func ServeOpenLinkerManifest(cfg *config.Config) echo.HandlerFunc {
+	return ServeOpenLinkerManifestWithRuntimeTransportPolicy(
+		cfg,
+		coreruntime.CurrentRuntimeTransportPolicy(),
+	)
+}
+
+// ServeOpenLinkerManifestWithRuntimeTransportPolicy serves discovery for a
+// restricted Core mode without claiming transports that mode does not mount.
+func ServeOpenLinkerManifestWithRuntimeTransportPolicy(
+	cfg *config.Config,
+	transportPolicy coreruntime.RuntimeTransportPolicy,
+) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		c.Response().Header().Set(echo.HeaderCacheControl, "public, max-age=300")
-		return c.JSON(http.StatusOK, NewManifest(cfg))
+		return c.JSON(http.StatusOK, NewManifestWithRuntimeTransportPolicy(cfg, transportPolicy))
 	}
 }
 

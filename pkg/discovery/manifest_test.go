@@ -72,6 +72,27 @@ func TestNewManifestUsesStablePublicEntrypoints(t *testing.T) {
 	require.Equal(t, "dag_async_agent_workflow_api", manifest.Workflows.Builder)
 }
 
+func TestNewManifestWithRuntimeTransportPolicyAdvertisesRestrictedServingMode(t *testing.T) {
+	manifest := NewManifestWithRuntimeTransportPolicy(
+		&config.Config{
+			APIURL:             "https://api.openlinker.test",
+			FrontendURL:        "https://openlinker.test",
+			RuntimeMTLSEnabled: false,
+		},
+		coreruntime.RuntimeAttachOnlyTransportPolicy(),
+	)
+
+	require.Equal(t, []string{"websocket"}, manifest.Runtime.Transports)
+	require.Equal(t, "auto", manifest.Runtime.DefaultTransport)
+	require.False(t, manifest.Runtime.MTLSRequired)
+	require.Equal(t, "https://api.openlinker.test", manifest.BaseURLs.Runtime)
+	require.Equal(t, coreruntime.CurrentRuntimeTransportPolicy().Version, manifest.Runtime.TransportPolicy.Version)
+	require.Equal(t, []string{"websocket", "long_poll"}, NewManifest(&config.Config{
+		APIURL:             "https://api.openlinker.test",
+		RuntimeMTLSEnabled: false,
+	}).Runtime.Transports)
+}
+
 func TestRuntimeDiscoveryPolicyFixtureMatchesCoreManifest(t *testing.T) {
 	raw, err := os.ReadFile("../../contracts/runtime-discovery-policy-fixtures.json")
 	require.NoError(t, err)

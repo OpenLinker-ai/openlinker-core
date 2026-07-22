@@ -93,6 +93,13 @@ func RegisterRuntimeAttachOnly(
 	opts Options,
 ) *Services {
 	_ = rootCtx // Kept in the signature to make the lifecycle boundary explicit.
+	e.GET(
+		"/.well-known/openlinker.json",
+		discovery.ServeOpenLinkerManifestWithRuntimeTransportPolicy(
+			cfg,
+			runtime.RuntimeAttachOnlyTransportPolicy(),
+		),
+	)
 	api := e.Group("/api/v1")
 
 	authSvc := newAuthService(pool, cfg)
