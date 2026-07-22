@@ -76,10 +76,12 @@ type fakeUserByIDQuerier struct {
 	user       db.User
 	err        error
 	seenUserID uuid.UUID
+	calls      int
 }
 
 func (f *fakeUserByIDQuerier) GetUserByID(_ context.Context, userID uuid.UUID) (db.User, error) {
 	f.seenUserID = userID
+	f.calls++
 	return f.user, f.err
 }
 

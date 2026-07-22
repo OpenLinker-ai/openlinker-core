@@ -44,6 +44,10 @@ type runtimeService interface {
 	ValidateRuntimeToken(context.Context, string, ...string) (db.AgentRuntimeToken, error)
 }
 
+type runWaitStatusService interface {
+	GetRunWaitStatus(context.Context, uuid.UUID, uuid.UUID) (string, error)
+}
+
 // NewHandler 构造 Handler。cfg 可选（测试可省略）。
 func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 	h := &Handler{
@@ -566,11 +570,129 @@ func (h *Handler) GetRun(c echo.Context) error {
 	if err != nil {
 		return httpx.BadRequest("id 不是合法 uuid")
 	}
+	wait, preferWait, err := parseRunPreferWait(c.Request().Header.Get("Prefer"))
+	if err != nil {
+		return err
+	}
+	if preferWait && wait > 0 {
+		var subscription RunUpdateSubscription
+		if h.runUpdates != nil && h.runUpdates.Healthy() {
+			subscription, _ = h.runUpdates.SubscribeRun(runID)
+			if subscription != nil {
+				defer subscription.Close()
+			}
+		}
+		if subscription != nil {
+			err = h.waitForRunStatus(c.Request().Context(), uid, runID, wait, subscription)
+		} else {
+			err = h.pollRunWaitStatus(c.Request().Context(), uid, runID, time.Now().Add(wait), "initial")
+		}
+		if err != nil {
+			return err
+		}
+	}
 	resp, err := h.svc.GetRun(c.Request().Context(), uid, runID)
 	if err != nil {
 		return err
 	}
+	if preferWait {
+		c.Response().Header().Set("Preference-Applied", "wait="+strconv.Itoa(int(wait/time.Second)))
+	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) waitForRunStatus(
+	ctx context.Context,
+	userID, runID uuid.UUID,
+	wait time.Duration,
+	subscription RunUpdateSubscription,
+) error {
+	deadline := time.Now().Add(wait)
+	status, err := h.getRunWaitStatus(ctx, userID, runID, "event_initial")
+	if err != nil {
+		return err
+	}
+	for status == "running" {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil
+		}
+		healthCheck := 2 * time.Second
+		if remaining < healthCheck {
+			healthCheck = remaining
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, healthCheck)
+		waitErr := subscription.Wait(waitCtx)
+		cancel()
+		if waitErr == nil {
+			status, err = h.getRunWaitStatus(ctx, userID, runID, "event_wake")
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if time.Until(deadline) <= 0 {
+			return nil
+		}
+		if h.runUpdates == nil || !h.runUpdates.Healthy() || !errors.Is(waitErr, context.DeadlineExceeded) {
+			return h.pollRunWaitStatus(ctx, userID, runID, deadline, "fallback")
+		}
+	}
+	return nil
+}
+
+func (h *Handler) pollRunWaitStatus(
+	ctx context.Context,
+	userID, runID uuid.UUID,
+	deadline time.Time,
+	initialReason string,
+) error {
+	status, err := h.getRunWaitStatus(ctx, userID, runID, initialReason)
+	if err != nil {
+		return err
+	}
+	for status == "running" {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil
+		}
+		wait := 100 * time.Millisecond
+		if remaining < wait {
+			wait = remaining
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+		status, err = h.getRunWaitStatus(ctx, userID, runID, "ticker")
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *Handler) getRunWaitStatus(ctx context.Context, userID, runID uuid.UUID, reason string) (string, error) {
+	observeWorker(h.observer, "runtime.prefer_wait.run_status_query", reason, 1)
+	if service, ok := h.svc.(runWaitStatusService); ok {
+		return service.GetRunWaitStatus(ctx, userID, runID)
+	}
+	resp, err := h.svc.GetRun(ctx, userID, runID)
+	if err != nil {
+		return "", err
+	}
+	if resp == nil {
+		return "", httpx.Internal("查询调用记录失败")
+	}
+	return resp.Status, nil
 }
 
 // GetRunEvents 查询 run 事件流。SSE 接口后续会复用同一 service 方法。

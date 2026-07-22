@@ -381,7 +381,7 @@ func (s *Service) ListMyAgentsPage(ctx context.Context, creatorID uuid.UUID, opt
 	}
 	out := make([]AgentResponse, 0, len(rows))
 	for i := range rows {
-		out = append(out, s.agentListRowToResponse(ctx, &rows[i]))
+		out = append(out, s.agentListRowToResponse(&rows[i]))
 	}
 	return &AgentListResponse{
 		Items:  out,
@@ -1020,20 +1020,18 @@ func toAgentResponse(a *db.Agent) AgentResponse {
 	return resp
 }
 
-func (s *Service) agentListRowToResponse(ctx context.Context, row *db.ListAgentsByCreatorPageRow) AgentResponse {
+func (s *Service) agentListRowToResponse(row *db.ListAgentsByCreatorPageRow) AgentResponse {
 	resp := toAgentResponse(&row.Agent)
-	availability := s.runtimeAwareAvailability(
-		ctx,
-		row.ID,
-		row.ConnectionMode,
-		availabilityResponse(
-			row.AvailabilityStatus,
-			row.AvailabilityLastSuccessfulRunAt,
-			row.AvailabilityLastFailedRunAt,
-			row.AvailabilityLastCheckedAt,
-			row.AvailabilityConsecutiveFailures,
-		),
+	availability := availabilityResponse(
+		row.AvailabilityStatus,
+		row.AvailabilityLastSuccessfulRunAt,
+		row.AvailabilityLastFailedRunAt,
+		row.AvailabilityLastCheckedAt,
+		row.AvailabilityConsecutiveFailures,
 	)
+	if isQueuedRuntimeConnectionMode(row.ConnectionMode) {
+		availability = availabilityForRuntimeSession(availability, row.RuntimeOnline)
+	}
 	readiness := readinessForAgent(
 		row.Slug,
 		row.LifecycleStatus,
@@ -1047,7 +1045,7 @@ func (s *Service) agentListRowToResponse(ctx context.Context, row *db.ListAgents
 	resp.Readiness = &readiness
 	resp.CallsThisMonth = row.CallsThisMonth
 	resp.RevenueThisMonth = row.RevenueThisMonth
-	s.attachAgentSkillIDsBestEffort(ctx, &resp, row.ID)
+	resp.SkillIDs = append([]string(nil), row.SkillIds...)
 	return resp
 }
 

@@ -100,6 +100,8 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        av.last_checked_at AS availability_last_checked_at,
        COALESCE(av.consecutive_failures, 0)::int AS availability_consecutive_failures,
        rt.last_runtime_token_used_at,
+       (rt.last_runtime_token_used_at IS NOT NULL) AS runtime_online,
+       COALESCE(declared_skills.skill_ids, ARRAY[]::text[]) AS skill_ids,
        COALESCE(monthly.calls_this_month, 0)::bigint AS calls_this_month,
        COALESCE(monthly.revenue_this_month, 0)::bigint AS revenue_this_month
 FROM agents a
@@ -146,6 +148,12 @@ LEFT JOIN LATERAL (
             AND attachment.detached_at IS NULL
       )
 ) rt ON TRUE
+LEFT JOIN LATERAL (
+    SELECT ARRAY_AGG(s.id ORDER BY s.category, s.sort_order, s.id)::text[] AS skill_ids
+    FROM agent_skills ag
+    JOIN skills s ON s.id = ag.skill_id
+    WHERE ag.agent_id = a.id
+) declared_skills ON TRUE
 LEFT JOIN LATERAL (
     SELECT
         COUNT(*)::bigint AS calls_this_month,
@@ -598,6 +606,7 @@ SELECT a.*, u.display_name AS creator_name,
        av.last_checked_at AS availability_last_checked_at,
        COALESCE(av.consecutive_failures, 0)::int AS availability_consecutive_failures,
        rt.last_runtime_token_used_at,
+       (runtime_truth.agent_id IS NOT NULL) AS runtime_online,
        COALESCE(skill_stats.verified_count, 0)::int AS verified_skill_count,
        skill_stats.latest_batch_id AS latest_benchmark_id,
        COALESCE(declared_skills.skill_ids, ARRAY[]::text[]) AS skill_ids,

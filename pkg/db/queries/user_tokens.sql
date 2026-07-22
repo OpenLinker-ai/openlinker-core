@@ -61,7 +61,13 @@ SET revoked_at = NOW()
 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL;
 
 -- name: TouchUserToken :exec
-UPDATE user_tokens SET last_used_at = NOW() WHERE id = $1;
+UPDATE user_tokens
+SET last_used_at = clock_timestamp()
+WHERE id = $1
+  AND (
+    last_used_at IS NULL
+    OR last_used_at < clock_timestamp() - INTERVAL '5 minutes'
+  );
 
 -- name: ListUserTokenCoreGrants :many
 SELECT id, token_id, permission, resource_type, resource_id, constraints, created_at

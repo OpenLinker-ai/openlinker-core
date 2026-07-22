@@ -27,11 +27,12 @@ type Grant struct {
 // JWT sessions represent the first-party user and are not narrowed by token
 // grants; User Token requests always go through Allows.
 type AuthPrincipal struct {
-	UserID           uuid.UUID  `json:"user_id"`
-	AuthMethod       string     `json:"auth_method"`
-	TokenID          *uuid.UUID `json:"token_id,omitempty"`
-	IssuerInstanceID string     `json:"issuer_instance_id,omitempty"`
-	Grants           []Grant    `json:"grants"`
+	UserID             uuid.UUID  `json:"user_id"`
+	AuthMethod         string     `json:"auth_method"`
+	TokenID            *uuid.UUID `json:"token_id,omitempty"`
+	IssuerInstanceID   string     `json:"issuer_instance_id,omitempty"`
+	Grants             []Grant    `json:"grants"`
+	UserStatusVerified bool       `json:"-"`
 }
 
 func (p *AuthPrincipal) Permissions() []string {

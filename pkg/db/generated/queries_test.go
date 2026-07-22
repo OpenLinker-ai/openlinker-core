@@ -3862,6 +3862,7 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 		&now,
 		int32(0),
 		&now,
+		true,
 		int32(2),
 		&latestBenchmarkID,
 		[]string{"data/sql-query"},
@@ -3983,6 +3984,7 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 		publicAgents[0].AvailabilityLastSuccessfulRunAt == nil ||
 		publicAgents[0].AvailabilityConsecutiveFailures != 0 ||
 		publicAgents[0].LastRuntimeTokenUsedAt == nil ||
+		!publicAgents[0].RuntimeOnline ||
 		publicAgents[0].VerifiedSkillCount != 2 ||
 		publicAgents[0].LatestBenchmarkID == nil ||
 		*publicAgents[0].LatestBenchmarkID != latestBenchmarkID ||
@@ -4039,6 +4041,15 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 		t.Fatalf("GetRunByID = %#v, %v", got, err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "GetRunByID")
+
+	dbtx.row = fakeRow{values: []any{"running"}}
+	if got, err := q.GetRunStatusForViewer(context.Background(), GetRunStatusForViewerParams{RunID: runID, ViewerID: userID}); err != nil || got != "running" {
+		t.Fatalf("GetRunStatusForViewer = %q, %v", got, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetRunStatusForViewer")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID, userID}) {
+		t.Fatalf("GetRunStatusForViewer args = %#v", dbtx.queryRowArgs)
+	}
 }
 
 func userRow(id uuid.UUID, now time.Time, passwordHash, provider, oauthID, avatar *string, deletedAt *time.Time) []any {

@@ -106,18 +106,16 @@ func (s *MarketService) ListMarketWithSkills(ctx context.Context, tags []string,
 
 	items := make([]MarketListItem, 0, len(rows))
 	for _, r := range rows {
-		availability := s.runtimeAwareAvailability(
-			ctx,
-			r.ID,
-			r.ConnectionMode,
-			availabilityResponse(
-				r.AvailabilityStatus,
-				r.AvailabilityLastSuccessfulRunAt,
-				r.AvailabilityLastFailedRunAt,
-				r.AvailabilityLastCheckedAt,
-				r.AvailabilityConsecutiveFailures,
-			),
+		availability := availabilityResponse(
+			r.AvailabilityStatus,
+			r.AvailabilityLastSuccessfulRunAt,
+			r.AvailabilityLastFailedRunAt,
+			r.AvailabilityLastCheckedAt,
+			r.AvailabilityConsecutiveFailures,
 		)
+		if isQueuedRuntimeConnectionMode(r.ConnectionMode) {
+			availability = availabilityForRuntimeSession(availability, r.RuntimeOnline)
+		}
 		latestBenchmarkID := stringPtrFromUUID(r.LatestBenchmarkID)
 		items = append(items, MarketListItem{
 			ID:                r.ID.String(),

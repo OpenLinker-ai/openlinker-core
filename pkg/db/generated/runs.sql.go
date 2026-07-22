@@ -181,6 +181,25 @@ func (q *Queries) GetRunByID(ctx context.Context, id uuid.UUID) (Run, error) {
 	return r, err
 }
 
+const getRunStatusForViewer = `-- name: GetRunStatusForViewer :one
+SELECT r.status
+FROM runs r
+LEFT JOIN agents a ON a.id = r.agent_id
+WHERE r.id = $1
+  AND (r.user_id = $2 OR a.creator_id = $2)`
+
+type GetRunStatusForViewerParams struct {
+	RunID    uuid.UUID `db:"run_id" json:"run_id"`
+	ViewerID uuid.UUID `db:"viewer_id" json:"viewer_id"`
+}
+
+func (q *Queries) GetRunStatusForViewer(ctx context.Context, arg GetRunStatusForViewerParams) (string, error) {
+	row := q.db.QueryRow(ctx, getRunStatusForViewer, arg.RunID, arg.ViewerID)
+	var status string
+	err := row.Scan(&status)
+	return status, err
+}
+
 const getRunReplayPayload = `-- name: GetRunReplayPayload :one
 SELECT input, request_metadata
 FROM runs

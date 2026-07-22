@@ -69,6 +69,66 @@ func TestPreferWaitQueriesOnlyInitiallyAndAfterRunWake(t *testing.T) {
 	}, observations)
 }
 
+func TestGetRunPreferWaitUsesLightweightStatusUntilWake(t *testing.T) {
+	runID, userID := uuid.New(), uuid.New()
+	service := &getRunWaitRuntimeServiceFake{
+		mockRuntimeService: &mockRuntimeService{getRunResp: &RunResponse{
+			RunID: runID.String(), Status: "success",
+		}},
+		status:     "running",
+		firstQuery: make(chan struct{}),
+	}
+	updates := newRuntimeRunUpdateSourceFake()
+	handler := NewHandler(service)
+	handler.SetRunUpdateSource(updates)
+	var observationsMu sync.Mutex
+	var observations []WorkerObservation
+	handler.SetWorkerObserver(WorkerObserverFunc(func(observation WorkerObservation) {
+		observationsMu.Lock()
+		observations = append(observations, observation)
+		observationsMu.Unlock()
+	}))
+
+	ctx, recorder := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method: http.MethodGet, target: "/api/v1/runs/" + runID.String(),
+		userID: userID.String(), params: map[string]string{"id": runID.String()},
+		headers: map[string]string{"Prefer": "wait=1"},
+	})
+	done := make(chan error, 1)
+	go func() { done <- handler.GetRun(ctx) }()
+	select {
+	case <-service.firstQuery:
+	case <-time.After(time.Second):
+		t.Fatal("GET Prefer wait did not perform its initial status query")
+	}
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, 1, service.calls())
+	require.Equal(t, uuid.Nil, service.getRunID, "full Run detail must not be read while waiting")
+
+	service.complete()
+	updates.publish(runID)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("GET Prefer wait did not wake for terminal status")
+	}
+	require.Equal(t, 2, service.calls())
+	require.Equal(t, runID, service.getRunID)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "wait=1", recorder.Header().Get("Preference-Applied"))
+	var response RunResponse
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	require.Equal(t, "success", response.Status)
+
+	observationsMu.Lock()
+	defer observationsMu.Unlock()
+	require.Equal(t, []WorkerObservation{
+		{Category: "runtime.prefer_wait.run_status_query", Reason: "event_initial", BatchSize: 1},
+		{Category: "runtime.prefer_wait.run_status_query", Reason: "event_wake", BatchSize: 1},
+	}, observations)
+}
+
 func TestRunSSEQueriesOnlyInitiallyAndAfterRunWake(t *testing.T) {
 	runID, userID := uuid.New(), uuid.New()
 	service := &runUpdateEventPageServiceFake{
@@ -122,6 +182,36 @@ type runUpdateRuntimeServiceFake struct {
 	queryCalls int
 	firstQuery chan struct{}
 	firstOnce  sync.Once
+}
+
+type getRunWaitRuntimeServiceFake struct {
+	*mockRuntimeService
+	mu         sync.Mutex
+	status     string
+	queryCalls int
+	firstQuery chan struct{}
+	firstOnce  sync.Once
+}
+
+func (f *getRunWaitRuntimeServiceFake) GetRunWaitStatus(context.Context, uuid.UUID, uuid.UUID) (string, error) {
+	f.mu.Lock()
+	f.queryCalls++
+	status := f.status
+	f.mu.Unlock()
+	f.firstOnce.Do(func() { close(f.firstQuery) })
+	return status, nil
+}
+
+func (f *getRunWaitRuntimeServiceFake) complete() {
+	f.mu.Lock()
+	f.status = "success"
+	f.mu.Unlock()
+}
+
+func (f *getRunWaitRuntimeServiceFake) calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.queryCalls
 }
 
 type runUpdateEventPageServiceFake struct {

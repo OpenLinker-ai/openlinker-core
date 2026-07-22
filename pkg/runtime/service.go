@@ -1454,6 +1454,22 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 	return resp, nil
 }
 
+// GetRunWaitStatus performs the narrow authorization and lifecycle read used
+// by Prefer: wait. Full Run evidence is assembled only for the HTTP response.
+func (s *Service) GetRunWaitStatus(ctx context.Context, userID, runID uuid.UUID) (string, error) {
+	status, err := s.queries.GetRunStatusForViewer(ctx, db.GetRunStatusForViewerParams{
+		RunID: runID, ViewerID: userID,
+	})
+	if err == nil {
+		return status, nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", httpx.NotFound("调用记录不存在")
+	}
+	log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.GetRunWaitStatus")
+	return "", httpx.Internal("查询调用记录失败")
+}
+
 func (s *Service) attachRunA2AContext(ctx context.Context, runID uuid.UUID, resp *RunResponse) {
 	if resp == nil {
 		return

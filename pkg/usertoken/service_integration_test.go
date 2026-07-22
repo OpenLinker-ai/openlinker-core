@@ -56,12 +56,22 @@ func TestServiceCreateVerifyShrinkRevokeIntegration(t *testing.T) {
 		t.Fatalf("created = %#v", created)
 	}
 	principal, err := svc.VerifyPrincipal(ctx, created.PlaintextToken)
-	if err != nil || principal.TokenID == nil || principal.TokenID.String() != created.ID {
+	if err != nil || principal.TokenID == nil || principal.TokenID.String() != created.ID || !principal.UserStatusVerified {
 		t.Fatalf("principal = %#v, %v", principal, err)
 	}
-	var lastUsed *time.Time
-	if err := pool.QueryRow(ctx, `SELECT last_used_at FROM user_tokens WHERE id=$1`, created.ID).Scan(&lastUsed); err != nil || lastUsed == nil {
-		t.Fatalf("last_used_at = %v, %v", lastUsed, err)
+	var lastUsed, updatedAt *time.Time
+	if err := pool.QueryRow(ctx, `SELECT last_used_at, updated_at FROM user_tokens WHERE id=$1`, created.ID).Scan(&lastUsed, &updatedAt); err != nil || lastUsed == nil || updatedAt == nil {
+		t.Fatalf("token timestamps = last_used_at %v, updated_at %v, error %v", lastUsed, updatedAt, err)
+	}
+	if _, err := svc.VerifyPrincipal(ctx, created.PlaintextToken); err != nil {
+		t.Fatalf("second VerifyPrincipal: %v", err)
+	}
+	var secondLastUsed, secondUpdatedAt *time.Time
+	if err := pool.QueryRow(ctx, `SELECT last_used_at, updated_at FROM user_tokens WHERE id=$1`, created.ID).Scan(&secondLastUsed, &secondUpdatedAt); err != nil {
+		t.Fatalf("second token timestamps: %v", err)
+	}
+	if secondLastUsed == nil || !secondLastUsed.Equal(*lastUsed) || secondUpdatedAt == nil || !secondUpdatedAt.Equal(*updatedAt) {
+		t.Fatalf("coalesced touch changed timestamps: first=(%v,%v) second=(%v,%v)", lastUsed, updatedAt, secondLastUsed, secondUpdatedAt)
 	}
 
 	remaining := []GrantRequest{{Permission: "runs:read", ResourceType: "run"}}
