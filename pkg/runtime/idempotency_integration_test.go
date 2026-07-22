@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sync"
@@ -16,6 +17,91 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
+
+func TestRunCreationPersistsTrustedA2AMetadataBeforeImmutableInsert(t *testing.T) {
+	pool := setupTestDB(t)
+	requireReliableRuntimeSchema(t, pool)
+	svc := newTestService(t, pool)
+	userID := insertRuntimeUser(t, pool)
+	creatorID := insertCreator(t, pool)
+
+	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"answer":"done"}}`))
+	agentID := insertAgent(t, pool, creatorID, endpoint, 0, "approved")
+	const conversationID = "plugin-conversation-1"
+
+	first, err := svc.Run(context.Background(), userID, &runtime.RunRequest{
+		AgentID: agentID.String(),
+		Input:   map[string]any{"task": "remember the nonce"},
+		Metadata: map[string]any{
+			"client":       "native-plugin-test",
+			"a2a":          map[string]any{"source": "caller"},
+			"conversation": map[string]any{"source": "caller"},
+		},
+		A2AContext: &runtime.RunA2AContextRequest{
+			ProtocolContextID: conversationID,
+			ProtocolTaskID:    "plugin-turn-1",
+			RootContextID:     conversationID,
+		},
+		IdempotencyKey: "plugin-conversation-turn-1",
+	}, "mcp")
+	require.NoError(t, err)
+	require.Equal(t, "success", first.Status)
+
+	firstID := uuid.MustParse(first.RunID)
+	var firstMetadataJSON []byte
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT request_metadata FROM runs WHERE id = $1`, firstID,
+	).Scan(&firstMetadataJSON))
+	var firstMetadata map[string]any
+	require.NoError(t, json.Unmarshal(firstMetadataJSON, &firstMetadata))
+	require.Equal(t, "native-plugin-test", firstMetadata["client"])
+	firstA2A := firstMetadata["a2a"].(map[string]any)
+	require.Equal(t, conversationID, firstA2A["protocol_context_id"])
+	firstConversation := firstMetadata["conversation"].(map[string]any)
+	require.Equal(t, conversationID, firstConversation["session_key"])
+	require.Equal(t, first.RunID, firstConversation["current_run_id"])
+	require.Equal(t, "plugin-turn-1", firstConversation["current_protocol_task_id"])
+	require.Equal(t, "core", firstConversation["source"])
+	require.NotContains(t, firstConversation, "history_before_current")
+	var mappedTargetAgentID uuid.UUID
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT target_agent_id FROM a2a_context_mappings WHERE run_id = $1`, firstID,
+	).Scan(&mappedTargetAgentID))
+	require.Equal(t, agentID, mappedTargetAgentID)
+
+	_, err = pool.Exec(context.Background(),
+		`UPDATE runs SET request_metadata = '{"tampered":true}'::jsonb WHERE id = $1`, firstID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "run creation identity is immutable")
+
+	second, err := svc.Run(context.Background(), userID, &runtime.RunRequest{
+		AgentID: agentID.String(),
+		Input:   map[string]any{"task": "recall the nonce"},
+		A2AContext: &runtime.RunA2AContextRequest{
+			ProtocolContextID: conversationID,
+			ProtocolTaskID:    "plugin-turn-2",
+			RootContextID:     conversationID,
+		},
+		IdempotencyKey: "plugin-conversation-turn-2",
+	}, "mcp")
+	require.NoError(t, err)
+	require.Equal(t, "success", second.Status)
+
+	var secondMetadataJSON []byte
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT request_metadata FROM runs WHERE id = $1`, uuid.MustParse(second.RunID),
+	).Scan(&secondMetadataJSON))
+	var secondMetadata map[string]any
+	require.NoError(t, json.Unmarshal(secondMetadataJSON, &secondMetadata))
+	secondConversation := secondMetadata["conversation"].(map[string]any)
+	require.Equal(t, conversationID, secondConversation["session_key"])
+	require.Equal(t, second.RunID, secondConversation["current_run_id"])
+	require.Equal(t, "plugin-turn-2", secondConversation["current_protocol_task_id"])
+	history := secondConversation["history_before_current"].([]any)
+	require.Len(t, history, 1)
+	require.Equal(t, first.RunID, history[0].(map[string]any)["run_id"])
+	require.Equal(t, "user", history[0].(map[string]any)["role"])
+}
 
 func TestRunCreationIdempotencyOneWinnerUnder100ConcurrentRequests(t *testing.T) {
 	pool := setupTestDB(t)

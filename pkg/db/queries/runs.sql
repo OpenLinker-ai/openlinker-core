@@ -95,14 +95,6 @@ SELECT input, request_metadata
 FROM runs
 WHERE id = $1;
 
--- name: UpdateRunRequestMetadata :exec
--- Run creation uses this only inside the same transaction, after the
--- Core-owned A2A mapping exists, so queued runtimes receive trusted session
--- context instead of caller-supplied conversation metadata.
-UPDATE runs
-SET request_metadata = $2
-WHERE id = $1;
-
 -- name: LockRunForResultFinalization :one
 -- Result 事务的首把锁。所有 deadline 判断使用同一行返回的数据库时钟，
 -- 后续固定按 Run -> Attempt -> Event advisory lock 顺序取锁。

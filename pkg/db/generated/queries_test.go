@@ -206,18 +206,6 @@ func TestRunQueriesScanRowsAndGuardAffectedRows(t *testing.T) {
 		t.Fatalf("GetRunIdempotencyRecord SQL missing runtime contract guard: %s", dbtx.queryRowSQL)
 	}
 
-	trustedMetadata := []byte(`{"conversation":{"session_key":"ctx-1","source":"core"}}`)
-	if err := q.UpdateRunRequestMetadata(context.Background(), UpdateRunRequestMetadataParams{
-		ID:              runID,
-		RequestMetadata: trustedMetadata,
-	}); err != nil {
-		t.Fatalf("UpdateRunRequestMetadata error = %v", err)
-	}
-	requireSQLName(t, dbtx.execSQL, "UpdateRunRequestMetadata")
-	if !reflect.DeepEqual(dbtx.execArgs, []any{runID, trustedMetadata}) {
-		t.Fatalf("UpdateRunRequestMetadata args = %#v", dbtx.execArgs)
-	}
-
 	listed, err := q.ListRunsByUserWithAgent(context.Background(), ListRunsByUserWithAgentParams{UserID: userID, Limit: 10, Offset: 5})
 	if err != nil {
 		t.Fatalf("ListRunsByUserWithAgent error = %v", err)
@@ -1848,6 +1836,24 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	requireSQLName(t, dbtx.querySQL, "ListA2AContextMappingsByRoot")
 	if !mappingRows.closed || len(mappings) != 1 || mappings[0].TraceID != "trace-root" {
 		t.Fatalf("ListA2AContextMappingsByRoot scan = %#v closed=%v", mappings, mappingRows.closed)
+	}
+
+	recentMappingRows := &fakeRows{rows: [][]any{
+		a2aContextMappingRow(mappingID, childRunID, userID, agentID, parentRunID, callerAgentID, targetAgentID, now),
+	}}
+	dbtx.queryRows = recentMappingRows
+	recentMappings, err := q.ListRecentA2AContextMappingsByRoot(context.Background(), ListRecentA2AContextMappingsByRootParams{
+		UserID: userID, RootContextID: "ctx-root", Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("ListRecentA2AContextMappingsByRoot error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListRecentA2AContextMappingsByRoot")
+	if !recentMappingRows.closed || len(recentMappings) != 1 || recentMappings[0].ProtocolTaskID != "task-child" {
+		t.Fatalf("ListRecentA2AContextMappingsByRoot scan = %#v closed=%v", recentMappings, recentMappingRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{userID, "ctx-root", int32(20)}) {
+		t.Fatalf("ListRecentA2AContextMappingsByRoot args = %#v", dbtx.queryArgs)
 	}
 
 	duration := int32(250)
