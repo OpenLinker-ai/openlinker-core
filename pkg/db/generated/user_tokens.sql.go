@@ -210,7 +210,13 @@ func (q *Queries) RevokeUserTokenForUser(ctx context.Context, arg RevokeUserToke
 }
 
 const touchUserToken = `-- name: TouchUserToken :exec
-UPDATE user_tokens SET last_used_at = NOW() WHERE id = $1`
+UPDATE user_tokens
+SET last_used_at = clock_timestamp()
+WHERE id = $1
+  AND (
+    last_used_at IS NULL
+    OR last_used_at < clock_timestamp() - INTERVAL '5 minutes'
+  )`
 
 func (q *Queries) TouchUserToken(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, touchUserToken, id)

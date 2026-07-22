@@ -14,8 +14,8 @@ import (
 
 // ApiKeyVerifier 抽象 User Token 鉴权能力，避免 auth 与具体 Token 存储或桥接实现耦合。
 //
-// 实现方（internal/apikey.Service）应在命中后异步刷新 last_used_at，
-// 失败时返回固定错误（不暴露内部细节）。
+// 实现方应在命中后合并刷新 last_used_at，失败时返回固定错误
+// （不暴露内部细节）。
 type ApiKeyVerifier interface {
 	Verify(ctx context.Context, plaintextToken string) (uuid.UUID, []string, error)
 }
@@ -89,8 +89,10 @@ func HybridAuthMiddlewareWithUserStatus(jwtSecret string, verifier ApiKeyVerifie
 			if principal == nil {
 				return httpx.Unauthorized("认证失败")
 			}
-			if err := ensureTokenUserEnabled(c.Request().Context(), users, principal.UserID.String()); err != nil {
-				return err
+			if !principal.UserStatusVerified {
+				if err := ensureTokenUserEnabled(c.Request().Context(), users, principal.UserID.String()); err != nil {
+					return err
+				}
 			}
 			SetPrincipal(c, principal)
 			return next(c)

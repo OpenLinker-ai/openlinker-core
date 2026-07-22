@@ -522,6 +522,27 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 	}
 }
 
+func TestAgentListRowUsesAggregatedRuntimeAndSkills(t *testing.T) {
+	row := &db.ListAgentsByCreatorPageRow{
+		Agent: db.Agent{
+			ID: uuid.New(), Slug: "runtime-agent", Name: "Runtime Agent",
+			LifecycleStatus: "active", Visibility: "public", CertificationStatus: "certified",
+			ConnectionMode: ConnectionModeRuntime,
+		},
+		AvailabilityStatus: "unknown",
+		RuntimeOnline:      true,
+		SkillIds:           []string{"data/sql-query", "dev/code-review"},
+	}
+
+	response := (&Service{}).agentListRowToResponse(row)
+	if response.Availability == nil || response.Availability.Status != "healthy" {
+		t.Fatalf("aggregated Runtime availability = %#v", response.Availability)
+	}
+	if !reflect.DeepEqual(response.SkillIDs, row.SkillIds) {
+		t.Fatalf("aggregated skill IDs = %#v, want %#v", response.SkillIDs, row.SkillIds)
+	}
+}
+
 func TestRegistrationApprovalAndMetricHelpers(t *testing.T) {
 	slug := deriveSlug(" My Agent!! ")
 	if !strings.HasPrefix(slug, "my-agent-") || len(slug) != len("my-agent-")+6 || !isValidSlug(slug) {

@@ -75,6 +75,7 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        av.last_checked_at AS availability_last_checked_at,
        COALESCE(av.consecutive_failures, 0)::int AS availability_consecutive_failures,
        rt.last_runtime_token_used_at,
+       (runtime_truth.agent_id IS NOT NULL) AS runtime_online,
        COALESCE(skill_stats.verified_count, 0)::int AS verified_skill_count,
        skill_stats.latest_batch_id AS latest_benchmark_id,
        COALESCE(declared_skills.skill_ids, ARRAY[]::text[]) AS skill_ids,
@@ -218,6 +219,7 @@ type ListPublicAgentsRow struct {
 	AvailabilityLastCheckedAt       *time.Time `db:"availability_last_checked_at" json:"availability_last_checked_at"`
 	AvailabilityConsecutiveFailures int32      `db:"availability_consecutive_failures" json:"availability_consecutive_failures"`
 	LastRuntimeTokenUsedAt          *time.Time `db:"last_runtime_token_used_at" json:"last_runtime_token_used_at"`
+	RuntimeOnline                   bool       `db:"runtime_online" json:"runtime_online"`
 	VerifiedSkillCount              int32      `db:"verified_skill_count" json:"verified_skill_count"`
 	LatestBenchmarkID               *uuid.UUID `db:"latest_benchmark_id" json:"latest_benchmark_id"`
 	SkillIDs                        []string   `db:"skill_ids" json:"skill_ids"`
@@ -272,6 +274,7 @@ func (q *Queries) ListPublicAgents(ctx context.Context, arg ListPublicAgentsPara
 			&r.AvailabilityLastCheckedAt,
 			&r.AvailabilityConsecutiveFailures,
 			&r.LastRuntimeTokenUsedAt,
+			&r.RuntimeOnline,
 			&r.VerifiedSkillCount,
 			&r.LatestBenchmarkID,
 			&r.SkillIDs,

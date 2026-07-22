@@ -336,6 +336,38 @@ func TestHybridAuthMiddlewareBranches(t *testing.T) {
 	}
 }
 
+func TestHybridAuthMiddlewareAvoidsDuplicateVerifiedUserStatusLookup(t *testing.T) {
+	userID := uuid.New()
+	principalVerifier := &fakePrincipalAPIKeyVerifier{principal: &AuthPrincipal{
+		UserID: userID, AuthMethod: AuthMethodUserToken, UserStatusVerified: true,
+	}}
+	users := &fakeUserByIDQuerier{err: errors.New("verified principal must not query user status again")}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer ol_user_verified")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	called := false
+	err := HybridAuthMiddlewareWithUserStatus(pureAuthSecret, principalVerifier, users)(func(echo.Context) error {
+		called = true
+		return nil
+	})(c)
+	if err != nil || !called || users.calls != 0 {
+		t.Fatalf("verified principal middleware = err %v, called %t, user queries %d", err, called, users.calls)
+	}
+
+	legacyVerifier := &fakeAPIKeyVerifier{userID: userID}
+	users = &fakeUserByIDQuerier{user: db.User{ID: userID}}
+	req = httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer ol_user_legacy")
+	c = e.NewContext(req, httptest.NewRecorder())
+	err = HybridAuthMiddlewareWithUserStatus(pureAuthSecret, legacyVerifier, users)(func(echo.Context) error { return nil })(c)
+	if err != nil || users.calls != 1 {
+		t.Fatalf("legacy principal middleware = err %v, user queries %d", err, users.calls)
+	}
+}
+
 func TestAuthServicePureHelpers(t *testing.T) {
 	userID := uuid.New()
 	svc := &Service{jwtSecret: pureAuthSecret, jwtExpire: time.Hour}
@@ -544,6 +576,22 @@ type fakeAPIKeyVerifier struct {
 	scopes    []string
 	err       error
 	seenToken string
+}
+
+type fakePrincipalAPIKeyVerifier struct {
+	principal *AuthPrincipal
+	err       error
+}
+
+func (f *fakePrincipalAPIKeyVerifier) Verify(context.Context, string) (uuid.UUID, []string, error) {
+	if f.err != nil || f.principal == nil {
+		return uuid.Nil, nil, f.err
+	}
+	return f.principal.UserID, f.principal.Permissions(), nil
+}
+
+func (f *fakePrincipalAPIKeyVerifier) VerifyPrincipal(context.Context, string) (*AuthPrincipal, error) {
+	return f.principal, f.err
 }
 
 func (f *fakeAPIKeyVerifier) Verify(_ context.Context, plaintextKey string) (uuid.UUID, []string, error) {

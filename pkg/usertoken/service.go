@@ -340,6 +340,7 @@ func (s *Service) VerifyPrincipal(ctx context.Context, plaintext string) (*auth.
 	return &auth.AuthPrincipal{
 		UserID: matched.UserID, AuthMethod: auth.AuthMethodUserToken,
 		TokenID: &tokenID, IssuerInstanceID: issuer, Grants: dbGrantsToAuth(grants),
+		UserStatusVerified: true,
 	}, nil
 }
 

@@ -75,6 +75,18 @@ SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
 FROM runs r
 WHERE r.id = $1;
 
+-- name: GetRunStatusForViewer :one
+-- Prefer: wait only needs owner authorization and the current lifecycle state.
+-- Keep this narrow so progress wake-ups do not rebuild the full Run detail.
+SELECT r.status
+FROM runs r
+LEFT JOIN agents a ON a.id = r.agent_id
+WHERE r.id = sqlc.arg(run_id)
+  AND (
+    r.user_id = sqlc.arg(viewer_id)
+    OR a.creator_id = sqlc.arg(viewer_id)
+  );
+
 -- name: GetRunReplayPayload :one
 -- Owner/state/DLQ authorization is performed before this narrow payload read.
 -- Keeping it separate prevents request metadata from leaking into ordinary Run
