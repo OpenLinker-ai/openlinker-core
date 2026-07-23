@@ -544,7 +544,10 @@ func TestApplicationReadinessSkipsRedisWhenExternalExecutionDisabled(t *testing.
 	}
 }
 
-func TestNewRedisClientDoesNotRequireReachableServer(t *testing.T) {
+func TestNewRedisClientBuildsPrimaryOnlyClientWithoutReachability(t *testing.T) {
+	// The concrete *redis.Client return type is part of the revocation-cache
+	// safety boundary: replica reads must not be enabled without adding the
+	// per-slot atomic projection acknowledgement contract and its tests.
 	client, err := newRedisClient("redis://127.0.0.1:1/0")
 	if err != nil {
 		t.Fatalf("newRedisClient: %v", err)

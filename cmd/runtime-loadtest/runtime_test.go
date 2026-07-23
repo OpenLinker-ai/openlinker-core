@@ -11,6 +11,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -113,7 +115,7 @@ func TestRuntimeCredentialPreflightBindsCertificateNodeAndKeyPermissions(t *test
 	cert, key, ca := writeRuntimeTestCredentials(t, nodeID)
 	cfg := config{
 		NodeID: nodeID.String(), MTLSCertFile: cert, MTLSKeyFile: key, MTLSCAFile: ca,
-		StateDir: filepath.Join(t.TempDir(), "state"),
+		RuntimeCredentialSource: "mtls", StateDir: filepath.Join(t.TempDir(), "state"),
 	}
 	if err := preflightRuntimeCredentials(cfg); err != nil {
 		t.Fatalf("preflight valid credentials: %v", err)
@@ -128,6 +130,45 @@ func TestRuntimeCredentialPreflightBindsCertificateNodeAndKeyPermissions(t *test
 	}
 	if err := preflightRuntimeCredentials(cfg); err == nil {
 		t.Fatal("preflight accepted a group-readable private key")
+	}
+}
+
+func TestRuntimeTokenOnlyPreflightNeedsOnlyPrivateStateDirectory(t *testing.T) {
+	cfg := config{
+		RuntimeCredentialSource: "token",
+		StateDir:                filepath.Join(t.TempDir(), "token-state"),
+	}
+	if err := preflightRuntimeCredentials(cfg); err != nil {
+		t.Fatalf("token-only preflight: %v", err)
+	}
+	info, err := os.Stat(cfg.StateDir)
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("token-only state mode=%v err=%v", info.Mode(), err)
+	}
+}
+
+func TestResolveRuntimeTargetRequiresExplicitTokenOnlyDiscovery(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/.well-known/openlinker.json" {
+			http.NotFound(w, request)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"base_urls": map[string]any{"runtime": server.URL},
+			"runtime":   map[string]any{"mtls_required": false},
+		})
+	}))
+	defer server.Close()
+	cfg := config{
+		APIRoot: server.URL + "/api/v1", RuntimeCredentialSource: "token",
+		RequestTimeout: time.Second,
+	}
+	if err := resolveRuntimeTarget(context.Background(), &cfg); err != nil {
+		t.Fatalf("resolve token-only Runtime: %v", err)
+	}
+	if cfg.RuntimeURL != server.URL {
+		t.Fatalf("Runtime URL = %q, want %q", cfg.RuntimeURL, server.URL)
 	}
 }
 

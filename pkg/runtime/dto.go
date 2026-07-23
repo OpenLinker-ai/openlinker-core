@@ -364,16 +364,21 @@ type AgentRequest struct {
 // AgentA2AContext tells an Agent how to delegate from its current run without
 // making a human copy/paste a parent run id from the UI.
 type AgentA2AContext struct {
-	CurrentRunID      string   `json:"current_run_id"`
-	ParentRunID       string   `json:"parent_run_id,omitempty"`
-	CallerAgentID     string   `json:"caller_agent_id,omitempty"`
-	ProtocolContextID string   `json:"protocol_context_id,omitempty"`
-	ProtocolTaskID    string   `json:"protocol_task_id,omitempty"`
-	RootContextID     string   `json:"root_context_id,omitempty"`
-	ParentContextID   string   `json:"parent_context_id,omitempty"`
-	ParentTaskID      string   `json:"parent_task_id,omitempty"`
-	TraceID           string   `json:"trace_id,omitempty"`
-	ReferenceTaskIDs  []string `json:"reference_task_ids,omitempty"`
+	CurrentRunID        string   `json:"current_run_id"`
+	MessageID           string   `json:"message_id,omitempty"`
+	Protocol            string   `json:"protocol,omitempty"`
+	Method              string   `json:"method,omitempty"`
+	ParentRunID         string   `json:"parent_run_id,omitempty"`
+	CallerAgentID       string   `json:"caller_agent_id,omitempty"`
+	ProtocolContextID   string   `json:"protocol_context_id,omitempty"`
+	ProtocolTaskID      string   `json:"protocol_task_id,omitempty"`
+	RootContextID       string   `json:"root_context_id,omitempty"`
+	ParentContextID     string   `json:"parent_context_id,omitempty"`
+	ParentTaskID        string   `json:"parent_task_id,omitempty"`
+	TraceID             string   `json:"trace_id,omitempty"`
+	ReferenceTaskIDs    []string `json:"reference_task_ids,omitempty"`
+	AcceptedOutputModes []string `json:"accepted_output_modes,omitempty"`
+	Extensions          []string `json:"extensions,omitempty"`
 }
 
 // AgentResponse 创作者 endpoint → 平台的响应体。

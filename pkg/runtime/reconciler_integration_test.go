@@ -417,6 +417,7 @@ func convertRuntimeReconcileFixtureToOffered(
 			SET attempt_no = NULL,
 			    accepted_at = NULL,
 			    last_renewed_at = NULL,
+			    runtime_attachment_id = NULL,
 			    offer_expires_at = $2
 			WHERE id = $1`, fixture.identity.AttemptID, offerExpiresAt); err != nil {
 			return err

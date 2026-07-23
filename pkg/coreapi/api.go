@@ -348,12 +348,18 @@ func configureEventWake(rootCtx context.Context, pool *pgxpool.Pool) *eventwake.
 	}
 	infrastructure, err := eventwake.NewPostgresInfrastructure(
 		pool,
-		[]string{"openlinker_run_v1", "openlinker_work_v1", "openlinker_external_v1"},
+		[]string{
+			"openlinker_run_v1",
+			"openlinker_work_v1",
+			"openlinker_external_v1",
+			"openlinker_runtime_v1",
+		},
 		[]string{
 			"run.changed",
 			"external_execution.changed",
 			"work.runtime_signal.available",
 			"work.run_effect.available",
+			runtime.RuntimeCredentialRevocationWakeTopic,
 		},
 	)
 	if err != nil {
@@ -501,6 +507,7 @@ func configureRuntime(
 	wakeHub := runtime.NewRuntimeWakeHub()
 	var presence runtime.RuntimePresenceStore
 	var sessionLeases *runtime.RuntimeSessionLeaseManager
+	var credentialProjection runtime.RuntimeCredentialProjectionStore
 	if provider, ok := signalBus.(runtime.RuntimePresenceStoreProvider); ok {
 		presence, err = provider.RuntimePresenceStore()
 		if err != nil {
@@ -520,6 +527,13 @@ func configureRuntime(
 				log.Warn().Err(leaseErr).Msg("agent runtime Session lease manager is unavailable; using database heartbeat")
 				sessionLeases = nil
 			}
+		}
+	}
+	if provider, ok := signalBus.(runtime.RuntimeCredentialProjectionStoreProvider); ok {
+		credentialProjection, err = provider.RuntimeCredentialProjectionStore()
+		if err != nil {
+			log.Warn().Err(err).Msg("agent runtime credential projection is unavailable; using database reconciliation")
+			credentialProjection = nil
 		}
 	}
 	if sessionLeases != nil {
@@ -564,6 +578,20 @@ func configureRuntime(
 		runtime.NewRuntimeDispatchWakeReconciler(pool, wakeHub),
 		runtime.RuntimeDispatchWakeReconcilerConfig{},
 	)
+	go func() {
+		reconciler := runtime.NewRuntimeCredentialReconciler(
+			wakeHub,
+			credentialProjection,
+			runtime.NewPostgresRuntimeCredentialConnectionValidator(pool, coreInstanceID),
+			runtime.RuntimeCredentialReconcilerConfig{},
+		)
+		if reconcileErr := reconciler.Run(rootCtx); reconcileErr != nil && rootCtx.Err() == nil {
+			log.Error().Err(reconcileErr).Msg("agent runtime credential reconciler stopped")
+		}
+	}()
+	if eventWake != nil {
+		go runtime.StartRuntimeCredentialRevocationWake(rootCtx, eventWake, wakeHub)
+	}
 	if signalBus != nil {
 		go runtime.StartRuntimeSignalSubscriber(rootCtx, signalBus, coreInstanceID, wakeHub, runtimeService)
 		go runtime.StartRuntimeSignalOutboxWorkerWithWake(

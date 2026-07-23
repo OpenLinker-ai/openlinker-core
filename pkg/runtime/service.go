@@ -275,11 +275,18 @@ func (s *Service) agentA2AContext(runID uuid.UUID, delegation *Delegation) *Agen
 	return ctx
 }
 
-func (s *Service) agentA2AContextForRequest(runID uuid.UUID, delegation *Delegation, reqCtx *RunA2AContextRequest) *AgentA2AContext {
+func (s *Service) agentA2AContextForRequest(runID uuid.UUID, delegation *Delegation, req *RunRequest) *AgentA2AContext {
 	base := s.agentA2AContext(runID, delegation)
+	if req == nil {
+		return base
+	}
+	base.Protocol = req.CreationProtocol
+	base.Method = req.CreationMethod
+	reqCtx := req.A2AContext
 	if reqCtx == nil {
 		return base
 	}
+	base.MessageID = reqCtx.MessageID
 	base.ProtocolContextID = reqCtx.ProtocolContextID
 	base.ProtocolTaskID = reqCtx.ProtocolTaskID
 	if base.ProtocolTaskID == "" {
@@ -290,6 +297,8 @@ func (s *Service) agentA2AContextForRequest(runID uuid.UUID, delegation *Delegat
 	base.ParentTaskID = reqCtx.ParentTaskID
 	base.TraceID = reqCtx.TraceID
 	base.ReferenceTaskIDs = append([]string(nil), reqCtx.ReferenceTaskIDs...)
+	base.AcceptedOutputModes = append([]string(nil), reqCtx.AcceptedOutputModes...)
+	base.Extensions = append([]string(nil), reqCtx.Extensions...)
 	return base
 }
 
@@ -503,6 +512,15 @@ func agentA2AContextMap(ctx *AgentA2AContext) map[string]interface{} {
 	value := map[string]interface{}{
 		"current_run_id": ctx.CurrentRunID,
 	}
+	if ctx.MessageID != "" {
+		value["message_id"] = ctx.MessageID
+	}
+	if ctx.Protocol != "" {
+		value["protocol"] = ctx.Protocol
+	}
+	if ctx.Method != "" {
+		value["method"] = ctx.Method
+	}
 	if ctx.ParentRunID != "" {
 		value["parent_run_id"] = ctx.ParentRunID
 	}
@@ -511,9 +529,11 @@ func agentA2AContextMap(ctx *AgentA2AContext) map[string]interface{} {
 	}
 	if ctx.ProtocolContextID != "" {
 		value["protocol_context_id"] = ctx.ProtocolContextID
+		value["context_id"] = ctx.ProtocolContextID
 	}
 	if ctx.ProtocolTaskID != "" {
 		value["protocol_task_id"] = ctx.ProtocolTaskID
+		value["task_id"] = ctx.ProtocolTaskID
 	}
 	if ctx.RootContextID != "" {
 		value["root_context_id"] = ctx.RootContextID
@@ -529,6 +549,12 @@ func agentA2AContextMap(ctx *AgentA2AContext) map[string]interface{} {
 	}
 	if len(ctx.ReferenceTaskIDs) > 0 {
 		value["reference_task_ids"] = ctx.ReferenceTaskIDs
+	}
+	if len(ctx.AcceptedOutputModes) > 0 {
+		value["accepted_output_modes"] = ctx.AcceptedOutputModes
+	}
+	if len(ctx.Extensions) > 0 {
+		value["extensions"] = ctx.Extensions
 	}
 	return value
 }
@@ -1019,13 +1045,18 @@ func (s *Service) createRunningRun(
 			params := runA2AContextMappingParams(runID, userID, agentID, runA2AContext)
 			a2aMappingParams = &params
 			trustedMetadata := trustedRunMetadata(req.Metadata)
-			trustedMetadata["a2a"] = agentA2AContextMap(s.agentA2AContextForRequest(runID, opts.delegation, runA2AContext))
+			trustedMetadata["a2a"] = agentA2AContextMap(s.agentA2AContextForRequest(runID, opts.delegation, req))
 			trustedMetadata["conversation"] = conversationContextBeforeMapping(ctx, q, pendingA2AContextMapping(params))
 			marshaledMetadata, marshalErr := json.Marshal(trustedMetadata)
 			if marshalErr != nil {
 				return marshalErr
 			}
 			createMetadataJSON = marshaledMetadata
+			// Core-connected HTTP and MCP executions reuse this in-memory
+			// request after the transaction. Give them the same trusted
+			// metadata persisted for queued Runtime assignments; never restore
+			// the caller-owned metadata.a2a or metadata.conversation values.
+			req.Metadata = trustedMetadata
 		}
 
 		run, createErr := q.CreateRun(ctx, db.CreateRunParams{
@@ -1832,7 +1863,7 @@ func (s *Service) callAgentEndpoint(
 		Input:        req.Input,
 		Metadata:     req.Metadata,
 		RunID:        runID.String(),
-		A2A:          s.agentA2AContextForRequest(runID, delegation, req.A2AContext),
+		A2A:          s.agentA2AContextForRequest(runID, delegation, req),
 		Conversation: conversation,
 	}
 	if delegation != nil {
@@ -2049,7 +2080,7 @@ func (s *Service) callMCPServer(
 		metadata["parent_run_id"] = delegation.ParentRunID.String()
 		metadata["caller_agent_id"] = delegation.CallerAgentID.String()
 	}
-	metadata["a2a"] = agentA2AContextMap(s.agentA2AContextForRequest(runID, delegation, req.A2AContext))
+	metadata["a2a"] = agentA2AContextMap(s.agentA2AContextForRequest(runID, delegation, req))
 	if conversation := s.conversationContextForRun(ctx, runID); conversation != nil {
 		metadata["conversation"] = conversation
 	}

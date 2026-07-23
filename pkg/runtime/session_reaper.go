@@ -64,13 +64,17 @@ func NewRuntimeSessionReaperWithLeases(
 	heartbeatTTL time.Duration,
 	leases *RuntimeSessionLeaseManager,
 ) *RuntimeSessionReaper {
+	var leaseEvidence runtimeSessionLeaseEvidence
+	if leases != nil {
+		leaseEvidence = leases
+	}
 	if pool == nil {
-		return &RuntimeSessionReaper{heartbeatTTL: heartbeatTTL, leases: leases}
+		return &RuntimeSessionReaper{heartbeatTTL: heartbeatTTL, leases: leaseEvidence}
 	}
 	return &RuntimeSessionReaper{
 		repository:              &postgresRuntimeSessionRepository{pool: pool, queries: db.New(pool)},
 		heartbeatTTL:            heartbeatTTL,
-		leases:                  leases,
+		leases:                  leaseEvidence,
 		nextDatabaseReconcileAt: time.Now().Add(runtimeSessionDatabaseReconcilePeriod),
 	}
 }

@@ -788,6 +788,40 @@ func TestTrustedRunMetadataRejectsCallerOwnedSessionFields(t *testing.T) {
 	require.Contains(t, original, "conversation", "sanitizing metadata must not mutate the caller request")
 }
 
+func TestAgentA2AContextUsesTypedMessageAndTrustedCreationSource(t *testing.T) {
+	runID := uuid.New()
+	svc := &Service{}
+	req := &RunRequest{
+		Metadata: map[string]interface{}{
+			"a2a": map[string]interface{}{
+				"message_id": "spoofed-message",
+				"protocol":   "spoofed-protocol",
+				"method":     "spoofed-method",
+			},
+		},
+		A2AContext: &RunA2AContextRequest{
+			MessageID:         "message-42",
+			ProtocolContextID: "context-1",
+			ProtocolTaskID:    "task-1",
+		},
+		CreationProtocol: "a2a",
+		CreationMethod:   "message.send",
+	}
+
+	ctx := svc.agentA2AContextForRequest(runID, nil, req)
+	require.Equal(t, "message-42", ctx.MessageID)
+	require.Equal(t, "a2a", ctx.Protocol)
+	require.Equal(t, "message.send", ctx.Method)
+	require.Equal(t, "context-1", ctx.ProtocolContextID)
+	require.Equal(t, "task-1", ctx.ProtocolTaskID)
+
+	mapped := agentA2AContextMap(ctx)
+	require.Equal(t, "message-42", mapped["message_id"])
+	require.Equal(t, "a2a", mapped["protocol"])
+	require.Equal(t, "message.send", mapped["method"])
+	require.NotEqual(t, "spoofed-message", mapped["message_id"])
+}
+
 func TestReplayA2AContextPreservesCoreOwnedConversation(t *testing.T) {
 	parentRunID := uuid.New()
 	callerAgentID := uuid.New()

@@ -20,9 +20,11 @@ var ErrRuntimeCredentialSessionScopeChanged = errors.New("runtime credential ses
 
 type lockedRuntimeCredentialSession struct {
 	runtimeSessionID uuid.UUID
+	sessionEpoch     int64
 	nodeID           uuid.UUID
 	agentID          uuid.UUID
 	coreInstanceID   *uuid.UUID
+	attachmentID     *uuid.UUID
 }
 
 // RevokeAgentCredential closes every Session owned by one Agent Token before
@@ -84,8 +86,15 @@ FOR UPDATE`, credentialID).Scan(&ownerID, &agentID, &revokedAt)
 	}
 
 	sessionIDs := runtimeCredentialSessionIDs(sessions)
-	if err = lockRuntimeCredentialAttachments(ctx, tx, sessionIDs); err != nil {
+	attachments, err := lockRuntimeCredentialAttachments(ctx, tx, sessionIDs)
+	if err != nil {
 		return false, err
+	}
+	for index := range sessions {
+		attachmentID, ok := attachments[sessions[index].runtimeSessionID]
+		if ok {
+			sessions[index].attachmentID = &attachmentID
+		}
 	}
 	changed, err := runtimeCredentialSessionScopeChanged(ctx, tx, credentialID, sessionIDs)
 	if err != nil {
@@ -109,6 +118,10 @@ SET status = 'revoked',
     capacity = GREATEST(capacity, inflight),
     attached_core_instance_id = NULL,
     disconnected_at = COALESCE(disconnected_at, clock_timestamp()),
+    drain_requested_at = NULL,
+    drain_deadline_at = NULL,
+    drain_reason_code = NULL,
+    resume_capacity = NULL,
     updated_at = clock_timestamp()
 WHERE runtime_session_id = ANY($1::uuid[])
   AND status IN ('active', 'draining', 'offline')`, sessionIDs); err != nil {
@@ -134,7 +147,9 @@ WHERE id = $1
 		return false, nil
 	}
 	if agentID != nil {
-		if err = enqueueRuntimeCredentialRevocationSignals(ctx, tx, sessions, *agentID); err != nil {
+		if err = enqueueRuntimeCredentialRevocationSignals(
+			ctx, tx, sessions, *agentID, credentialID,
+		); err != nil {
 			return false, err
 		}
 	}
@@ -150,7 +165,7 @@ func lockRuntimeCredentialSessions(
 	credentialID uuid.UUID,
 ) ([]lockedRuntimeCredentialSession, error) {
 	rows, err := tx.Query(ctx, `
-SELECT runtime_session_id, node_id, agent_id, attached_core_instance_id
+SELECT runtime_session_id, session_epoch, node_id, agent_id, attached_core_instance_id
 FROM runtime_sessions
 WHERE credential_id = $1
   AND status IN ('active', 'draining', 'offline')
@@ -165,6 +180,7 @@ FOR UPDATE`, credentialID)
 		var session lockedRuntimeCredentialSession
 		if err = rows.Scan(
 			&session.runtimeSessionID,
+			&session.sessionEpoch,
 			&session.nodeID,
 			&session.agentID,
 			&session.coreInstanceID,
@@ -207,28 +223,34 @@ FOR UPDATE`, nodeIDs)
 	return nil
 }
 
-func lockRuntimeCredentialAttachments(ctx context.Context, tx pgx.Tx, sessionIDs []uuid.UUID) error {
+func lockRuntimeCredentialAttachments(
+	ctx context.Context,
+	tx pgx.Tx,
+	sessionIDs []uuid.UUID,
+) (map[uuid.UUID]uuid.UUID, error) {
+	attachments := make(map[uuid.UUID]uuid.UUID, len(sessionIDs))
 	if len(sessionIDs) == 0 {
-		return nil
+		return attachments, nil
 	}
 	rows, err := tx.Query(ctx, `
-SELECT id
+SELECT id, runtime_session_id
 FROM runtime_session_attachments
 WHERE runtime_session_id = ANY($1::uuid[])
   AND detached_at IS NULL
 ORDER BY id ASC
 FOR UPDATE`, sessionIDs)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var ignored uuid.UUID
-		if err = rows.Scan(&ignored); err != nil {
-			return err
+		var attachmentID, sessionID uuid.UUID
+		if err = rows.Scan(&attachmentID, &sessionID); err != nil {
+			return nil, err
 		}
+		attachments[sessionID] = attachmentID
 	}
-	return rows.Err()
+	return attachments, rows.Err()
 }
 
 func runtimeCredentialSessionScopeChanged(
@@ -254,17 +276,56 @@ func enqueueRuntimeCredentialRevocationSignals(
 	tx pgx.Tx,
 	sessions []lockedRuntimeCredentialSession,
 	agentID uuid.UUID,
+	credentialID uuid.UUID,
 ) error {
-	coreIDs := runtimeCredentialCoreIDs(sessions)
+	grouped := runtimeCredentialConnectionsByCore(sessions)
+	coreIDs := make([]uuid.UUID, 0, len(grouped))
+	for coreID := range grouped {
+		coreIDs = append(coreIDs, coreID)
+	}
+	sort.Slice(coreIDs, func(i, j int) bool { return coreIDs[i].String() < coreIDs[j].String() })
 	for _, coreID := range coreIDs {
-		payload, err := json.Marshal(map[string]string{"target_instance_id": coreID.String()})
-		if err != nil {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `
+		connections := grouped[coreID]
+		for offset := 0; offset < len(connections); offset += MaxRuntimeSignalConnections {
+			end := offset + MaxRuntimeSignalConnections
+			if end > len(connections) {
+				end = len(connections)
+			}
+			payload, err := json.Marshal(struct {
+				TargetInstanceID uuid.UUID                   `json:"target_instance_id"`
+				CredentialID     uuid.UUID                   `json:"credential_id"`
+				Connections      []RuntimeConnectionIdentity `json:"connections"`
+			}{
+				TargetInstanceID: coreID,
+				CredentialID:     credentialID,
+				Connections:      connections[offset:end],
+			})
+			if err != nil {
+				return err
+			}
+			var outboxID uuid.UUID
+			if err = tx.QueryRow(ctx, `
 INSERT INTO runtime_signal_outbox (event_type, agent_id, payload, available_at)
-VALUES ('credential.revoke', $1, $2, clock_timestamp())`, agentID, payload); err != nil {
-			return err
+VALUES ('credential.revoke', $1, $2, clock_timestamp())
+RETURNING id`, agentID, payload).Scan(&outboxID); err != nil {
+				return err
+			}
+			if _, err = tx.Exec(ctx, `
+SELECT pg_notify(
+    'openlinker_runtime_v1',
+    jsonb_build_object(
+        'version', 1,
+        'topic', $1::text,
+        'resource_id', $2::text,
+        'generation', 0,
+        'produced_at', to_char(
+            clock_timestamp() AT TIME ZONE 'UTC',
+            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+        )
+    )::text
+)`, RuntimeCredentialRevocationWakeTopic, outboxID.String()); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -292,6 +353,39 @@ func runtimeCredentialNodeIDs(sessions []lockedRuntimeCredentialSession) []uuid.
 	return ids
 }
 
+func runtimeCredentialConnectionsByCore(
+	sessions []lockedRuntimeCredentialSession,
+) map[uuid.UUID][]RuntimeConnectionIdentity {
+	grouped := make(map[uuid.UUID][]RuntimeConnectionIdentity)
+	for _, session := range sessions {
+		if session.coreInstanceID == nil || *session.coreInstanceID == uuid.Nil ||
+			session.attachmentID == nil || *session.attachmentID == uuid.Nil {
+			continue
+		}
+		grouped[*session.coreInstanceID] = append(
+			grouped[*session.coreInstanceID],
+			RuntimeConnectionIdentity{
+				RuntimeSessionID: session.runtimeSessionID,
+				SessionEpoch:     session.sessionEpoch,
+				AttachmentID:     *session.attachmentID,
+			},
+		)
+	}
+	for coreID := range grouped {
+		sort.Slice(grouped[coreID], func(i, j int) bool {
+			left, right := grouped[coreID][i], grouped[coreID][j]
+			if left.RuntimeSessionID != right.RuntimeSessionID {
+				return left.RuntimeSessionID.String() < right.RuntimeSessionID.String()
+			}
+			if left.SessionEpoch != right.SessionEpoch {
+				return left.SessionEpoch < right.SessionEpoch
+			}
+			return left.AttachmentID.String() < right.AttachmentID.String()
+		})
+	}
+	return grouped
+}
+
 func runtimeCredentialCoreIDs(sessions []lockedRuntimeCredentialSession) []uuid.UUID {
 	seen := make(map[uuid.UUID]struct{}, len(sessions))
 	ids := make([]uuid.UUID, 0, len(sessions))
@@ -299,7 +393,7 @@ func runtimeCredentialCoreIDs(sessions []lockedRuntimeCredentialSession) []uuid.
 		if session.coreInstanceID == nil || *session.coreInstanceID == uuid.Nil {
 			continue
 		}
-		if _, ok := seen[*session.coreInstanceID]; ok {
+		if _, duplicate := seen[*session.coreInstanceID]; duplicate {
 			continue
 		}
 		seen[*session.coreInstanceID] = struct{}{}

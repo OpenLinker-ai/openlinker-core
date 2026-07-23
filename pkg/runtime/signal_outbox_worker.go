@@ -337,6 +337,21 @@ func runtimeSignalFromOutbox(outbox db.RuntimeSignalOutbox) (RuntimeSignal, erro
 			}
 			signal.NodeID = &nodeID
 		}
+		if encodedCredential, ok := fields["credential_id"]; ok &&
+			!bytes.Equal(bytes.TrimSpace(encodedCredential), []byte("null")) {
+			var credentialID uuid.UUID
+			if err := json.Unmarshal(encodedCredential, &credentialID); err != nil ||
+				credentialID == uuid.Nil {
+				return RuntimeSignal{}, fmt.Errorf("%w: invalid credential_id", ErrRuntimeSignalInvalid)
+			}
+			signal.CredentialID = &credentialID
+		}
+		if encodedConnections, ok := fields["connections"]; ok &&
+			!bytes.Equal(bytes.TrimSpace(encodedConnections), []byte("null")) {
+			if err := json.Unmarshal(encodedConnections, &signal.Connections); err != nil {
+				return RuntimeSignal{}, fmt.Errorf("%w: invalid connections", ErrRuntimeSignalInvalid)
+			}
+		}
 	}
 	if err := ValidateRuntimeSignal(signal); err != nil {
 		return RuntimeSignal{}, err

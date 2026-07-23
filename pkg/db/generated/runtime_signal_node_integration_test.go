@@ -101,7 +101,8 @@ func TestHasActiveRuntimeSessionForAgentAgainstPostgres(t *testing.T) {
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE runtime_session_attachments
-		SET detached_at = clock_timestamp()
+		SET detached_at = clock_timestamp(),
+		    disconnect_reason = 'integration_test_detach'
 		WHERE runtime_session_id = $1`, sessionID); err != nil {
 		t.Fatalf("detach session: %v", err)
 	}

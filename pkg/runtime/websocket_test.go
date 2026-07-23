@@ -94,6 +94,26 @@ func TestRuntimeWebSocketPolicyChangeClosesEstablishedTransportWithCanonicalSign
 	require.Equal(t, RuntimePolicyChangedSignal, closeErr.Text)
 }
 
+func TestRuntimeWebSocketCredentialRevocationClosesExactConnectionImmediately(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	server, target := fixture.server(t)
+	defer server.Close()
+	connection := dialRuntimeWS(t, target)
+	defer connection.Close()
+	writeRuntimeWSHello(t, connection, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, connection).Type)
+
+	require.Equal(t, 1, fixture.wakeHub.RevokeCredentialConnections(
+		fixture.principal.CredentialID,
+		[]RuntimeConnectionIdentity{{
+			RuntimeSessionID: fixture.principal.RuntimeSessionID,
+			SessionEpoch:     fixture.principal.SessionEpoch,
+			AttachmentID:     fixture.principal.AttachmentID,
+		}},
+	))
+	requireRuntimeWSCloseCode(t, connection, RuntimeWSCloseAuthenticationFailed)
+}
+
 func TestRuntimeWebSocketHeartbeatUsesHealthyLeaseAndFallsBackOnRedisFailure(t *testing.T) {
 	fixture := newRuntimeWSTestFixture()
 	reason := string(RuntimeTransportReasonExplicit)

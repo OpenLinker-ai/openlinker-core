@@ -741,6 +741,12 @@ func TestProtocolMessageReusesProtocolTaskIDForContinuation(t *testing.T) {
 	assert.Equal(t, "completed", followup.Status.State)
 	require.Len(t, calls, 2)
 	require.Len(t, callA2AMetadata, 2)
+	assert.Equal(t, "input-required-1", callA2AMetadata[0]["message_id"])
+	assert.Equal(t, "complete-1", callA2AMetadata[1]["message_id"])
+	for _, metadata := range callA2AMetadata {
+		assert.Equal(t, "a2a", metadata["protocol"])
+		assert.Equal(t, "message.send", metadata["method"])
+	}
 	assert.Equal(t, first.ID, callA2AMetadata[1]["task_id"])
 	assert.Equal(t, "ctx-multi", callA2AMetadata[1]["context_id"])
 	for _, input := range calls {
