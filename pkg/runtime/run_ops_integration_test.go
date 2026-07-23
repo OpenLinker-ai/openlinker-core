@@ -39,6 +39,7 @@ func TestRuntimeDeadLetterReplayIsAppendOnlyAndIdempotent(t *testing.T) {
 		RunID: fixture.identity.RunID, UserID: ownerID, AgentID: fixture.identity.AgentID,
 		ProtocolContextID: "replay-conversation", ProtocolTaskID: "replay-source-task",
 		RootContextID: "replay-conversation", TraceID: "replay-trace", Source: "a2a_protocol",
+		ReferenceTaskIDs: []string{},
 	})
 	require.NoError(t, err)
 	// Replay uses the current Agent configuration. Keep this fixture on the

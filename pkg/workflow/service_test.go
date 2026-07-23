@@ -1238,9 +1238,20 @@ func TestCancelRunningWorkflowRunPreventsSuccessOverwrite(t *testing.T) {
 	final, err := svc.GetWorkflowRun(context.Background(), userID, uuid.MustParse(queued.ID))
 	require.NoError(t, err)
 	require.Equal(t, "canceled", final.Status)
-	require.Equal(t, "workflow run canceled by user", final.Error)
+	require.Equal(t, "workflow run canceled", final.Error)
 	require.Len(t, final.Steps, 1)
-	require.Equal(t, "success", final.Steps[0].Status)
+	require.Equal(t, "failed", final.Steps[0].Status)
+
+	evidence, err := svc.GetWorkflowCancellationEvidence(
+		context.Background(), userID, uuid.MustParse(queued.ID),
+	)
+	require.NoError(t, err)
+	require.Equal(t, uuid.MustParse(queued.ID), evidence.WorkflowRunID)
+	require.Equal(t, userID, evidence.ActorUserID)
+	require.Equal(t, "OWNER_CANCEL_REQUESTED", evidence.ReasonCode)
+	require.Equal(t, "stopping", evidence.State)
+	require.NotNil(t, evidence.AppliedAt)
+	require.Nil(t, evidence.FinishedAt)
 
 	claimed, err := svc.ClaimAndRunPendingWorkflow(context.Background())
 	require.NoError(t, err)

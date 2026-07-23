@@ -229,10 +229,12 @@ type runtimeWSConnection struct {
 	writerDone      chan struct{}
 	maintenanceDone chan struct{}
 	cleanupOnce     sync.Once
+	revocationWake  <-chan struct{}
 
 	sessionRequest     RuntimeSessionRequest
 	sessionState       RuntimeSessionState
 	sessionPrincipal   RuntimeSessionPrincipal
+	connectionIdentity RuntimeConnectionIdentity
 	attachmentID       uuid.UUID
 	attached           bool
 	leaseRegistered    bool
@@ -375,6 +377,23 @@ func (c *runtimeWSConnection) run() {
 		return
 	}
 	c.sessionPrincipal = principal
+	c.connectionIdentity = RuntimeConnectionIdentity{
+		RuntimeSessionID: principal.RuntimeSessionID,
+		SessionEpoch:     principal.SessionEpoch,
+		AttachmentID:     principal.AttachmentID,
+	}
+	if c.controller.dependencies.WakeHub != nil {
+		c.revocationWake = c.controller.dependencies.WakeHub.RegisterConnection(
+			c.connectionIdentity,
+			principal.CredentialID,
+		)
+		select {
+		case <-c.revocationWake:
+			c.closeForError(runtimeUnauthorizedError(errors.New("runtime credential revoked")))
+			return
+		default:
+		}
+	}
 	if c.controller.dependencies.SessionLeases != nil {
 		record, leaseErr := runtimeSessionLeaseRecordFromState(state, c.connectionID)
 		if leaseErr == nil {
@@ -778,6 +797,9 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 	for {
 		select {
 		case <-c.ctx.Done():
+			return
+		case <-c.revocationWake:
+			c.closeForError(runtimeUnauthorizedError(errors.New("runtime credential revoked")))
 			return
 		case <-policyChecks:
 			observeWorker(c.controller.dependencies.Observer, "runtime.websocket.policy_check", "ticker", 1)
@@ -1196,6 +1218,9 @@ func (c *runtimeWSConnection) cleanup() {
 	c.cleanupOnce.Do(func() {
 		// Stop claim/heartbeat work before changing durable Session state.
 		c.cancel()
+		if c.controller.dependencies.WakeHub != nil {
+			c.controller.dependencies.WakeHub.UnregisterConnection(c.connectionIdentity)
+		}
 		if c.maintenanceStarted {
 			select {
 			case <-c.maintenanceDone:

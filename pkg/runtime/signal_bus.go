@@ -19,17 +19,30 @@ var (
 	runtimeSignalTypePattern       = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
 )
 
+const MaxRuntimeSignalConnections = 64
+
+// RuntimeConnectionIdentity is the immutable attachment-generation fence for
+// one live Runtime transport. A lifecycle signal must match every field before
+// it can affect a connection.
+type RuntimeConnectionIdentity struct {
+	RuntimeSessionID uuid.UUID `json:"runtime_session_id"`
+	SessionEpoch     int64     `json:"session_epoch"`
+	AttachmentID     uuid.UUID `json:"attachment_id"`
+}
+
 // RuntimeSignal is deliberately a wake-up hint, never a data transport. Its
 // wire shape is the complete allowlist: Run input/output, token material,
 // invocation capabilities, payloads and secrets have no field through which
 // they can reach Redis or an in-process subscriber.
 type RuntimeSignal struct {
-	SignalID         uuid.UUID  `json:"signal_id"`
-	Type             string     `json:"type"`
-	AgentID          uuid.UUID  `json:"agent_id"`
-	RunID            *uuid.UUID `json:"run_id,omitempty"`
-	NodeID           *uuid.UUID `json:"node_id,omitempty"`
-	TargetInstanceID *uuid.UUID `json:"target_instance_id,omitempty"`
+	SignalID         uuid.UUID                   `json:"signal_id"`
+	Type             string                      `json:"type"`
+	AgentID          uuid.UUID                   `json:"agent_id"`
+	RunID            *uuid.UUID                  `json:"run_id,omitempty"`
+	NodeID           *uuid.UUID                  `json:"node_id,omitempty"`
+	TargetInstanceID *uuid.UUID                  `json:"target_instance_id,omitempty"`
+	CredentialID     *uuid.UUID                  `json:"credential_id,omitempty"`
+	Connections      []RuntimeConnectionIdentity `json:"connections,omitempty"`
 }
 
 type RuntimeSignalHandler func(context.Context, RuntimeSignal) error
@@ -73,6 +86,32 @@ func ValidateRuntimeSignal(signal RuntimeSignal) error {
 	}
 	if signal.TargetInstanceID != nil && *signal.TargetInstanceID == uuid.Nil {
 		return fmt.Errorf("%w: target_instance_id is invalid", ErrRuntimeSignalInvalid)
+	}
+	if signal.Type != "credential.revoke" {
+		if signal.CredentialID != nil || len(signal.Connections) > 0 {
+			return fmt.Errorf("%w: credential revocation identity is not allowed", ErrRuntimeSignalInvalid)
+		}
+		return nil
+	}
+	if signal.CredentialID != nil && *signal.CredentialID == uuid.Nil {
+		return fmt.Errorf("%w: credential_id is invalid", ErrRuntimeSignalInvalid)
+	}
+	if len(signal.Connections) > MaxRuntimeSignalConnections {
+		return fmt.Errorf("%w: too many connection identities", ErrRuntimeSignalInvalid)
+	}
+	if len(signal.Connections) > 0 && signal.CredentialID == nil {
+		return fmt.Errorf("%w: credential_id is required with connections", ErrRuntimeSignalInvalid)
+	}
+	seen := make(map[RuntimeConnectionIdentity]struct{}, len(signal.Connections))
+	for _, identity := range signal.Connections {
+		if identity.RuntimeSessionID == uuid.Nil || identity.SessionEpoch <= 0 ||
+			identity.AttachmentID == uuid.Nil {
+			return fmt.Errorf("%w: connection identity is invalid", ErrRuntimeSignalInvalid)
+		}
+		if _, duplicate := seen[identity]; duplicate {
+			return fmt.Errorf("%w: connection identity is duplicated", ErrRuntimeSignalInvalid)
+		}
+		seen[identity] = struct{}{}
 	}
 	return nil
 }

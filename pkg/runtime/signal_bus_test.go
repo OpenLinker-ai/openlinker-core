@@ -72,6 +72,103 @@ func TestRuntimeNodeCapacitySignalRequiresOnlyAValidNodeProjection(t *testing.T)
 	require.ErrorIs(t, ValidateRuntimeSignal(otherType), ErrRuntimeSignalInvalid)
 }
 
+func TestRuntimeCredentialRevocationSignalCarriesOnlyBoundedImmutableIdentities(t *testing.T) {
+	credentialID := uuid.New()
+	identity := RuntimeConnectionIdentity{
+		RuntimeSessionID: uuid.New(),
+		SessionEpoch:     3,
+		AttachmentID:     uuid.New(),
+	}
+	signal := RuntimeSignal{
+		SignalID:     uuid.New(),
+		Type:         "credential.revoke",
+		AgentID:      uuid.New(),
+		CredentialID: &credentialID,
+		Connections:  []RuntimeConnectionIdentity{identity},
+	}
+	encoded, err := MarshalRuntimeSignal(signal)
+	require.NoError(t, err)
+	require.Equal(t, signal, requireRuntimeSignal(t, encoded))
+
+	duplicate := signal
+	duplicate.Connections = []RuntimeConnectionIdentity{identity, identity}
+	require.ErrorIs(t, ValidateRuntimeSignal(duplicate), ErrRuntimeSignalInvalid)
+	missingCredential := signal
+	missingCredential.CredentialID = nil
+	require.ErrorIs(t, ValidateRuntimeSignal(missingCredential), ErrRuntimeSignalInvalid)
+	invalidGeneration := signal
+	invalidGeneration.Connections = []RuntimeConnectionIdentity{{
+		RuntimeSessionID: identity.RuntimeSessionID,
+		SessionEpoch:     0,
+		AttachmentID:     identity.AttachmentID,
+	}}
+	require.ErrorIs(t, ValidateRuntimeSignal(invalidGeneration), ErrRuntimeSignalInvalid)
+}
+
+func TestRedisSignalBusProjectsCredentialStateWithBoundedTTL(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	bus, err := NewRedisSignalBus(client, RedisSignalBusConfig{InstanceID: uuid.New()})
+	require.NoError(t, err)
+	credentialID := uuid.New()
+	registration := RuntimeConnectionRegistration{
+		Identity: RuntimeConnectionIdentity{
+			RuntimeSessionID: uuid.New(),
+			SessionEpoch:     5,
+			AttachmentID:     uuid.New(),
+		},
+		CredentialID: credentialID,
+	}
+
+	require.NoError(t, bus.MarkActive(context.Background(), []RuntimeConnectionRegistration{registration}))
+	results, err := bus.Check(context.Background(), []RuntimeConnectionRegistration{registration})
+	require.NoError(t, err)
+	require.Equal(t, RuntimeCredentialProjectionActive, results[0].State)
+	ttl := server.TTL(runtimeCredentialProjectionKey(registration.Identity))
+	require.Equal(t, RuntimeCredentialProjectionTTL, ttl)
+
+	require.NoError(t, bus.Publish(context.Background(), RuntimeSignal{
+		SignalID:     uuid.New(),
+		Type:         "credential.revoke",
+		AgentID:      uuid.New(),
+		CredentialID: &credentialID,
+		Connections:  []RuntimeConnectionIdentity{registration.Identity},
+	}))
+	results, err = bus.Check(context.Background(), []RuntimeConnectionRegistration{registration})
+	require.NoError(t, err)
+	require.Equal(t, RuntimeCredentialProjectionRevoked, results[0].State)
+	require.Equal(t, RuntimeCredentialProjectionTTL, server.TTL(
+		runtimeCredentialProjectionKey(registration.Identity),
+	))
+	require.NoError(t, bus.MarkActive(
+		context.Background(),
+		[]RuntimeConnectionRegistration{registration},
+	))
+	results, err = bus.Check(context.Background(), []RuntimeConnectionRegistration{registration})
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		RuntimeCredentialProjectionRevoked,
+		results[0].State,
+		"a delayed active projection must not overwrite an irreversible tombstone",
+	)
+
+	missing := testRuntimeConnectionRegistration()
+	results, err = bus.Check(context.Background(), []RuntimeConnectionRegistration{missing})
+	require.NoError(t, err)
+	require.Equal(t, RuntimeCredentialProjectionMissing, results[0].State)
+	require.NoError(t, client.Set(
+		context.Background(),
+		runtimeCredentialProjectionKey(missing.Identity),
+		"active:"+uuid.NewString(),
+		RuntimeCredentialProjectionTTL,
+	).Err())
+	results, err = bus.Check(context.Background(), []RuntimeConnectionRegistration{missing})
+	require.NoError(t, err)
+	require.Equal(t, RuntimeCredentialProjectionMalformed, results[0].State)
+}
+
 func requireRuntimeSignal(t *testing.T, encoded []byte) RuntimeSignal {
 	t.Helper()
 	signal, err := ParseRuntimeSignal(encoded)
@@ -277,5 +374,5 @@ func TestLocalSignalBusReturnsAllSubscriberErrors(t *testing.T) {
 
 func TestRuntimeSignalStructHasNoUnreviewedWireFields(t *testing.T) {
 	typeOfSignal := reflect.TypeFor[RuntimeSignal]()
-	require.Equal(t, 6, typeOfSignal.NumField())
+	require.Equal(t, 8, typeOfSignal.NumField())
 }

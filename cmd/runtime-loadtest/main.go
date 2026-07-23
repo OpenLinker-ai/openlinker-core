@@ -34,6 +34,7 @@ type config struct {
 	AuthAPIRoot              string
 	RuntimeURL               string
 	RuntimeURLSecondary      string
+	RuntimeCredentialSource  string
 	DatabaseURL              string
 	DBActivitySampleInterval time.Duration
 	DBStrictIdleCommitRate   float64
@@ -703,6 +704,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "runtime-loadtest:", err)
 		os.Exit(2)
 	}
+	discoveryCtx, cancelDiscovery := context.WithTimeout(context.Background(), cfg.RequestTimeout)
+	if err := resolveRuntimeTarget(discoveryCtx, &cfg); err != nil {
+		cancelDiscovery()
+		fmt.Fprintln(os.Stderr, "runtime-loadtest:", err)
+		os.Exit(2)
+	}
+	cancelDiscovery()
 	if err := preflightRuntimeCredentials(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "runtime-loadtest:", err)
 		os.Exit(2)
@@ -884,20 +892,21 @@ func parseFlags() config {
 	var dropACKResponses string
 	flag.StringVar(&cfg.APIRoot, "api", envDefault("OPENLINKER_API_ROOT", "http://127.0.0.1:8080/api/v1"), "OpenLinker Core user/API root")
 	flag.StringVar(&cfg.AuthAPIRoot, "auth-api", os.Getenv("OPENLINKER_AUTH_API_ROOT"), "account auth API root; defaults to -api")
-	flag.StringVar(&cfg.RuntimeURL, "runtime-url", os.Getenv("OPENLINKER_RUNTIME_URL"), "required dedicated Runtime mTLS origin (https)")
-	flag.StringVar(&cfg.RuntimeURLSecondary, "runtime-url-secondary", os.Getenv("OPENLINKER_RUNTIME_URL_SECONDARY"), "second Runtime mTLS origin for Core A→B resume")
+	flag.StringVar(&cfg.RuntimeURL, "runtime-url", os.Getenv("OPENLINKER_RUNTIME_URL"), "optional Runtime origin override; otherwise discover from -api")
+	flag.StringVar(&cfg.RuntimeURLSecondary, "runtime-url-secondary", os.Getenv("OPENLINKER_RUNTIME_URL_SECONDARY"), "optional second Runtime origin for Core A→B resume")
+	flag.StringVar(&cfg.RuntimeCredentialSource, "runtime-credential-source", envDefault("OPENLINKER_RUNTIME_CREDENTIAL_SOURCE", "auto"), "Runtime credentials: auto, token, or mtls")
 	flag.StringVar(&cfg.DatabaseURL, "database-url", os.Getenv("DATABASE_URL"), "optional Postgres URL for DB-side counts and query-plan evidence")
 	flag.DurationVar(&cfg.DBActivitySampleInterval, "db-activity-sample-interval", durationEnv("OPENLINKER_RUNTIME_LOADTEST_DB_ACTIVITY_SAMPLE_INTERVAL", time.Second), "Postgres activity sampling interval; 0 disables periodic observer traffic")
 	flag.Float64Var(&cfg.DBStrictIdleCommitRate, "db-strict-idle-commit-rate", floatEnv("OPENLINKER_RUNTIME_LOADTEST_DB_STRICT_IDLE_COMMIT_RATE", 0), "fail a capacity hold when adjusted PostgreSQL commits/second exceed this value; 0 disables")
 	flag.DurationVar(&cfg.DBStrictIdleMinDuration, "db-strict-idle-min-duration", durationEnv("OPENLINKER_RUNTIME_LOADTEST_DB_STRICT_IDLE_MIN_DURATION", 0), "minimum hold duration eligible for the strict idle commit-rate gate; 0 checks every hold")
 	flag.StringVar(&cfg.Transport, "transport", envDefault("OPENLINKER_RUNTIME_LOADTEST_TRANSPORT", transportAuto), "Runtime transport: ws, pull, or auto")
 	flag.StringVar(&scenarios, "scenarios", envDefault("OPENLINKER_RUNTIME_LOADTEST_SCENARIOS", "baseline"), "comma-separated Runtime scenarios; see cmd/runtime-loadtest/README.md")
-	flag.StringVar(&cfg.NodeID, "node-id", os.Getenv("OPENLINKER_NODE_ID"), "required enrolled Runtime Node UUID from the client certificate")
+	flag.StringVar(&cfg.NodeID, "node-id", os.Getenv("OPENLINKER_NODE_ID"), "optional Runtime Node UUID; required only for explicit mTLS")
 	flag.StringVar(&cfg.NodeVersion, "node-version", envDefault("OPENLINKER_RUNTIME_LOADTEST_NODE_VERSION", runtimeLoadtestNodeVersion), "exact version registered for the Runtime Node")
 	flag.IntVar(&cfg.NodeCapacity, "node-capacity", intEnv("OPENLINKER_RUNTIME_LOADTEST_NODE_CAPACITY", 0), "Node capacity; defaults to agents × workers-per-agent")
-	flag.StringVar(&cfg.MTLSCertFile, "runtime-mtls-cert", os.Getenv("OPENLINKER_RUNTIME_MTLS_CERT_FILE"), "required Runtime Node client certificate PEM")
-	flag.StringVar(&cfg.MTLSKeyFile, "runtime-mtls-key", os.Getenv("OPENLINKER_RUNTIME_MTLS_KEY_FILE"), "required Runtime Node private key PEM")
-	flag.StringVar(&cfg.MTLSCAFile, "runtime-mtls-ca", os.Getenv("OPENLINKER_RUNTIME_MTLS_CA_FILE"), "required Runtime server trust CA PEM")
+	flag.StringVar(&cfg.MTLSCertFile, "runtime-mtls-cert", os.Getenv("OPENLINKER_RUNTIME_MTLS_CERT_FILE"), "optional Runtime Node client certificate PEM")
+	flag.StringVar(&cfg.MTLSKeyFile, "runtime-mtls-key", os.Getenv("OPENLINKER_RUNTIME_MTLS_KEY_FILE"), "optional Runtime Node private key PEM")
+	flag.StringVar(&cfg.MTLSCAFile, "runtime-mtls-ca", os.Getenv("OPENLINKER_RUNTIME_MTLS_CA_FILE"), "optional Runtime server trust CA PEM")
 	flag.StringVar(&cfg.MTLSServerName, "runtime-mtls-server-name", os.Getenv("OPENLINKER_RUNTIME_MTLS_SERVER_NAME"), "optional Runtime TLS server-name override")
 	flag.StringVar(&cfg.StateDir, "state-dir", envDefault("OPENLINKER_RUNTIME_LOADTEST_STATE_DIR", filepath.Join(defaultReportBaseDir(), ".openlinker-dev", "performance", "runtime-loadtest-state")), "durable Runtime Attempt/Event/Result journal directory")
 	flag.IntVar(&cfg.Users, "users", intEnv("OPENLINKER_RUNTIME_LOADTEST_USERS", 1), "number of creator/caller users")
@@ -948,6 +957,37 @@ func parseFlags() config {
 
 func (c *config) validate() error {
 	c.Transport = strings.ToLower(strings.TrimSpace(c.Transport))
+	c.RuntimeCredentialSource = strings.ToLower(strings.TrimSpace(c.RuntimeCredentialSource))
+	if c.RuntimeCredentialSource == "" {
+		c.RuntimeCredentialSource = "auto"
+	}
+	if c.RuntimeCredentialSource != "auto" &&
+		c.RuntimeCredentialSource != "token" &&
+		c.RuntimeCredentialSource != "mtls" {
+		return errors.New("runtime-credential-source must be auto, token, or mtls")
+	}
+	mtlsFields := 0
+	for _, value := range []string{c.MTLSCertFile, c.MTLSKeyFile, c.MTLSCAFile} {
+		if strings.TrimSpace(value) != "" {
+			mtlsFields++
+		}
+	}
+	if mtlsFields != 0 && mtlsFields != 3 {
+		return errors.New("runtime mTLS certificate, key, and CA must be configured together")
+	}
+	if c.RuntimeCredentialSource == "token" && mtlsFields != 0 {
+		return errors.New("runtime-credential-source=token must not include mTLS files")
+	}
+	if c.RuntimeCredentialSource == "mtls" && mtlsFields != 3 {
+		return errors.New("runtime-credential-source=mtls requires certificate, key, and CA")
+	}
+	if c.RuntimeCredentialSource == "auto" {
+		if mtlsFields == 3 {
+			c.RuntimeCredentialSource = "mtls"
+		} else {
+			c.RuntimeCredentialSource = "token"
+		}
+	}
 	if c.Transport != transportAuto && c.Transport != transportWS && c.Transport != transportPull {
 		return fmt.Errorf("unsupported transport %q", c.Transport)
 	}
@@ -1047,16 +1087,24 @@ func (c *config) validate() error {
 	if _, err := url.ParseRequestURI(c.AuthAPIRoot); err != nil {
 		return fmt.Errorf("invalid auth api root: %w", err)
 	}
-	if err := validateRuntimeOrigin(c.RuntimeURL, "runtime-url"); err != nil {
-		return err
+	if c.RuntimeURL != "" {
+		if err := validateRuntimeOrigin(c.RuntimeURL, "runtime-url", c.RuntimeCredentialSource == "token"); err != nil {
+			return err
+		}
+	} else if c.RuntimeCredentialSource == "mtls" {
+		return errors.New("runtime-url is required with explicit mTLS")
 	}
 	if c.RuntimeURLSecondary != "" {
-		if err := validateRuntimeOrigin(c.RuntimeURLSecondary, "runtime-url-secondary"); err != nil {
+		if err := validateRuntimeOrigin(c.RuntimeURLSecondary, "runtime-url-secondary", c.RuntimeCredentialSource == "token"); err != nil {
 			return err
 		}
 	}
-	if _, err := uuid.Parse(c.NodeID); err != nil {
-		return errors.New("node-id must be the enrolled Runtime Node UUID")
+	if c.RuntimeCredentialSource == "mtls" {
+		if _, err := uuid.Parse(c.NodeID); err != nil {
+			return errors.New("node-id must be the enrolled Runtime Node UUID with explicit mTLS")
+		}
+	} else if strings.TrimSpace(c.NodeID) != "" {
+		return errors.New("node-id must be omitted in token-only mode; each Agent Token receives an isolated Node identity")
 	}
 	if strings.TrimSpace(c.NodeVersion) == "" {
 		return errors.New("node-version is required")
@@ -1064,14 +1112,13 @@ func (c *config) validate() error {
 	if strings.TrimSpace(c.StateDir) == "" {
 		return errors.New("state-dir is required for the persistent_spool contract feature")
 	}
-	for _, required := range []struct{ name, value string }{
-		{"runtime-mtls-cert", c.MTLSCertFile}, {"runtime-mtls-key", c.MTLSKeyFile}, {"runtime-mtls-ca", c.MTLSCAFile},
-	} {
-		if strings.TrimSpace(required.value) == "" {
-			return fmt.Errorf("%s is required; Runtime never falls back to token-only transport", required.name)
-		}
-		if info, err := os.Stat(required.value); err != nil || info.IsDir() {
-			return fmt.Errorf("%s is not a readable file", required.name)
+	if c.RuntimeCredentialSource == "mtls" {
+		for _, required := range []struct{ name, value string }{
+			{"runtime-mtls-cert", c.MTLSCertFile}, {"runtime-mtls-key", c.MTLSKeyFile}, {"runtime-mtls-ca", c.MTLSCAFile},
+		} {
+			if info, err := os.Stat(required.value); err != nil || info.IsDir() {
+				return fmt.Errorf("%s is not a readable file", required.name)
+			}
 		}
 	}
 	if err := c.applyScenarioDefaults(); err != nil {
@@ -1702,6 +1749,7 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 		"api_root":                             cfg.APIRoot,
 		"auth_api_root":                        cfg.AuthAPIRoot,
 		"runtime_origins":                      runtimeOrigins,
+		"runtime_credential_source":            cfg.RuntimeCredentialSource,
 		"transport":                            cfg.Transport,
 		"scenarios":                            cfg.Scenarios,
 		"node_id":                              cfg.NodeID,

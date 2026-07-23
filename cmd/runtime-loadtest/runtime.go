@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +30,15 @@ const (
 	transportWS                = "ws"
 	transportPull              = "pull"
 )
+
+func tokenScopedRuntimeNodeID(agentToken string) string {
+	sum := sha256.Sum256([]byte("openlinker/runtime-worker/token-scoped-node/v1\x00" + agentToken))
+	bytes := append([]byte(nil), sum[:16]...)
+	bytes[6] = (bytes[6] & 0x0f) | 0x50
+	bytes[8] = (bytes[8] & 0x3f) | 0x80
+	value := hex.EncodeToString(bytes)
+	return value[:8] + "-" + value[8:12] + "-" + value[12:16] + "-" + value[16:20] + "-" + value[20:]
+}
 
 var errACKResponseLost = errors.New("runtime-loadtest: injected ACK response loss after Core persisted the request")
 
@@ -458,25 +469,27 @@ func runtimeACKOperation(path string) string {
 
 func newRuntimeEndpoint(cfg config, origin, token string, metrics *runtimeMetrics) (*runtimeEndpoint, error) {
 	parsed, err := url.Parse(strings.TrimSpace(origin))
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-		return nil, errors.New("Runtime URL must be an absolute https URL")
-	}
-	certificate, err := tls.LoadX509KeyPair(cfg.MTLSCertFile, cfg.MTLSKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load Runtime Node mTLS certificate: %w", err)
-	}
-	caPEM, err := os.ReadFile(cfg.MTLSCAFile)
-	if err != nil {
-		return nil, fmt.Errorf("read Runtime server CA: %w", err)
-	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(caPEM) {
-		return nil, errors.New("Runtime server CA file contains no certificates")
+	if err != nil || parsed.Host == "" {
+		return nil, errors.New("Runtime URL must be an absolute origin")
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = &tls.Config{
-		MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate},
-		RootCAs: roots, ServerName: strings.TrimSpace(cfg.MTLSServerName),
+	if cfg.RuntimeCredentialSource == "mtls" {
+		certificate, loadErr := tls.LoadX509KeyPair(cfg.MTLSCertFile, cfg.MTLSKeyFile)
+		if loadErr != nil {
+			return nil, fmt.Errorf("load Runtime Node mTLS certificate: %w", loadErr)
+		}
+		caPEM, readErr := os.ReadFile(cfg.MTLSCAFile)
+		if readErr != nil {
+			return nil, fmt.Errorf("read Runtime server CA: %w", readErr)
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(caPEM) {
+			return nil, errors.New("Runtime server CA file contains no certificates")
+		}
+		transport.TLSClientConfig = &tls.Config{
+			MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate},
+			RootCAs: roots, ServerName: strings.TrimSpace(cfg.MTLSServerName),
+		}
 	}
 	transport.ResponseHeaderTimeout = time.Duration(openlinker.RuntimeMaxPullWaitSeconds+5) * time.Second
 	transport.TLSHandshakeTimeout = 10 * time.Second
@@ -547,15 +560,83 @@ func (c config) hasScenario(name string) bool {
 	return false
 }
 
-func validateRuntimeOrigin(raw, flagName string) error {
+func validateRuntimeOrigin(raw, flagName string, allowLoopbackHTTP bool) error {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return fmt.Errorf("%s must be an absolute https Runtime origin", flagName)
+	loopbackHTTP := allowLoopbackHTTP && parsed != nil && parsed.Scheme == "http" &&
+		(parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "localhost" || parsed.Hostname() == "::1")
+	if err != nil || (parsed.Scheme != "https" && !loopbackHTTP) || parsed.Host == "" ||
+		parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%s must be an absolute https Runtime origin or an explicit token-only loopback http origin", flagName)
+	}
+	return nil
+}
+
+func resolveRuntimeTarget(ctx context.Context, cfg *config) error {
+	if cfg == nil || cfg.RuntimeCredentialSource != "token" {
+		return nil
+	}
+	apiRoot, err := url.Parse(strings.TrimSpace(cfg.APIRoot))
+	if err != nil || apiRoot.Scheme == "" || apiRoot.Host == "" {
+		return errors.New("cannot discover token-only Runtime from an invalid API root")
+	}
+	manifestURL := (&url.URL{Scheme: apiRoot.Scheme, Host: apiRoot.Host, Path: "/.well-known/openlinker.json"}).String()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{
+		Timeout: cfg.RequestTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("discover token-only Runtime: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("discover token-only Runtime: %s returned %d", manifestURL, response.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read Runtime discovery manifest: %w", err)
+	}
+	var manifest struct {
+		BaseURLs struct {
+			Runtime string `json:"runtime"`
+		} `json:"base_urls"`
+		Runtime struct {
+			MTLSRequired bool `json:"mtls_required"`
+		} `json:"runtime"`
+	}
+	if err = json.Unmarshal(raw, &manifest); err != nil {
+		return fmt.Errorf("decode Runtime discovery manifest: %w", err)
+	}
+	if manifest.Runtime.MTLSRequired {
+		return errors.New("Runtime discovery requires mTLS; configure the complete Node identity and runtime-credential-source=mtls")
+	}
+	discovered := strings.TrimSpace(manifest.BaseURLs.Runtime)
+	if err = validateRuntimeOrigin(discovered, "discovered runtime URL", true); err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.RuntimeURL) == "" {
+		cfg.RuntimeURL = discovered
 	}
 	return nil
 }
 
 func preflightRuntimeCredentials(cfg config) error {
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		return fmt.Errorf("create Runtime state directory: %w", err)
+	}
+	if err := os.Chmod(cfg.StateDir, 0o700); err != nil {
+		return fmt.Errorf("secure Runtime state directory: %w", err)
+	}
+	if cfg.RuntimeCredentialSource != "mtls" {
+		return nil
+	}
 	if info, err := os.Stat(cfg.MTLSKeyFile); err != nil {
 		return fmt.Errorf("stat Runtime Node private key: %w", err)
 	} else if info.Mode().Perm()&0o077 != 0 {
@@ -602,12 +683,6 @@ func preflightRuntimeCredentials(cfg config) error {
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return errors.New("Runtime server CA file contains no certificates")
-	}
-	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
-		return fmt.Errorf("create Runtime state directory: %w", err)
-	}
-	if err := os.Chmod(cfg.StateDir, 0o700); err != nil {
-		return fmt.Errorf("secure Runtime state directory: %w", err)
 	}
 	return nil
 }
@@ -768,8 +843,12 @@ func newRuntimeWorker(
 		return nil, errors.New("Runtime metrics are required")
 	}
 	workerID := fmt.Sprintf("loadtest-%s-%02d", agent.ID, workerIndex)
+	nodeID := cfg.NodeID
+	if cfg.RuntimeCredentialSource == "token" {
+		nodeID = tokenScopedRuntimeNodeID(token)
+	}
 	hello := openlinker.RuntimeHelloPayload{
-		NodeID:           cfg.NodeID,
+		NodeID:           nodeID,
 		AgentID:          agent.ID,
 		WorkerID:         workerID,
 		RuntimeSessionID: uuid.NewString(),

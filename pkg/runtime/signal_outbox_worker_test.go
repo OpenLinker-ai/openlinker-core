@@ -88,6 +88,32 @@ func TestRuntimeSignalOutboxWorkerExtractsOnlyTargetFromPayload(t *testing.T) {
 	require.NotContains(t, string(encoded), "token")
 }
 
+func TestRuntimeSignalOutboxWorkerProjectsCredentialConnectionIdentities(t *testing.T) {
+	targetID, credentialID := uuid.New(), uuid.New()
+	identity := RuntimeConnectionIdentity{
+		RuntimeSessionID: uuid.New(),
+		SessionEpoch:     4,
+		AttachmentID:     uuid.New(),
+	}
+	payload := `{"target_instance_id":"` + targetID.String() +
+		`","credential_id":"` + credentialID.String() +
+		`","connections":[{"runtime_session_id":"` + identity.RuntimeSessionID.String() +
+		`","session_epoch":4,"attachment_id":"` + identity.AttachmentID.String() + `"}]}`
+	row := testRuntimeSignalOutbox(payload)
+	row.EventType = "credential.revoke"
+	store := &runtimeSignalOutboxStoreFake{claimed: []db.RuntimeSignalOutbox{row}}
+	bus := &runtimeSignalBusFake{}
+
+	result, err := NewRuntimeSignalOutboxWorker(store, bus).ProcessOnce(
+		context.Background(), RuntimeSignalOutboxWorkerConfig{},
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Published)
+	require.Equal(t, &targetID, bus.published[0].TargetInstanceID)
+	require.Equal(t, &credentialID, bus.published[0].CredentialID)
+	require.Equal(t, []RuntimeConnectionIdentity{identity}, bus.published[0].Connections)
+}
+
 func TestRuntimeSignalOutboxWorkerProjectsNodeCapacityIdentity(t *testing.T) {
 	nodeID := uuid.New()
 	row := testRuntimeSignalOutbox(`{"node_id":"` + nodeID.String() + `","input":"classified"}`)

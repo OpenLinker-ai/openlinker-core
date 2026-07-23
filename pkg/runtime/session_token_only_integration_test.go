@@ -120,11 +120,28 @@ INSERT INTO agent_tokens (
 		Transport:             runtime.RuntimeTransportWebSocket,
 	}
 	service := runtime.NewRuntimeSessionService(pool, coreInstanceID)
-	if _, err = service.CreateOrAttachSession(ctx, principal, request); err != nil {
+	state, err := service.CreateOrAttachSession(ctx, principal, request)
+	if err != nil {
 		t.Fatalf("create first token-only Session: %v", err)
 	}
-	if _, err = service.CreateOrAttachSession(ctx, principal, request); err != nil {
+	if state, err = service.CreateOrAttachSession(ctx, principal, request); err != nil {
 		t.Fatalf("retry first token-only Session: %v", err)
+	}
+	if state.Attachment == nil {
+		t.Fatal("created token-only Session has no active attachment")
+	}
+	registration := runtime.RuntimeConnectionRegistration{
+		Identity: runtime.RuntimeConnectionIdentity{
+			RuntimeSessionID: state.Session.RuntimeSessionID,
+			SessionEpoch:     state.Session.SessionEpoch,
+			AttachmentID:     state.Attachment.ID,
+		},
+		CredentialID: credentialID,
+	}
+	validator := runtime.NewPostgresRuntimeCredentialConnectionValidator(pool, coreInstanceID)
+	validation, err := validator.Validate(ctx, []runtime.RuntimeConnectionRegistration{registration})
+	if err != nil || len(validation) != 1 || !validation[0].Valid {
+		t.Fatalf("active token-only connection validation = %#v, err=%v", validation, err)
 	}
 
 	var bindingMode string

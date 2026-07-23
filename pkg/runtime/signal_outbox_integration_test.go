@@ -25,6 +25,8 @@ func TestRuntimeSignalOutboxRedisFailureAndRecoveryAgainstPostgres(t *testing.T)
 	pool, err := pgxpool.New(ctx, databaseURL)
 	require.NoError(t, err)
 	defer pool.Close()
+	_, err = pool.Exec(ctx, `DELETE FROM runtime_signal_outbox`)
+	require.NoError(t, err)
 
 	userID, agentID := uuid.New(), uuid.New()
 	_, err = pool.Exec(ctx, `

@@ -324,6 +324,96 @@ func TestRuntimeCredentialRevocationSignalWakesTargetCore(t *testing.T) {
 	<-done
 }
 
+func TestRuntimeCredentialRevocationClosesOnlyExactAttachmentGeneration(t *testing.T) {
+	hub := NewRuntimeWakeHub()
+	sessionID := uuid.New()
+	oldIdentity := RuntimeConnectionIdentity{
+		RuntimeSessionID: sessionID,
+		SessionEpoch:     7,
+		AttachmentID:     uuid.New(),
+	}
+	replacementIdentity := RuntimeConnectionIdentity{
+		RuntimeSessionID: sessionID,
+		SessionEpoch:     7,
+		AttachmentID:     uuid.New(),
+	}
+	laterGeneration := RuntimeConnectionIdentity{
+		RuntimeSessionID: sessionID,
+		SessionEpoch:     8,
+		AttachmentID:     uuid.New(),
+	}
+	credentialID := uuid.New()
+	oldWake := hub.RegisterConnection(oldIdentity, credentialID)
+	replacementWake := hub.RegisterConnection(replacementIdentity, credentialID)
+	laterWake := hub.RegisterConnection(laterGeneration, credentialID)
+
+	require.Equal(t, 1, hub.RevokeCredentialConnections(
+		credentialID,
+		[]RuntimeConnectionIdentity{oldIdentity},
+	))
+	select {
+	case <-oldWake:
+	default:
+		t.Fatal("matching attachment generation was not revoked")
+	}
+	for name, wake := range map[string]<-chan struct{}{
+		"replacement attachment": replacementWake,
+		"later generation":       laterWake,
+	} {
+		select {
+		case <-wake:
+			t.Fatalf("%s was revoked by an old attachment signal", name)
+		default:
+		}
+	}
+
+	lateWake := hub.RegisterConnection(oldIdentity, credentialID)
+	select {
+	case <-lateWake:
+	default:
+		t.Fatal("registration racing a delivered revocation was not fenced")
+	}
+}
+
+func TestRuntimeCredentialRevocationSignalUsesExactConnections(t *testing.T) {
+	instanceID, agentID, credentialID := uuid.New(), uuid.New(), uuid.New()
+	identity := RuntimeConnectionIdentity{
+		RuntimeSessionID: uuid.New(),
+		SessionEpoch:     2,
+		AttachmentID:     uuid.New(),
+	}
+	bus := &runtimeSignalSubscriberFake{signal: RuntimeSignal{
+		SignalID:         uuid.New(),
+		Type:             "credential.revoke",
+		AgentID:          agentID,
+		TargetInstanceID: &instanceID,
+		CredentialID:     &credentialID,
+		Connections:      []RuntimeConnectionIdentity{identity},
+	}}
+	hub := NewRuntimeWakeHub()
+	connectionWake := hub.RegisterConnection(identity, credentialID)
+	controlWake := hub.WaitControl(agentID)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		StartRuntimeSignalSubscriber(ctx, bus, instanceID, hub, nil)
+	}()
+
+	select {
+	case <-connectionWake:
+	case <-time.After(time.Second):
+		t.Fatal("credential revocation did not close the exact connection")
+	}
+	select {
+	case <-controlWake:
+		t.Fatal("exact credential revocation used the broad Agent control wake")
+	default:
+	}
+	cancel()
+	<-done
+}
+
 type runtimeSignalSubscriberFake struct {
 	mu        sync.Mutex
 	calls     int

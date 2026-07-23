@@ -58,6 +58,12 @@ WHERE singleton_id = 1`, previousMode)
 	supported := coreruntime.CurrentRuntimeWireCompatibility().SupportedContractDigests
 	require.Len(t, supported, 2)
 	previousDigest := supported[1]
+	previousFeatures := make([]string, 0, len(coreruntime.RuntimeRequiredFeatures()))
+	for _, feature := range coreruntime.RuntimeRequiredFeatures() {
+		if feature != "session_drain" {
+			previousFeatures = append(previousFeatures, feature)
+		}
+	}
 
 	for _, transport := range []string{"http", "websocket"} {
 		t.Run(transport, func(t *testing.T) {
@@ -107,7 +113,7 @@ WHERE singleton_id = 1`, previousMode)
 				SessionEpoch:     1,
 				NodeVersion:      "2.0.0",
 				Capacity:         2,
-				Features:         coreruntime.RuntimeRequiredFeatures(),
+				Features:         previousFeatures,
 				ContractDigest:   previousDigest,
 			}
 
@@ -146,8 +152,8 @@ WHERE singleton_id = 1`, previousMode)
 				require.NoError(t, json.Unmarshal(envelope.Payload, &ready))
 			}
 
-			require.NotContains(t, ready, "attachment_id")
-			require.Len(t, ready, 5)
+			require.Contains(t, ready, "attachment_id")
+			require.Len(t, ready, 6)
 			var nodeDigest, sessionDigest string
 			require.NoError(t, pool.QueryRow(context.Background(), `
 SELECT n.runtime_contract_digest, s.runtime_contract_digest

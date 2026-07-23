@@ -13,6 +13,15 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
+func TestNewRuntimeSessionReaperNormalizesNilLeaseManager(t *testing.T) {
+	reaper := NewRuntimeSessionReaperWithLeases(nil, 2*time.Minute, nil)
+	require.Nil(t, reaper.leases)
+	require.ErrorIs(t, func() error {
+		_, err := reaper.ReapStaleSessions(context.Background(), 32)
+		return err
+	}(), ErrRuntimeSessionReaperNotConfigured)
+}
+
 func TestRuntimeSessionReaperClosesExactStaleAttachment(t *testing.T) {
 	fixture := newSessionFixture()
 	tx := newSessionTransactionFake(fixture)

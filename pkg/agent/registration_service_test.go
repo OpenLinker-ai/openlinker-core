@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -166,16 +167,21 @@ INSERT INTO runtime_sessions (
     session_epoch, device_certificate_serial, node_version,
     protocol_version, runtime_contract_id, runtime_contract_digest,
     features, capacity, inflight, status, attached_core_instance_id,
-    disconnected_at
+    disconnected_at, drain_requested_at, drain_deadline_at,
+    drain_reason_code, resume_capacity
 ) VALUES
     ($1, $5, $6, $7, 'target-active', 1, $8, 'credential-revoke-test',
-     2, $9, $10, $11, 4, 1, 'active', $12, NULL),
+     2, $9, $10, $11, 4, 1, 'active', $12, NULL, NULL, NULL, NULL, NULL),
     ($2, $5, $6, $7, 'target-draining', 1, $8, 'credential-revoke-test',
-     2, $9, $10, $11, 4, 1, 'draining', $13, NULL),
+     2, $9, $10, $11, 0, 1, 'draining', $13, NULL,
+     clock_timestamp(), clock_timestamp() + INTERVAL '30 seconds',
+     'credential_revoke_test', 4),
     ($3, $5, $6, $7, 'target-offline', 1, $8, 'credential-revoke-test',
-     2, $9, $10, $11, 4, 0, 'offline', NULL, clock_timestamp()),
+     2, $9, $10, $11, 4, 0, 'offline', NULL, clock_timestamp(),
+     NULL, NULL, NULL, NULL),
     ($4, $5, $6, $14, 'other-active', 1, $8, 'credential-revoke-test',
-     2, $9, $10, $11, 4, 1, 'active', $15, NULL)`,
+     2, $9, $10, $11, 4, 1, 'active', $15, NULL,
+     NULL, NULL, NULL, NULL)`,
 			targetActiveSessionID, targetDrainingSessionID, targetOfflineSessionID,
 			otherSessionID, nodeID, agentID, targetTokenID, serial,
 			coreruntime.RuntimeContractID, coreruntime.RuntimeContractDigest,
@@ -215,15 +221,21 @@ SELECT status FROM agent_tokens WHERE id = $1`, otherTokenID).Scan(&otherStatus)
 		var attachedCore *uuid.UUID
 		var disconnected bool
 		var inflight int32
+		var hasDrainEvidence bool
 		require.NoError(t, pool.QueryRow(ctx, `
-SELECT status, attached_core_instance_id, disconnected_at IS NOT NULL, inflight
+SELECT status, attached_core_instance_id, disconnected_at IS NOT NULL, inflight,
+       drain_requested_at IS NOT NULL
+       OR drain_deadline_at IS NOT NULL
+       OR drain_reason_code IS NOT NULL
+       OR resume_capacity IS NOT NULL
 FROM runtime_sessions WHERE runtime_session_id = $1`, sessionID).Scan(
-			&status, &attachedCore, &disconnected, &inflight,
+			&status, &attachedCore, &disconnected, &inflight, &hasDrainEvidence,
 		))
 		require.Equal(t, "revoked", status)
 		require.Nil(t, attachedCore)
 		require.True(t, disconnected)
 		require.Equal(t, targetInflight[sessionID], inflight)
+		require.False(t, hasDrainEvidence)
 	}
 	for _, sessionID := range []uuid.UUID{targetActiveSessionID, targetDrainingSessionID} {
 		var reason *string
@@ -272,23 +284,33 @@ FROM runtime_nodes WHERE node_id = $1`, nodeID).Scan(
 	require.False(t, nodeRevoked)
 
 	rows, err := pool.Query(ctx, `
-SELECT payload->>'target_instance_id'
+SELECT payload
 FROM runtime_signal_outbox
 WHERE event_type = 'credential.revoke' AND agent_id = $1
 ORDER BY payload->>'target_instance_id'`, agentID)
 	require.NoError(t, err)
 	defer rows.Close()
-	signalTargets := make(map[string]struct{})
+	signalTargets := make(map[uuid.UUID]coreruntime.RuntimeConnectionIdentity)
 	for rows.Next() {
-		var target string
-		require.NoError(t, rows.Scan(&target))
-		signalTargets[target] = struct{}{}
+		var encoded []byte
+		require.NoError(t, rows.Scan(&encoded))
+		var payload struct {
+			TargetInstanceID uuid.UUID                               `json:"target_instance_id"`
+			CredentialID     uuid.UUID                               `json:"credential_id"`
+			Connections      []coreruntime.RuntimeConnectionIdentity `json:"connections"`
+		}
+		require.NoError(t, json.Unmarshal(encoded, &payload))
+		require.Equal(t, targetTokenID, payload.CredentialID)
+		require.Len(t, payload.Connections, 1)
+		signalTargets[payload.TargetInstanceID] = payload.Connections[0]
 	}
 	require.NoError(t, rows.Err())
-	require.Equal(t, map[string]struct{}{
-		targetCoreA.String(): {},
-		targetCoreB.String(): {},
-	}, signalTargets)
+	require.Equal(t, targetActiveSessionID, signalTargets[targetCoreA].RuntimeSessionID)
+	require.Equal(t, int64(1), signalTargets[targetCoreA].SessionEpoch)
+	require.NotEqual(t, uuid.Nil, signalTargets[targetCoreA].AttachmentID)
+	require.Equal(t, targetDrainingSessionID, signalTargets[targetCoreB].RuntimeSessionID)
+	require.Equal(t, int64(1), signalTargets[targetCoreB].SessionEpoch)
+	require.NotEqual(t, uuid.Nil, signalTargets[targetCoreB].AttachmentID)
 
 	err = svc.RevokeAgentToken(ctx, creatorID, targetTokenID)
 	assertHTTPStatus(t, err, 404)
