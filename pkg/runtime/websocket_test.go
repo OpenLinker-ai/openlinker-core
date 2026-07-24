@@ -763,6 +763,64 @@ func TestRuntimeWebSocketAssignmentAckContinuesKnownDispatchDemand(t *testing.T)
 	require.Equal(t, 2, fixture.leases.claimCallCount())
 }
 
+func TestRuntimeWebSocketDispatchCreditsSurviveConcurrentCoalescedWakeups(t *testing.T) {
+	connection := &runtimeWSConnection{
+		dispatchContinue: make(chan struct{}, 1),
+		dispatchLimit:    8,
+	}
+
+	connection.requestDispatch(1, false, "node_capacity")
+	require.False(t, connection.takeDispatchCredit(), "capacity alone must not invent demand")
+
+	connection.requestDispatch(1, true, "run_available")
+	var signals sync.WaitGroup
+	for index := 0; index < 63; index++ {
+		signals.Add(1)
+		go func() {
+			defer signals.Done()
+			connection.requestDispatch(1, false, "assignment_ack")
+		}()
+	}
+	signals.Wait()
+	require.Len(t, connection.dispatchContinue, 1, "wakeups may coalesce in the notification channel")
+	for index := 0; index < 8; index++ {
+		require.True(t, connection.takeDispatchCredit(), "coalescing must retain every credit up to capacity")
+	}
+	require.False(t, connection.takeDispatchCredit(), "credits are bounded by Session capacity")
+	require.True(t, connection.clearDispatchDemandIfIdle())
+
+	connection.requestDispatch(1, false, "node_capacity")
+	require.False(t, connection.takeDispatchCredit(), "a stale capacity signal must not restore cleared demand")
+}
+
+func TestRuntimeWebSocketNilDispatchClaimClearsDemandUntilLaterRunWake(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	server, target := fixture.server(t)
+	defer server.Close()
+	conn := dialRuntimeWS(t, target)
+	defer conn.Close()
+
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
+	require.Eventually(t, func() bool {
+		return fixture.leases.claimCallCount() == 1
+	}, time.Second, 10*time.Millisecond)
+
+	assignment := fixture.assignment()
+	fixture.leases.setAssignment(&assignment)
+	fixture.wakeHub.WakeNodeDispatch(fixture.principal.NodeID)
+	time.Sleep(20 * time.Millisecond)
+	require.Equal(t, 1, fixture.leases.claimCallCount(), "capacity does not create demand after an empty claim")
+
+	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
+	assignedEnvelope := readRuntimeWSEnvelope(t, conn)
+	assigned, err := DecodeRuntimeMessagePayload[RunAssignedPayload](assignedEnvelope, RuntimeMessageRunAssigned)
+	require.NoError(t, err)
+	require.Equal(t, assignment.AttemptIdentity, assigned.AttemptIdentity)
+	require.Equal(t, 2, fixture.leases.claimCallCount())
+}
+
 func TestRuntimeWebSocketCapacitySignalContinuesDemandAfterResultRelease(t *testing.T) {
 	fixture := newRuntimeWSTestFixture()
 	first, second := fixture.assignment(), fixture.assignment()
@@ -1160,6 +1218,7 @@ type runtimeWSTestFixture struct {
 	wakeHub         *RuntimeWakeHub
 	sessionLeases   *RuntimeSessionLeaseManager
 	transportPolicy RuntimeTransportPolicyProvider
+	webSocketConfig RuntimeWebSocketConcurrencyConfig
 }
 
 func newRuntimeWSTestFixture() *runtimeWSTestFixture {
@@ -1214,6 +1273,7 @@ func newRuntimeWSTestFixture() *runtimeWSTestFixture {
 			Status:                 "active",
 			AttachedCoreInstanceID: &coreID,
 			HeartbeatAt:            now,
+			Capacity:               int32(hello.Capacity),
 		},
 		Attachment: &db.RuntimeSessionAttachment{
 			ID:               attachmentID,
@@ -1248,17 +1308,18 @@ func newRuntimeWSTestFixture() *runtimeWSTestFixture {
 
 func (f *runtimeWSTestFixture) controller() *RuntimeHTTPController {
 	return NewRuntimeHTTPController(RuntimeHTTPDependencies{
-		TokenValidator:      f.tokens,
-		DeviceAuthenticator: f.devices,
-		TransportPolicy:     f.transportPolicy,
-		Sessions:            f.sessions,
-		Leases:              f.leases,
-		EventProjector:      f.events,
-		Finalizer:           f.finalizer,
-		Resume:              f.resume,
-		Cancellations:       f.cancellations,
-		WakeHub:             f.wakeHub,
-		SessionLeases:       f.sessionLeases,
+		TokenValidator:       f.tokens,
+		DeviceAuthenticator:  f.devices,
+		TransportPolicy:      f.transportPolicy,
+		Sessions:             f.sessions,
+		Leases:               f.leases,
+		EventProjector:       f.events,
+		Finalizer:            f.finalizer,
+		Resume:               f.resume,
+		Cancellations:        f.cancellations,
+		WakeHub:              f.wakeHub,
+		SessionLeases:        f.sessionLeases,
+		WebSocketConcurrency: f.webSocketConfig,
 	})
 }
 
@@ -1701,6 +1762,7 @@ type runtimeWSFinalizerFake struct {
 	calls     int
 	principal RuntimeResultPrincipal
 	request   RuntimeResultRequest
+	finalize  func(RuntimeResultPrincipal, RuntimeResultRequest) (RuntimeResultAck, error)
 }
 
 type runtimeWSResumeServiceFake struct {
@@ -1795,11 +1857,15 @@ func (f *runtimeWSResumeServiceFake) callCount() int {
 
 func (f *runtimeWSFinalizerFake) Finalize(_ context.Context, principal RuntimeResultPrincipal, request RuntimeResultRequest) (RuntimeResultAck, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls++
 	f.principal = principal
 	f.request = request
-	return f.ack, f.err
+	ack, err, finalize := f.ack, f.err, f.finalize
+	f.mu.Unlock()
+	if finalize != nil {
+		return finalize(principal, request)
+	}
+	return ack, err
 }
 
 func (f *runtimeWSFinalizerFake) callCount() int {

@@ -94,7 +94,9 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	}
 	if cfg.RuntimeMTLSEnabled || cfg.RuntimeMTLSPort != 9443 || cfg.RuntimeMTLSMaxConnections != 4096 ||
 		cfg.RuntimeMTLSAPIURL != "" || cfg.RuntimePKIMode != "auto" ||
-		cfg.RuntimeInvocationSigningKeyID != "current" || len(cfg.RuntimeInvocationSigningSecret) != 64 {
+		cfg.RuntimeInvocationSigningKeyID != "current" || len(cfg.RuntimeInvocationSigningSecret) != 64 ||
+		cfg.RuntimeWSConnectionMaxInflight != 8 || cfg.RuntimeWSProcessMaxInflight != 16 ||
+		cfg.RuntimeWSLaneQueueDepth != 16 {
 		t.Fatalf("unexpected runtime mTLS defaults: %#v", cfg)
 	}
 	if cfg.HTTPRateLimitRate != 50 || cfg.HTTPRateLimitBurst != 200 || cfg.HTTPRateLimitPeriodSec != 1 {
@@ -163,5 +165,29 @@ func TestLoadRequiresDatabaseURLAndJWTSecret(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatalf("Load should fail when required env is missing")
+	}
+}
+
+func TestLoadRejectsInvalidRuntimeWebSocketBounds(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://dev:dev@localhost/openlinker_test")
+	t.Setenv("JWT_SECRET", "test-secret")
+
+	for _, test := range []struct {
+		name, env, value string
+	}{
+		{name: "connection zero", env: "RUNTIME_WS_CONNECTION_MAX_INFLIGHT", value: "0"},
+		{name: "connection above maximum", env: "RUNTIME_WS_CONNECTION_MAX_INFLIGHT", value: "257"},
+		{name: "process zero", env: "RUNTIME_WS_PROCESS_MAX_INFLIGHT", value: "0"},
+		{name: "process above maximum", env: "RUNTIME_WS_PROCESS_MAX_INFLIGHT", value: "1025"},
+		{name: "queue zero", env: "RUNTIME_WS_LANE_QUEUE_DEPTH", value: "0"},
+		{name: "queue above maximum", env: "RUNTIME_WS_LANE_QUEUE_DEPTH", value: "1025"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(test.env, test.value)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), test.env) {
+				t.Fatalf("Load error = %v, want %s validation", err, test.env)
+			}
+		})
 	}
 }
