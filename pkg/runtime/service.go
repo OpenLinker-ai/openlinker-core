@@ -722,7 +722,18 @@ func trustedRunMetadata(input map[string]interface{}) map[string]interface{} {
 	// populate them after persisting the matching A2A context mapping.
 	delete(out, "a2a")
 	delete(out, "conversation")
+	delete(out, "_openlinker_runtime_authority")
 	return out
+}
+
+func attachRuntimeAuthority(metadata map[string]interface{}, userID uuid.UUID) {
+	if metadata == nil || userID == uuid.Nil {
+		return
+	}
+	metadata["_openlinker_runtime_authority"] = map[string]interface{}{
+		"principal_scope_id": userID.String(),
+		"source":             "core",
+	}
 }
 
 func attachRunA2AContextToInput(input map[string]interface{}, ctx *RunA2AContextRequest) {
@@ -983,6 +994,7 @@ func (s *Service) createRunningRun(
 	normalizedReq := *req
 	normalizedReq.Input = copyRunInput(req.Input)
 	normalizedReq.Metadata = trustedRunMetadata(req.Metadata)
+	attachRuntimeAuthority(normalizedReq.Metadata, userID)
 	normalizedReq.A2AContext = runA2AContext
 	attachRunA2AContextToInput(normalizedReq.Input, runA2AContext)
 	req = &normalizedReq
@@ -1045,6 +1057,7 @@ func (s *Service) createRunningRun(
 			params := runA2AContextMappingParams(runID, userID, agentID, runA2AContext)
 			a2aMappingParams = &params
 			trustedMetadata := trustedRunMetadata(req.Metadata)
+			attachRuntimeAuthority(trustedMetadata, userID)
 			trustedMetadata["a2a"] = agentA2AContextMap(s.agentA2AContextForRequest(runID, opts.delegation, req))
 			trustedMetadata["conversation"] = conversationContextBeforeMapping(ctx, q, pendingA2AContextMapping(params))
 			marshaledMetadata, marshalErr := json.Marshal(trustedMetadata)

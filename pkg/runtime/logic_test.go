@@ -775,17 +775,37 @@ func TestConversationContextFromMappingBuildsHistory(t *testing.T) {
 
 func TestTrustedRunMetadataRejectsCallerOwnedSessionFields(t *testing.T) {
 	original := map[string]interface{}{
-		"tenant":       "seller-research",
-		"a2a":          map[string]interface{}{"root_context_id": "spoofed"},
-		"conversation": map[string]interface{}{"session_key": "spoofed", "source": "caller"},
+		"tenant":                        "seller-research",
+		"a2a":                           map[string]interface{}{"root_context_id": "spoofed"},
+		"conversation":                  map[string]interface{}{"session_key": "spoofed", "source": "caller"},
+		"_openlinker_runtime_authority": map[string]interface{}{"principal_scope_id": "spoofed", "source": "caller"},
 	}
 
 	trusted := trustedRunMetadata(original)
 	require.Equal(t, "seller-research", trusted["tenant"])
 	require.NotContains(t, trusted, "a2a")
 	require.NotContains(t, trusted, "conversation")
+	require.NotContains(t, trusted, "_openlinker_runtime_authority")
 	require.Contains(t, original, "a2a", "sanitizing metadata must not mutate the caller request")
 	require.Contains(t, original, "conversation", "sanitizing metadata must not mutate the caller request")
+	require.Contains(t, original, "_openlinker_runtime_authority", "sanitizing metadata must not mutate the caller request")
+}
+
+func TestAttachRuntimeAuthorityUsesCorePrincipal(t *testing.T) {
+	userID := uuid.New()
+	metadata := map[string]interface{}{
+		"_openlinker_runtime_authority": map[string]interface{}{
+			"principal_scope_id": "spoofed",
+			"source":             "caller",
+		},
+	}
+
+	attachRuntimeAuthority(metadata, userID)
+
+	require.Equal(t, map[string]interface{}{
+		"principal_scope_id": userID.String(),
+		"source":             "core",
+	}, metadata["_openlinker_runtime_authority"])
 }
 
 func TestAgentA2AContextUsesTypedMessageAndTrustedCreationSource(t *testing.T) {
