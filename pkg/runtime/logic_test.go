@@ -793,19 +793,104 @@ func TestTrustedRunMetadataRejectsCallerOwnedSessionFields(t *testing.T) {
 
 func TestAttachRuntimeAuthorityUsesCorePrincipal(t *testing.T) {
 	userID := uuid.New()
+	agentID := uuid.New()
 	metadata := map[string]interface{}{
 		"_openlinker_runtime_authority": map[string]interface{}{
 			"principal_scope_id": "spoofed",
 			"source":             "caller",
 		},
 	}
+	svc := NewService(nil, &config.Config{
+		JWTSecret:              "test-jwt-secret",
+		RuntimePKIMasterSecret: "stable-runtime-master-secret",
+	})
 
-	attachRuntimeAuthority(metadata, userID)
+	require.NoError(t, svc.attachRuntimeAuthority(metadata, userID, agentID))
+	scopeID, err := runtimePrincipalScopeID(svc.runtimePrincipalScopeKey, userID, agentID)
+	require.NoError(t, err)
 
 	require.Equal(t, map[string]interface{}{
-		"principal_scope_id": userID.String(),
+		"principal_scope_id": scopeID,
 		"source":             "core",
 	}, metadata["_openlinker_runtime_authority"])
+	require.NotContains(t, scopeID, userID.String())
+	require.NotContains(t, scopeID, agentID.String())
+}
+
+func TestRuntimePrincipalScopeIsStableAndAgentScoped(t *testing.T) {
+	userID := uuid.New()
+	otherUserID := uuid.New()
+	agentID := uuid.New()
+	otherAgentID := uuid.New()
+	cfg := &config.Config{
+		JWTSecret:              "jwt-secret-that-may-rotate",
+		RuntimePKIMasterSecret: "stable-runtime-master-secret",
+	}
+	key := deriveRuntimePrincipalScopeKey(cfg)
+
+	scopeID, err := runtimePrincipalScopeID(key, userID, agentID)
+	require.NoError(t, err)
+	repeatedScopeID, err := runtimePrincipalScopeID(deriveRuntimePrincipalScopeKey(cfg), userID, agentID)
+	require.NoError(t, err)
+	otherAgentScopeID, err := runtimePrincipalScopeID(key, userID, otherAgentID)
+	require.NoError(t, err)
+	otherUserScopeID, err := runtimePrincipalScopeID(key, otherUserID, agentID)
+	require.NoError(t, err)
+
+	require.Equal(t, scopeID, repeatedScopeID)
+	require.Regexp(t, `^ps1_[A-Za-z0-9_-]{43}$`, scopeID)
+	require.NotEqual(t, scopeID, otherAgentScopeID)
+	require.NotEqual(t, scopeID, otherUserScopeID)
+}
+
+func TestRuntimePrincipalScopeGoldenVector(t *testing.T) {
+	userID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	agentID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	key := deriveRuntimePrincipalScopeKey(&config.Config{
+		RuntimePKIMasterSecret: "stable-runtime-master-secret",
+	})
+
+	scopeID, err := runtimePrincipalScopeID(key, userID, agentID)
+
+	require.NoError(t, err)
+	require.Equal(t, "ps1_36C-QE2DPv4OIDMBSPrzf87qCl7ad3FqbaZ7eDMnEJw", scopeID,
+		"changing a versioned scope requires a new prefix and an explicit Profile migration")
+}
+
+func TestRuntimePrincipalScopePrefersStableRuntimeMasterSecret(t *testing.T) {
+	userID := uuid.New()
+	agentID := uuid.New()
+	firstKey := deriveRuntimePrincipalScopeKey(&config.Config{
+		JWTSecret:              "first-jwt-secret",
+		RuntimePKIMasterSecret: "stable-runtime-master-secret",
+	})
+	rotatedJWTKey := deriveRuntimePrincipalScopeKey(&config.Config{
+		JWTSecret:              "rotated-jwt-secret",
+		RuntimePKIMasterSecret: "stable-runtime-master-secret",
+	})
+	fallbackKey := deriveRuntimePrincipalScopeKey(&config.Config{
+		JWTSecret: "stable-runtime-master-secret",
+	})
+
+	firstScopeID, err := runtimePrincipalScopeID(firstKey, userID, agentID)
+	require.NoError(t, err)
+	rotatedJWTScopeID, err := runtimePrincipalScopeID(rotatedJWTKey, userID, agentID)
+	require.NoError(t, err)
+	fallbackScopeID, err := runtimePrincipalScopeID(fallbackKey, userID, agentID)
+	require.NoError(t, err)
+
+	require.Equal(t, firstScopeID, rotatedJWTScopeID, "JWT rotation must not change scopes when the Runtime master is configured")
+	require.Equal(t, firstScopeID, fallbackScopeID, "the existing JWT fallback must use the same effective root")
+}
+
+func TestAttachRuntimeAuthorityFailsClosedWithoutRuntimeMaster(t *testing.T) {
+	metadata := map[string]interface{}{}
+	svc := NewService(nil, &config.Config{})
+
+	err := svc.attachRuntimeAuthority(metadata, uuid.New(), uuid.New())
+
+	require.ErrorContains(t, err, "scope key is unavailable")
+	require.NotContains(t, metadata, "_openlinker_runtime_authority")
 }
 
 func TestAgentA2AContextUsesTypedMessageAndTrustedCreationSource(t *testing.T) {

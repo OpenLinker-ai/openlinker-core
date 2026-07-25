@@ -126,6 +126,7 @@ func newTestConfig() *config.Config {
 	return &config.Config{
 		RunTimeoutSeconds:       2,
 		AllowLocalHTTPEndpoints: true,
+		JWTSecret:               "runtime-service-test-secret",
 	}
 }
 

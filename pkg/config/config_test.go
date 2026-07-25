@@ -21,6 +21,40 @@ func unsetEnv(t *testing.T, key string) {
 	})
 }
 
+func TestEffectiveRuntimeMasterSecret(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want string
+	}{
+		{
+			name: "prefers explicit runtime master",
+			cfg: &Config{
+				RuntimePKIMasterSecret: "  runtime-master  ",
+				JWTSecret:              "jwt-fallback",
+			},
+			want: "runtime-master",
+		},
+		{
+			name: "falls back to jwt",
+			cfg:  &Config{JWTSecret: "  jwt-fallback  "},
+			want: "jwt-fallback",
+		},
+		{
+			name: "nil config",
+			cfg:  nil,
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.EffectiveRuntimeMasterSecret(); got != tt.want {
+				t.Fatalf("EffectiveRuntimeMasterSecret() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://dev:dev@localhost/openlinker_test")
 	t.Setenv("JWT_SECRET", "test-secret")
