@@ -3,9 +3,11 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -43,6 +45,9 @@ const runtimeBestEffortWriteConcurrency = 32
 const maxA2AContextIDLen = 200
 const maxConversationHistoryRuns int32 = 50
 const maxConversationHistoryMessages = 120
+const runtimePrincipalScopePrefix = "ps1_"
+const runtimePrincipalScopeKeyDomain = "openlinker/runtime-principal-scope/key/v1"
+const runtimePrincipalScopeIDDomain = "openlinker/runtime-principal-scope/id/v1\x00"
 
 const (
 	connectionModeDirectHTTP = "direct_http"
@@ -81,6 +86,9 @@ type Service struct {
 	coreExecutions  *coreAttemptRegistry
 	effectWorker    *RunEffectWorker
 	bestEffortDBSem chan struct{}
+	// Derived once from Config.EffectiveRuntimeMasterSecret. The root secret is
+	// never copied into Run metadata or exposed to a Runtime worker.
+	runtimePrincipalScopeKey []byte
 }
 
 // StartCoreAttemptCancellationCoordinator starts the single Core-scoped
@@ -171,7 +179,8 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 			chan struct{},
 			runtimeBestEffortWriteConcurrency,
 		),
-		httpClient: endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
+		httpClient:               endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
+		runtimePrincipalScopeKey: deriveRuntimePrincipalScopeKey(cfg),
 	}
 	svc.resultFinalizer = NewResultFinalizer(pool, nil, nil)
 	svc.cancellation = NewRuntimeCancellationCoordinator(pool)
@@ -722,7 +731,47 @@ func trustedRunMetadata(input map[string]interface{}) map[string]interface{} {
 	// populate them after persisting the matching A2A context mapping.
 	delete(out, "a2a")
 	delete(out, "conversation")
+	delete(out, "_openlinker_runtime_authority")
 	return out
+}
+
+func deriveRuntimePrincipalScopeKey(cfg *config.Config) []byte {
+	rootSecret := cfg.EffectiveRuntimeMasterSecret()
+	if rootSecret == "" {
+		return nil
+	}
+	mac := hmac.New(sha256.New, []byte(rootSecret))
+	_, _ = mac.Write([]byte(runtimePrincipalScopeKeyDomain))
+	return mac.Sum(nil)
+}
+
+func runtimePrincipalScopeID(key []byte, userID, agentID uuid.UUID) (string, error) {
+	if len(key) == 0 {
+		return "", errors.New("runtime principal scope key is unavailable")
+	}
+	if userID == uuid.Nil || agentID == uuid.Nil {
+		return "", errors.New("runtime principal scope identity is incomplete")
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(runtimePrincipalScopeIDDomain))
+	_, _ = mac.Write(userID[:])
+	_, _ = mac.Write(agentID[:])
+	return runtimePrincipalScopePrefix + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+func (s *Service) attachRuntimeAuthority(metadata map[string]interface{}, userID, agentID uuid.UUID) error {
+	if metadata == nil {
+		return errors.New("runtime authority metadata is unavailable")
+	}
+	principalScopeID, err := runtimePrincipalScopeID(s.runtimePrincipalScopeKey, userID, agentID)
+	if err != nil {
+		return err
+	}
+	metadata["_openlinker_runtime_authority"] = map[string]interface{}{
+		"principal_scope_id": principalScopeID,
+		"source":             "core",
+	}
+	return nil
 }
 
 func attachRunA2AContextToInput(input map[string]interface{}, ctx *RunA2AContextRequest) {
@@ -983,6 +1032,10 @@ func (s *Service) createRunningRun(
 	normalizedReq := *req
 	normalizedReq.Input = copyRunInput(req.Input)
 	normalizedReq.Metadata = trustedRunMetadata(req.Metadata)
+	if err := s.attachRuntimeAuthority(normalizedReq.Metadata, userID, agentID); err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("runtime.Run: attach Runtime authority")
+		return nil, nil, httpx.Internal("生成 Runtime 调用身份失败")
+	}
 	normalizedReq.A2AContext = runA2AContext
 	attachRunA2AContextToInput(normalizedReq.Input, runA2AContext)
 	req = &normalizedReq
@@ -1045,6 +1098,9 @@ func (s *Service) createRunningRun(
 			params := runA2AContextMappingParams(runID, userID, agentID, runA2AContext)
 			a2aMappingParams = &params
 			trustedMetadata := trustedRunMetadata(req.Metadata)
+			if authorityErr := s.attachRuntimeAuthority(trustedMetadata, userID, agentID); authorityErr != nil {
+				return authorityErr
+			}
 			trustedMetadata["a2a"] = agentA2AContextMap(s.agentA2AContextForRequest(runID, opts.delegation, req))
 			trustedMetadata["conversation"] = conversationContextBeforeMapping(ctx, q, pendingA2AContextMapping(params))
 			marshaledMetadata, marshalErr := json.Marshal(trustedMetadata)

@@ -80,14 +80,8 @@ func NewManager(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config) (*M
 	if pool == nil || cfg == nil {
 		return nil, errors.New("runtime PKI requires database and configuration")
 	}
-	secret := strings.TrimSpace(cfg.RuntimePKIMasterSecret)
+	secret := cfg.EffectiveRuntimeMasterSecret()
 	if secret == "" {
-		// JWT_SECRET already has a production minimum and is present in every
-		// Core replica. Domain separation prevents protocol-key reuse while
-		// keeping the default deployment zero-touch.
-		secret = cfg.JWTSecret
-	}
-	if strings.TrimSpace(secret) == "" {
 		return nil, errors.New("runtime PKI master secret is unavailable")
 	}
 	m := &Manager{pool: pool}

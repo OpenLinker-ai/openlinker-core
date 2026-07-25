@@ -227,6 +227,23 @@ func normalizeOAuthCodeStorageMode(value string) (string, error) {
 	}
 }
 
+// EffectiveRuntimeMasterSecret returns the stable root secret shared by
+// domain-separated Runtime derivations. RUNTIME_PKI_MASTER_SECRET is preferred
+// when configured; JWT_SECRET remains the zero-touch development/self-hosted
+// fallback used by the existing automatic Runtime PKI.
+//
+// Changing the effective value invalidates persistent Runtime material derived
+// from it, including automatic PKI authorities and Browser principal scopes.
+func (c *Config) EffectiveRuntimeMasterSecret() string {
+	if c == nil {
+		return ""
+	}
+	if secret := strings.TrimSpace(c.RuntimePKIMasterSecret); secret != "" {
+		return secret
+	}
+	return strings.TrimSpace(c.JWTSecret)
+}
+
 // IsProduction 是否生产环境。
 func (c *Config) IsProduction() bool {
 	return c.Env == "production"
