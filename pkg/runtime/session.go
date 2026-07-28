@@ -282,6 +282,7 @@ type RuntimeSessionPrincipal struct {
 	WorkerID                        string
 	SessionEpoch                    int64
 	RuntimeContractDigest           string
+	Features                        []string
 	CoreInstanceID                  uuid.UUID
 	AttachmentID                    uuid.UUID
 	DeviceCertificateSerial         string
@@ -565,6 +566,17 @@ func (s *RuntimeSessionService) CreateOrAttachSession(
 		if lockErr := tx.LockSessionIdentity(ctx, normalized.RuntimeSessionID); lockErr != nil {
 			return lockErr
 		}
+		if lockErr := tx.LockRuntimeAgentProfile(ctx, normalized.AgentID); lockErr != nil {
+			return lockErr
+		}
+		if profileErr := ensureRuntimeAgentExecutionProfile(
+			ctx,
+			tx,
+			principal,
+			normalized,
+		); profileErr != nil {
+			return profileErr
+		}
 		if principal.Device.AuthenticationMode == RuntimeAuthenticationTokenOnly {
 			enroller, ok := tx.(runtimeTokenOnlyNodeEnroller)
 			if !ok {
@@ -583,6 +595,19 @@ func (s *RuntimeSessionService) CreateOrAttachSession(
 		)
 		if lockErr != nil {
 			return lockErr
+		}
+		activeAgentSessions, profileErr := tx.ListActiveRuntimeSessionsByAgent(
+			ctx,
+			normalized.AgentID,
+		)
+		if profileErr != nil {
+			return profileErr
+		}
+		if profileErr = validateAgentRuntimeProfile(
+			activeAgentSessions,
+			normalized.Features,
+		); profileErr != nil {
+			return profileErr
 		}
 
 		existing, getErr := tx.GetRuntimeSessionForUpdate(ctx, normalized.RuntimeSessionID)
@@ -1595,6 +1620,9 @@ type runtimeSessionGenerationParams struct {
 type runtimeSessionTransaction interface {
 	RequireRuntimeClusterOperation(context.Context, RuntimeClusterOperation) error
 	LockSessionIdentity(context.Context, uuid.UUID) error
+	LockRuntimeAgentProfile(context.Context, uuid.UUID) error
+	GetRuntimeAgentExecutionProfileForUpdate(context.Context, uuid.UUID) (db.RuntimeAgentExecutionProfile, error)
+	ClassifyRuntimeAgentBrowserExecutionProfile(context.Context, db.ClassifyRuntimeAgentBrowserExecutionProfileParams) (db.RuntimeAgentExecutionProfile, error)
 	GetRuntimeSessionForUpdate(context.Context, uuid.UUID) (db.RuntimeSession, error)
 	LockRuntimeLifecycleSessions(context.Context, uuid.UUID, uuid.UUID) ([]uuid.UUID, error)
 	LockRuntimeNodesForPrincipalRevocation(context.Context, []uuid.UUID) ([]uuid.UUID, error)
@@ -1604,6 +1632,7 @@ type runtimeSessionTransaction interface {
 	HasNewerRuntimeSessionGeneration(context.Context, runtimeSessionGenerationParams) (bool, error)
 	HeartbeatRuntimeNode(context.Context, db.HeartbeatRuntimeNodeParams) (db.RuntimeNode, error)
 	ListActiveRuntimeSessionsByNode(context.Context, uuid.UUID) ([]db.RuntimeSession, error)
+	ListActiveRuntimeSessionsByAgent(context.Context, uuid.UUID) ([]db.RuntimeSession, error)
 	RetireOfflineRuntimeSessionsForGenerationSwitch(context.Context, uuid.UUID, string) (int64, error)
 	CreateRuntimeSession(context.Context, db.CreateRuntimeSessionParams) (db.RuntimeSession, error)
 	CreateDrainingRuntimeSessionSuccessor(context.Context, db.CreateDrainingRuntimeSessionSuccessorParams) (db.RuntimeSession, error)
@@ -1654,6 +1683,7 @@ SELECT s.runtime_session_id,
        s.worker_id,
        s.session_epoch,
        s.runtime_contract_digest,
+       s.features,
        s.attached_core_instance_id,
 	   s.device_certificate_serial,
 	   n.device_public_key_thumbprint,
@@ -1713,6 +1743,7 @@ WHERE s.runtime_session_id = $1
 		&principal.WorkerID,
 		&principal.SessionEpoch,
 		&principal.RuntimeContractDigest,
+		&principal.Features,
 		&principal.CoreInstanceID,
 		&principal.DeviceCertificateSerial,
 		&principal.DevicePublicKeyThumbprintSHA256,
@@ -1747,6 +1778,7 @@ func (r *postgresRuntimeSessionRepository) ResolveRuntimeWorkerSessionPrincipal(
 		WorkerID:                        row.WorkerID,
 		SessionEpoch:                    row.SessionEpoch,
 		RuntimeContractDigest:           row.RuntimeContractDigest,
+		Features:                        append([]string(nil), row.Features...),
 		CoreInstanceID:                  row.AttachedCoreInstanceID,
 		DeviceCertificateSerial:         row.DeviceCertificateSerial,
 		DevicePublicKeyThumbprintSHA256: row.DevicePublicKeyThumbprint,
@@ -1804,6 +1836,32 @@ func (t *postgresRuntimeSessionTransaction) LockSessionIdentity(ctx context.Cont
 		sessionID,
 	)
 	return err
+}
+
+func (t *postgresRuntimeSessionTransaction) LockRuntimeAgentProfile(
+	ctx context.Context,
+	agentID uuid.UUID,
+) error {
+	_, err := t.tx.Exec(
+		ctx,
+		"SELECT pg_advisory_xact_lock(hashtextextended('runtime-agent-profile:' || $1::text, 0))",
+		agentID,
+	)
+	return err
+}
+
+func (t *postgresRuntimeSessionTransaction) GetRuntimeAgentExecutionProfileForUpdate(
+	ctx context.Context,
+	agentID uuid.UUID,
+) (db.RuntimeAgentExecutionProfile, error) {
+	return t.queries.GetRuntimeAgentExecutionProfileForUpdate(ctx, agentID)
+}
+
+func (t *postgresRuntimeSessionTransaction) ClassifyRuntimeAgentBrowserExecutionProfile(
+	ctx context.Context,
+	arg db.ClassifyRuntimeAgentBrowserExecutionProfileParams,
+) (db.RuntimeAgentExecutionProfile, error) {
+	return t.queries.ClassifyRuntimeAgentBrowserExecutionProfile(ctx, arg)
 }
 
 func (t *postgresRuntimeSessionTransaction) EnsureTokenOnlyRuntimeNodeEnrollment(
@@ -2006,6 +2064,13 @@ func (t *postgresRuntimeSessionTransaction) HeartbeatRuntimeNode(ctx context.Con
 
 func (t *postgresRuntimeSessionTransaction) ListActiveRuntimeSessionsByNode(ctx context.Context, id uuid.UUID) ([]db.RuntimeSession, error) {
 	return t.queries.ListActiveRuntimeSessionsByNode(ctx, id)
+}
+
+func (t *postgresRuntimeSessionTransaction) ListActiveRuntimeSessionsByAgent(
+	ctx context.Context,
+	id uuid.UUID,
+) ([]db.RuntimeSession, error) {
+	return t.queries.ListActiveRuntimeSessionsByAgent(ctx, id)
 }
 
 func (t *postgresRuntimeSessionTransaction) CreateRuntimeSession(ctx context.Context, params db.CreateRuntimeSessionParams) (db.RuntimeSession, error) {

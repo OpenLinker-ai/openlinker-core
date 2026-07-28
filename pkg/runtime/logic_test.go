@@ -805,16 +805,40 @@ func TestAttachRuntimeAuthorityUsesCorePrincipal(t *testing.T) {
 		RuntimePKIMasterSecret: "stable-runtime-master-secret",
 	})
 
-	require.NoError(t, svc.attachRuntimeAuthority(metadata, userID, agentID))
+	require.NoError(t, svc.attachRuntimeAuthority(
+		metadata,
+		userID,
+		agentID,
+		runtimeExecutionProfileBrowser,
+	))
 	scopeID, err := runtimePrincipalScopeID(svc.runtimePrincipalScopeKey, userID, agentID)
 	require.NoError(t, err)
 
 	require.Equal(t, map[string]interface{}{
 		"principal_scope_id": scopeID,
 		"source":             "core",
+		"execution_profile":  "browser",
 	}, metadata["_openlinker_runtime_authority"])
 	require.NotContains(t, scopeID, userID.String())
 	require.NotContains(t, scopeID, agentID.String())
+}
+
+func TestAttachRuntimeAuthorityOmitsExecutionProfileOutsideRuntimeQueue(t *testing.T) {
+	userID := uuid.New()
+	agentID := uuid.New()
+	metadata := map[string]interface{}{}
+	svc := NewService(nil, &config.Config{
+		RuntimePKIMasterSecret: "stable-runtime-master-secret",
+	})
+
+	require.NoError(t, svc.attachRuntimeAuthority(metadata, userID, agentID, ""))
+
+	authority, ok := metadata["_openlinker_runtime_authority"].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, "core", authority["source"])
+	require.Regexp(t, `^ps1_[A-Za-z0-9_-]{43}$`, authority["principal_scope_id"])
+	require.NotContains(t, authority, "execution_profile",
+		"direct HTTP/MCP metadata must preserve the pre-profile wire contract")
 }
 
 func TestRuntimePrincipalScopeIsStableAndAgentScoped(t *testing.T) {
@@ -887,7 +911,12 @@ func TestAttachRuntimeAuthorityFailsClosedWithoutRuntimeMaster(t *testing.T) {
 	metadata := map[string]interface{}{}
 	svc := NewService(nil, &config.Config{})
 
-	err := svc.attachRuntimeAuthority(metadata, uuid.New(), uuid.New())
+	err := svc.attachRuntimeAuthority(
+		metadata,
+		uuid.New(),
+		uuid.New(),
+		runtimeExecutionProfileStandard,
+	)
 
 	require.ErrorContains(t, err, "scope key is unavailable")
 	require.NotContains(t, metadata, "_openlinker_runtime_authority")

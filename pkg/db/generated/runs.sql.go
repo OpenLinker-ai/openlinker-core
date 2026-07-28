@@ -1,5 +1,5 @@
-// Code generated manually as a placeholder for sqlc output.
-// TODO: 由 sqlc 生成（基于 pkg/db/queries/runs.sql）。
+// Hand-maintained SQL query implementation.
+// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
 //
 // 模块 4 / 6 共享此文件初始内容。
 //   - 模块 4 (runtime) 写入到本文件

@@ -7,14 +7,16 @@ import (
 	"testing"
 )
 
-func TestCoreMigrationDirectoryContainsOnlyCurrentInitializer(t *testing.T) {
+func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigration(t *testing.T) {
 	paths, err := filepath.Glob("../../migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]bool{
-		"086_current_schema_init.up.sql":     true,
-		"086_current_schema_init_verify.sql": true,
+		"086_current_schema_init.up.sql":             true,
+		"086_current_schema_init_verify.sql":         true,
+		"087_browser_agent_execution_profile.up.sql": true,
+		"088_browser_human_control.up.sql":           true,
 	}
 	if len(paths) != len(want) {
 		t.Fatalf("migration SQL files = %v, want only current initializer and verifier", paths)
@@ -26,7 +28,70 @@ func TestCoreMigrationDirectoryContainsOnlyCurrentInitializer(t *testing.T) {
 	}
 }
 
-func TestCoreInitializerContainsCurrentContracts(t *testing.T) {
+func TestBrowserHumanControlForwardMigrationIsSingleAuditableTransition(t *testing.T) {
+	up := readInitializer(
+		t,
+		"../../migrations/088_browser_human_control.up.sql",
+	)
+	for _, fragment := range []string{
+		"CREATE TABLE public.browser_run_controls",
+		"browser_run_controls_human_consistent",
+		"browser_run_controls_expiry_idx",
+		"CREATE TABLE public.browser_human_control_audits",
+		"browser_human_control_audits_counts_nonnegative",
+		"browser_human_control_audits_run_created_idx",
+	} {
+		if !strings.Contains(up, fragment) {
+			t.Fatalf("Browser human-control migration missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"IF NOT EXISTS",
+		"DO $$",
+		"EXECUTE ",
+	} {
+		if strings.Contains(up, forbidden) {
+			t.Fatalf(
+				"Browser human-control migration hides or duplicates its transition with %q",
+				forbidden,
+			)
+		}
+	}
+}
+
+func TestBrowserAgentExecutionProfileForwardMigrationIsSingleAuditableTransition(t *testing.T) {
+	up := readInitializer(
+		t,
+		"../../migrations/087_browser_agent_execution_profile.up.sql",
+	)
+	for _, fragment := range []string{
+		"ADD COLUMN browser_execution_profile",
+		"agents_browser_execution_profile_private",
+		"CREATE TABLE public.runtime_agent_execution_profiles",
+		"runtime_agent_execution_profiles_reset_consistent",
+		"runtime_agent_execution_profiles_credential_id_fkey",
+		"runtime_agent_execution_profiles_reset_by_user_id_fkey",
+		"CREATE INDEX runtime_agent_execution_profiles_browser_idx",
+	} {
+		if !strings.Contains(up, fragment) {
+			t.Fatalf("Browser Agent profile migration missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"IF NOT EXISTS",
+		"DO $$",
+		"EXECUTE ",
+	} {
+		if strings.Contains(up, forbidden) {
+			t.Fatalf(
+				"Browser Agent profile migration hides or duplicates its transition with %q",
+				forbidden,
+			)
+		}
+	}
+}
+
+func TestCoreFoundationalInitializerContainsPredecessorContracts(t *testing.T) {
 	up := readInitializer(t, "../../migrations/086_current_schema_init.up.sql")
 	for _, fragment := range []string{
 		"CREATE TABLE public.runtime_node_bindings",
@@ -68,14 +133,27 @@ func TestCoreInitializerContainsCurrentContracts(t *testing.T) {
 			t.Fatalf("Core initializer contains transition-only statement %q", forbidden)
 		}
 	}
+	for _, futureCatalog := range []string{
+		"runtime_agent_execution_profiles",
+		"browser_execution_profile",
+		"browser_run_controls",
+		"browser_human_control_audits",
+	} {
+		if strings.Contains(up, futureCatalog) {
+			t.Fatalf(
+				"Core version 086 predecessor contains later Browser catalog %q",
+				futureCatalog,
+			)
+		}
+	}
 }
 
 func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	verify := readInitializer(t, "../../migrations/086_current_schema_init_verify.sql")
 	for _, fragment := range []string{
-		"public_tables <> 69",
-		"public_constraints <> 587",
-		"public_indexes <> 259",
+		"public_tables <> 72",
+		"public_constraints <> 615",
+		"public_indexes <> 265",
 		"public_triggers <> 70",
 		"public_functions <> 65",
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",
@@ -85,6 +163,10 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 		"Core Runtime wire contract initialization is inconsistent",
 		"idx_runtime_node_certificates_retention",
 		"idx_runtime_sessions_credential_lifecycle",
+		"runtime_agent_execution_profiles_browser_idx",
+		"browser_run_controls_expiry_idx",
+		"browser_human_control_audits_run_created_idx",
+		"agents_browser_execution_profile_private",
 	} {
 		if !strings.Contains(verify, fragment) {
 			t.Fatalf("Core initializer verifier missing %q", fragment)

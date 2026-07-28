@@ -132,8 +132,8 @@ func TestRuntimeSessionServiceCreateLocksPrincipalAndPersistsAuthenticatedIdenti
 		t.Fatalf("CreateOrAttachSession() error = %v", err)
 	}
 	wantOrder := []string{
-		"lock_session_identity", "lock_lifecycle_sessions", "lock_nodes", "lock_tokens",
-		"lock_attachments", "get_session_for_update", "cluster_gate", "check_generation", "get_node", "list_active", "heartbeat_node", "create_session", "create_attachment",
+		"lock_session_identity", "lock_agent_profile", "get_execution_profile", "lock_lifecycle_sessions", "lock_nodes", "lock_tokens",
+		"lock_attachments", "list_agent_active", "get_session_for_update", "cluster_gate", "check_generation", "get_node", "list_active", "heartbeat_node", "create_session", "create_attachment",
 	}
 	if !reflect.DeepEqual(tx.operations, wantOrder) {
 		t.Fatalf("operation order = %#v, want %#v", tx.operations, wantOrder)
@@ -184,8 +184,9 @@ func TestRuntimeSessionServiceEnrollsTokenOnlyNodeOnlyInsideCreateTransaction(t 
 		t.Fatal(err)
 	}
 	wantPrefix := []string{
-		"lock_session_identity", "ensure_token_only_enrollment",
-		"lock_lifecycle_sessions", "lock_nodes", "lock_tokens", "lock_attachments",
+		"lock_session_identity", "lock_agent_profile",
+		"get_execution_profile", "ensure_token_only_enrollment", "lock_lifecycle_sessions", "lock_nodes",
+		"lock_tokens", "lock_attachments", "list_agent_active",
 	}
 	if len(tx.operations) < len(wantPrefix) || !reflect.DeepEqual(tx.operations[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("token-only enrollment order = %#v, want prefix %#v", tx.operations, wantPrefix)
@@ -216,8 +217,8 @@ func TestRuntimeSessionServiceCreatesDrainingSuccessorWithServerEvidence(t *test
 		t.Fatalf("CreateOrAttachSession() error = %v", err)
 	}
 	wantOrder := []string{
-		"lock_session_identity", "lock_lifecycle_sessions", "lock_nodes", "lock_tokens",
-		"lock_attachments", "get_session_for_update", "cluster_gate", "check_generation",
+		"lock_session_identity", "lock_agent_profile", "get_execution_profile", "lock_lifecycle_sessions", "lock_nodes", "lock_tokens",
+		"lock_attachments", "list_agent_active", "get_session_for_update", "cluster_gate", "check_generation",
 		"get_node", "list_active", "heartbeat_node", "create_draining_successor", "create_attachment",
 	}
 	if !reflect.DeepEqual(tx.operations, wantOrder) {
@@ -246,6 +247,55 @@ func TestRuntimeSessionServiceCreatesDrainingSuccessorWithServerEvidence(t *test
 		!tx.drainDeadline.Equal(tx.drainRequestedAt.Add(runtimeNodeDrainDeadline)) {
 		t.Fatalf("draining successor state=%#v evidence=%s/%s/%s resume=%d",
 			state, tx.drainRequestedAt, tx.drainDeadline, tx.drainReason, tx.drainResumeCapacity)
+	}
+}
+
+func TestRuntimeSessionServiceRejectsMixedAgentExecutionProfiles(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name            string
+		requestBrowser  bool
+		existingBrowser bool
+	}{
+		{name: "browser beside standard", requestBrowser: true},
+		{name: "standard beside browser", existingBrowser: true},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newSessionFixture()
+			if test.requestBrowser {
+				fixture.request.Features = append(
+					fixture.request.Features,
+					RuntimeBrowserExecutionProfileFeature,
+				)
+			}
+			tx := newSessionTransactionFake(fixture)
+			tx.getErr = pgx.ErrNoRows
+			existing := tx.session
+			existing.Features = RuntimeRequiredFeatures()
+			if test.existingBrowser {
+				existing.Features = append(
+					existing.Features,
+					RuntimeBrowserExecutionProfileFeature,
+				)
+			}
+			tx.active = []db.RuntimeSession{existing}
+			service := newRuntimeSessionService(
+				&sessionRepositoryFake{tx: tx},
+				fixture.coreID,
+			)
+			if _, err := service.CreateOrAttachSession(
+				context.Background(),
+				fixture.principal,
+				fixture.request,
+			); !IsRuntimeSessionError(err, RuntimeSessionErrorSessionConflict) {
+				t.Fatalf("mixed profile error = %v", err)
+			}
+			if slices.Contains(tx.operations, "create_session") {
+				t.Fatalf("mixed profile reached Session insert: %#v", tx.operations)
+			}
+		})
 	}
 }
 
@@ -995,6 +1045,11 @@ type sessionTransactionFake struct {
 	getErr                   error
 	node                     db.RuntimeNode
 	active                   []db.RuntimeSession
+	executionProfile         db.RuntimeAgentExecutionProfile
+	executionProfileErr      error
+	classifyProfile          db.RuntimeAgentExecutionProfile
+	classifyProfileErr       error
+	classifyProfileParams    db.ClassifyRuntimeAgentBrowserExecutionProfileParams
 	createErr                error
 	createCalls              int
 	createParams             db.CreateRuntimeSessionParams
@@ -1086,6 +1141,43 @@ func (f *sessionTransactionFake) LockSessionIdentity(context.Context, uuid.UUID)
 	return nil
 }
 
+func (f *sessionTransactionFake) LockRuntimeAgentProfile(context.Context, uuid.UUID) error {
+	f.op("lock_agent_profile")
+	return nil
+}
+
+func (f *sessionTransactionFake) GetRuntimeAgentExecutionProfileForUpdate(
+	context.Context,
+	uuid.UUID,
+) (db.RuntimeAgentExecutionProfile, error) {
+	f.op("get_execution_profile")
+	if f.executionProfileErr != nil {
+		return db.RuntimeAgentExecutionProfile{}, f.executionProfileErr
+	}
+	if f.executionProfile.AgentID == uuid.Nil {
+		return db.RuntimeAgentExecutionProfile{}, pgx.ErrNoRows
+	}
+	return f.executionProfile, nil
+}
+
+func (f *sessionTransactionFake) ClassifyRuntimeAgentBrowserExecutionProfile(
+	_ context.Context,
+	params db.ClassifyRuntimeAgentBrowserExecutionProfileParams,
+) (db.RuntimeAgentExecutionProfile, error) {
+	f.op("classify_browser_profile")
+	f.classifyProfileParams = params
+	if f.classifyProfileErr != nil {
+		return db.RuntimeAgentExecutionProfile{}, f.classifyProfileErr
+	}
+	if f.classifyProfile.AgentID == uuid.Nil {
+		return db.RuntimeAgentExecutionProfile{
+			AgentID:          params.AgentID,
+			ExecutionProfile: runtimeExecutionProfileBrowser,
+		}, nil
+	}
+	return f.classifyProfile, nil
+}
+
 func (f *sessionTransactionFake) EnsureTokenOnlyRuntimeNodeEnrollment(
 	context.Context,
 	AuthenticatedRuntimePrincipal,
@@ -1157,6 +1249,11 @@ func (f *sessionTransactionFake) HeartbeatRuntimeNode(_ context.Context, params 
 
 func (f *sessionTransactionFake) ListActiveRuntimeSessionsByNode(context.Context, uuid.UUID) ([]db.RuntimeSession, error) {
 	f.op("list_active")
+	return f.active, nil
+}
+
+func (f *sessionTransactionFake) ListActiveRuntimeSessionsByAgent(context.Context, uuid.UUID) ([]db.RuntimeSession, error) {
+	f.op("list_agent_active")
 	return f.active, nil
 }
 

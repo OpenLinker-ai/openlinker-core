@@ -1,5 +1,5 @@
-// Code generated manually as a placeholder for sqlc output.
-// TODO: 由 sqlc 生成（基于 pkg/db/queries/agents.sql）。
+// Hand-maintained SQL query implementation.
+// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
 //
 // 模块 2 / 3 共享此文件。模块 3 的市场查询在 agents_market.sql.go 独立维护。
 
@@ -114,6 +114,11 @@ func (q *Queries) CreateAgent(ctx context.Context, arg CreateAgentParams) (Agent
 }
 
 const updateAgentDraft = `-- name: UpdateAgentDraft :one
+WITH profile_lock AS MATERIALIZED (
+    SELECT pg_advisory_xact_lock(
+        hashtextextended('runtime-agent-profile:' || ($1::uuid)::text, 0)
+    )
+)
 UPDATE agents
 SET name = $2,
     description = $3,
@@ -125,7 +130,17 @@ SET name = $2,
     connection_mode = $10,
     mcp_tool_name = $11,
     updated_at = NOW()
+FROM profile_lock
 WHERE id = $1 AND creator_id = $8 AND lifecycle_status = 'active'
+  AND (
+      $9 = 'private'
+      OR NOT EXISTS (
+          SELECT 1
+          FROM runtime_agent_execution_profiles profile
+          WHERE profile.agent_id = agents.id
+            AND profile.execution_profile = 'browser'
+      )
+  )
 RETURNING id, creator_id, slug, name, description, endpoint_url,
           endpoint_auth_header, price_per_call_cents, tags,
           lifecycle_status, visibility, certification_status,
@@ -169,11 +184,26 @@ func (q *Queries) UpdateAgentDraft(ctx context.Context, arg UpdateAgentDraftPara
 }
 
 const setAgentVisibilityForOwner = `-- name: SetAgentVisibilityForOwner :exec
+WITH profile_lock AS MATERIALIZED (
+    SELECT pg_advisory_xact_lock(
+        hashtextextended('runtime-agent-profile:' || ($1::uuid)::text, 0)
+    )
+)
 UPDATE agents
 SET visibility = $3,
     updated_at = NOW()
+FROM profile_lock
 WHERE id = $1 AND creator_id = $2
-  AND lifecycle_status = 'active'`
+  AND lifecycle_status = 'active'
+  AND (
+      $3 = 'private'
+      OR NOT EXISTS (
+          SELECT 1
+          FROM runtime_agent_execution_profiles profile
+          WHERE profile.agent_id = agents.id
+            AND profile.execution_profile = 'browser'
+      )
+  )`
 
 type SetAgentVisibilityForOwnerParams struct {
 	ID         uuid.UUID `db:"id" json:"id"`
@@ -979,6 +1009,11 @@ func (q *Queries) CountAdminAgents(ctx context.Context, arg CountAdminAgentsPara
 }
 
 const updateAdminAgentModeration = `-- name: UpdateAdminAgentModeration :one
+WITH profile_lock AS MATERIALIZED (
+    SELECT pg_advisory_xact_lock(
+        hashtextextended('runtime-agent-profile:' || ($1::uuid)::text, 0)
+    )
+)
 UPDATE agents
 SET lifecycle_status = $2,
     visibility = $3,
@@ -994,7 +1029,17 @@ SET lifecycle_status = $2,
         ELSE certified_at
     END,
     updated_at = NOW()
+FROM profile_lock
 WHERE id = $1
+  AND (
+      $3 = 'private'
+      OR NOT EXISTS (
+          SELECT 1
+          FROM runtime_agent_execution_profiles profile
+          WHERE profile.agent_id = agents.id
+            AND profile.execution_profile = 'browser'
+      )
+  )
 RETURNING id, creator_id, slug, name, description, endpoint_url,
           endpoint_auth_header, price_per_call_cents, tags,
           lifecycle_status, visibility, certification_status,

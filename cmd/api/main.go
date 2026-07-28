@@ -762,6 +762,8 @@ func runMigrateWith(args []string, getenv func(string) string, inspect migration
 		state := "fresh"
 		if current {
 			state = "current"
+		} else if snapshot.Core.Exists {
+			state = "upgradeable"
 		}
 		fmt.Fprintf(stdout, "migrate check: state=%s\n", state)
 		return 0

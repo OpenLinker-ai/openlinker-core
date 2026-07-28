@@ -30,6 +30,7 @@ func TestRuntimeLeaseClaimUsesGlobalLockAndCapacityOrder(t *testing.T) {
 	require.Equal(t, map[string]any{"prompt": "hello"}, assigned.Input)
 	require.Equal(t, map[string]any{"trace": "a"}, assigned.Metadata)
 	require.Equal(t, fixture.principal.RuntimeSessionID, fixture.tx.sessionSlotParams.RuntimeSessionID)
+	require.False(t, fixture.tx.candidateParams.BrowserExecutionProfile)
 	require.Equal(t, fixture.principal.NodeID, fixture.tx.nodeSlotID)
 	require.Equal(t, fixture.principal.CoreInstanceID, fixture.tx.mirrorOfferParams.CoreInstanceID)
 	require.Equal(t, int32(1), fixture.tx.sessionInflight)
@@ -43,6 +44,112 @@ func TestRuntimeLeaseClaimUsesGlobalLockAndCapacityOrder(t *testing.T) {
 	require.Equal(t, sha256.Sum256(canonical), fixture.issuer.capability.InputSHA256)
 	require.Equal(t, fixture.tx.createdAttempt.OfferedAt, fixture.issuer.capability.IssuedAt)
 	require.Equal(t, fixture.tx.createdAttempt.AttemptDeadlineAt, fixture.issuer.capability.ExpiresAt)
+}
+
+func TestRuntimeLeaseClaimPreservesCoreConversationAuthority(t *testing.T) {
+	fixture := newRuntimeLeaseFixture(t)
+	fixture.tx.candidate.RequestMetadata = []byte(`{
+		"trace":"a",
+		"conversation":{
+			"id":"conversation-one",
+			"session_key":"conversation-one",
+			"current_run_id":"run-current",
+			"source":"core",
+			"history_before_current":[
+				{"run_id":"run-previous","role":"user","content":"first question"},
+				{"run_id":"run-previous","role":"agent","content":"first answer"}
+			]
+		}
+	}`)
+
+	assigned, err := fixture.service.ClaimOffer(context.Background(), fixture.principal)
+	require.NoError(t, err)
+	require.NotNil(t, assigned)
+	require.Equal(t, "a", assigned.Metadata["trace"])
+	conversation, ok := assigned.Metadata["conversation"].(map[string]any)
+	require.True(t, ok, "conversation metadata = %#v", assigned.Metadata["conversation"])
+	require.Equal(t, "core", conversation["source"])
+	history, ok := conversation["history_before_current"].([]any)
+	require.True(t, ok, "history = %#v", conversation["history_before_current"])
+	require.Len(t, history, 2)
+	require.Equal(t, "first question", history[0].(map[string]any)["content"])
+	require.Equal(t, "first answer", history[1].(map[string]any)["content"])
+}
+
+func TestBrowserRuntimeClaimRequiresOwnerPrivateCandidate(t *testing.T) {
+	fixture := newRuntimeLeaseFixture(t)
+	fixture.principal.Features = append(
+		RuntimeRequiredFeatures(),
+		RuntimeBrowserExecutionProfileFeature,
+	)
+	fixture.tx.candidate.RequestMetadata = []byte(
+		`{"_openlinker_runtime_authority":{` +
+			`"principal_scope_id":"ps1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",` +
+			`"source":"core","execution_profile":"browser"}}`,
+	)
+	assigned, err := fixture.service.ClaimOffer(context.Background(), fixture.principal)
+	require.NoError(t, err)
+	require.NotNil(t, assigned)
+	require.True(t, fixture.tx.candidateParams.BrowserExecutionProfile)
+	require.Equal(t, fixture.principal.AgentID, fixture.tx.candidateParams.AgentID)
+	require.Equal(t, map[string]any{
+		"_openlinker_runtime_authority": map[string]any{
+			"principal_scope_id": "ps1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			"source":             "core",
+		},
+	}, assigned.Metadata)
+}
+
+func TestRuntimeExecutionProfileMarkerFailsClosedAndNeverReachesWorker(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		browser   bool
+		metadata  map[string]any
+		wantError bool
+	}{
+		{
+			name:      "legacy standard",
+			metadata:  map[string]any{"trace": "a"},
+			wantError: false,
+		},
+		{
+			name:    "browser exact match",
+			browser: true,
+			metadata: map[string]any{
+				"_openlinker_runtime_authority": map[string]any{
+					"principal_scope_id": "ps1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+					"source":             "core",
+					"execution_profile":  "browser",
+				},
+			},
+		},
+		{
+			name:      "browser missing marker",
+			browser:   true,
+			metadata:  map[string]any{},
+			wantError: true,
+		},
+		{
+			name: "standard rejects browser marker",
+			metadata: map[string]any{
+				"_openlinker_runtime_authority": map[string]any{
+					"execution_profile": "browser",
+				},
+			},
+			wantError: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := consumeRuntimeExecutionProfile(test.metadata, test.browser)
+			require.Equal(t, test.wantError, err != nil, "error = %v", err)
+			if err != nil {
+				return
+			}
+			if authority, ok := test.metadata["_openlinker_runtime_authority"].(map[string]any); ok {
+				require.NotContains(t, authority, "execution_profile")
+			}
+		})
+	}
 }
 
 func TestRuntimeLeaseRepeatedClaimReturnsIdenticalOfferWithoutCapacityMutation(t *testing.T) {
@@ -475,10 +582,11 @@ type runtimeLeaseTransactionFake struct {
 	clusterGateErr       error
 	clusterGateOperation RuntimeClusterOperation
 
-	existing     *db.GetExistingUnacceptedRunOfferForSessionRow
-	existingErr  error
-	candidate    db.LockNextClaimableRuntimeRunForAgentRow
-	candidateErr error
+	existing        *db.GetExistingUnacceptedRunOfferForSessionRow
+	existingErr     error
+	candidate       db.LockNextClaimableRuntimeRunForAgentRow
+	candidateErr    error
+	candidateParams db.LockNextClaimableRuntimeRunForAgentParams
 
 	sessionSlotParams db.ClaimRuntimeSessionSlotParams
 	nodeSlotID        uuid.UUID
@@ -589,8 +697,12 @@ func (f *runtimeLeaseTransactionFake) GetExistingUnacceptedRunOfferForSession(_ 
 	return db.GetExistingUnacceptedRunOfferForSessionRow{}, f.existingErr
 }
 
-func (f *runtimeLeaseTransactionFake) LockNextClaimableRuntimeRunForAgent(_ context.Context, _ uuid.UUID) (db.LockNextClaimableRuntimeRunForAgentRow, error) {
+func (f *runtimeLeaseTransactionFake) LockNextClaimableRuntimeRunForAgent(
+	_ context.Context,
+	params db.LockNextClaimableRuntimeRunForAgentParams,
+) (db.LockNextClaimableRuntimeRunForAgentRow, error) {
 	f.call("lock_candidate")
+	f.candidateParams = params
 	return f.candidate, f.candidateErr
 }
 

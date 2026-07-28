@@ -1,5 +1,5 @@
-// Code generated manually as a placeholder for sqlc output.
-// TODO: 由 sqlc 生成（基于 pkg/db/queries/runs.sql 中 "## 模块 6" 区块）。
+// Hand-maintained SQL query implementation.
+// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
 //
 // 模块 6 (dashboard，读) 由 subagent-6a 维护，独立文件避免与 subagent-4a 编辑的
 // runs.sql.go (模块 4 写) 冲突。

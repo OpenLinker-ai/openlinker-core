@@ -1,5 +1,5 @@
-// Code generated manually as a placeholder for sqlc output.
-// TODO: 由 sqlc 生成（基于 pkg/db/queries/delivery.sql）。
+// Hand-maintained SQL query implementation.
+// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
 //
 // Phase 2 §7：用户侧 Output Delivery。
 // 风格参考 webhooks.sql.go：const + 方法，逐字段 Scan。

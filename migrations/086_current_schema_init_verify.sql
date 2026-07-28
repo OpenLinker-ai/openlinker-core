@@ -1,5 +1,5 @@
 -- 086_current_schema_init_verify.sql
--- Run after the Core initializer and before Cloud initialization.
+-- Run after the complete Core migration chain and before Cloud initialization.
 
 DO $$
 DECLARE
@@ -13,8 +13,8 @@ BEGIN
     FROM pg_catalog.pg_tables
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_tables <> 69 THEN
-        RAISE EXCEPTION 'Core initializer table count is %, expected 69', public_tables;
+    IF public_tables <> 72 THEN
+        RAISE EXCEPTION 'Core initializer table count is %, expected 72', public_tables;
     END IF;
 
     SELECT count(*) INTO public_constraints
@@ -23,16 +23,16 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 587 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 587', public_constraints;
+    IF public_constraints <> 615 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 615', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 259 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 259', public_indexes;
+    IF public_indexes <> 265 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 265', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers
@@ -112,7 +112,10 @@ BEGIN
 
     IF to_regclass('public.idx_run_events_metric_cursor') IS NULL
        OR to_regclass('public.idx_runtime_node_certificates_retention') IS NULL
-       OR to_regclass('public.idx_runtime_sessions_credential_lifecycle') IS NULL THEN
+       OR to_regclass('public.idx_runtime_sessions_credential_lifecycle') IS NULL
+       OR to_regclass('public.runtime_agent_execution_profiles_browser_idx') IS NULL
+       OR to_regclass('public.browser_run_controls_expiry_idx') IS NULL
+       OR to_regclass('public.browser_human_control_audits_run_created_idx') IS NULL THEN
         RAISE EXCEPTION 'Core initializer is missing a required current index';
     END IF;
 
@@ -125,6 +128,26 @@ BEGIN
           AND column_default = '''mtls''::text'
     ) THEN
         RAISE EXCEPTION 'Core initializer is missing Runtime token-only binding state';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'agents'
+          AND column_name = 'browser_execution_profile'
+          AND is_nullable = 'NO'
+          AND column_default = 'false'
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint constraint_row
+        JOIN pg_catalog.pg_class relation ON relation.oid = constraint_row.conrelid
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relname = 'agents'
+          AND constraint_row.conname = 'agents_browser_execution_profile_private'
+          AND constraint_row.contype = 'c'
+    ) THEN
+        RAISE EXCEPTION 'Core initializer is missing the durable Browser Agent visibility invariant';
     END IF;
 END
 $$;

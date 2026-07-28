@@ -412,3 +412,40 @@ func TestRuntimeLeaseGeneratedMethodsScanAndPreserveArgumentOrder(t *testing.T) 
 		t.Fatalf("CreateRuntimeResumeGrant args = %#v", dbtx.queryRowArgs)
 	}
 }
+
+func TestLockNextClaimableRuntimeRunForAgentCarriesBrowserOwnershipFence(t *testing.T) {
+	now := time.Date(2026, 7, 28, 1, 2, 3, 0, time.UTC)
+	runID, userID, agentID := uuid.New(), uuid.New(), uuid.New()
+	mode := "runtime"
+	dispatchDeadline, runDeadline := now.Add(time.Minute), now.Add(5*time.Minute)
+	dbtx := &fakeDBTX{row: fakeRow{values: []any{
+		runID, userID, agentID, []byte(`{"prompt":"hello"}`), []byte(`{}`),
+		&mode, "pending", int32(0), int32(20), int32(0), int32(3),
+		(*time.Time)(nil), &dispatchDeadline, &runDeadline, int64(0), now, now,
+	}}}
+	row, err := New(dbtx).LockNextClaimableRuntimeRunForAgent(
+		context.Background(),
+		LockNextClaimableRuntimeRunForAgentParams{
+			AgentID:                 agentID,
+			BrowserExecutionProfile: true,
+		},
+	)
+	if err != nil || row.ID != runID {
+		t.Fatalf("LockNextClaimableRuntimeRunForAgent = %#v, %v", row, err)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, true}) {
+		t.Fatalf("claim args = %#v", dbtx.queryRowArgs)
+	}
+	for _, guard := range []string{
+		"request_metadata #>> '{_openlinker_runtime_authority,execution_profile}'",
+		"THEN 'browser'",
+		"ELSE 'standard'",
+		"NOT $2::boolean",
+		"a.visibility = 'private'",
+		"a.creator_id = r.user_id",
+	} {
+		if !strings.Contains(dbtx.queryRowSQL, guard) {
+			t.Fatalf("Browser claim is missing %q:\\n%s", guard, dbtx.queryRowSQL)
+		}
+	}
+}

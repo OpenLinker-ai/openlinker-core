@@ -1,4 +1,4 @@
-.PHONY: help dev build run bootstrap-admin runtime-node-issue runtime-node-inspect test lint fmt sqlc migrate-up migrate-create migrate-status deps runtime-loadtest
+.PHONY: help dev build run bootstrap-admin runtime-node-issue runtime-node-inspect test browser-event-volume-acceptance lint fmt sqlc migrate-up migrate-create migrate-status deps runtime-loadtest
 
 ENV_FILE ?= .env
 API_URL ?= http://localhost:8080
@@ -34,6 +34,9 @@ runtime-node-inspect: build ## 审计 Runtime Node 证书; 参数放在 RUNTIME_
 test: ## 运行测试(race + cover)
 	go test ./... -race -cover
 
+browser-event-volume-acceptance: ## 一次性 PostgreSQL 验证 Browser 1/500 action 的持久行数恒定
+	./scripts/test-browser-event-volume.sh
+
 runtime-loadtest: ## 通过 WebSocket/长轮询回退对已启动 Core API 压测 Runtime Worker; 用 RUNTIME_LOADTEST_ARGS 覆盖参数
 	go run ./cmd/runtime-loadtest -api $(API_URL)/api/v1 $(RUNTIME_LOADTEST_ARGS)
 
@@ -45,11 +48,15 @@ fmt: ## 格式化
 	gofmt -s -w .
 	go vet ./...
 
-sqlc: ## 重新生成 sqlc 代码(注意:pkg/db/generated/*.sql.go 是手写,谨慎覆盖)
+sqlc: ## 有意迁移手写 DB 层到 sqlc 输出(必须 CONFIRM_OVERWRITE=1)
+	@if [ "$(CONFIRM_OVERWRITE)" != "1" ]; then \
+		echo "拒绝覆盖手写 pkg/db/generated: 仅在确认迁移方案后使用 make sqlc CONFIRM_OVERWRITE=1"; \
+		exit 1; \
+	fi
 	@command -v sqlc >/dev/null 2>&1 || { echo "请先安装 sqlc"; exit 1; }
 	sqlc generate
 
-migrate-up: build ## 初始化当前 Core schema，或验证已处于精确版本 086
+migrate-up: build ## 初始化当前 Core schema，或从精确版本 087 升级/验证版本 088
 	@set -a; . ./$(ENV_FILE); set +a; MIGRATIONS_DIR=./migrations ./bin/api migrate up
 
 migrate-create: ## 创建 migration: make migrate-create name=add_xxx

@@ -36,6 +36,11 @@ RETURNING id, creator_id, slug, name, description, endpoint_url,
 -- name: UpdateAgentDraft :one
 -- 创作者编辑：可以同时改 visibility（public / unlisted / private）。
 -- 只允许在未下架时编辑。
+WITH profile_lock AS MATERIALIZED (
+    SELECT pg_advisory_xact_lock(
+        hashtextextended('runtime-agent-profile:' || ($1::uuid)::text, 0)
+    )
+)
 UPDATE agents
 SET name = $2,
     description = $3,
@@ -47,7 +52,17 @@ SET name = $2,
     connection_mode = $10,
     mcp_tool_name = $11,
     updated_at = NOW()
+FROM profile_lock
 WHERE id = $1 AND creator_id = $8 AND lifecycle_status = 'active'
+  AND (
+      $9 = 'private'
+      OR NOT EXISTS (
+          SELECT 1
+          FROM runtime_agent_execution_profiles profile
+          WHERE profile.agent_id = agents.id
+            AND profile.execution_profile = 'browser'
+      )
+  )
 RETURNING id, creator_id, slug, name, description, endpoint_url,
           endpoint_auth_header, price_per_call_cents, tags,
           lifecycle_status, visibility, certification_status,
@@ -397,11 +412,26 @@ WHERE id = $1 AND creator_id = $2
   AND certification_status IN ('unreviewed', 'rejected');
 
 -- name: SetAgentVisibilityForOwner :exec
+WITH profile_lock AS MATERIALIZED (
+    SELECT pg_advisory_xact_lock(
+        hashtextextended('runtime-agent-profile:' || ($1::uuid)::text, 0)
+    )
+)
 UPDATE agents
 SET visibility = $3,
     updated_at = NOW()
+FROM profile_lock
 WHERE id = $1 AND creator_id = $2
-  AND lifecycle_status = 'active';
+  AND lifecycle_status = 'active'
+  AND (
+      $3 = 'private'
+      OR NOT EXISTS (
+          SELECT 1
+          FROM runtime_agent_execution_profiles profile
+          WHERE profile.agent_id = agents.id
+            AND profile.execution_profile = 'browser'
+      )
+  );
 
 -- name: CertifyAgent :exec
 -- 运营授予认证：pending → certified。
@@ -508,6 +538,11 @@ WHERE (
 
 -- name: UpdateAdminAgentModeration :one
 -- 管理台调整 Agent 生命周期、可见性、认证状态。
+WITH profile_lock AS MATERIALIZED (
+    SELECT pg_advisory_xact_lock(
+        hashtextextended('runtime-agent-profile:' || ($1::uuid)::text, 0)
+    )
+)
 UPDATE agents
 SET lifecycle_status = $2,
     visibility = $3,
@@ -523,7 +558,17 @@ SET lifecycle_status = $2,
         ELSE certified_at
     END,
     updated_at = NOW()
+FROM profile_lock
 WHERE id = $1
+  AND (
+      $3 = 'private'
+      OR NOT EXISTS (
+          SELECT 1
+          FROM runtime_agent_execution_profiles profile
+          WHERE profile.agent_id = agents.id
+            AND profile.execution_profile = 'browser'
+      )
+  )
 RETURNING id, creator_id, slug, name, description, endpoint_url,
           endpoint_auth_header, price_per_call_cents, tags,
           lifecycle_status, visibility, certification_status,

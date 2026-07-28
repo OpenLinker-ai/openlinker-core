@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
 
@@ -263,6 +264,17 @@ func (s *Service) UpdateAgentModeration(ctx context.Context, agentID uuid.UUID, 
 	if !allowed(certification, certificationValues) {
 		return nil, httpx.Unprocessable("certification_status 不合法")
 	}
+	if visibility != "private" {
+		profile, profileErr := s.queries.GetRuntimeAgentExecutionProfile(ctx, agentID)
+		if profileErr == nil && profile.ExecutionProfile == "browser" {
+			return nil, httpx.Conflict("Browser Agent 必须保持 private")
+		}
+		if profileErr != nil && !errors.Is(profileErr, pgx.ErrNoRows) {
+			log.Error().Err(profileErr).Str("agent_id", agentID.String()).
+				Msg("admin.UpdateAgentModeration: get runtime execution profile")
+			return nil, httpx.Internal("检查 Agent 执行配置失败")
+		}
+	}
 
 	reason := strings.TrimSpace(req.RejectionReason)
 	if certification == "rejected" && reason == "" {
@@ -283,11 +295,21 @@ func (s *Service) UpdateAgentModeration(ctx context.Context, agentID uuid.UUID, 
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, httpx.NotFound("Agent 不存在")
 		}
+		if isBrowserExecutionProfileVisibilityViolation(err) {
+			return nil, httpx.Conflict("Browser Agent 必须保持 private")
+		}
 		log.Error().Err(err).Msg("admin.UpdateAgentModeration")
 		return nil, httpx.Internal("更新 Agent 状态失败")
 	}
 	item := toAgentItem(&updated)
 	return &item, nil
+}
+
+func isBrowserExecutionProfileVisibilityViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == "23514" &&
+		pgErr.ConstraintName == "agents_browser_execution_profile_private"
 }
 
 func (s *Service) ListTasks(ctx context.Context, query, status string, limit, offset int32) (*TaskListResponse, error) {

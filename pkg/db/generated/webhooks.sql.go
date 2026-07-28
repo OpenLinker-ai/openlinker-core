@@ -1,5 +1,5 @@
-// Code generated manually as a placeholder for sqlc output.
-// TODO: 由 sqlc 生成（基于 pkg/db/queries/webhooks.sql）。
+// Hand-maintained SQL query implementation.
+// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
 //
 // 子轮 2.1（Phase 2）：webhook 投递相关 query。
 // 风格参考手写 sqlc 占位文件：const + 方法，逐字段 Scan，避免与其它 subagent 冲突。

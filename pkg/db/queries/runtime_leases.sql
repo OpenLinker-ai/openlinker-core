@@ -190,6 +190,23 @@ SELECT r.id, r.user_id, r.agent_id, r.input, r.request_metadata,
        r.fencing_token, r.started_at, clock_timestamp() AS database_now
 FROM runs r
 WHERE r.agent_id = sqlc.arg(agent_id)
+  AND COALESCE(
+      r.request_metadata #>> '{_openlinker_runtime_authority,execution_profile}',
+      'standard'
+  ) = CASE
+      WHEN sqlc.arg(browser_execution_profile)::boolean THEN 'browser'
+      ELSE 'standard'
+  END
+  AND (
+      NOT sqlc.arg(browser_execution_profile)::boolean
+      OR EXISTS (
+          SELECT 1
+          FROM agents a
+          WHERE a.id = r.agent_id
+            AND a.visibility = 'private'
+            AND a.creator_id = r.user_id
+      )
+  )
   AND r.status = 'running'
   AND r.runtime_contract_id = 'openlinker.runtime.v2'
   AND r.connection_mode_snapshot = 'runtime'
