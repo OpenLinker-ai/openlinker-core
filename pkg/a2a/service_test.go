@@ -57,6 +57,7 @@ WHERE singleton_id = 1`)
 	runtimeSvc := runtime.NewService(pool, &config.Config{
 		RunTimeoutSeconds:       15,
 		AllowLocalHTTPEndpoints: true,
+		RuntimePKIMasterSecret:  "a2a-service-test-runtime-master-secret",
 	})
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	return pool, a2a.NewService(pool, runtimeSvc), runtimeSvc

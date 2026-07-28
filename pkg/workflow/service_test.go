@@ -25,6 +25,14 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/workflow"
 )
 
+func newWorkflowRuntimeTestConfig(runTimeoutSeconds int, allowLocalHTTP bool) *config.Config {
+	return &config.Config{
+		RunTimeoutSeconds:       runTimeoutSeconds,
+		AllowLocalHTTPEndpoints: allowLocalHTTP,
+		RuntimePKIMasterSecret:  "workflow-test-runtime-master-secret",
+	}
+}
+
 func TestWorkflowRunExecutesAgentNodesAndPersistsChildRuns(t *testing.T) {
 	pool := setupWorkflowTestDB(t)
 
@@ -63,10 +71,7 @@ func TestWorkflowRunExecutesAgentNodesAndPersistsChildRuns(t *testing.T) {
 	creatorID := insertWorkflowUser(t, pool, "wf-creator")
 	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
 
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
@@ -147,10 +152,7 @@ func TestWorkflowRunMapsExplicitInputBeforeCreatingChildRun(t *testing.T) {
 		"additionalProperties":false
 	}`)
 
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
@@ -189,10 +191,7 @@ func TestWorkflowMappedInputSchemaMismatchFailsBeforeChildRun(t *testing.T) {
 		"required":["task"],
 		"additionalProperties":false
 	}`)
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
@@ -304,10 +303,7 @@ func TestWorkflowStartRejectsAgentThatBecameUncallable(t *testing.T) {
 	creatorID := insertWorkflowUser(t, pool, "wf-stale-creator")
 	agentID := insertWorkflowAgent(t, pool, creatorID, "https://example.com/offline")
 
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
@@ -393,10 +389,7 @@ func TestWorkflowRunExecutesIndependentBranchesInParallelAndAggregatesOutputs(t 
 	creatorID := insertWorkflowUser(t, pool, "wf-dag-creator")
 	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
 
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
@@ -504,10 +497,7 @@ func TestWorkflowParallelBranchFailureCancelsSiblingHTTPRun(t *testing.T) {
 	creatorID := insertWorkflowUser(t, pool, "wf-cancel-sibling-creator")
 	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
 
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       10,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(10, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
@@ -588,10 +578,7 @@ func TestRerunWorkflowStepReusesUnaffectedStepsAndComparesRuns(t *testing.T) {
 	userID := insertWorkflowUser(t, pool, "wf-step-rerun-user")
 	creatorID := insertWorkflowUser(t, pool, "wf-step-rerun-creator")
 	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
@@ -673,10 +660,7 @@ func TestStartWorkflowRunQueuesAndWorkerExecutes(t *testing.T) {
 	creatorID := insertWorkflowUser(t, pool, "wf-async-creator")
 	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
 
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
@@ -727,7 +711,7 @@ func TestRuntimeWorkflowStepExposesChildRunIDWhileRunning(t *testing.T) {
 	require.NoError(t, err)
 	insertWorkflowRuntimeSession(t, pool, coreID, creatorID, agentID)
 
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{RunTimeoutSeconds: 5})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, false))
 	runtimeSvc.ConfigureCoreRuntime(coreID)
 	svc := workflow.NewService(pool, runtimeSvc)
 	created, err := svc.CreateWorkflow(ctx, userID, &workflow.CreateWorkflowRequest{
@@ -868,10 +852,7 @@ func TestStartRunWorkerProcessesPendingRunsInBurst(t *testing.T) {
 	userID := insertWorkflowUser(t, pool, "wf-worker-user")
 	creatorID := insertWorkflowUser(t, pool, "wf-worker-creator")
 	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
@@ -946,10 +927,7 @@ func TestPauseResumeWorkflowRunControlsWorkerClaim(t *testing.T) {
 	userID := insertWorkflowUser(t, pool, "wf-pause-user")
 	creatorID := insertWorkflowUser(t, pool, "wf-pause-creator")
 	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
@@ -1024,10 +1002,7 @@ func TestPauseResumeRunningWorkflowWaitsForClaimReleaseAndReusesChildRun(t *test
 	userID := insertWorkflowUser(t, pool, "wf-running-pause-user")
 	creatorID := insertWorkflowUser(t, pool, "wf-running-pause-creator")
 	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
@@ -1192,10 +1167,7 @@ func TestCancelRunningWorkflowRunPreventsSuccessOverwrite(t *testing.T) {
 	userID := insertWorkflowUser(t, pool, "wf-cancel-user")
 	creatorID := insertWorkflowUser(t, pool, "wf-cancel-creator")
 	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
@@ -1279,10 +1251,7 @@ func TestWorkflowWorkerRequeuesStaleRunAndCleansRetrySteps(t *testing.T) {
 	creatorID := insertWorkflowUser(t, pool, "wf-retry-creator")
 	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
 
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
@@ -1340,10 +1309,7 @@ func TestRetryWorkflowRunCreatesNewPendingRun(t *testing.T) {
 	userID := insertWorkflowUser(t, pool, "wf-manual-retry-user")
 	creatorID := insertWorkflowUser(t, pool, "wf-manual-retry-creator")
 	agentID := insertWorkflowAgent(t, pool, creatorID, "http://127.0.0.1:18080")
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 
