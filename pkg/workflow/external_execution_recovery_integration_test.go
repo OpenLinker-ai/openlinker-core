@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	runtimemod "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/workflow"
@@ -23,7 +22,7 @@ func TestResolveExternalExecutionWorkflowRunSurvivesTargetRetirement(t *testing.
 	replacementOwnerID := insertWorkflowUser(t, pool, "external-recovery-replacement")
 	agentID := insertWorkflowAgent(t, pool, targetOwnerID, "https://agent.example/run")
 
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{RunTimeoutSeconds: 5})
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, false))
 	runtimeSvc.ConfigureCoreRuntime(uuid.New())
 	svc := workflow.NewService(pool, runtimeSvc)
 	created, err := svc.CreateWorkflow(context.Background(), targetOwnerID, &workflow.CreateWorkflowRequest{
