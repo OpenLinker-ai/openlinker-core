@@ -1,6 +1,7 @@
 // Package migrationinit protects the current-schema initialization boundary.
-// It deliberately supports only a fresh database or the exact current schema;
-// historical upgrade orchestration does not belong in this phase.
+// It supports a fresh database, the exact current schema, and one explicitly
+// fingerprinted predecessor. Every other historical or drifted state fails
+// before the migration driver can mutate it.
 package migrationinit
 
 import (
@@ -15,10 +16,12 @@ import (
 )
 
 const (
-	CoreVersion       int64 = 86
-	CloudVersion      int64 = 55
-	CoreSchemaDigest        = "6c22808a8cd658cf827a5828a92d3343f040d7d6ff3302f9fdab691fe90aec5b"
-	CloudSchemaDigest       = "0cf21f9a518d9875e62e66e1b490148e45b67eaaeddf9cab118efd778575abd5"
+	CoreVersion             int64 = 88
+	CoreUpgradeVersion      int64 = 87
+	CloudVersion            int64 = 55
+	CoreSchemaDigest              = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
+	CoreUpgradeSchemaDigest       = "19b7cba7240f4597633e224962437b6676ff592f6168ab611051483031211f87"
+	CloudSchemaDigest             = "0cf21f9a518d9875e62e66e1b490148e45b67eaaeddf9cab118efd778575abd5"
 )
 
 var coreTables = []string{
@@ -36,6 +39,8 @@ var coreTables = []string{
 	"agent_skills",
 	"agent_tokens",
 	"agents",
+	"browser_human_control_audits",
+	"browser_run_controls",
 	"core_instance_identity",
 	"delivery_targets",
 	"external_execution_cancellations",
@@ -69,6 +74,7 @@ var coreTables = []string{
 	"runtime_node_certificates",
 	"runtime_nodes",
 	"runtime_pki_authorities",
+	"runtime_agent_execution_profiles",
 	"runtime_resume_grants",
 	"runtime_schema_contracts",
 	"runtime_session_attachments",
@@ -151,12 +157,13 @@ type SchemaShape struct {
 
 // Snapshot contains migration bookkeeping plus immutable catalog evidence.
 type Snapshot struct {
-	Core                  MigrationTableState
-	Cloud                 MigrationTableState
-	NonBookkeepingObjects int64
-	CoreShape             SchemaShape
-	CloudShape            SchemaShape
-	ObsoleteCloudObjects  int64
+	Core                      MigrationTableState
+	Cloud                     MigrationTableState
+	NonBookkeepingObjects     int64
+	CoreShape                 SchemaShape
+	CloudShape                SchemaShape
+	ObsoleteCloudObjects      int64
+	UnclassifiedBrowserAgents int64
 }
 
 // Inspect reads initialization evidence without creating migration tables.
@@ -209,12 +216,52 @@ func Inspect(ctx context.Context, databaseURL string) (Snapshot, error) {
 		return Snapshot{}, fmt.Errorf("inspect obsolete Cloud relations: %w", err)
 	}
 
-	if snapshot.CoreShape.Tables == int64(len(coreTables)) {
+	if snapshot.CoreShape.Tables == int64(len(coreTables)) ||
+		(snapshot.Core.Version == CoreUpgradeVersion &&
+			snapshot.CoreShape.Tables == int64(len(coreTables)-2)) {
 		if err := inspectCoreSeeds(ctx, conn, &snapshot.CoreShape); err != nil {
 			return Snapshot{}, err
 		}
 	}
+	snapshot.UnclassifiedBrowserAgents, err =
+		inspectUnclassifiedBrowserAgents(ctx, conn)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	return snapshot, nil
+}
+
+func inspectUnclassifiedBrowserAgents(
+	ctx context.Context,
+	conn *pgx.Conn,
+) (int64, error) {
+	var profileTable *string
+	if err := conn.QueryRow(
+		ctx,
+		`SELECT to_regclass('public.runtime_agent_execution_profiles')::text`,
+	).Scan(&profileTable); err != nil {
+		return 0, fmt.Errorf("inspect Browser Agent profile table: %w", err)
+	}
+	if profileTable == nil {
+		return 0, nil
+	}
+	var count int64
+	if err := conn.QueryRow(ctx, `
+SELECT count(*)::bigint
+FROM (
+    SELECT DISTINCT session.agent_id
+    FROM public.runtime_sessions session
+    WHERE session.features
+          @> ARRAY['browser_execution_profile.v1']::text[]
+      AND NOT EXISTS (
+          SELECT 1
+          FROM public.runtime_agent_execution_profiles profile
+          WHERE profile.agent_id = session.agent_id
+      )
+) unclassified`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("inspect unclassified Browser Agents: %w", err)
+	}
+	return count, nil
 }
 
 func readMigrationTable(ctx context.Context, conn *pgx.Conn, table string) (MigrationTableState, error) {
@@ -413,27 +460,79 @@ func (s Snapshot) ValidateCoreUp() (bool, error) {
 		}
 		return false, nil
 	}
-	if err := validateMigrationTable("Core", s.Core, CoreVersion); err != nil {
+	if err := validateMigrationTableState("Core", s.Core); err != nil {
 		return false, err
 	}
-	if err := validateCoreShape(s.CoreShape); err != nil {
-		return false, err
+	switch s.Core.Version {
+	case CoreVersion:
+		if err := validateCoreShape(s.CoreShape); err != nil {
+			return false, err
+		}
+		if s.UnclassifiedBrowserAgents != 0 {
+			return false, fmt.Errorf(
+				"Core Browser Agent profile backfill is incomplete: %d historical Browser Agents are unclassified",
+				s.UnclassifiedBrowserAgents,
+			)
+		}
+		if err := s.validateKnownRelations(); err != nil {
+			return false, err
+		}
+		return true, nil
+	case CoreUpgradeVersion:
+		if err := validateCoreUpgradeShape(s.CoreShape); err != nil {
+			return false, err
+		}
+		if err := s.validateKnownRelations(); err != nil {
+			return false, err
+		}
+		return false, nil
+	default:
+		return false, fmt.Errorf(
+			"Core migration %d is unsupported; rebuild an empty database at version %d",
+			s.Core.Version,
+			CoreVersion,
+		)
 	}
-	if err := s.validateKnownRelations(); err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 // ValidateCloudUp returns true when the current Cloud schema is already installed.
 func (s Snapshot) ValidateCloudUp() (bool, error) {
-	if err := validateMigrationTable("Core", s.Core, CoreVersion); err != nil {
+	if err := validateMigrationTableState("Core", s.Core); err != nil {
 		return false, fmt.Errorf("Cloud initialization requires current Core: %w", err)
 	}
-	if err := validateCoreShape(s.CoreShape); err != nil {
-		return false, fmt.Errorf("Cloud initialization requires current Core: %w", err)
+	coreUpgradeable := false
+	switch s.Core.Version {
+	case CoreVersion:
+		if err := validateCoreShape(s.CoreShape); err != nil {
+			return false, fmt.Errorf("Cloud initialization requires current Core: %w", err)
+		}
+		if s.UnclassifiedBrowserAgents != 0 {
+			return false, fmt.Errorf(
+				"Cloud initialization requires current Core: Browser Agent profile backfill is incomplete for %d Agents",
+				s.UnclassifiedBrowserAgents,
+			)
+		}
+	case CoreUpgradeVersion:
+		if err := validateCoreUpgradeShape(s.CoreShape); err != nil {
+			return false, fmt.Errorf(
+				"Cloud initialization requires current Core: %w",
+				err,
+			)
+		}
+		coreUpgradeable = true
+	default:
+		return false, fmt.Errorf(
+			"Cloud initialization requires current Core: Core migration %d is unsupported; rebuild an empty database at version %d",
+			s.Core.Version,
+			CoreVersion,
+		)
 	}
 	if !s.Cloud.Exists {
+		if coreUpgradeable {
+			return false, errors.New(
+				"Cloud initialization requires Core to complete its supported migration before a fresh Cloud schema is installed",
+			)
+		}
 		if s.CloudShape.Tables != 0 || s.CloudShape.GuardFunctions != 0 || s.ObsoleteCloudObjects != 0 {
 			return false, errors.New("Cloud initialization found a partial or legacy Cloud schema")
 		}
@@ -463,6 +562,16 @@ func (s Snapshot) validateKnownRelations() error {
 }
 
 func validateMigrationTable(owner string, state MigrationTableState, current int64) error {
+	if err := validateMigrationTableState(owner, state); err != nil {
+		return err
+	}
+	if state.Version != current {
+		return fmt.Errorf("%s migration %d is unsupported; rebuild an empty database at version %d", owner, state.Version, current)
+	}
+	return nil
+}
+
+func validateMigrationTableState(owner string, state MigrationTableState) error {
 	if !state.Exists {
 		return fmt.Errorf("%s migration table is missing", owner)
 	}
@@ -472,18 +581,15 @@ func validateMigrationTable(owner string, state MigrationTableState, current int
 	if state.Dirty {
 		return fmt.Errorf("%s migration %d is dirty", owner, state.Version)
 	}
-	if state.Version != current {
-		return fmt.Errorf("%s migration %d is unsupported; rebuild an empty database at version %d", owner, state.Version, current)
-	}
 	return nil
 }
 
 func validateCoreShape(shape SchemaShape) error {
 	want := SchemaShape{
 		Digest:            CoreSchemaDigest,
-		Tables:            69,
-		Constraints:       587,
-		Indexes:           259,
+		Tables:            72,
+		Constraints:       615,
+		Indexes:           265,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -503,6 +609,46 @@ func validateCoreShape(shape SchemaShape) error {
 		shape.PreviousWire != want.PreviousWire || shape.BuiltInSkills != want.BuiltInSkills ||
 		shape.BuiltInSkillCases < want.BuiltInSkillCases {
 		return fmt.Errorf("Core schema fingerprint mismatch: %s", formatShape(shape))
+	}
+	return nil
+}
+
+func validateCoreUpgradeShape(shape SchemaShape) error {
+	want := SchemaShape{
+		Digest:            CoreUpgradeSchemaDigest,
+		Tables:            70,
+		Constraints:       594,
+		Indexes:           261,
+		Triggers:          70,
+		CoreIdentities:    1,
+		RuntimeControls:   1,
+		RuntimeSchemas:    10,
+		CurrentRuntime:    1,
+		RuntimeWires:      5,
+		CurrentWire:       1,
+		PreviousWire:      1,
+		BuiltInSkills:     30,
+		BuiltInSkillCases: 15,
+	}
+	if shape.Digest != want.Digest ||
+		shape.Tables != want.Tables ||
+		shape.Constraints != want.Constraints ||
+		shape.Indexes != want.Indexes ||
+		shape.Triggers != want.Triggers ||
+		shape.CoreIdentities != want.CoreIdentities ||
+		shape.RuntimeControls != want.RuntimeControls ||
+		shape.RuntimeSchemas != want.RuntimeSchemas ||
+		shape.CurrentRuntime != want.CurrentRuntime ||
+		shape.RuntimeWires != want.RuntimeWires ||
+		shape.CurrentWire != want.CurrentWire ||
+		shape.PreviousWire != want.PreviousWire ||
+		shape.BuiltInSkills != want.BuiltInSkills ||
+		shape.BuiltInSkillCases < want.BuiltInSkillCases {
+		return fmt.Errorf(
+			"Core schema fingerprint mismatch for supported version %d upgrade: %s",
+			CoreUpgradeVersion,
+			formatShape(shape),
+		)
 	}
 	return nil
 }

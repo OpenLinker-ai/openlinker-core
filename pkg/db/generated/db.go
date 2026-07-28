@@ -1,5 +1,5 @@
-// Code generated manually as a placeholder for sqlc output.
-// TODO: 由 sqlc 生成（运行 `sqlc generate` 后会覆盖此文件）。
+// Hand-maintained SQL query implementation.
+// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
 // 包路径与 sqlc.yaml 中 `package: db` + `out: pkg/db/generated` 一致。
 
 package db

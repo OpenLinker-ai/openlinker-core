@@ -110,6 +110,7 @@ type RuntimeHTTPDependencies struct {
 	SessionLeases        *RuntimeSessionLeaseManager
 	AdmissionLimiter     RuntimeAdmissionLimiter
 	Observer             WorkerObserver
+	BrowserControl       *BrowserHumanControl
 	CoreInstanceID       uuid.UUID
 	WebSocketConcurrency RuntimeWebSocketConcurrencyConfig
 	// AttachOnly is a release-cutover safety mode. It permits authenticated
@@ -167,12 +168,16 @@ type runtimePreviousReadyPayload struct {
 
 func NewRuntimeHTTPController(dependencies RuntimeHTTPDependencies) *RuntimeHTTPController {
 	webSocketConfig := normalizeRuntimeWebSocketConcurrencyConfig(dependencies.WebSocketConcurrency)
-	return &RuntimeHTTPController{
+	controller := &RuntimeHTTPController{
 		dependencies:       dependencies,
 		webSockets:         newRuntimeWSRegistry(),
 		webSocketConfig:    webSocketConfig,
 		webSocketProcesses: newRuntimeWSProcessLimiter(webSocketConfig.ProcessMaxInflight),
 	}
+	if dependencies.BrowserControl != nil {
+		dependencies.BrowserControl.BindCommandSender(controller)
+	}
+	return controller
 }
 
 func newRuntimeHTTPControllerForService(service runtimeService) *RuntimeHTTPController {

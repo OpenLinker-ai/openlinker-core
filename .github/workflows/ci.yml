@@ -27,3 +27,20 @@ jobs:
 
       - name: Test
         run: go test ./... -race -cover
+
+  browser-event-volume:
+    name: Browser event volume (PostgreSQL 1/500)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run the fail-closed PostgreSQL acceptance
+        run: ./scripts/test-browser-event-volume.sh

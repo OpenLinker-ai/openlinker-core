@@ -194,7 +194,13 @@ func (s *RuntimeLeaseService) ClaimOffer(
 			return err
 		}
 
-		candidate, err := tx.LockNextClaimableRuntimeRunForAgent(ctx, principal.AgentID)
+		candidate, err := tx.LockNextClaimableRuntimeRunForAgent(
+			ctx,
+			db.LockNextClaimableRuntimeRunForAgentParams{
+				AgentID:                 principal.AgentID,
+				BrowserExecutionProfile: runtimeSessionUsesBrowserProfile(principal.Features),
+			},
+		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -950,6 +956,12 @@ func (s *RuntimeLeaseService) assignmentFromAttempt(
 	if err != nil {
 		return RunAssignedPayload{}, newRuntimeLeaseError(RuntimeLeaseErrorValidationFailed, err)
 	}
+	if err := consumeRuntimeExecutionProfile(
+		metadata,
+		runtimeSessionUsesBrowserProfile(principal.Features),
+	); err != nil {
+		return RunAssignedPayload{}, err
+	}
 	digest := sha256.Sum256(canonicalInput)
 	nodeEnvelope, invocationToken, err := s.issuer.Issue(RuntimeInvocationCapability{
 		RunID: attempt.RunID, AttemptID: attempt.ID, LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
@@ -972,6 +984,43 @@ func (s *RuntimeLeaseService) assignmentFromAttempt(
 		return RunAssignedPayload{}, newRuntimeLeaseError(RuntimeLeaseErrorValidationFailed, err)
 	}
 	return payload, nil
+}
+
+func consumeRuntimeExecutionProfile(
+	metadata map[string]any,
+	browserProfile bool,
+) error {
+	rawAuthority, found := metadata["_openlinker_runtime_authority"]
+	authority, valid := rawAuthority.(map[string]any)
+	if !found || !valid {
+		if browserProfile {
+			return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
+		}
+		return nil
+	}
+	rawProfile, found := authority["execution_profile"]
+	if !found {
+		if browserProfile {
+			return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
+		}
+		return nil
+	}
+	profile, valid := rawProfile.(string)
+	expected := runtimeExecutionProfileStandard
+	if browserProfile {
+		expected = runtimeExecutionProfileBrowser
+	}
+	if !valid || profile != expected {
+		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
+	}
+	sanitized := make(map[string]any, len(authority)-1)
+	for key, value := range authority {
+		if key != "execution_profile" {
+			sanitized[key] = value
+		}
+	}
+	metadata["_openlinker_runtime_authority"] = sanitized
+	return nil
 }
 
 func attemptIdentityFromRow(attempt db.RunAttempt) (AttemptIdentity, error) {
@@ -1077,7 +1126,7 @@ type runtimeLeaseTransaction interface {
 	LockRuntimeNodeForPrincipalValidation(context.Context, db.LockRuntimeNodeForPrincipalValidationParams) (db.LockRuntimeNodeForPrincipalValidationRow, error)
 	LockRuntimeCredentialForPrincipalValidation(context.Context, db.LockRuntimeCredentialForPrincipalValidationParams) (db.LockRuntimeCredentialForPrincipalValidationRow, error)
 	GetExistingUnacceptedRunOfferForSession(context.Context, db.GetExistingUnacceptedRunOfferForSessionParams) (db.GetExistingUnacceptedRunOfferForSessionRow, error)
-	LockNextClaimableRuntimeRunForAgent(context.Context, uuid.UUID) (db.LockNextClaimableRuntimeRunForAgentRow, error)
+	LockNextClaimableRuntimeRunForAgent(context.Context, db.LockNextClaimableRuntimeRunForAgentParams) (db.LockNextClaimableRuntimeRunForAgentRow, error)
 	ClaimRuntimeSessionSlot(context.Context, db.ClaimRuntimeSessionSlotParams) (db.RuntimeSession, error)
 	ClaimRuntimeNodeSlot(context.Context, uuid.UUID) (db.RuntimeNode, error)
 	ReleaseRuntimeSessionSlot(context.Context, uuid.UUID) (db.RuntimeSession, error)
@@ -1146,8 +1195,11 @@ func (t *postgresRuntimeLeaseTransaction) LockRuntimeCredentialForPrincipalValid
 func (t *postgresRuntimeLeaseTransaction) GetExistingUnacceptedRunOfferForSession(ctx context.Context, params db.GetExistingUnacceptedRunOfferForSessionParams) (db.GetExistingUnacceptedRunOfferForSessionRow, error) {
 	return t.queries.GetExistingUnacceptedRunOfferForSession(ctx, params)
 }
-func (t *postgresRuntimeLeaseTransaction) LockNextClaimableRuntimeRunForAgent(ctx context.Context, agentID uuid.UUID) (db.LockNextClaimableRuntimeRunForAgentRow, error) {
-	return t.queries.LockNextClaimableRuntimeRunForAgent(ctx, agentID)
+func (t *postgresRuntimeLeaseTransaction) LockNextClaimableRuntimeRunForAgent(
+	ctx context.Context,
+	params db.LockNextClaimableRuntimeRunForAgentParams,
+) (db.LockNextClaimableRuntimeRunForAgentRow, error) {
+	return t.queries.LockNextClaimableRuntimeRunForAgent(ctx, params)
 }
 func (t *postgresRuntimeLeaseTransaction) ClaimRuntimeSessionSlot(ctx context.Context, params db.ClaimRuntimeSessionSlotParams) (db.RuntimeSession, error) {
 	return t.queries.ClaimRuntimeSessionSlot(ctx, params)

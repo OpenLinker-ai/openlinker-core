@@ -190,6 +190,18 @@ func TestToUserItemIncludesAuthSummary(t *testing.T) {
 	}
 }
 
+func TestBrowserExecutionProfileVisibilityViolationIsExact(t *testing.T) {
+	if !isBrowserExecutionProfileVisibilityViolation(&pgconn.PgError{
+		Code:           "23514",
+		ConstraintName: "agents_browser_execution_profile_private",
+	}) || isBrowserExecutionProfileVisibilityViolation(&pgconn.PgError{
+		Code:           "23514",
+		ConstraintName: "agents_visibility_valid",
+	}) || isBrowserExecutionProfileVisibilityViolation(nil) {
+		t.Fatal("Browser execution-profile visibility violation was not classified exactly")
+	}
+}
+
 func assertAdminHTTPStatus(t *testing.T, err error, want int) {
 	t.Helper()
 	if err == nil {

@@ -1,5 +1,5 @@
-// Code generated manually as a placeholder for sqlc output.
-// TODO: 由 sqlc 生成。
+// Hand-maintained SQL query implementation.
+// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
 
 package db
 
@@ -404,6 +404,22 @@ type RuntimeSession struct {
 	DisconnectedAt          *time.Time `db:"disconnected_at" json:"disconnected_at"`
 	CreatedAt               time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt               time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// RuntimeAgentExecutionProfile is the durable, Agent-keyed execution
+// classification. A Browser classification is sticky across Runtime Session
+// retention; only the audited reset path may return it to standard.
+type RuntimeAgentExecutionProfile struct {
+	AgentID                  uuid.UUID  `db:"agent_id" json:"agent_id"`
+	ExecutionProfile         string     `db:"execution_profile" json:"execution_profile"`
+	ClassifiedAt             time.Time  `db:"classified_at" json:"classified_at"`
+	ClassifiedByCredentialID uuid.UUID  `db:"classified_by_credential_id" json:"classified_by_credential_id"`
+	SourceRuntimeSessionID   uuid.UUID  `db:"source_runtime_session_id" json:"source_runtime_session_id"`
+	LastConfirmedAt          time.Time  `db:"last_confirmed_at" json:"last_confirmed_at"`
+	ResetAt                  *time.Time `db:"reset_at" json:"reset_at"`
+	ResetByUserID            *uuid.UUID `db:"reset_by_user_id" json:"reset_by_user_id"`
+	ResetReason              *string    `db:"reset_reason" json:"reset_reason"`
+	ProfilePurgeAttested     *bool      `db:"profile_purge_attested" json:"profile_purge_attested"`
 }
 
 type RuntimeSessionAttachment struct {

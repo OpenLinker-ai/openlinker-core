@@ -1,8 +1,8 @@
 -- 086_current_schema_init.up.sql
--- Canonical fresh-database schema for OpenLinker Core.
+-- Foundational fresh-database schema for OpenLinker Core.
 --
--- This initializer intentionally contains only the final catalog and required
--- seed/control state. It must never be used as an upgrade migration.
+-- The migration runner applies later supported forward migrations after this
+-- initializer. It must never be applied outside that ordered migration chain.
 
 BEGIN;
 

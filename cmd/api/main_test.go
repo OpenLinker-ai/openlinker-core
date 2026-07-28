@@ -660,6 +660,20 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 			wantFactory:  1,
 		},
 		{
+			name:         "supported predecessor up success",
+			args:         []string{"up"},
+			env:          map[string]string{"DATABASE_URL": "postgres://db"},
+			snapshot:     upgradeableCoreMigrationSnapshot(),
+			migrator:     &fakeMigrator{},
+			postSnapshot: migrationSnapshotPointer(currentCoreMigrationSnapshot()),
+			wantCode:     0,
+			wantOut:      "migrate up: ok",
+			wantSrc:      "file://./migrations",
+			wantDBURL:    "postgres://db",
+			wantInspect:  2,
+			wantFactory:  1,
+		},
+		{
 			name:         "fresh up no change is ok",
 			args:         []string{"up"},
 			env:          map[string]string{"DATABASE_URL": "postgres://db"},
@@ -719,6 +733,15 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 			snapshot:    currentCoreMigrationSnapshot(),
 			wantCode:    0,
 			wantOut:     "migrate check: state=current",
+			wantInspect: 1,
+		},
+		{
+			name:        "check reports supported predecessor without factory",
+			args:        []string{"check"},
+			env:         map[string]string{"DATABASE_URL": "postgres://db"},
+			snapshot:    upgradeableCoreMigrationSnapshot(),
+			wantCode:    0,
+			wantOut:     "migrate check: state=upgradeable",
 			wantInspect: 1,
 		},
 		{
@@ -844,10 +867,10 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 func currentCoreMigrationSnapshot() migrationinit.Snapshot {
 	return migrationinit.Snapshot{
 		Core:                  migrationinit.MigrationTableState{Exists: true, Rows: 1, Version: migrationinit.CoreVersion},
-		NonBookkeepingObjects: 69,
+		NonBookkeepingObjects: 72,
 		CoreShape: migrationinit.SchemaShape{
 			Digest: migrationinit.CoreSchemaDigest,
-			Tables: 69, Constraints: 587, Indexes: 259, Triggers: 70,
+			Tables: 72, Constraints: 615, Indexes: 265, Triggers: 70,
 			CoreIdentities: 1, RuntimeControls: 1, RuntimeSchemas: 10,
 			CurrentRuntime: 1, RuntimeWires: 5, CurrentWire: 1, PreviousWire: 1,
 			BuiltInSkills: 30, BuiltInSkillCases: 15,
@@ -859,6 +882,24 @@ func legacyCoreMigrationSnapshot(version int64) migrationinit.Snapshot {
 	snapshot := currentCoreMigrationSnapshot()
 	snapshot.Core.Version = version
 	return snapshot
+}
+
+func upgradeableCoreMigrationSnapshot() migrationinit.Snapshot {
+	return migrationinit.Snapshot{
+		Core: migrationinit.MigrationTableState{
+			Exists:  true,
+			Rows:    1,
+			Version: migrationinit.CoreUpgradeVersion,
+		},
+		NonBookkeepingObjects: 70,
+		CoreShape: migrationinit.SchemaShape{
+			Digest: migrationinit.CoreUpgradeSchemaDigest,
+			Tables: 70, Constraints: 594, Indexes: 261, Triggers: 70,
+			CoreIdentities: 1, RuntimeControls: 1, RuntimeSchemas: 10,
+			CurrentRuntime: 1, RuntimeWires: 5, CurrentWire: 1,
+			PreviousWire: 1, BuiltInSkills: 30, BuiltInSkillCases: 15,
+		},
+	}
 }
 
 func migrationSnapshotPointer(snapshot migrationinit.Snapshot) *migrationinit.Snapshot {

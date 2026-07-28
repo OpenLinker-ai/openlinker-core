@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
@@ -231,6 +232,9 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 	if visibility == "" {
 		visibility = existing.Visibility
 	}
+	if err := s.requireBrowserAgentPrivateVisibility(ctx, agentID, visibility); err != nil {
+		return nil, err
+	}
 	updated, err := s.queries.UpdateAgentDraft(ctx, db.UpdateAgentDraftParams{
 		ID:                 agentID,
 		Name:               strings.TrimSpace(req.Name),
@@ -249,6 +253,9 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 		return &resp, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
+		if isBrowserExecutionProfileVisibilityViolation(err) {
+			return nil, httpx.Conflict("Browser Agent 必须保持 private")
+		}
 		if isCheckViolation(err) {
 			return nil, httpx.Unprocessable("Agent 字段不符合约束")
 		}
@@ -291,11 +298,18 @@ func (s *Service) SetVisibility(ctx context.Context, agentID, creatorID uuid.UUI
 	if existing.LifecycleStatus == "disabled" {
 		return nil, httpx.Forbidden("已下架的 Agent 不可编辑")
 	}
+	visibility = strings.TrimSpace(visibility)
+	if err := s.requireBrowserAgentPrivateVisibility(ctx, agentID, visibility); err != nil {
+		return nil, err
+	}
 	if err := s.queries.SetAgentVisibilityForOwner(ctx, db.SetAgentVisibilityForOwnerParams{
 		ID:         agentID,
 		CreatorID:  creatorID,
-		Visibility: strings.TrimSpace(visibility),
+		Visibility: visibility,
 	}); err != nil {
+		if isBrowserExecutionProfileVisibilityViolation(err) {
+			return nil, httpx.Conflict("Browser Agent 必须保持 private")
+		}
 		if isCheckViolation(err) {
 			return nil, httpx.Unprocessable("可见性不符合约束")
 		}
@@ -310,8 +324,34 @@ func (s *Service) SetVisibility(ctx context.Context, agentID, creatorID uuid.UUI
 		log.Error().Err(err).Msg("agent.SetVisibility: refresh")
 		return nil, httpx.Internal("查询 Agent 失败")
 	}
+	if updated.Visibility != visibility {
+		return nil, httpx.Conflict("Browser Agent 必须保持 private")
+	}
 	resp := s.toAgentResponseWithReadiness(ctx, &updated)
 	return &resp, nil
+}
+
+func (s *Service) requireBrowserAgentPrivateVisibility(
+	ctx context.Context,
+	agentID uuid.UUID,
+	visibility string,
+) error {
+	if visibility == "private" {
+		return nil
+	}
+	profile, err := s.queries.GetRuntimeAgentExecutionProfile(ctx, agentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).
+			Msg("agent.requireBrowserAgentPrivateVisibility")
+		return httpx.Internal("检查 Agent 执行配置失败")
+	}
+	if profile.ExecutionProfile == "browser" {
+		return httpx.Conflict("Browser Agent 必须保持 private")
+	}
+	return nil
 }
 
 // DisableAgent 创作者主动下架。
@@ -1275,6 +1315,13 @@ func isCheckViolation(err error) bool {
 		return ss.SQLState() == "23514"
 	}
 	return false
+}
+
+func isBrowserExecutionProfileVisibilityViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == "23514" &&
+		pgErr.ConstraintName == "agents_browser_execution_profile_private"
 }
 
 func isUndefinedTable(err error) bool {

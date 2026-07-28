@@ -25,26 +25,29 @@ const (
 type RuntimeMessageType string
 
 const (
-	RuntimeMessageHello               RuntimeMessageType = "runtime.hello"
-	RuntimeMessageReady               RuntimeMessageType = "runtime.ready"
-	RuntimeMessageRunAssigned         RuntimeMessageType = "run.assigned"
-	RuntimeMessageAssignmentAck       RuntimeMessageType = "run.assignment.ack"
-	RuntimeMessageAssignmentConfirmed RuntimeMessageType = "run.assignment.confirmed"
-	RuntimeMessageAssignmentReject    RuntimeMessageType = "run.assignment.reject"
-	RuntimeMessageAssignmentRejected  RuntimeMessageType = "run.assignment.rejected"
-	RuntimeMessageLeaseRenew          RuntimeMessageType = "run.lease.renew"
-	RuntimeMessageLeaseRenewed        RuntimeMessageType = "run.lease.renewed"
-	RuntimeMessageRunEvent            RuntimeMessageType = "run.event"
-	RuntimeMessageRunEventAck         RuntimeMessageType = "run.event.ack"
-	RuntimeMessageRunResult           RuntimeMessageType = "run.result"
-	RuntimeMessageRunResultAck        RuntimeMessageType = "run.result.ack"
-	RuntimeMessageRunCancel           RuntimeMessageType = "run.cancel"
-	RuntimeMessageRunCancelAck        RuntimeMessageType = "run.cancel.ack"
-	RuntimeMessageResume              RuntimeMessageType = "runtime.resume"
-	RuntimeMessageResumeAccepted      RuntimeMessageType = "run.resume.accepted"
-	RuntimeMessageLeaseRevoked        RuntimeMessageType = "run.lease.revoked"
-	RuntimeMessageDrain               RuntimeMessageType = "runtime.drain"
-	RuntimeMessageError               RuntimeMessageType = "runtime.error"
+	RuntimeMessageHello                 RuntimeMessageType = "runtime.hello"
+	RuntimeMessageReady                 RuntimeMessageType = "runtime.ready"
+	RuntimeMessageRunAssigned           RuntimeMessageType = "run.assigned"
+	RuntimeMessageAssignmentAck         RuntimeMessageType = "run.assignment.ack"
+	RuntimeMessageAssignmentConfirmed   RuntimeMessageType = "run.assignment.confirmed"
+	RuntimeMessageAssignmentReject      RuntimeMessageType = "run.assignment.reject"
+	RuntimeMessageAssignmentRejected    RuntimeMessageType = "run.assignment.rejected"
+	RuntimeMessageLeaseRenew            RuntimeMessageType = "run.lease.renew"
+	RuntimeMessageLeaseRenewed          RuntimeMessageType = "run.lease.renewed"
+	RuntimeMessageRunEvent              RuntimeMessageType = "run.event"
+	RuntimeMessageRunEventAck           RuntimeMessageType = "run.event.ack"
+	RuntimeMessageRunResult             RuntimeMessageType = "run.result"
+	RuntimeMessageRunResultAck          RuntimeMessageType = "run.result.ack"
+	RuntimeMessageRunCancel             RuntimeMessageType = "run.cancel"
+	RuntimeMessageRunCancelAck          RuntimeMessageType = "run.cancel.ack"
+	RuntimeMessageResume                RuntimeMessageType = "runtime.resume"
+	RuntimeMessageResumeAccepted        RuntimeMessageType = "run.resume.accepted"
+	RuntimeMessageLeaseRevoked          RuntimeMessageType = "run.lease.revoked"
+	RuntimeMessageDrain                 RuntimeMessageType = "runtime.drain"
+	RuntimeMessageBrowserViewerCommand  RuntimeMessageType = "browser.viewer.command"
+	RuntimeMessageBrowserViewerFrame    RuntimeMessageType = "browser.viewer.frame"
+	RuntimeMessageBrowserViewerFrameAck RuntimeMessageType = "browser.viewer.frame.ack"
+	RuntimeMessageError                 RuntimeMessageType = "runtime.error"
 )
 
 // RuntimeEnvelopeFields are common to every Runtime WebSocket message.
@@ -91,6 +94,9 @@ type RuntimeResumeMessage = RuntimeTypedEnvelope[RuntimeResumePayload]
 type RunResumeAcceptedMessage = RuntimeTypedEnvelope[RunResumeAcceptedPayload]
 type RunLeaseRevokedMessage = RuntimeTypedEnvelope[RunLeaseRevokedPayload]
 type RuntimeDrainMessage = RuntimeTypedEnvelope[RuntimeDrainPayload]
+type BrowserViewerCommandMessage = RuntimeTypedEnvelope[BrowserViewerCommandPayload]
+type BrowserViewerFrameMessage = RuntimeTypedEnvelope[BrowserViewerFramePayload]
+type BrowserViewerFrameAckMessage = RuntimeTypedEnvelope[BrowserViewerFrameAckPayload]
 type RuntimeErrorMessage = RuntimeTypedEnvelope[RuntimeErrorBody]
 
 // AttemptIdentity is the exact runtime wire identity. Unlike the
@@ -350,6 +356,61 @@ type RuntimeDrainPayload struct {
 	Inflight   int64     `json:"inflight" runtime:"required"`
 }
 
+type BrowserViewerAction string
+
+const (
+	BrowserViewerActionClaim     BrowserViewerAction = "claim"
+	BrowserViewerActionRelease   BrowserViewerAction = "release"
+	BrowserViewerActionResume    BrowserViewerAction = "resume"
+	BrowserViewerActionTerminate BrowserViewerAction = "terminate"
+	BrowserViewerActionInput     BrowserViewerAction = "input"
+)
+
+type BrowserViewerInputPayload struct {
+	Kind           string  `json:"kind" runtime:"required"`
+	PointerAction  string  `json:"pointer_action,omitempty"`
+	KeyboardAction string  `json:"keyboard_action,omitempty"`
+	X              *int    `json:"x,omitempty"`
+	Y              *int    `json:"y,omitempty"`
+	Button         string  `json:"button,omitempty"`
+	ClickCount     int     `json:"click_count,omitempty"`
+	Key            string  `json:"key,omitempty"`
+	Text           string  `json:"text,omitempty"`
+	DeltaX         float64 `json:"delta_x,omitempty"`
+	DeltaY         float64 `json:"delta_y,omitempty"`
+}
+
+type BrowserViewerCommandPayload struct {
+	AttemptIdentity      AttemptIdentity            `json:"attempt_identity" runtime:"required"`
+	Action               BrowserViewerAction        `json:"action" runtime:"required"`
+	BrowserSessionID     uuid.UUID                  `json:"browser_session_id" runtime:"required"`
+	SessionEpoch         uint64                     `json:"session_epoch" runtime:"required"`
+	AttachmentID         uuid.UUID                  `json:"attachment_id" runtime:"required"`
+	PreviousControlEpoch uint64                     `json:"previous_control_epoch" runtime:"required"`
+	ControlEpoch         uint64                     `json:"control_epoch" runtime:"required"`
+	Input                *BrowserViewerInputPayload `json:"input,omitempty"`
+	DeadlineAt           time.Time                  `json:"deadline_at" runtime:"required"`
+}
+
+type BrowserViewerFramePayload struct {
+	AttemptIdentity  AttemptIdentity `json:"attempt_identity" runtime:"required"`
+	BrowserSessionID uuid.UUID       `json:"browser_session_id" runtime:"required"`
+	SessionEpoch     uint64          `json:"session_epoch" runtime:"required"`
+	AttachmentID     uuid.UUID       `json:"attachment_id" runtime:"required"`
+	ControlEpoch     uint64          `json:"control_epoch" runtime:"required"`
+	FrameSeq         uint64          `json:"frame_seq" runtime:"required"`
+	MIMEType         string          `json:"mime_type" runtime:"required"`
+	Data             []byte          `json:"data" runtime:"required"`
+	Width            int             `json:"width" runtime:"required"`
+	Height           int             `json:"height" runtime:"required"`
+}
+
+type BrowserViewerFrameAckPayload struct {
+	AttemptIdentity AttemptIdentity `json:"attempt_identity" runtime:"required"`
+	ControlEpoch    uint64          `json:"control_epoch" runtime:"required"`
+	FrameSeq        uint64          `json:"frame_seq" runtime:"required"`
+}
+
 // RuntimeSessionDrainRequest carries trusted transport identity outside the
 // JSON payload. RuntimeDrainPayload is shared by WebSocket and Pull so both
 // adapters commit exactly the same durable state transition. Capacity must be
@@ -370,6 +431,7 @@ type PendingCommand struct {
 type CancelCommand = RuntimeCommand[RunCancelPayload]
 type DrainCommand = RuntimeCommand[RuntimeDrainPayload]
 type RevokeCommand = RuntimeCommand[RunLeaseRevokedPayload]
+type BrowserViewerCommand = RuntimeCommand[BrowserViewerCommandPayload]
 
 type RuntimeCommand[P any] struct {
 	Type    RuntimeMessageType `json:"type" runtime:"required"`

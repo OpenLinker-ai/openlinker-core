@@ -655,6 +655,23 @@ SELECT r.id, r.user_id, r.agent_id, r.input, r.request_metadata,
        r.fencing_token, r.started_at, clock_timestamp() AS database_now
 FROM runs r
 WHERE r.agent_id = $1
+  AND COALESCE(
+      r.request_metadata #>> '{_openlinker_runtime_authority,execution_profile}',
+      'standard'
+  ) = CASE
+      WHEN $2::boolean THEN 'browser'
+      ELSE 'standard'
+  END
+  AND (
+      NOT $2::boolean
+      OR EXISTS (
+          SELECT 1
+          FROM agents a
+          WHERE a.id = r.agent_id
+            AND a.visibility = 'private'
+            AND a.creator_id = r.user_id
+      )
+  )
   AND r.status = 'running'
   AND r.runtime_contract_id = 'openlinker.runtime.v2'
   AND r.connection_mode_snapshot = 'runtime'
@@ -678,6 +695,11 @@ LIMIT 1
 FOR UPDATE OF r SKIP LOCKED
 `
 
+type LockNextClaimableRuntimeRunForAgentParams struct {
+	AgentID                 uuid.UUID `db:"agent_id" json:"agent_id"`
+	BrowserExecutionProfile bool      `db:"browser_execution_profile" json:"browser_execution_profile"`
+}
+
 type LockNextClaimableRuntimeRunForAgentRow struct {
 	ID                     uuid.UUID  `db:"id" json:"id"`
 	UserID                 uuid.UUID  `db:"user_id" json:"user_id"`
@@ -698,8 +720,8 @@ type LockNextClaimableRuntimeRunForAgentRow struct {
 	DatabaseNow            time.Time  `db:"database_now" json:"database_now"`
 }
 
-func (q *Queries) LockNextClaimableRuntimeRunForAgent(ctx context.Context, agentID uuid.UUID) (LockNextClaimableRuntimeRunForAgentRow, error) {
-	row := q.db.QueryRow(ctx, lockNextClaimableRuntimeRunForAgent, agentID)
+func (q *Queries) LockNextClaimableRuntimeRunForAgent(ctx context.Context, arg LockNextClaimableRuntimeRunForAgentParams) (LockNextClaimableRuntimeRunForAgentRow, error) {
+	row := q.db.QueryRow(ctx, lockNextClaimableRuntimeRunForAgent, arg.AgentID, arg.BrowserExecutionProfile)
 	var i LockNextClaimableRuntimeRunForAgentRow
 	err := row.Scan(
 		&i.ID,

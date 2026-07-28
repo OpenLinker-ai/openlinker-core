@@ -257,6 +257,15 @@ func runtimeWSAttemptID(envelope RuntimeEnvelope) (uuid.UUID, bool, error) {
 			return uuid.Nil, true, err
 		}
 		identity = payload.AttemptIdentity
+	case RuntimeMessageBrowserViewerFrame:
+		payload, err := DecodeRuntimeMessagePayload[BrowserViewerFramePayload](
+			envelope,
+			envelope.Type,
+		)
+		if err != nil {
+			return uuid.Nil, true, err
+		}
+		identity = payload.AttemptIdentity
 	default:
 		return uuid.Nil, false, nil
 	}

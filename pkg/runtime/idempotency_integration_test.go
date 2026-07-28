@@ -25,7 +25,24 @@ func TestRunCreationPersistsTrustedA2AMetadataBeforeImmutableInsert(t *testing.T
 	userID := insertRuntimeUser(t, pool)
 	creatorID := insertCreator(t, pool)
 
-	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"answer":"done"}}`))
+	var delivered []runtime.AgentRequest
+	endpoint := startMockEndpointForService(t, svc, func(w http.ResponseWriter, r *http.Request) {
+		var request runtime.AgentRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		delivered = append(delivered, request)
+		answer := "later answer"
+		if len(delivered) == 1 {
+			answer = "first answer"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"output": map[string]any{"answer": answer},
+			"events": []map[string]any{{
+				"event_type": "run.message.delta",
+				"payload":    map[string]any{"text": answer},
+			}},
+		}))
+	})
 	agentID := insertAgent(t, pool, creatorID, endpoint, 0, "approved")
 	const conversationID = "plugin-conversation-1"
 
@@ -98,9 +115,45 @@ func TestRunCreationPersistsTrustedA2AMetadataBeforeImmutableInsert(t *testing.T
 	require.Equal(t, second.RunID, secondConversation["current_run_id"])
 	require.Equal(t, "plugin-turn-2", secondConversation["current_protocol_task_id"])
 	history := secondConversation["history_before_current"].([]any)
-	require.Len(t, history, 1)
+	require.Len(t, history, 2)
 	require.Equal(t, first.RunID, history[0].(map[string]any)["run_id"])
 	require.Equal(t, "user", history[0].(map[string]any)["role"])
+	firstUserContent := history[0].(map[string]any)["content"].(string)
+	require.JSONEq(t, `{
+		"task":"remember the nonce",
+		"a2a_context_id":"plugin-conversation-1",
+		"a2a_task_id":"plugin-turn-1",
+		"a2a_root_context_id":"plugin-conversation-1"
+	}`, firstUserContent)
+	require.NotContains(t, firstUserContent, "recall the nonce")
+	require.Equal(t, first.RunID, history[1].(map[string]any)["run_id"])
+	require.Equal(t, "agent", history[1].(map[string]any)["role"])
+	require.Equal(t, "first answer", history[1].(map[string]any)["content"])
+	require.NotContains(t, secondMetadata, "conversation_history")
+
+	require.Len(t, delivered, 2)
+	require.NotNil(t, delivered[1].Conversation)
+	require.Equal(t, conversationID, delivered[1].Conversation.SessionKey)
+	require.Len(t, delivered[1].Conversation.HistoryBeforeCurrent, 2)
+	require.Equal(t, firstUserContent, delivered[1].Conversation.HistoryBeforeCurrent[0].Content)
+	require.Equal(t, "first answer", delivered[1].Conversation.HistoryBeforeCurrent[1].Content)
+	require.NotContains(t, delivered[1].Input, "conversation_history")
+
+	separate, err := svc.Run(context.Background(), userID, &runtime.RunRequest{
+		AgentID: agentID.String(),
+		Input:   map[string]any{"task": "separate conversation"},
+		A2AContext: &runtime.RunA2AContextRequest{
+			ProtocolContextID: "plugin-conversation-2",
+			ProtocolTaskID:    "plugin-conversation-2-turn-1",
+			RootContextID:     "plugin-conversation-2",
+		},
+		IdempotencyKey: "plugin-conversation-2-turn-1",
+	}, "mcp")
+	require.NoError(t, err)
+	require.Equal(t, "success", separate.Status)
+	require.Len(t, delivered, 3)
+	require.NotNil(t, delivered[2].Conversation)
+	require.Empty(t, delivered[2].Conversation.HistoryBeforeCurrent)
 }
 
 func TestRunCreationIdempotencyOneWinnerUnder100ConcurrentRequests(t *testing.T) {

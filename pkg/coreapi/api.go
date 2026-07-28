@@ -559,6 +559,7 @@ func configureRuntime(
 		Presence:            presence,
 		SessionLeases:       sessionLeases,
 		AdmissionLimiter:    runtime.NewRuntimeAdmissionLimiter(runtime.RuntimeAdmissionLimitConfig{}),
+		BrowserControl:      runtimeService.BrowserHumanControl(),
 		CoreInstanceID:      coreInstanceID,
 		WebSocketConcurrency: runtime.RuntimeWebSocketConcurrencyConfig{
 			ConnectionMaxInflight: cfg.RuntimeWSConnectionMaxInflight,
@@ -566,6 +567,7 @@ func configureRuntime(
 			LaneQueueDepth:        cfg.RuntimeWSLaneQueueDepth,
 		},
 	})
+	go runtimeService.BrowserHumanControl().RunGC(rootCtx)
 	go runtime.StartRuntimeMaintenanceWorkerWithWake(
 		rootCtx,
 		runtime.NewRuntimeDeadlineReconciler(pool, nil),

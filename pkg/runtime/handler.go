@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
@@ -25,12 +27,13 @@ const ssePollInterval = time.Second
 
 // Handler 调用执行 HTTP 入口。
 type Handler struct {
-	svc        runtimeService
-	validator  *validator.Validate
-	cfg        *config.Config
-	runtime    *RuntimeHTTPController
-	observer   WorkerObserver
-	runUpdates RunUpdateSource
+	svc            runtimeService
+	validator      *validator.Validate
+	cfg            *config.Config
+	runtime        *RuntimeHTTPController
+	observer       WorkerObserver
+	runUpdates     RunUpdateSource
+	browserControl *BrowserHumanControl
 }
 
 type runtimeService interface {
@@ -54,6 +57,11 @@ func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 		svc:       svc,
 		validator: validator.New(validator.WithRequiredStructEnabled()),
 		runtime:   newRuntimeHTTPControllerForService(svc),
+	}
+	if provider, ok := svc.(interface {
+		BrowserHumanControl() *BrowserHumanControl
+	}); ok {
+		h.browserControl = provider.BrowserHumanControl()
 	}
 	if len(cfg) > 0 {
 		h.cfg = cfg[0]
@@ -100,6 +108,151 @@ func (h *Handler) RegisterProtected(api *echo.Group, runMw, queryMw echo.Middlew
 	api.GET("/runs/:id/stream", h.StreamRunEvents, queryMw)
 	api.POST("/runs/:id/cancel", h.CancelRun, queryMw)
 	api.POST("/runs/:id/replay", h.ReplayRun, runMw)
+	api.GET("/runs/:id/browser-control", h.GetBrowserControl, queryMw)
+	api.POST("/runs/:id/browser-control/claim", h.ClaimBrowserControl, queryMw)
+	api.POST("/runs/:id/browser-control/release", h.ReleaseBrowserControl, queryMw)
+	api.POST("/runs/:id/browser-control/resume", h.ResumeBrowserControl, queryMw)
+	api.POST("/runs/:id/browser-control/input", h.SendBrowserControlInput, queryMw)
+	api.GET("/runs/:id/browser-control/frame", h.GetBrowserControlFrame, queryMw)
+}
+
+func (h *Handler) GetBrowserControl(c echo.Context) error {
+	userID, runID, err := h.browserControlIdentity(c)
+	if err != nil {
+		return err
+	}
+	state, err := h.browserControl.State(c.Request().Context(), userID, runID)
+	if err != nil {
+		return browserControlHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, state)
+}
+
+func (h *Handler) ClaimBrowserControl(c echo.Context) error {
+	return h.browserControlTransition(c, h.browserControl.Claim)
+}
+
+func (h *Handler) ReleaseBrowserControl(c echo.Context) error {
+	return h.browserControlTransition(c, h.browserControl.Release)
+}
+
+func (h *Handler) ResumeBrowserControl(c echo.Context) error {
+	return h.browserControlTransition(c, h.browserControl.Resume)
+}
+
+func (h *Handler) browserControlTransition(
+	c echo.Context,
+	transition func(
+		context.Context,
+		uuid.UUID,
+		uuid.UUID,
+	) (BrowserHumanControlState, error),
+) error {
+	userID, runID, err := h.browserControlIdentity(c)
+	if err != nil {
+		return err
+	}
+	state, err := transition(c.Request().Context(), userID, runID)
+	if err != nil {
+		return browserControlHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, state)
+}
+
+func (h *Handler) SendBrowserControlInput(c echo.Context) error {
+	userID, runID, err := h.browserControlIdentity(c)
+	if err != nil {
+		return err
+	}
+	var input BrowserViewerInputPayload
+	decoder := json.NewDecoder(http.MaxBytesReader(
+		c.Response().Writer,
+		c.Request().Body,
+		64<<10,
+	))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		return httpx.BadRequest("浏览器人控输入无效")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return httpx.BadRequest("浏览器人控输入包含多余数据")
+	}
+	if err := h.browserControl.Input(
+		c.Request().Context(),
+		userID,
+		runID,
+		input,
+	); err != nil {
+		return browserControlHTTPError(err)
+	}
+	return c.NoContent(http.StatusAccepted)
+}
+
+func (h *Handler) GetBrowserControlFrame(c echo.Context) error {
+	userID, runID, err := h.browserControlIdentity(c)
+	if err != nil {
+		return err
+	}
+	var after uint64
+	if raw := strings.TrimSpace(c.QueryParam("after")); raw != "" {
+		after, err = strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			return httpx.BadRequest("after 必须是非负整数")
+		}
+	}
+	wait := 25 * time.Second
+	if raw := strings.TrimSpace(c.QueryParam("wait")); raw != "" {
+		seconds, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || seconds < 0 || seconds > 25 {
+			return httpx.BadRequest("wait 必须是 0 到 25 秒")
+		}
+		wait = time.Duration(seconds) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(c.Request().Context(), wait)
+	defer cancel()
+	frame, err := h.browserControl.WaitFrame(ctx, userID, runID, after)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return c.NoContent(http.StatusNoContent)
+	}
+	if err != nil {
+		return browserControlHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, frame)
+}
+
+func (h *Handler) browserControlIdentity(
+	c echo.Context,
+) (uuid.UUID, uuid.UUID, error) {
+	if h == nil || h.browserControl == nil {
+		return uuid.Nil, uuid.Nil, httpx.ServiceUnavailable("浏览器人控能力不可用")
+	}
+	userID, err := userIDFromCtx(c)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, err
+	}
+	runID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return uuid.Nil, uuid.Nil, httpx.BadRequest("id 不是合法 uuid")
+	}
+	return userID, runID, nil
+}
+
+func browserControlHTTPError(err error) error {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return httpx.NotFound("浏览器人控会话不存在")
+	case strings.Contains(err.Error(), "unavailable"):
+		return httpx.ServiceUnavailable("浏览器人控通道不可用")
+	case strings.Contains(err.Error(), "not allowed"),
+		strings.Contains(err.Error(), "expired"),
+		strings.Contains(err.Error(), "not active"),
+		strings.Contains(err.Error(), "changed"),
+		strings.Contains(err.Error(), "stale"):
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	default:
+		return httpx.Internal("浏览器人控操作失败")
+	}
 }
 
 // RegisterAdmin mounts read-only runtime operational inventory. Core API owns

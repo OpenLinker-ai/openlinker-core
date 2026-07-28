@@ -86,6 +86,7 @@ type Service struct {
 	coreExecutions  *coreAttemptRegistry
 	effectWorker    *RunEffectWorker
 	bestEffortDBSem chan struct{}
+	browserControl  *BrowserHumanControl
 	// Derived once from Config.EffectiveRuntimeMasterSecret. The root secret is
 	// never copied into Run metadata or exposed to a Runtime worker.
 	runtimePrincipalScopeKey []byte
@@ -181,6 +182,7 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		),
 		httpClient:               endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
 		runtimePrincipalScopeKey: deriveRuntimePrincipalScopeKey(cfg),
+		browserControl:           NewBrowserHumanControl(pool),
 	}
 	svc.resultFinalizer = NewResultFinalizer(pool, nil, nil)
 	svc.cancellation = NewRuntimeCancellationCoordinator(pool)
@@ -196,6 +198,13 @@ func (s *Service) ConfigureCoreRuntime(coreInstanceID uuid.UUID) {
 		return
 	}
 	s.coreInstanceID = coreInstanceID
+}
+
+func (s *Service) BrowserHumanControl() *BrowserHumanControl {
+	if s == nil {
+		return nil
+	}
+	return s.browserControl
 }
 
 // FinalizeRuntimeResult is the transport-neutral Runtime Result entrypoint.
@@ -226,6 +235,15 @@ func (s *Service) AppendRuntimeEvent(
 	ack, err := s.eventStore.Append(ctx, principal, identity, req)
 	if err != nil {
 		return RuntimeEventAck{}, err
+	}
+	if req.EventType == "run.browser.lifecycle" && s.browserControl != nil {
+		if projectionErr := s.browserControl.PauseFromEvent(
+			ctx,
+			identity,
+			req.Payload,
+		); projectionErr != nil {
+			return RuntimeEventAck{}, projectionErr
+		}
 	}
 	if !ack.Inserted {
 		return ack, nil
@@ -759,18 +777,31 @@ func runtimePrincipalScopeID(key []byte, userID, agentID uuid.UUID) (string, err
 	return runtimePrincipalScopePrefix + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
 
-func (s *Service) attachRuntimeAuthority(metadata map[string]interface{}, userID, agentID uuid.UUID) error {
+func (s *Service) attachRuntimeAuthority(
+	metadata map[string]interface{},
+	userID, agentID uuid.UUID,
+	executionProfile string,
+) error {
 	if metadata == nil {
 		return errors.New("runtime authority metadata is unavailable")
+	}
+	if executionProfile != "" &&
+		executionProfile != runtimeExecutionProfileStandard &&
+		executionProfile != runtimeExecutionProfileBrowser {
+		return errors.New("runtime execution profile is invalid")
 	}
 	principalScopeID, err := runtimePrincipalScopeID(s.runtimePrincipalScopeKey, userID, agentID)
 	if err != nil {
 		return err
 	}
-	metadata["_openlinker_runtime_authority"] = map[string]interface{}{
+	authority := map[string]interface{}{
 		"principal_scope_id": principalScopeID,
 		"source":             "core",
 	}
+	if executionProfile != "" {
+		authority["execution_profile"] = executionProfile
+	}
+	metadata["_openlinker_runtime_authority"] = authority
 	return nil
 }
 
@@ -995,6 +1026,7 @@ func (s *Service) createRunningRun(
 		agent.ConnectionMode = connectionModeDirectHTTP
 	}
 	runtimeAvailable := true
+	runtimeProfile := runtimeAgentExecutionProfile{}
 	if !isQueuedRuntimeMode(agent.ConnectionMode) {
 		allowLocalHTTP := s.cfg != nil && s.cfg.AllowLocalHTTPEndpoints
 		if err := endpointurl.Validate(agent.EndpointURL, allowLocalHTTP); err != nil {
@@ -1002,14 +1034,32 @@ func (s *Service) createRunningRun(
 			return nil, nil, httpx.Forbidden("Agent endpoint 当前不可调用")
 		}
 	} else {
+		profile, profileErr := s.inspectRuntimeAgentExecutionProfile(ctx, agent.ID)
+		if profileErr != nil {
+			log.Error().Err(profileErr).Str("agent_id", agent.ID.String()).
+				Msg("runtime.Run: inspect Runtime Agent profile")
+			return nil, nil, httpx.Internal("检查 Runtime Worker 执行配置失败")
+		}
+		if profileErr = validateRuntimeAgentExecutionProfile(
+			profile,
+			agent.Visibility,
+			agent.CreatorID,
+			userID,
+		); profileErr != nil {
+			return nil, nil, profileErr
+		}
 		available, checkErr := s.queries.HasActiveRuntimeSessionForAgent(ctx, agent.ID)
 		if checkErr != nil {
 			log.Error().Err(checkErr).Str("agent_id", agent.ID.String()).Msg("runtime.Run: HasActiveRuntimeSessionForAgent")
 			return nil, nil, httpx.Internal("检查 Runtime Worker 连接状态失败")
 		}
-		if !available && !opts.allowOfflineQueuedRuntime {
+		if !available && !runtimeAgentAllowsOfflineQueue(
+			profile,
+			opts.allowOfflineQueuedRuntime,
+		) {
 			return nil, nil, httpx.Conflict("Agent runtime 当前离线，请稍后再试")
 		}
+		runtimeProfile = profile
 		runtimeAvailable = available
 	}
 	if agent.ConnectionMode == connectionModeMCPServer && (agent.MCPToolName == nil || strings.TrimSpace(*agent.MCPToolName) == "") {
@@ -1032,7 +1082,16 @@ func (s *Service) createRunningRun(
 	normalizedReq := *req
 	normalizedReq.Input = copyRunInput(req.Input)
 	normalizedReq.Metadata = trustedRunMetadata(req.Metadata)
-	if err := s.attachRuntimeAuthority(normalizedReq.Metadata, userID, agentID); err != nil {
+	executionProfile := ""
+	if isQueuedRuntimeMode(agent.ConnectionMode) {
+		executionProfile = runtimeExecutionProfileName(runtimeProfile)
+	}
+	if err := s.attachRuntimeAuthority(
+		normalizedReq.Metadata,
+		userID,
+		agentID,
+		executionProfile,
+	); err != nil {
 		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("runtime.Run: attach Runtime authority")
 		return nil, nil, httpx.Internal("生成 Runtime 调用身份失败")
 	}
@@ -1098,7 +1157,12 @@ func (s *Service) createRunningRun(
 			params := runA2AContextMappingParams(runID, userID, agentID, runA2AContext)
 			a2aMappingParams = &params
 			trustedMetadata := trustedRunMetadata(req.Metadata)
-			if authorityErr := s.attachRuntimeAuthority(trustedMetadata, userID, agentID); authorityErr != nil {
+			if authorityErr := s.attachRuntimeAuthority(
+				trustedMetadata,
+				userID,
+				agentID,
+				executionProfile,
+			); authorityErr != nil {
 				return authorityErr
 			}
 			trustedMetadata["a2a"] = agentA2AContextMap(s.agentA2AContextForRequest(runID, opts.delegation, req))
@@ -1110,8 +1174,9 @@ func (s *Service) createRunningRun(
 			createMetadataJSON = marshaledMetadata
 			// Core-connected HTTP and MCP executions reuse this in-memory
 			// request after the transaction. Give them the same trusted
-			// metadata persisted for queued Runtime assignments; never restore
-			// the caller-owned metadata.a2a or metadata.conversation values.
+			// metadata persisted for this Run; never restore caller-owned
+			// metadata.a2a or metadata.conversation values. Only queued Runtime
+			// Runs carry the private execution-profile claim marker.
 			req.Metadata = trustedMetadata
 		}
 

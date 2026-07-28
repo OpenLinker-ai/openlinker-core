@@ -74,6 +74,8 @@ func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {
 			RuntimeSessionID: fixture.sourceSessionID,
 			CoreInstanceID:   fixture.coreID,
 			AttachmentKind:   "resumed",
+			Transport:        "long_poll",
+			TransportReason:  "recovery",
 		})
 		if err != nil {
 			_ = rotateTx.Rollback(ctx)
@@ -146,7 +148,10 @@ func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {
 			t.Fatalf("authenticated claim did not refresh Node liveness: %s", claimedNode.LastSeenAt)
 		}
 
-		candidate, err := q.LockNextClaimableRuntimeRunForAgent(ctx, fixture.agentID)
+		candidate, err := q.LockNextClaimableRuntimeRunForAgent(
+			ctx,
+			LockNextClaimableRuntimeRunForAgentParams{AgentID: fixture.agentID},
+		)
 		if err != nil || candidate.ID != fixture.runID || candidate.DatabaseNow.IsZero() {
 			t.Fatalf("claim candidate = %#v, %v", candidate, err)
 		}
@@ -397,6 +402,115 @@ func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {
 		}
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatal(err)
+		}
+	})
+
+	t.Run("unexpired resume grant blocks audited Browser profile reset", func(t *testing.T) {
+		if _, err := pool.Exec(ctx,
+			`UPDATE agents SET visibility = 'private' WHERE id = $1`,
+			fixture.agentID,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := New(pool).ClassifyRuntimeAgentBrowserExecutionProfile(
+			ctx,
+			ClassifyRuntimeAgentBrowserExecutionProfileParams{
+				AgentID:          fixture.agentID,
+				CredentialID:     fixture.tokenID,
+				RuntimeSessionID: fixture.targetSessionID,
+			},
+		); err != nil {
+			t.Fatalf("classify Browser fixture: %v", err)
+		}
+
+		grantID := uuid.New()
+		grant, err := New(pool).CreateRuntimeResumeGrant(ctx, CreateRuntimeResumeGrantParams{
+			GrantID: grantID, Permission: "upload_spool_only",
+			CoreInstanceID: fixture.coreID, GrantTtlMs: 300_000,
+			TargetSessionID: fixture.targetSessionID, RunID: fixture.runID,
+			AttemptID: fixture.attemptID, LeaseID: fixture.leaseID,
+			FencingToken: 1,
+		})
+		if err != nil {
+			t.Fatalf("create trigger-valid resume grant: %v", err)
+		}
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		q := New(tx)
+		if _, err := q.GetRuntimeSessionForUpdate(ctx, fixture.targetSessionID); err != nil {
+			t.Fatal(err)
+		}
+		attachment, err := q.GetActiveRuntimeSessionAttachment(ctx, fixture.targetSessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reason := "Browser profile reset test"
+		if _, err := q.CloseRuntimeSessionAttachment(ctx, CloseRuntimeSessionAttachmentParams{
+			RuntimeSessionID: fixture.targetSessionID,
+			CoreInstanceID:   fixture.coreID,
+			AttachmentID:     attachment.ID,
+			DisconnectReason: &reason,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := q.CloseRuntimeSession(ctx, CloseRuntimeSessionParams{
+			RuntimeSessionID: fixture.targetSessionID,
+			CoreInstanceID:   fixture.coreID,
+			Status:           "closed",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `
+UPDATE runtime_sessions
+SET status = 'closed',
+    updated_at = clock_timestamp()
+WHERE runtime_session_id = $1
+  AND status = 'offline'`, fixture.sourceSessionID); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		resetParams := ResetRuntimeAgentExecutionProfileParams{
+			AgentID:              fixture.agentID,
+			ResetByUserID:        fixture.userID,
+			ResetReason:          "all Browser Sessions drained and Profile artifacts purged",
+			ProfilePurgeAttested: true,
+		}
+		if _, err := New(pool).ResetRuntimeAgentExecutionProfile(
+			ctx,
+			resetParams,
+		); !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("reset with unexpired resume grant = %v, want pgx.ErrNoRows", err)
+		}
+
+		revokerType := "operator"
+		revokeReason := "Browser Agent reset"
+		if _, err := New(pool).RevokeRuntimeResumeGrant(
+			ctx,
+			RevokeRuntimeResumeGrantParams{
+				RevokedByType: &revokerType,
+				RevokedByID:   &fixture.userID,
+				RevokeReason:  &revokeReason,
+				GrantID:       grant.ID,
+				RunID:         fixture.runID,
+				AttemptID:     fixture.attemptID,
+				LeaseID:       fixture.leaseID,
+				FencingToken:  1,
+			},
+		); err != nil {
+			t.Fatalf("revoke resume grant: %v", err)
+		}
+		if _, err := New(pool).ResetRuntimeAgentExecutionProfile(
+			ctx,
+			resetParams,
+		); err != nil {
+			t.Fatalf("reset after resume grant revocation: %v", err)
 		}
 	})
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/labstack/echo/v4"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
@@ -95,6 +96,15 @@ func TestAgentSlugTagsStatusAndSQLStateHelpers(t *testing.T) {
 	}
 	if !isCheckViolation(sqlStateErr{state: "23514"}) || isCheckViolation(sqlStateErr{state: "23505"}) || isCheckViolation(nil) {
 		t.Fatalf("isCheckViolation did not classify SQLSTATE 23514 only")
+	}
+	if !isBrowserExecutionProfileVisibilityViolation(&pgconn.PgError{
+		Code:           "23514",
+		ConstraintName: "agents_browser_execution_profile_private",
+	}) || isBrowserExecutionProfileVisibilityViolation(&pgconn.PgError{
+		Code:           "23514",
+		ConstraintName: "agents_visibility_valid",
+	}) || isBrowserExecutionProfileVisibilityViolation(nil) {
+		t.Fatalf("Browser execution-profile visibility violation was not classified exactly")
 	}
 	if !isUndefinedTable(sqlStateErr{state: "42P01"}) || isUndefinedTable(sqlStateErr{state: "23505"}) || isUndefinedTable(nil) {
 		t.Fatalf("isUndefinedTable did not classify SQLSTATE 42P01 only")

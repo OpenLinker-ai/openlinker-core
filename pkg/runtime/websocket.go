@@ -143,6 +143,49 @@ func (r *runtimeWSRegistry) shutdown(ctx context.Context) error {
 	}
 }
 
+func (r *runtimeWSRegistry) sendBrowserViewerCommand(
+	runtimeSessionID uuid.UUID,
+	payload BrowserViewerCommandPayload,
+) error {
+	if r == nil || runtimeSessionID == uuid.Nil {
+		return errors.New("Runtime websocket registry is unavailable")
+	}
+	r.mu.Lock()
+	connections := make([]runtimeWSBrowserViewerConnection, 0, 1)
+	for connection := range r.connections {
+		viewer, ok := connection.(runtimeWSBrowserViewerConnection)
+		if ok && viewer.browserViewerRuntimeSessionID() == runtimeSessionID {
+			connections = append(connections, viewer)
+		}
+	}
+	r.mu.Unlock()
+	if len(connections) != 1 {
+		return errors.New("Runtime websocket Viewer connection is unavailable")
+	}
+	return connections[0].sendBrowserViewerCommand(payload)
+}
+
+type runtimeWSBrowserViewerConnection interface {
+	browserViewerRuntimeSessionID() uuid.UUID
+	sendBrowserViewerCommand(BrowserViewerCommandPayload) error
+}
+
+func (h *RuntimeHTTPController) SendBrowserViewerCommand(
+	runtimeSessionID uuid.UUID,
+	payload BrowserViewerCommandPayload,
+) error {
+	if h == nil || h.webSockets == nil {
+		return errors.New("Runtime websocket Viewer is unavailable")
+	}
+	if err := ValidateRuntimePayload(payload); err != nil {
+		return err
+	}
+	if payload.AttemptIdentity.RuntimeSessionID != runtimeSessionID {
+		return errors.New("Runtime websocket Viewer Session identity mismatch")
+	}
+	return h.webSockets.sendBrowserViewerCommand(runtimeSessionID, payload)
+}
+
 // Shutdown rejects new Runtime WebSockets, interrupts every hijacked
 // connection, and waits until each handler has completed durable cleanup.
 func (h *RuntimeHTTPController) Shutdown(ctx context.Context) error {
@@ -571,6 +614,8 @@ func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 		err = c.handleResume(envelope)
 	case RuntimeMessageDrain:
 		err = c.handleDrain(envelope)
+	case RuntimeMessageBrowserViewerFrame:
+		err = c.handleBrowserViewerFrame(envelope)
 	default:
 		err = runtimeTransportValidationError()
 	}
@@ -579,6 +624,68 @@ func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 		return false
 	}
 	return c.replyErrorAndMaybeClose(envelope, err, false)
+}
+
+func (c *runtimeWSConnection) handleBrowserViewerFrame(
+	envelope RuntimeEnvelope,
+) error {
+	if c.controller.dependencies.BrowserControl == nil {
+		return runtimeUnavailableError()
+	}
+	payload, err := DecodeRuntimeMessagePayload[BrowserViewerFramePayload](
+		envelope,
+		RuntimeMessageBrowserViewerFrame,
+	)
+	if err != nil {
+		return err
+	}
+	if payload.AttemptIdentity.RuntimeSessionID !=
+		c.sessionPrincipal.RuntimeSessionID {
+		return runtimeTransportValidationError()
+	}
+	if err := c.controller.dependencies.BrowserControl.PublishFrame(payload); err != nil {
+		return runtimeTransportValidationError()
+	}
+	return sendRuntimeWSReply(
+		c,
+		envelope,
+		RuntimeMessageBrowserViewerFrameAck,
+		BrowserViewerFrameAckPayload{
+			AttemptIdentity: payload.AttemptIdentity,
+			ControlEpoch:    payload.ControlEpoch,
+			FrameSeq:        payload.FrameSeq,
+		},
+	)
+}
+
+func (c *runtimeWSConnection) browserViewerRuntimeSessionID() uuid.UUID {
+	c.lifecycleMu.RLock()
+	defer c.lifecycleMu.RUnlock()
+	if !c.attached {
+		return uuid.Nil
+	}
+	return c.sessionPrincipal.RuntimeSessionID
+}
+
+func (c *runtimeWSConnection) sendBrowserViewerCommand(
+	payload BrowserViewerCommandPayload,
+) error {
+	c.lifecycleMu.RLock()
+	defer c.lifecycleMu.RUnlock()
+	if !c.attached ||
+		c.sessionPrincipal.RuntimeSessionID !=
+			payload.AttemptIdentity.RuntimeSessionID {
+		return errors.New("Runtime websocket Viewer Session is unavailable")
+	}
+	message, _, err := newRuntimeWSTypedMessage(
+		RuntimeMessageBrowserViewerCommand,
+		nil,
+		payload,
+	)
+	if err != nil {
+		return err
+	}
+	return c.writeMessage(message)
 }
 
 func (c *runtimeWSConnection) scheduleMaintenanceContinuation(messageType RuntimeMessageType) {

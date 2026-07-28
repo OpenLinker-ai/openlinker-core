@@ -206,16 +206,17 @@ func ValidateRuntimeReplyCorrelation(request, reply RuntimeEnvelope) error {
 }
 
 var runtimeReplyTypes = map[RuntimeMessageType][]RuntimeMessageType{
-	RuntimeMessageHello:            {RuntimeMessageReady},
-	RuntimeMessageRunAssigned:      {RuntimeMessageAssignmentAck, RuntimeMessageAssignmentReject},
-	RuntimeMessageAssignmentAck:    {RuntimeMessageAssignmentConfirmed},
-	RuntimeMessageAssignmentReject: {RuntimeMessageAssignmentRejected},
-	RuntimeMessageLeaseRenew:       {RuntimeMessageLeaseRenewed},
-	RuntimeMessageRunEvent:         {RuntimeMessageRunEventAck},
-	RuntimeMessageRunResult:        {RuntimeMessageRunResultAck},
-	RuntimeMessageRunCancel:        {RuntimeMessageRunCancelAck},
-	RuntimeMessageResume:           {RuntimeMessageResumeAccepted},
-	RuntimeMessageDrain:            {RuntimeMessageDrain},
+	RuntimeMessageHello:              {RuntimeMessageReady},
+	RuntimeMessageRunAssigned:        {RuntimeMessageAssignmentAck, RuntimeMessageAssignmentReject},
+	RuntimeMessageAssignmentAck:      {RuntimeMessageAssignmentConfirmed},
+	RuntimeMessageAssignmentReject:   {RuntimeMessageAssignmentRejected},
+	RuntimeMessageLeaseRenew:         {RuntimeMessageLeaseRenewed},
+	RuntimeMessageRunEvent:           {RuntimeMessageRunEventAck},
+	RuntimeMessageRunResult:          {RuntimeMessageRunResultAck},
+	RuntimeMessageRunCancel:          {RuntimeMessageRunCancelAck},
+	RuntimeMessageResume:             {RuntimeMessageResumeAccepted},
+	RuntimeMessageDrain:              {RuntimeMessageDrain},
+	RuntimeMessageBrowserViewerFrame: {RuntimeMessageBrowserViewerFrameAck},
 }
 
 func runtimeMessageExpectsReply(messageType RuntimeMessageType) bool {
@@ -235,6 +236,7 @@ func runtimeMessageRequiresReplyTo(messageType RuntimeMessageType) bool {
 		RuntimeMessageRunResultAck,
 		RuntimeMessageRunCancelAck,
 		RuntimeMessageResumeAccepted,
+		RuntimeMessageBrowserViewerFrameAck,
 		RuntimeMessageError:
 		return true
 	default:
@@ -263,6 +265,9 @@ func knownRuntimeMessageType(messageType RuntimeMessageType) bool {
 		RuntimeMessageResumeAccepted,
 		RuntimeMessageLeaseRevoked,
 		RuntimeMessageDrain,
+		RuntimeMessageBrowserViewerCommand,
+		RuntimeMessageBrowserViewerFrame,
+		RuntimeMessageBrowserViewerFrameAck,
 		RuntimeMessageError:
 		return true
 	default:
@@ -367,6 +372,12 @@ func ValidateRuntimePayload(payload any) error {
 		if value.DeadlineAt.IsZero() || !validRequiredString(value.ReasonCode, 120) || value.Capacity != 0 || value.Inflight < 0 {
 			return runtimeValidationError("invalid runtime drain command", nil)
 		}
+	case BrowserViewerCommandPayload:
+		return validateBrowserViewerCommand(value)
+	case BrowserViewerFramePayload:
+		return validateBrowserViewerFrame(value)
+	case BrowserViewerFrameAckPayload:
+		return validateBrowserViewerFrameAck(value)
 	case PendingCommand:
 		_, err := DecodePendingCommand(value)
 		return err
@@ -702,6 +713,7 @@ type DecodedPendingCommand struct {
 	Cancel *RunCancelPayload
 	Drain  *RuntimeDrainPayload
 	Revoke *RunLeaseRevokedPayload
+	Viewer *BrowserViewerCommandPayload
 }
 
 // DecodePendingCommand strictly decodes the command union and rejects unknown
@@ -736,6 +748,15 @@ func DecodePendingCommand(command PendingCommand) (DecodedPendingCommand, error)
 			return DecodedPendingCommand{}, err
 		}
 		decoded.Revoke = &payload
+	case RuntimeMessageBrowserViewerCommand:
+		var payload BrowserViewerCommandPayload
+		if err := decodeRuntimeJSON(command.Payload, &payload); err != nil {
+			return DecodedPendingCommand{}, err
+		}
+		if err := ValidateRuntimePayload(payload); err != nil {
+			return DecodedPendingCommand{}, err
+		}
+		decoded.Viewer = &payload
 	default:
 		return DecodedPendingCommand{}, runtimeValidationError("unknown runtime command type", nil)
 	}
@@ -746,6 +767,126 @@ func validateAttemptIdentity(value AttemptIdentity) error {
 	if value.RunID == uuid.Nil || value.AttemptID == uuid.Nil || value.LeaseID == uuid.Nil || value.FencingToken < 1 ||
 		value.NodeID == uuid.Nil || value.AgentID == uuid.Nil || !validRequiredString(value.WorkerID, 200) || value.RuntimeSessionID == uuid.Nil {
 		return runtimeValidationError("invalid runtime attempt identity", nil)
+	}
+	return nil
+}
+
+func validateBrowserViewerCommand(value BrowserViewerCommandPayload) error {
+	if err := validateAttemptIdentity(value.AttemptIdentity); err != nil {
+		return err
+	}
+	if value.BrowserSessionID == uuid.Nil ||
+		value.AttachmentID == uuid.Nil ||
+		value.SessionEpoch == 0 ||
+		value.PreviousControlEpoch == 0 ||
+		value.ControlEpoch == 0 ||
+		value.DeadlineAt.IsZero() {
+		return runtimeValidationError("invalid browser Viewer command identity", nil)
+	}
+	switch value.Action {
+	case BrowserViewerActionClaim,
+		BrowserViewerActionRelease,
+		BrowserViewerActionResume,
+		BrowserViewerActionTerminate:
+		if value.Input != nil ||
+			value.ControlEpoch != value.PreviousControlEpoch+1 {
+			return runtimeValidationError("invalid browser Viewer control transition", nil)
+		}
+	case BrowserViewerActionInput:
+		if value.Input == nil ||
+			value.ControlEpoch != value.PreviousControlEpoch ||
+			!validBrowserViewerInput(*value.Input) {
+			return runtimeValidationError("invalid browser Viewer input", nil)
+		}
+	default:
+		return runtimeValidationError("invalid browser Viewer command action", nil)
+	}
+	return nil
+}
+
+func validBrowserViewerInput(input BrowserViewerInputPayload) bool {
+	switch input.Kind {
+	case "pointer":
+		if input.X == nil || input.Y == nil ||
+			*input.X < 0 || *input.X >= 1280 ||
+			*input.Y < 0 || *input.Y >= 720 ||
+			input.KeyboardAction != "" || input.Key != "" ||
+			input.Text != "" || input.DeltaX != 0 || input.DeltaY != 0 {
+			return false
+		}
+		switch input.PointerAction {
+		case "move":
+			return input.Button == "" && input.ClickCount == 0
+		case "click":
+			return (input.Button == "left" ||
+				input.Button == "middle" ||
+				input.Button == "right") &&
+				input.ClickCount >= 1 && input.ClickCount <= 3
+		default:
+			return false
+		}
+	case "keyboard":
+		if input.PointerAction != "" || input.X != nil || input.Y != nil ||
+			input.Button != "" || input.ClickCount != 0 ||
+			input.DeltaX != 0 || input.DeltaY != 0 {
+			return false
+		}
+		switch input.KeyboardAction {
+		case "press":
+			return validRequiredString(input.Key, 64) && input.Text == ""
+		case "text":
+			return input.Key == "" &&
+				validRequiredString(input.Text, 4096) &&
+				!strings.ContainsRune(input.Text, '\x00')
+		default:
+			return false
+		}
+	case "scroll":
+		return input.PointerAction == "" &&
+			input.KeyboardAction == "" &&
+			input.X == nil && input.Y == nil &&
+			input.Button == "" && input.ClickCount == 0 &&
+			input.Key == "" && input.Text == "" &&
+			!math.IsNaN(input.DeltaX) && !math.IsInf(input.DeltaX, 0) &&
+			!math.IsNaN(input.DeltaY) && !math.IsInf(input.DeltaY, 0) &&
+			math.Abs(input.DeltaX) <= 4096 &&
+			math.Abs(input.DeltaY) <= 4096 &&
+			(input.DeltaX != 0 || input.DeltaY != 0)
+	default:
+		return false
+	}
+}
+
+func validateBrowserViewerFrame(value BrowserViewerFramePayload) error {
+	if err := validateAttemptIdentity(value.AttemptIdentity); err != nil {
+		return err
+	}
+	if value.BrowserSessionID == uuid.Nil ||
+		value.AttachmentID == uuid.Nil ||
+		value.SessionEpoch == 0 ||
+		value.ControlEpoch == 0 ||
+		value.FrameSeq == 0 ||
+		value.MIMEType != "image/jpeg" ||
+		len(value.Data) == 0 ||
+		len(value.Data) > 1<<20 ||
+		value.Width != 1280 ||
+		value.Height != 720 {
+		return runtimeValidationError("invalid browser Viewer frame", nil)
+	}
+	return nil
+}
+
+func validateBrowserViewerFrameAck(
+	value BrowserViewerFrameAckPayload,
+) error {
+	if err := validateAttemptIdentity(value.AttemptIdentity); err != nil {
+		return err
+	}
+	if value.ControlEpoch == 0 || value.FrameSeq == 0 {
+		return runtimeValidationError(
+			"invalid browser Viewer frame acknowledgement",
+			nil,
+		)
 	}
 	return nil
 }
