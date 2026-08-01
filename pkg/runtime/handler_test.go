@@ -60,7 +60,7 @@ func setupHandlerTest(t *testing.T) (*echo.Echo, *pgxpool.Pool, *runtime.Service
 	}
 
 	api := e.Group("/api/v1")
-	jwtMW := auth.JWTMiddleware(testHandlerSecret)
+	jwtMW := auth.JWTMiddlewareWithUserStatus(testHandlerSecret, auth.NewDBUserStatusChecker(pool))
 	h.RegisterProtected(api, jwtMW, jwtMW)
 
 	return e, pool, svc

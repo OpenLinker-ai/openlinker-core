@@ -3,6 +3,7 @@ package a2a
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
@@ -34,8 +35,11 @@ func NewBearerGRPCAuthenticator(jwtSecret string, verifier auth.ApiKeyVerifier) 
 	return &BearerGRPCAuthenticator{jwtSecret: jwtSecret, verifier: verifier}
 }
 
-func NewBearerGRPCAuthenticatorWithUserStatus(jwtSecret string, verifier auth.ApiKeyVerifier, users auth.UserStatusChecker) *BearerGRPCAuthenticator {
-	return &BearerGRPCAuthenticator{jwtSecret: jwtSecret, verifier: verifier, users: users}
+func NewBearerGRPCAuthenticatorWithUserStatus(jwtSecret string, verifier auth.ApiKeyVerifier, users auth.UserStatusChecker) (*BearerGRPCAuthenticator, error) {
+	if err := auth.ValidateUserStatusChecker(users); err != nil {
+		return nil, fmt.Errorf("a2a grpc: %w", err)
+	}
+	return &BearerGRPCAuthenticator{jwtSecret: jwtSecret, verifier: verifier, users: users}, nil
 }
 
 func (a *BearerGRPCAuthenticator) AuthenticateA2AGRPC(ctx context.Context) (*GRPCAuthInfo, error) {
@@ -70,18 +74,19 @@ func (a *BearerGRPCAuthenticator) AuthenticateA2AGRPC(ctx context.Context) (*GRP
 		principal := &auth.AuthPrincipal{UserID: uid, AuthMethod: auth.AuthMethodUserToken, Grants: grants}
 		return &GRPCAuthInfo{UserID: uid, AuthMethod: auth.AuthMethodUserToken, Scopes: scopes, Principal: principal}, nil
 	}
-	uid, err := auth.ParseToken(token, a.jwtSecret)
+	claims, err := auth.ParseTokenClaims(token, a.jwtSecret)
 	if err != nil {
 		return nil, httpx.Unauthorized("token 无效或已过期")
 	}
-	parsed, err := uuid.Parse(uid)
+	parsed, err := uuid.Parse(claims.Subject)
 	if err != nil {
 		return nil, httpx.Unauthorized("token 无效")
 	}
-	if a.users != nil {
-		if err := a.users.EnsureUserEnabled(ctx, parsed); err != nil {
-			return nil, err
-		}
+	if a.users == nil {
+		return nil, httpx.Unauthorized("token 无效或已过期")
+	}
+	if err := a.users.EnsureJWTUserVersion(ctx, parsed, claims.TokenVersion); err != nil {
+		return nil, err
 	}
 	principal := &auth.AuthPrincipal{UserID: parsed, AuthMethod: auth.AuthMethodJWT, Grants: []auth.Grant{}}
 	return &GRPCAuthInfo{UserID: parsed, AuthMethod: auth.AuthMethodJWT, Principal: principal}, nil

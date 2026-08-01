@@ -38,6 +38,14 @@ func StartA2AGRPCServer(rootCtx context.Context, cfg *config.Config, services *S
 	if services == nil || services.A2A == nil || services.AgentMarket == nil {
 		return nil, errors.New("a2a grpc services are not initialized")
 	}
+	authenticator, err := a2a.NewBearerGRPCAuthenticatorWithUserStatus(
+		cfg.JWTSecret,
+		services.UserToken,
+		services.UserStatus,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("configure a2a grpc authentication: %w", err)
+	}
 	addr := ":" + strconv.Itoa(cfg.A2AGRPCPort)
 	publicURL := strings.TrimRight(strings.TrimSpace(cfg.A2AGRPCPublicURL), "/")
 	if publicURL == "" {
@@ -51,7 +59,7 @@ func StartA2AGRPCServer(rootCtx context.Context, cfg *config.Config, services *S
 	a2aServer := a2a.NewGRPCServer(
 		services.A2A,
 		services.AgentMarket,
-		a2a.NewBearerGRPCAuthenticatorWithUserStatus(cfg.JWTSecret, services.UserToken, services.UserStatus),
+		authenticator,
 	)
 	a2aServer.SetRunUpdateSource(services.RunUpdates)
 	a2apb.RegisterA2AServiceServer(server, a2aServer)

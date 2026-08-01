@@ -65,7 +65,7 @@ func TestUpdateUserFlagsCanDisableUserButNotSelf(t *testing.T) {
 	now := time.Date(2026, 7, 6, 10, 0, 0, 0, time.UTC)
 	disabledAt := now.Add(time.Minute)
 	updatedRow := adminUserRow(targetID, "target@example.com", "Target User", false, false, false, now)
-	updatedRow[10] = &disabledAt
+	updatedRow[11] = &disabledAt
 	fake := &adminFakeDBTX{
 		rows: []pgx.Row{
 			adminFakeRow{values: adminUserRow(targetID, "target@example.com", "Target User", false, false, false, now)},
@@ -229,6 +229,7 @@ func adminUserRow(id uuid.UUID, email, displayName string, isCreator, creatorVer
 		isCreator,
 		creatorVerified,
 		isAdmin,
+		int64(0),
 		nil,
 		now,
 		now,

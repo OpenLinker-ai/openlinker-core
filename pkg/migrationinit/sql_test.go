@@ -17,6 +17,8 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 		"086_current_schema_init_verify.sql":         true,
 		"087_browser_agent_execution_profile.up.sql": true,
 		"088_browser_human_control.up.sql":           true,
+		"089_user_jwt_token_version.up.sql":          true,
+		"090_task_callback_owner_index.up.sql":       true,
 	}
 	if len(paths) != len(want) {
 		t.Fatalf("migration SQL files = %v, want only current initializer and verifier", paths)
@@ -24,6 +26,45 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 	for _, path := range paths {
 		if !want[filepath.Base(path)] {
 			t.Fatalf("unexpected executable migration file %s", path)
+		}
+	}
+}
+
+func TestJWTTokenVersionForwardMigrationIsBoundedAndAuditable(t *testing.T) {
+	up := readInitializer(t, "../../migrations/089_user_jwt_token_version.up.sql")
+	for _, fragment := range []string{
+		"SET LOCAL lock_timeout = '5s'",
+		"SET LOCAL statement_timeout = '30s'",
+		"ADD COLUMN token_version bigint DEFAULT 0 NOT NULL",
+		"CONSTRAINT users_token_version_nonnegative",
+		"CHECK (token_version >= 0) NOT VALID",
+		"VALIDATE CONSTRAINT users_token_version_nonnegative",
+	} {
+		if !strings.Contains(up, fragment) {
+			t.Fatalf("JWT token-version migration missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{"IF NOT EXISTS", "DO $$", "UPDATE public.users"} {
+		if strings.Contains(up, forbidden) {
+			t.Fatalf("JWT token-version migration hides or duplicates its transition with %q", forbidden)
+		}
+	}
+}
+
+func TestTaskCallbackOwnerIndexForwardMigrationIsConcurrentAndExact(t *testing.T) {
+	up := readInitializer(t, "../../migrations/090_task_callback_owner_index.up.sql")
+	for _, fragment := range []string{
+		"CREATE INDEX CONCURRENTLY idx_task_callback_subscriptions_owner",
+		"(owner_user_id, updated_at DESC, created_at DESC)",
+		"WHERE status <> 'deleted'",
+	} {
+		if !strings.Contains(up, fragment) {
+			t.Fatalf("task callback owner-index migration missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{"IF NOT EXISTS", "DO $$", "BEGIN;", "SET "} {
+		if strings.Contains(up, forbidden) {
+			t.Fatalf("concurrent callback index migration contains forbidden %q", forbidden)
 		}
 	}
 }
@@ -152,8 +193,8 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	verify := readInitializer(t, "../../migrations/086_current_schema_init_verify.sql")
 	for _, fragment := range []string{
 		"public_tables <> 72",
-		"public_constraints <> 615",
-		"public_indexes <> 265",
+		"public_constraints <> 616",
+		"public_indexes <> 266",
 		"public_triggers <> 70",
 		"public_functions <> 65",
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",
@@ -166,7 +207,10 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 		"runtime_agent_execution_profiles_browser_idx",
 		"browser_run_controls_expiry_idx",
 		"browser_human_control_audits_run_created_idx",
+		"idx_task_callback_subscriptions_owner",
 		"agents_browser_execution_profile_private",
+		"users_token_version_nonnegative",
+		"column_name = 'token_version'",
 	} {
 		if !strings.Contains(verify, fragment) {
 			t.Fatalf("Core initializer verifier missing %q", fragment)

@@ -84,7 +84,7 @@ func setupProtectedMarketTestServer(t *testing.T) (*httptest.Server, *pgxpool.Po
 	}
 
 	api := e.Group("/api/v1")
-	jwtMW := auth.JWTMiddleware(testHandlerSecret)
+	jwtMW := auth.JWTMiddlewareWithUserStatus(testHandlerSecret, auth.NewDBUserStatusChecker(pool))
 	h.Register(api)
 	h.RegisterProtected(api, jwtMW)
 

@@ -23,16 +23,16 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 615 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 615', public_constraints;
+    IF public_constraints <> 616 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 616', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 265 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 265', public_indexes;
+    IF public_indexes <> 266 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 266', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers
@@ -115,8 +115,32 @@ BEGIN
        OR to_regclass('public.idx_runtime_sessions_credential_lifecycle') IS NULL
        OR to_regclass('public.runtime_agent_execution_profiles_browser_idx') IS NULL
        OR to_regclass('public.browser_run_controls_expiry_idx') IS NULL
-       OR to_regclass('public.browser_human_control_audits_run_created_idx') IS NULL THEN
+       OR to_regclass('public.browser_human_control_audits_run_created_idx') IS NULL
+       OR to_regclass('public.idx_task_callback_subscriptions_owner') IS NULL THEN
         RAISE EXCEPTION 'Core initializer is missing a required current index';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'users'
+          AND column_name = 'token_version'
+          AND data_type = 'bigint'
+          AND is_nullable = 'NO'
+          AND column_default = '0'
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint constraint_row
+        JOIN pg_catalog.pg_class relation ON relation.oid = constraint_row.conrelid
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relname = 'users'
+          AND constraint_row.conname = 'users_token_version_nonnegative'
+          AND constraint_row.contype = 'c'
+          AND constraint_row.convalidated
+    ) THEN
+        RAISE EXCEPTION 'Core initializer is missing the JWT token-version contract';
     END IF;
 
     IF NOT EXISTS (

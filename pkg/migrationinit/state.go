@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	CoreVersion             int64 = 88
-	CoreUpgradeVersion      int64 = 87
+	CoreVersion             int64 = 90
+	CoreUpgradeVersion      int64 = 88
 	CloudVersion            int64 = 55
-	CoreSchemaDigest              = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
-	CoreUpgradeSchemaDigest       = "19b7cba7240f4597633e224962437b6676ff592f6168ab611051483031211f87"
+	CoreSchemaDigest              = "7e47d3b82e06f4be0e2c67680fc088a02945bb7be28811e358435323b2397ebe"
+	CoreUpgradeSchemaDigest       = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
 	CloudSchemaDigest             = "0cf21f9a518d9875e62e66e1b490148e45b67eaaeddf9cab118efd778575abd5"
 )
 
@@ -588,8 +588,8 @@ func validateCoreShape(shape SchemaShape) error {
 	want := SchemaShape{
 		Digest:            CoreSchemaDigest,
 		Tables:            72,
-		Constraints:       615,
-		Indexes:           265,
+		Constraints:       616,
+		Indexes:           266,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -616,9 +616,9 @@ func validateCoreShape(shape SchemaShape) error {
 func validateCoreUpgradeShape(shape SchemaShape) error {
 	want := SchemaShape{
 		Digest:            CoreUpgradeSchemaDigest,
-		Tables:            70,
-		Constraints:       594,
-		Indexes:           261,
+		Tables:            72,
+		Constraints:       615,
+		Indexes:           265,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,

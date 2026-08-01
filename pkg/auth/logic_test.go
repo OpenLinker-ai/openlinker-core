@@ -349,7 +349,7 @@ func TestHybridAuthMiddlewareAvoidsDuplicateVerifiedUserStatusLookup(t *testing.
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 	called := false
-	err := HybridAuthMiddlewareWithUserStatus(pureAuthSecret, principalVerifier, users)(func(echo.Context) error {
+	err := HybridAuthMiddlewareWithUserStatus(pureAuthSecret, principalVerifier, &DBUserStatusChecker{users: users})(func(echo.Context) error {
 		called = true
 		return nil
 	})(c)
@@ -362,10 +362,52 @@ func TestHybridAuthMiddlewareAvoidsDuplicateVerifiedUserStatusLookup(t *testing.
 	req = httptest.NewRequest(http.MethodGet, "/protected", nil)
 	req.Header.Set(echo.HeaderAuthorization, "Bearer ol_user_legacy")
 	c = e.NewContext(req, httptest.NewRecorder())
-	err = HybridAuthMiddlewareWithUserStatus(pureAuthSecret, legacyVerifier, users)(func(echo.Context) error { return nil })(c)
+	err = HybridAuthMiddlewareWithUserStatus(pureAuthSecret, legacyVerifier, &DBUserStatusChecker{users: users})(func(echo.Context) error { return nil })(c)
 	if err != nil || users.calls != 1 {
 		t.Fatalf("legacy principal middleware = err %v, user queries %d", err, users.calls)
 	}
+}
+
+func TestHybridAuthMiddlewareRejectsRevokedJWTVersionWithOneUserRead(t *testing.T) {
+	userID := uuid.New()
+	token, err := GenerateTokenWithVersion(userID.String(), pureAuthSecret, time.Hour, 2)
+	if err != nil {
+		t.Fatalf("GenerateTokenWithVersion: %v", err)
+	}
+	users := &fakeUserByIDQuerier{user: db.User{ID: userID, TokenVersion: 3}}
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer "+token)
+	c := e.NewContext(req, httptest.NewRecorder())
+	err = HybridAuthMiddlewareWithUserStatus(
+		pureAuthSecret,
+		nil,
+		&DBUserStatusChecker{users: users},
+	)(func(echo.Context) error {
+		t.Fatal("revoked Hybrid JWT reached protected handler")
+		return nil
+	})(c)
+	requireAuthHTTPStatus(t, err, http.StatusUnauthorized)
+	if users.calls != 1 {
+		t.Fatalf("Hybrid JWT user reads = %d, want 1", users.calls)
+	}
+}
+
+func TestHybridAuthMiddlewareRequiresConcreteUserStatusChecker(t *testing.T) {
+	assertPanics := func(name string, checker UserStatusChecker) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("hybrid middleware construction should panic")
+				}
+			}()
+			_ = HybridAuthMiddlewareWithUserStatus(pureAuthSecret, nil, checker)
+		})
+	}
+	assertPanics("nil", nil)
+	var typedNil *DBUserStatusChecker
+	assertPanics("typed nil", typedNil)
 }
 
 func TestAuthServicePureHelpers(t *testing.T) {
@@ -479,7 +521,7 @@ func invokeHybridAuth(t *testing.T, secret string, verifier ApiKeyVerifier, auth
 		got.scopes, _ = c.Get(string(httpx.CtxKeyAuthScopes)).([]string)
 		return c.NoContent(http.StatusOK)
 	}
-	if err := HybridAuthMiddleware(secret, verifier)(next)(c); err != nil {
+	if err := HybridAuthMiddlewareWithUserStatus(secret, verifier, allowingUserStatusChecker{})(next)(c); err != nil {
 		e.HTTPErrorHandler(err, c)
 	}
 	return rec, got

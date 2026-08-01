@@ -105,8 +105,8 @@ func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
 		Tables:            72,
-		Constraints:       615,
-		Indexes:           265,
+		Constraints:       616,
+		Indexes:           266,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -128,16 +128,16 @@ func upgradeableCoreSnapshot() Snapshot {
 			Version: CoreUpgradeVersion,
 		},
 		CoreShape:             upgradeableCoreShape(),
-		NonBookkeepingObjects: 70,
+		NonBookkeepingObjects: 72,
 	}
 }
 
 func upgradeableCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreUpgradeSchemaDigest,
-		Tables:            70,
-		Constraints:       594,
-		Indexes:           261,
+		Tables:            72,
+		Constraints:       615,
+		Indexes:           265,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -158,7 +158,7 @@ func upgradeableCloudSnapshot(current Snapshot) Snapshot {
 		Version: CoreUpgradeVersion,
 	}
 	current.CoreShape = upgradeableCoreShape()
-	current.NonBookkeepingObjects = 77
+	current.NonBookkeepingObjects = 79
 	return current
 }
 

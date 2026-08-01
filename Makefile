@@ -56,7 +56,7 @@ sqlc: ## 有意迁移手写 DB 层到 sqlc 输出(必须 CONFIRM_OVERWRITE=1)
 	@command -v sqlc >/dev/null 2>&1 || { echo "请先安装 sqlc"; exit 1; }
 	sqlc generate
 
-migrate-up: build ## 初始化当前 Core schema，或从精确版本 087 升级/验证版本 088
+migrate-up: build ## 初始化当前 Core schema，或从精确版本 088 升级/验证版本 090
 	@set -a; . ./$(ENV_FILE); set +a; MIGRATIONS_DIR=./migrations ./bin/api migrate up
 
 migrate-create: ## 创建 migration: make migrate-create name=add_xxx
