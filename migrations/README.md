@@ -20,6 +20,23 @@ migration driver is created. `api migrate check` reports `fresh`,
 `upgradeable`, or `current` without mutation. There is no down migration;
 recreate disposable databases instead.
 
+Migration `090` uses `CREATE INDEX CONCURRENTLY`. If PostgreSQL interrupts that
+build, it can retain `public.idx_task_callback_subscriptions_owner` with
+`pg_index.indisvalid = false`. Do not retry `090` while that relation exists:
+the replay will fail with `relation already exists`. On a reviewed maintenance
+connection, first confirm that the index is invalid, then run:
+
+```sql
+DROP INDEX CONCURRENTLY IF EXISTS public.idx_task_callback_subscriptions_owner;
+```
+
+After the invalid relation is gone, use the same pinned `golang-migrate`
+version as the deployment to force the dirty migration state back to version
+`089`, rerun exactly one migration, and finish with `api migrate check`. Never
+force the version or mark the rollout complete while the invalid index still
+exists. Both the production migration inspector and the current-schema SQL
+verifier require the version-090 index to have `indisvalid = true`.
+
 Version `090` postflight also fails while any Agent with historical
 `browser_execution_profile.v1` Runtime Sessions is missing a reviewed durable
 profile row. Follow `docs/58-browser-agent-execution-profile-runbook.md` before

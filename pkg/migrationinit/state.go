@@ -164,6 +164,7 @@ type Snapshot struct {
 	CloudShape                SchemaShape
 	ObsoleteCloudObjects      int64
 	UnclassifiedBrowserAgents int64
+	CallbackOwnerIndexValid   bool
 }
 
 // Inspect reads initialization evidence without creating migration tables.
@@ -204,6 +205,27 @@ func Inspect(ctx context.Context, databaseURL string) (Snapshot, error) {
 	snapshot.CloudShape, err = inspectShape(ctx, conn, cloudTables, true)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("inspect Cloud schema: %w", err)
+	}
+	if err := conn.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_catalog.pg_index index_metadata
+			JOIN pg_catalog.pg_class index_relation
+			  ON index_relation.oid = index_metadata.indexrelid
+			JOIN pg_catalog.pg_namespace index_namespace
+			  ON index_namespace.oid = index_relation.relnamespace
+			JOIN pg_catalog.pg_class table_relation
+			  ON table_relation.oid = index_metadata.indrelid
+			JOIN pg_catalog.pg_namespace table_namespace
+			  ON table_namespace.oid = table_relation.relnamespace
+			WHERE index_namespace.nspname = 'public'
+			  AND index_relation.relname = 'idx_task_callback_subscriptions_owner'
+			  AND table_namespace.nspname = 'public'
+			  AND table_relation.relname = 'task_callback_subscriptions'
+			  AND index_metadata.indisvalid
+		)
+	`).Scan(&snapshot.CallbackOwnerIndexValid); err != nil {
+		return Snapshot{}, fmt.Errorf("inspect callback owner index validity: %w", err)
 	}
 	if err := conn.QueryRow(ctx, `
 		SELECT count(*)
@@ -465,6 +487,9 @@ func (s Snapshot) ValidateCoreUp() (bool, error) {
 	}
 	switch s.Core.Version {
 	case CoreVersion:
+		if !s.CallbackOwnerIndexValid {
+			return false, errors.New("idx_task_callback_subscriptions_owner is missing or invalid")
+		}
 		if err := validateCoreShape(s.CoreShape); err != nil {
 			return false, err
 		}
@@ -503,6 +528,9 @@ func (s Snapshot) ValidateCloudUp() (bool, error) {
 	coreUpgradeable := false
 	switch s.Core.Version {
 	case CoreVersion:
+		if !s.CallbackOwnerIndexValid {
+			return false, errors.New("Cloud initialization requires current Core: idx_task_callback_subscriptions_owner is missing or invalid")
+		}
 		if err := validateCoreShape(s.CoreShape); err != nil {
 			return false, fmt.Errorf("Cloud initialization requires current Core: %w", err)
 		}

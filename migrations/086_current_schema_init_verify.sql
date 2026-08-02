@@ -115,9 +115,28 @@ BEGIN
        OR to_regclass('public.idx_runtime_sessions_credential_lifecycle') IS NULL
        OR to_regclass('public.runtime_agent_execution_profiles_browser_idx') IS NULL
        OR to_regclass('public.browser_run_controls_expiry_idx') IS NULL
-       OR to_regclass('public.browser_human_control_audits_run_created_idx') IS NULL
-       OR to_regclass('public.idx_task_callback_subscriptions_owner') IS NULL THEN
+       OR to_regclass('public.browser_human_control_audits_run_created_idx') IS NULL THEN
         RAISE EXCEPTION 'Core initializer is missing a required current index';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_index index_metadata
+        JOIN pg_catalog.pg_class index_relation
+          ON index_relation.oid = index_metadata.indexrelid
+        JOIN pg_catalog.pg_namespace index_namespace
+          ON index_namespace.oid = index_relation.relnamespace
+        JOIN pg_catalog.pg_class table_relation
+          ON table_relation.oid = index_metadata.indrelid
+        JOIN pg_catalog.pg_namespace table_namespace
+          ON table_namespace.oid = table_relation.relnamespace
+        WHERE index_namespace.nspname = 'public'
+          AND index_relation.relname = 'idx_task_callback_subscriptions_owner'
+          AND table_namespace.nspname = 'public'
+          AND table_relation.relname = 'task_callback_subscriptions'
+          AND index_metadata.indisvalid
+    ) THEN
+        RAISE EXCEPTION 'idx_task_callback_subscriptions_owner is missing or invalid';
     END IF;
 
     IF NOT EXISTS (

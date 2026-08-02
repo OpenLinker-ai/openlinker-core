@@ -208,6 +208,8 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 		"browser_run_controls_expiry_idx",
 		"browser_human_control_audits_run_created_idx",
 		"idx_task_callback_subscriptions_owner",
+		"index_metadata.indisvalid",
+		"idx_task_callback_subscriptions_owner is missing or invalid",
 		"agents_browser_execution_profile_private",
 		"users_token_version_nonnegative",
 		"column_name = 'token_version'",
