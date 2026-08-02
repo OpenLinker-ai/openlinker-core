@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 
 	"github.com/google/uuid"
@@ -18,16 +19,10 @@ type userStatusQuerier interface {
 	GetUserByID(context.Context, uuid.UUID) (db.User, error)
 }
 
-// JWTMiddleware 校验 Authorization: Bearer <token>。
-//
-// 成功：c.Set(string(httpx.CtxKeyUserID), userID) 后 next。
-// 失败：返回 httpx.Unauthorized()，由全局 ErrorHandler 转成统一错误响应。
-func JWTMiddleware(secret string) echo.MiddlewareFunc {
-	return JWTMiddlewareWithUserStatus(secret, nil)
-}
-
-// JWTMiddlewareWithUserStatus additionally rejects deleted or disabled users.
-func JWTMiddlewareWithUserStatus(secret string, users userStatusQuerier) echo.MiddlewareFunc {
+// JWTMiddlewareWithUserStatus validates a JWT and its current durable user
+// session version before exposing the principal to a protected handler.
+func JWTMiddlewareWithUserStatus(secret string, users UserStatusChecker) echo.MiddlewareFunc {
+	requireUserStatusChecker(users)
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			h := c.Request().Header.Get(echo.HeaderAuthorization)
@@ -38,16 +33,16 @@ func JWTMiddlewareWithUserStatus(secret string, users userStatusQuerier) echo.Mi
 			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
 				return httpx.Unauthorized("Authorization 格式错误")
 			}
-			userID, err := ParseToken(parts[1], secret)
+			claims, err := ParseTokenClaims(parts[1], secret)
 			if err != nil {
 				return httpx.Unauthorized("token 无效或已过期")
 			}
-			if err := ensureTokenUserEnabled(c.Request().Context(), users, userID); err != nil {
-				return err
-			}
-			uid, err := uuid.Parse(userID)
+			uid, err := uuid.Parse(claims.Subject)
 			if err != nil {
 				return httpx.Unauthorized("token 无效")
+			}
+			if err := users.EnsureJWTUserVersion(c.Request().Context(), uid, claims.TokenVersion); err != nil {
+				return err
 			}
 			SetPrincipal(c, &AuthPrincipal{UserID: uid, AuthMethod: AuthMethodJWT, Grants: []Grant{}})
 			return next(c)
@@ -55,24 +50,39 @@ func JWTMiddlewareWithUserStatus(secret string, users userStatusQuerier) echo.Mi
 	}
 }
 
-func ensureTokenUserEnabled(ctx context.Context, users userStatusQuerier, userID string) error {
+func requireUserStatusChecker(users UserStatusChecker) {
+	if err := ValidateUserStatusChecker(users); err != nil {
+		panic(err)
+	}
+}
+
+// ValidateUserStatusChecker rejects both a nil interface and an interface that
+// contains a typed-nil checker.
+func ValidateUserStatusChecker(users UserStatusChecker) error {
 	if users == nil {
-		return nil
+		return errors.New("auth: user status checker is required")
 	}
-	uid, err := uuid.Parse(userID)
-	if err != nil {
-		return httpx.Unauthorized("token 无效")
-	}
-	user, err := users.GetUserByID(ctx, uid)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return httpx.Unauthorized("用户不存在或会话已失效")
+	value := reflect.ValueOf(users)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return errors.New("auth: user status checker is required")
 		}
-		log.Error().Err(err).Str("user_id", uid.String()).Msg("auth.middleware: GetUserByID")
-		return httpx.Internal("认证状态校验失败")
-	}
-	if user.DisabledAt != nil {
-		return httpx.Unauthorized("账号已禁用")
 	}
 	return nil
+}
+
+func loadEnabledUser(ctx context.Context, users userStatusQuerier, userID uuid.UUID) (db.User, error) {
+	user, err := users.GetUserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.User{}, httpx.Unauthorized("用户不存在或会话已失效")
+		}
+		log.Error().Err(err).Str("user_id", userID.String()).Msg("auth.middleware: GetUserByID")
+		return db.User{}, httpx.Internal("认证状态校验失败")
+	}
+	if user.DisabledAt != nil {
+		return db.User{}, httpx.Unauthorized("账号已禁用")
+	}
+	return user, nil
 }

@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	CoreVersion             int64 = 88
-	CoreUpgradeVersion      int64 = 87
+	CoreVersion             int64 = 90
+	CoreUpgradeVersion      int64 = 88
 	CloudVersion            int64 = 55
-	CoreSchemaDigest              = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
-	CoreUpgradeSchemaDigest       = "19b7cba7240f4597633e224962437b6676ff592f6168ab611051483031211f87"
+	CoreSchemaDigest              = "7e47d3b82e06f4be0e2c67680fc088a02945bb7be28811e358435323b2397ebe"
+	CoreUpgradeSchemaDigest       = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
 	CloudSchemaDigest             = "0cf21f9a518d9875e62e66e1b490148e45b67eaaeddf9cab118efd778575abd5"
 )
 
@@ -164,6 +164,7 @@ type Snapshot struct {
 	CloudShape                SchemaShape
 	ObsoleteCloudObjects      int64
 	UnclassifiedBrowserAgents int64
+	CallbackOwnerIndexValid   bool
 }
 
 // Inspect reads initialization evidence without creating migration tables.
@@ -204,6 +205,27 @@ func Inspect(ctx context.Context, databaseURL string) (Snapshot, error) {
 	snapshot.CloudShape, err = inspectShape(ctx, conn, cloudTables, true)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("inspect Cloud schema: %w", err)
+	}
+	if err := conn.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_catalog.pg_index index_metadata
+			JOIN pg_catalog.pg_class index_relation
+			  ON index_relation.oid = index_metadata.indexrelid
+			JOIN pg_catalog.pg_namespace index_namespace
+			  ON index_namespace.oid = index_relation.relnamespace
+			JOIN pg_catalog.pg_class table_relation
+			  ON table_relation.oid = index_metadata.indrelid
+			JOIN pg_catalog.pg_namespace table_namespace
+			  ON table_namespace.oid = table_relation.relnamespace
+			WHERE index_namespace.nspname = 'public'
+			  AND index_relation.relname = 'idx_task_callback_subscriptions_owner'
+			  AND table_namespace.nspname = 'public'
+			  AND table_relation.relname = 'task_callback_subscriptions'
+			  AND index_metadata.indisvalid
+		)
+	`).Scan(&snapshot.CallbackOwnerIndexValid); err != nil {
+		return Snapshot{}, fmt.Errorf("inspect callback owner index validity: %w", err)
 	}
 	if err := conn.QueryRow(ctx, `
 		SELECT count(*)
@@ -465,6 +487,9 @@ func (s Snapshot) ValidateCoreUp() (bool, error) {
 	}
 	switch s.Core.Version {
 	case CoreVersion:
+		if !s.CallbackOwnerIndexValid {
+			return false, errors.New("idx_task_callback_subscriptions_owner is missing or invalid")
+		}
 		if err := validateCoreShape(s.CoreShape); err != nil {
 			return false, err
 		}
@@ -503,6 +528,9 @@ func (s Snapshot) ValidateCloudUp() (bool, error) {
 	coreUpgradeable := false
 	switch s.Core.Version {
 	case CoreVersion:
+		if !s.CallbackOwnerIndexValid {
+			return false, errors.New("Cloud initialization requires current Core: idx_task_callback_subscriptions_owner is missing or invalid")
+		}
 		if err := validateCoreShape(s.CoreShape); err != nil {
 			return false, fmt.Errorf("Cloud initialization requires current Core: %w", err)
 		}
@@ -588,8 +616,8 @@ func validateCoreShape(shape SchemaShape) error {
 	want := SchemaShape{
 		Digest:            CoreSchemaDigest,
 		Tables:            72,
-		Constraints:       615,
-		Indexes:           265,
+		Constraints:       616,
+		Indexes:           266,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -616,9 +644,9 @@ func validateCoreShape(shape SchemaShape) error {
 func validateCoreUpgradeShape(shape SchemaShape) error {
 	want := SchemaShape{
 		Digest:            CoreUpgradeSchemaDigest,
-		Tables:            70,
-		Constraints:       594,
-		Indexes:           261,
+		Tables:            72,
+		Constraints:       615,
+		Indexes:           265,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,

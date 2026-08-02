@@ -4082,6 +4082,7 @@ func userRow(id uuid.UUID, now time.Time, passwordHash, provider, oauthID, avata
 		true,
 		true,
 		false,
+		int64(3),
 		nil,
 		now,
 		now.Add(time.Minute),

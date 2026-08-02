@@ -236,6 +236,7 @@ func upsertBootstrapAdmin(ctx context.Context, dbtx bootstrapAdminDB, email, pas
 		if _, err := tx.Exec(ctx, `
 UPDATE users
 SET password_hash = $2,
+    token_version = token_version + 1,
     display_name = $3,
     is_admin = TRUE,
     disabled_at = NULL,

@@ -48,6 +48,62 @@ func TestGenerateAndParseToken_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 	claims := parsed.Claims.(*Claims)
 	assert.Equal(t, jwtIssuer, claims.Issuer)
+	assert.Equal(t, int64(0), claims.TokenVersion)
+}
+
+func TestGenerateAndParseTokenWithVersion(t *testing.T) {
+	t.Parallel()
+
+	uid := uuid.NewString()
+	tok, err := GenerateTokenWithVersion(uid, testSecret, defaultTTL, 7)
+	require.NoError(t, err)
+
+	claims, err := ParseTokenClaims(tok, testSecret)
+	require.NoError(t, err)
+	assert.Equal(t, uid, claims.Subject)
+	assert.Equal(t, int64(7), claims.TokenVersion)
+}
+
+func TestParseTokenClaimsTreatsMissingVersionAsZero(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	legacy := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		Issuer:    jwtIssuer,
+		Subject:   uuid.NewString(),
+		IssuedAt:  jwt.NewNumericDate(now),
+		ExpiresAt: jwt.NewNumericDate(now.Add(defaultTTL)),
+	})
+	signed, err := legacy.SignedString([]byte(testSecret))
+	require.NoError(t, err)
+
+	claims, err := ParseTokenClaims(signed, testSecret)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), claims.TokenVersion)
+}
+
+func TestTokenVersionRejectsNegativeValues(t *testing.T) {
+	t.Parallel()
+
+	if _, err := GenerateTokenWithVersion(uuid.NewString(), testSecret, defaultTTL, -1); err == nil {
+		t.Fatal("GenerateTokenWithVersion should reject a negative version")
+	}
+
+	now := time.Now()
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    jwtIssuer,
+			Subject:   uuid.NewString(),
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(defaultTTL)),
+		},
+		TokenVersion: -1,
+	})
+	signed, err := token.SignedString([]byte(testSecret))
+	require.NoError(t, err)
+	if _, err := ParseTokenClaims(signed, testSecret); err == nil {
+		t.Fatal("ParseTokenClaims should reject a negative version")
+	}
 }
 
 func TestParseToken_InvalidSignature(t *testing.T) {

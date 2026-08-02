@@ -736,6 +736,9 @@ func TestChangePassword_HappyPathAndGuards(t *testing.T) {
 		DisplayName: "Password Tester",
 	})
 	require.NoError(t, err)
+	oldClaims, err := ParseTokenClaims(regResp.JWT, testServiceSecret)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), oldClaims.TokenVersion)
 	uid, err := uuid.Parse(regResp.UserID)
 	require.NoError(t, err)
 
@@ -766,18 +769,55 @@ func TestChangePassword_HappyPathAndGuards(t *testing.T) {
 		NewPasswordConfirm: newPassword,
 	})
 	require.NoError(t, err)
+	var tokenVersion int64
+	require.NoError(t, pool.QueryRow(ctx, `SELECT token_version FROM users WHERE id = $1`, uid).Scan(&tokenVersion))
+	assert.Equal(t, int64(1), tokenVersion)
+	assertHTTPStatus(t, NewDBUserStatusChecker(pool).EnsureJWTUserVersion(ctx, uid, oldClaims.TokenVersion), http.StatusUnauthorized)
 
 	_, err = svc.Login(ctx, &LoginRequest{Email: email, Password: oldPassword})
 	assertHTTPStatus(t, err, http.StatusUnauthorized)
 	loginResp, err := svc.Login(ctx, &LoginRequest{Email: email, Password: newPassword})
 	require.NoError(t, err)
 	assert.Equal(t, regResp.UserID, loginResp.UserID)
+	newClaims, err := ParseTokenClaims(loginResp.JWT, testServiceSecret)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), newClaims.TokenVersion)
 
 	err = svc.ChangePassword(ctx, uuid.New(), &ChangePasswordRequest{
 		CurrentPassword: oldPassword,
 		NewPassword:     newPassword,
 	})
 	assertHTTPStatus(t, err, http.StatusNotFound)
+}
+
+func TestResetPasswordAdvancesTokenVersionAndRevokesOldJWT(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+	email := uniqueEmail("password-reset-version")
+	oldPassword := "supersecret123"
+	newPassword := "newsecret456"
+
+	registered, err := svc.Register(ctx, &RegisterRequest{
+		Email: email, Password: oldPassword, DisplayName: "Reset Version",
+	})
+	require.NoError(t, err)
+	uid, err := uuid.Parse(registered.UserID)
+	require.NoError(t, err)
+	oldClaims, err := ParseTokenClaims(registered.JWT, testServiceSecret)
+	require.NoError(t, err)
+
+	require.NoError(t, svc.ResetPassword(ctx, email, newPassword))
+	var tokenVersion int64
+	require.NoError(t, pool.QueryRow(ctx, `SELECT token_version FROM users WHERE id = $1`, uid).Scan(&tokenVersion))
+	assert.Equal(t, int64(1), tokenVersion)
+	assertHTTPStatus(t, NewDBUserStatusChecker(pool).EnsureJWTUserVersion(ctx, uid, oldClaims.TokenVersion), http.StatusUnauthorized)
+
+	login, err := svc.Login(ctx, &LoginRequest{Email: email, Password: newPassword})
+	require.NoError(t, err)
+	claims, err := ParseTokenClaims(login.JWT, testServiceSecret)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), claims.TokenVersion)
 }
 
 func TestChangePassword_OAuthOnlyUserRejected(t *testing.T) {

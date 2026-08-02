@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"os"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type unexpectedBootstrapAdminDB struct{}
@@ -149,5 +153,46 @@ func TestParseBootstrapAdminConfigRejectsDisplayAddress(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("parseBootstrapAdminConfig returned nil error for display address")
+	}
+}
+
+func TestUpsertBootstrapAdminAdvancesTokenVersion(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, "TRUNCATE users RESTART IDENTITY CASCADE"); err != nil {
+		t.Fatal(err)
+	}
+	email := "bootstrap-version-" + uuid.NewString() + "@example.com"
+	var userID uuid.UUID
+	if err := pool.QueryRow(ctx, `
+INSERT INTO users (email, password_hash, display_name, token_version)
+VALUES ($1, 'old-hash', 'Old Admin', 4)
+RETURNING id
+`, email).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+
+	gotID, created, err := upsertBootstrapAdmin(ctx, pool, email, "new-hash", "New Admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created || gotID != userID {
+		t.Fatalf("upsert result id=%s created=%t", gotID, created)
+	}
+	var version int64
+	if err := pool.QueryRow(ctx, `SELECT token_version FROM users WHERE id = $1`, userID).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 5 {
+		t.Fatalf("token_version = %d, want 5", version)
 	}
 }

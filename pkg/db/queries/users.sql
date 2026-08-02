@@ -11,7 +11,7 @@ INSERT INTO users (
     $1, $2, $3, $4, $5, $6
 )
 RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
-          avatar_url, is_creator, creator_verified, is_admin, disabled_at,
+          avatar_url, is_creator, creator_verified, is_admin, token_version, disabled_at,
           created_at, updated_at, deleted_at;
 
 -- name: CreateAdminUser :one
@@ -27,13 +27,13 @@ INSERT INTO users (
     $1, $2, $3, $4, $5, $6
 )
 RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
-          avatar_url, is_creator, creator_verified, is_admin, disabled_at,
+          avatar_url, is_creator, creator_verified, is_admin, token_version, disabled_at,
           created_at, updated_at, deleted_at;
 
 -- name: GetUserByEmail :one
 -- 按 email 查活跃用户
 SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,
-       avatar_url, is_creator, creator_verified, is_admin, disabled_at,
+       avatar_url, is_creator, creator_verified, is_admin, token_version, disabled_at,
        created_at, updated_at, deleted_at
 FROM users
 WHERE email = $1 AND deleted_at IS NULL;
@@ -41,7 +41,7 @@ WHERE email = $1 AND deleted_at IS NULL;
 -- name: GetUserByOAuth :one
 -- 按 OAuth provider + oauth_id 查活跃用户
 SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,
-       avatar_url, is_creator, creator_verified, is_admin, disabled_at,
+       avatar_url, is_creator, creator_verified, is_admin, token_version, disabled_at,
        created_at, updated_at, deleted_at
 FROM users
 WHERE oauth_provider = $1 AND oauth_id = $2 AND deleted_at IS NULL;
@@ -49,7 +49,7 @@ WHERE oauth_provider = $1 AND oauth_id = $2 AND deleted_at IS NULL;
 -- name: GetUserByID :one
 -- 按 id 查活跃用户
 SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,
-       avatar_url, is_creator, creator_verified, is_admin, disabled_at,
+       avatar_url, is_creator, creator_verified, is_admin, token_version, disabled_at,
        created_at, updated_at, deleted_at
 FROM users
 WHERE id = $1 AND deleted_at IS NULL;
@@ -72,7 +72,7 @@ WHERE id = $1 AND deleted_at IS NULL AND disabled_at IS NULL;
 -- name: ListAdminUsers :many
 -- 管理台用户列表：按邮箱 / 昵称搜索，可筛角色。
 SELECT u.id, u.email, u.password_hash, u.oauth_provider, u.oauth_id, u.display_name,
-       u.avatar_url, u.is_creator, u.creator_verified, u.is_admin, u.disabled_at,
+       u.avatar_url, u.is_creator, u.creator_verified, u.is_admin, u.token_version, u.disabled_at,
        u.created_at, u.updated_at, u.deleted_at,
        COALESCE(agent_stats.agent_count, 0)::int AS agent_count,
        COALESCE(agent_stats.active_agent_count, 0)::int AS active_agent_count,
@@ -147,5 +147,5 @@ SET is_admin = $2,
     updated_at = NOW()
 WHERE id = $1 AND deleted_at IS NULL
 RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
-          avatar_url, is_creator, creator_verified, is_admin, disabled_at,
+          avatar_url, is_creator, creator_verified, is_admin, token_version, disabled_at,
           created_at, updated_at, deleted_at;

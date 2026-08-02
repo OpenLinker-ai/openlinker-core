@@ -22,7 +22,7 @@ INSERT INTO users (
     $1, $2, $3, $4, $5, $6
 )
 RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
-          avatar_url, is_creator, creator_verified, is_admin, disabled_at,
+          avatar_url, is_creator, creator_verified, is_admin, token_version, disabled_at,
           created_at, updated_at, deleted_at`
 
 // CreateUserParams 入参（password_hash / oauth_* / avatar_url 可空）。
@@ -57,6 +57,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&u.IsCreator,
 		&u.CreatorVerified,
 		&u.IsAdmin,
+		&u.TokenVersion,
 		&u.DisabledAt,
 		&u.CreatedAt,
 		&u.UpdatedAt,
@@ -77,7 +78,7 @@ INSERT INTO users (
     $1, $2, $3, $4, $5, $6
 )
 RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
-          avatar_url, is_creator, creator_verified, is_admin, disabled_at,
+          avatar_url, is_creator, creator_verified, is_admin, token_version, disabled_at,
           created_at, updated_at, deleted_at`
 
 // CreateAdminUserParams 入参（管理台创建用户）。
@@ -112,6 +113,7 @@ func (q *Queries) CreateAdminUser(ctx context.Context, arg CreateAdminUserParams
 		&u.IsCreator,
 		&u.CreatorVerified,
 		&u.IsAdmin,
+		&u.TokenVersion,
 		&u.DisabledAt,
 		&u.CreatedAt,
 		&u.UpdatedAt,
@@ -122,7 +124,7 @@ func (q *Queries) CreateAdminUser(ctx context.Context, arg CreateAdminUserParams
 
 const getUserByEmail = `-- name: GetUserByEmail :one
 SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,
-       avatar_url, is_creator, creator_verified, is_admin, disabled_at,
+       avatar_url, is_creator, creator_verified, is_admin, token_version, disabled_at,
        created_at, updated_at, deleted_at
 FROM users
 WHERE email = $1 AND deleted_at IS NULL`
@@ -142,6 +144,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&u.IsCreator,
 		&u.CreatorVerified,
 		&u.IsAdmin,
+		&u.TokenVersion,
 		&u.DisabledAt,
 		&u.CreatedAt,
 		&u.UpdatedAt,
@@ -152,7 +155,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 
 const getUserByOAuth = `-- name: GetUserByOAuth :one
 SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,
-       avatar_url, is_creator, creator_verified, is_admin, disabled_at,
+       avatar_url, is_creator, creator_verified, is_admin, token_version, disabled_at,
        created_at, updated_at, deleted_at
 FROM users
 WHERE oauth_provider = $1 AND oauth_id = $2 AND deleted_at IS NULL`
@@ -178,6 +181,7 @@ func (q *Queries) GetUserByOAuth(ctx context.Context, arg GetUserByOAuthParams) 
 		&u.IsCreator,
 		&u.CreatorVerified,
 		&u.IsAdmin,
+		&u.TokenVersion,
 		&u.DisabledAt,
 		&u.CreatedAt,
 		&u.UpdatedAt,
@@ -188,7 +192,7 @@ func (q *Queries) GetUserByOAuth(ctx context.Context, arg GetUserByOAuthParams) 
 
 const getUserByID = `-- name: GetUserByID :one
 SELECT id, email, password_hash, oauth_provider, oauth_id, display_name,
-       avatar_url, is_creator, creator_verified, is_admin, disabled_at,
+       avatar_url, is_creator, creator_verified, is_admin, token_version, disabled_at,
        created_at, updated_at, deleted_at
 FROM users
 WHERE id = $1 AND deleted_at IS NULL`
@@ -208,6 +212,7 @@ func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
 		&u.IsCreator,
 		&u.CreatorVerified,
 		&u.IsAdmin,
+		&u.TokenVersion,
 		&u.DisabledAt,
 		&u.CreatedAt,
 		&u.UpdatedAt,
@@ -260,7 +265,7 @@ func (q *Queries) UpdateUserBecomeCreator(ctx context.Context, id uuid.UUID) (in
 
 const listAdminUsers = `-- name: ListAdminUsers :many
 SELECT u.id, u.email, u.password_hash, u.oauth_provider, u.oauth_id, u.display_name,
-       u.avatar_url, u.is_creator, u.creator_verified, u.is_admin, u.disabled_at,
+       u.avatar_url, u.is_creator, u.creator_verified, u.is_admin, u.token_version, u.disabled_at,
        u.created_at, u.updated_at, u.deleted_at,
        COALESCE(agent_stats.agent_count, 0)::int AS agent_count,
        COALESCE(agent_stats.active_agent_count, 0)::int AS active_agent_count,
@@ -345,6 +350,7 @@ func (q *Queries) ListAdminUsers(ctx context.Context, arg ListAdminUsersParams) 
 			&u.IsCreator,
 			&u.CreatorVerified,
 			&u.IsAdmin,
+			&u.TokenVersion,
 			&u.DisabledAt,
 			&u.CreatedAt,
 			&u.UpdatedAt,
@@ -405,7 +411,7 @@ SET is_admin = $2,
     updated_at = NOW()
 WHERE id = $1 AND deleted_at IS NULL
 RETURNING id, email, password_hash, oauth_provider, oauth_id, display_name,
-          avatar_url, is_creator, creator_verified, is_admin, disabled_at,
+          avatar_url, is_creator, creator_verified, is_admin, token_version, disabled_at,
           created_at, updated_at, deleted_at`
 
 type UpdateAdminUserFlagsParams struct {
@@ -431,6 +437,7 @@ func (q *Queries) UpdateAdminUserFlags(ctx context.Context, arg UpdateAdminUserF
 		&u.IsCreator,
 		&u.CreatorVerified,
 		&u.IsAdmin,
+		&u.TokenVersion,
 		&u.DisabledAt,
 		&u.CreatedAt,
 		&u.UpdatedAt,

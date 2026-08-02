@@ -105,9 +105,8 @@ func RegisterRuntimeAttachOnly(
 	authSvc := newAuthService(pool, cfg)
 	authHandler := auth.NewHandler(authSvc, cfg)
 	authHandler.RegisterRuntimeAttachOnly(api)
-	userStatusQueries := db.New(pool)
 	userStatusChecker := auth.NewDBUserStatusChecker(pool)
-	jwtMiddleware := auth.JWTMiddlewareWithUserStatus(cfg.JWTSecret, userStatusQueries)
+	jwtMiddleware := auth.JWTMiddlewareWithUserStatus(cfg.JWTSecret, userStatusChecker)
 
 	agentSvc := agent.NewRuntimeAttachReadOnlyService(pool, cfg)
 	agent.NewHandler(agentSvc, cfg).RegisterRuntimeAttachReadOnly(api, jwtMiddleware)
@@ -143,16 +142,15 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	authSvc := newAuthService(pool, cfg)
 	authSvc.SetUserProvisioner(opts.UserProvisioner)
 	authHandler := auth.NewHandler(authSvc, cfg)
-	userStatusQueries := db.New(pool)
 	userStatusChecker := auth.NewDBUserStatusChecker(pool)
-	jwtMiddleware := auth.JWTMiddlewareWithUserStatus(cfg.JWTSecret, userStatusQueries)
+	jwtMiddleware := auth.JWTMiddlewareWithUserStatus(cfg.JWTSecret, userStatusChecker)
 	authHandler.Register(api)
 	authHandler.RegisterProtected(api, jwtMiddleware)
 	userTokenSvc := usertoken.NewService(pool)
 	usertoken.NewHandler(userTokenSvc).Register(api, jwtMiddleware)
 	usertoken.NewIntrospectionHandler(userTokenSvc, cfg.InternalToken).Register(e)
 	// ol_user_* is always issued, verified, and revoked by this Core.
-	hybridMw := auth.HybridAuthMiddlewareWithUserStatus(cfg.JWTSecret, userTokenSvc, userStatusQueries)
+	hybridMw := auth.HybridAuthMiddlewareWithUserStatus(cfg.JWTSecret, userTokenSvc, userStatusChecker)
 	var adminSvc *coreadmin.Service
 	if opts.AdminMiddleware != nil {
 		adminSvc = coreadmin.NewService(pool)

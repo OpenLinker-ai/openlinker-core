@@ -21,8 +21,9 @@ import (
 )
 
 type fakeGRPCUserStatusChecker struct {
-	err    error
-	userID uuid.UUID
+	err          error
+	userID       uuid.UUID
+	tokenVersion int64
 }
 
 type rejectingGRPCUserTokenVerifier struct{}
@@ -58,6 +59,12 @@ func (c *fakeGRPCUserStatusChecker) EnsureUserEnabled(_ context.Context, userID 
 	return c.err
 }
 
+func (c *fakeGRPCUserStatusChecker) EnsureJWTUserVersion(_ context.Context, userID uuid.UUID, tokenVersion int64) error {
+	c.userID = userID
+	c.tokenVersion = tokenVersion
+	return c.err
+}
+
 func TestBearerGRPCAuthenticatorRejectsDisabledJWTUser(t *testing.T) {
 	const secret = "grpc-user-status-secret-32-chars"
 	userID := uuid.New()
@@ -68,17 +75,65 @@ func TestBearerGRPCAuthenticatorRejectsDisabledJWTUser(t *testing.T) {
 	))
 	checker := &fakeGRPCUserStatusChecker{err: httpx.Unauthorized("账号已禁用")}
 
-	_, err = NewBearerGRPCAuthenticatorWithUserStatus(secret, nil, checker).AuthenticateA2AGRPC(ctx)
+	authenticator, err := NewBearerGRPCAuthenticatorWithUserStatus(secret, nil, checker)
+	require.NoError(t, err)
+	_, err = authenticator.AuthenticateA2AGRPC(ctx)
 	var httpErr *httpx.HTTPError
 	require.True(t, errors.As(err, &httpErr))
 	require.Equal(t, httpx.CodeUnauthorized, httpErr.Code)
 	require.Equal(t, userID, checker.userID)
 
 	checker.err = nil
-	info, err := NewBearerGRPCAuthenticatorWithUserStatus(secret, nil, checker).AuthenticateA2AGRPC(ctx)
+	authenticator, err = NewBearerGRPCAuthenticatorWithUserStatus(secret, nil, checker)
+	require.NoError(t, err)
+	info, err := authenticator.AuthenticateA2AGRPC(ctx)
 	require.NoError(t, err)
 	require.Equal(t, userID, info.UserID)
 	require.Equal(t, auth.AuthMethodJWT, info.AuthMethod)
+}
+
+func TestBearerGRPCAuthenticatorRejectsRevokedJWTVersion(t *testing.T) {
+	const secret = "grpc-revoked-version-secret-32-chars"
+	userID := uuid.New()
+	token, err := auth.GenerateTokenWithVersion(userID.String(), secret, time.Hour, 4)
+	require.NoError(t, err)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
+		"authorization", "Bearer "+token,
+	))
+	checker := &fakeGRPCUserStatusChecker{err: httpx.Unauthorized("token 无效或已过期")}
+
+	authenticator, err := NewBearerGRPCAuthenticatorWithUserStatus(secret, nil, checker)
+	require.NoError(t, err)
+	_, err = authenticator.AuthenticateA2AGRPC(ctx)
+	var httpErr *httpx.HTTPError
+	require.True(t, errors.As(err, &httpErr))
+	require.Equal(t, httpx.CodeUnauthorized, httpErr.Code)
+	require.Equal(t, userID, checker.userID)
+	require.Equal(t, int64(4), checker.tokenVersion)
+}
+
+func TestBearerGRPCAuthenticatorRejectsMissingAndTypedNilStatusChecker(t *testing.T) {
+	if _, err := NewBearerGRPCAuthenticatorWithUserStatus("secret", nil, nil); err == nil {
+		t.Fatal("nil checker should fail construction")
+	}
+	var typedNil *fakeGRPCUserStatusChecker
+	if _, err := NewBearerGRPCAuthenticatorWithUserStatus("secret", nil, typedNil); err == nil {
+		t.Fatal("typed-nil checker should fail construction")
+	}
+}
+
+func TestBearerGRPCCompatibilityAuthenticatorRejectsJWTWithoutStatusAuthority(t *testing.T) {
+	const secret = "grpc-no-status-secret-32-chars"
+	token, err := auth.GenerateToken(uuid.NewString(), secret, time.Hour)
+	require.NoError(t, err)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
+		"authorization", "Bearer "+token,
+	))
+
+	_, err = NewBearerGRPCAuthenticator(secret, nil).AuthenticateA2AGRPC(ctx)
+	var httpErr *httpx.HTTPError
+	require.True(t, errors.As(err, &httpErr))
+	require.Equal(t, httpx.CodeUnauthorized, httpErr.Code)
 }
 
 type staticGRPCAuth struct {

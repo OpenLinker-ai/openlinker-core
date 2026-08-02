@@ -23,6 +23,7 @@ func TestValidateCoreUp(t *testing.T) {
 		{name: "malformed", snapshot: withCoreState(currentCoreSnapshot(), MigrationTableState{Exists: true, Rows: 2}), wantError: "exactly one"},
 		{name: "partial current", snapshot: withCoreShape(currentCoreSnapshot(), SchemaShape{Tables: 69}), wantError: "fingerprint mismatch"},
 		{name: "definition drift with stable counts", snapshot: withCoreDigest(currentCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
+		{name: "invalid callback owner index", snapshot: withCallbackOwnerIndexValidity(currentCoreSnapshot(), false), wantError: "idx_task_callback_subscriptions_owner is missing or invalid"},
 		{name: "historical Browser Agent not backfilled", snapshot: withUnclassifiedBrowserAgents(currentCoreSnapshot(), 1), wantError: "backfill is incomplete"},
 		{name: "unknown public relation", snapshot: withRelationCount(currentCoreSnapshot(), 73), wantError: "ownership mismatch"},
 	}
@@ -70,6 +71,7 @@ func TestValidateCloudUp(t *testing.T) {
 		{name: "Cloud legacy", snapshot: withCloudState(current, MigrationTableState{Exists: true, Rows: 1, Version: 54}), wantError: "unsupported"},
 		{name: "Cloud dirty", snapshot: withCloudState(current, MigrationTableState{Exists: true, Rows: 1, Version: CloudVersion, Dirty: true}), wantError: "dirty"},
 		{name: "Cloud malformed", snapshot: withCloudState(current, MigrationTableState{Exists: true, Rows: 0}), wantError: "exactly one"},
+		{name: "Core callback owner index invalid", snapshot: withCallbackOwnerIndexValidity(current, false), wantError: "idx_task_callback_subscriptions_owner is missing or invalid"},
 		{name: "Cloud schema drift", snapshot: withCloudShape(current, SchemaShape{Tables: 7, Constraints: 71, Indexes: 30, Triggers: 5, GuardFunctions: 1}), wantError: "fingerprint mismatch"},
 		{name: "Cloud definition drift with stable counts", snapshot: withCloudDigest(current, "wrong"), wantError: "fingerprint mismatch"},
 		{name: "unknown public relation", snapshot: withRelationCount(current, 80), wantError: "ownership mismatch"},
@@ -95,9 +97,10 @@ func TestValidateCloudUp(t *testing.T) {
 
 func currentCoreSnapshot() Snapshot {
 	return Snapshot{
-		Core:                  MigrationTableState{Exists: true, Rows: 1, Version: CoreVersion},
-		CoreShape:             currentCoreShape(),
-		NonBookkeepingObjects: 72,
+		Core:                    MigrationTableState{Exists: true, Rows: 1, Version: CoreVersion},
+		CoreShape:               currentCoreShape(),
+		NonBookkeepingObjects:   72,
+		CallbackOwnerIndexValid: true,
 	}
 }
 
@@ -105,8 +108,8 @@ func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
 		Tables:            72,
-		Constraints:       615,
-		Indexes:           265,
+		Constraints:       616,
+		Indexes:           266,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -128,16 +131,16 @@ func upgradeableCoreSnapshot() Snapshot {
 			Version: CoreUpgradeVersion,
 		},
 		CoreShape:             upgradeableCoreShape(),
-		NonBookkeepingObjects: 70,
+		NonBookkeepingObjects: 72,
 	}
 }
 
 func upgradeableCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreUpgradeSchemaDigest,
-		Tables:            70,
-		Constraints:       594,
-		Indexes:           261,
+		Tables:            72,
+		Constraints:       615,
+		Indexes:           265,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -158,7 +161,7 @@ func upgradeableCloudSnapshot(current Snapshot) Snapshot {
 		Version: CoreUpgradeVersion,
 	}
 	current.CoreShape = upgradeableCoreShape()
-	current.NonBookkeepingObjects = 77
+	current.NonBookkeepingObjects = 79
 	return current
 }
 
@@ -198,6 +201,11 @@ func withCloudDigest(snapshot Snapshot, digest string) Snapshot {
 
 func withRelationCount(snapshot Snapshot, count int64) Snapshot {
 	snapshot.NonBookkeepingObjects = count
+	return snapshot
+}
+
+func withCallbackOwnerIndexValidity(snapshot Snapshot, valid bool) Snapshot {
+	snapshot.CallbackOwnerIndexValid = valid
 	return snapshot
 }
 

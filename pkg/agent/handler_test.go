@@ -69,7 +69,7 @@ func setupHandlerTest(t *testing.T) (*echo.Echo, *pgxpool.Pool) {
 	}
 
 	api := e.Group("/api/v1")
-	jwtMW := auth.JWTMiddleware(testHandlerSecret)
+	jwtMW := auth.JWTMiddlewareWithUserStatus(testHandlerSecret, auth.NewDBUserStatusChecker(pool))
 	adminMW := newTestAdminMiddleware(pool)
 
 	mountAgentRoutes(h, api, jwtMW, adminMW)

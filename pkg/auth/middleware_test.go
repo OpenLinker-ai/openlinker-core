@@ -2,7 +2,7 @@
 //
 // 预期 API：
 //
-//	func JWTMiddleware(secret string) echo.MiddlewareFunc
+//	func JWTMiddlewareWithUserStatus(secret string, checker UserStatusChecker) echo.MiddlewareFunc
 //
 // 中间件行为：
 //   - 缺 Authorization → 401
@@ -12,6 +12,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -62,7 +63,7 @@ func invokeMiddleware(t *testing.T, secret, authHeader string) (*httptest.Respon
 		return c.NoContent(http.StatusOK)
 	}
 
-	mw := JWTMiddleware(secret)
+	mw := JWTMiddlewareWithUserStatus(secret, allowingUserStatusChecker{})
 	handler := mw(next)
 	if err := handler(c); err != nil {
 		e.HTTPErrorHandler(err, c)
@@ -159,8 +160,51 @@ func TestJWTMiddlewareWithUserStatusRejectsDisabledUser(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	err = JWTMiddlewareWithUserStatus(testMWSecret, q)(func(c echo.Context) error {
+	err = JWTMiddlewareWithUserStatus(testMWSecret, &DBUserStatusChecker{users: q})(func(c echo.Context) error {
 		return c.NoContent(http.StatusOK)
 	})(c)
 	requireAuthHTTPStatus(t, err, http.StatusUnauthorized)
+}
+
+func TestJWTMiddlewareRejectsRevokedTokenVersion(t *testing.T) {
+	uid := uuid.New()
+	tok, err := GenerateTokenWithVersion(uid.String(), testMWSecret, time.Hour, 4)
+	require.NoError(t, err)
+
+	checker := &DBUserStatusChecker{users: &fakeUserByIDQuerier{user: db.User{ID: uid, TokenVersion: 5}}}
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer "+tok)
+	err = JWTMiddlewareWithUserStatus(testMWSecret, checker)(func(echo.Context) error {
+		t.Fatal("revoked JWT reached protected handler")
+		return nil
+	})(e.NewContext(req, httptest.NewRecorder()))
+	requireAuthHTTPStatus(t, err, http.StatusUnauthorized)
+}
+
+func TestJWTMiddlewareRequiresConcreteUserStatusChecker(t *testing.T) {
+	assertPanics := func(name string, checker UserStatusChecker) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("middleware construction should panic")
+				}
+			}()
+			_ = JWTMiddlewareWithUserStatus(testMWSecret, checker)
+		})
+	}
+	assertPanics("nil", nil)
+	var typedNil *DBUserStatusChecker
+	assertPanics("typed nil", typedNil)
+}
+
+type allowingUserStatusChecker struct{}
+
+func (allowingUserStatusChecker) EnsureUserEnabled(context.Context, uuid.UUID) error {
+	return nil
+}
+
+func (allowingUserStatusChecker) EnsureJWTUserVersion(context.Context, uuid.UUID, int64) error {
+	return nil
 }

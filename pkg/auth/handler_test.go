@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,7 +79,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
 
 	api := e.Group("/api/v1")
 	h.Register(api)
-	h.RegisterProtected(api, JWTMiddleware(testHandlerSecret))
+	h.RegisterProtected(api, JWTMiddlewareWithUserStatus(testHandlerSecret, NewDBUserStatusChecker(pool)))
 
 	srv := httptest.NewServer(e)
 	t.Cleanup(func() {
@@ -207,6 +208,47 @@ func TestGetMe_InvalidToken(t *testing.T) {
 		"Authorization": "Bearer not.a.real.jwt",
 	})
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+}
+
+func TestChangePasswordRevokesOldJWTAndBlocksRefresh(t *testing.T) {
+	srv, pool := setupTestServer(t)
+	email := "password-revoke-handler-" + uuid.NewString()[:8] + "@example.com"
+	oldPassword := "supersecret123"
+	newPassword := "newsecret456"
+	uid := insertHandlerPasswordUser(t, pool, email, oldPassword, "Session Revocation")
+	oldJWT, err := GenerateToken(uid.String(), testHandlerSecret, time.Hour)
+	require.NoError(t, err)
+
+	changed, raw := postJSON(t, srv.URL+"/api/v1/me/password", map[string]string{
+		"current_password":     oldPassword,
+		"new_password":         newPassword,
+		"new_password_confirm": newPassword,
+	}, map[string]string{"Authorization": "Bearer " + oldJWT})
+	assert.Equal(t, http.StatusNoContent, changed.StatusCode, "body=%s", string(raw))
+
+	me, _ := getJSON(t, srv.URL+"/api/v1/me", map[string]string{"Authorization": "Bearer " + oldJWT})
+	assert.Equal(t, http.StatusUnauthorized, me.StatusCode)
+	refresh, raw := postJSON(t, srv.URL+"/api/v1/auth/refresh", nil, map[string]string{"Authorization": "Bearer " + oldJWT})
+	assert.Equal(t, http.StatusUnauthorized, refresh.StatusCode)
+	assert.NotContains(t, strings.ToLower(string(raw)), `"jwt"`)
+
+	login, raw := postJSON(t, srv.URL+"/api/v1/auth/login", map[string]string{
+		"email": email, "password": newPassword,
+	}, nil)
+	require.Equal(t, http.StatusOK, login.StatusCode, "body=%s", string(raw))
+	var loginBody authResponseBody
+	require.NoError(t, json.Unmarshal(raw, &loginBody))
+	claims, err := ParseTokenClaims(loginBody.JWT, testHandlerSecret)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), claims.TokenVersion)
+
+	refresh, raw = postJSON(t, srv.URL+"/api/v1/auth/refresh", nil, map[string]string{"Authorization": "Bearer " + loginBody.JWT})
+	require.Equal(t, http.StatusOK, refresh.StatusCode, "body=%s", string(raw))
+	var refreshed authResponseBody
+	require.NoError(t, json.Unmarshal(raw, &refreshed))
+	refreshedClaims, err := ParseTokenClaims(refreshed.JWT, testHandlerSecret)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), refreshedClaims.TokenVersion)
 }
 
 func insertHandlerPasswordUser(t *testing.T, pool *pgxpool.Pool, email, password, displayName string) uuid.UUID {

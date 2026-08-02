@@ -26,20 +26,10 @@ type PrincipalAPIKeyVerifier interface {
 	VerifyPrincipal(ctx context.Context, plaintextToken string) (*AuthPrincipal, error)
 }
 
-// HybridAuthMiddleware 同时接受网页登录会话与 User Token。
-//
-// 判定规则：
-//   - Authorization: Bearer ol_user_xxx → 走 ApiKeyVerifier
-//   - Authorization: Bearer eyJ... 或其他 → 走 JWT
-//
-// 命中后写入 c.Set(httpx.CtxKeyUserID, userID)，与 JWTMiddleware 行为一致；
-// 这样下游 handler 用 httpx.UserIDFrom(c) 即可拿到当前用户。
-func HybridAuthMiddleware(jwtSecret string, verifier ApiKeyVerifier) echo.MiddlewareFunc {
-	return HybridAuthMiddlewareWithUserStatus(jwtSecret, verifier, nil)
-}
-
-// HybridAuthMiddlewareWithUserStatus additionally rejects deleted or disabled users.
-func HybridAuthMiddlewareWithUserStatus(jwtSecret string, verifier ApiKeyVerifier, users userStatusQuerier) echo.MiddlewareFunc {
+// HybridAuthMiddlewareWithUserStatus accepts JWT sessions and User Tokens while
+// requiring the durable user-status authority for every unverified principal.
+func HybridAuthMiddlewareWithUserStatus(jwtSecret string, verifier ApiKeyVerifier, users UserStatusChecker) echo.MiddlewareFunc {
+	requireUserStatusChecker(users)
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			h := c.Request().Header.Get(echo.HeaderAuthorization)
@@ -76,21 +66,24 @@ func HybridAuthMiddlewareWithUserStatus(jwtSecret string, verifier ApiKeyVerifie
 					principal = &AuthPrincipal{UserID: uid, AuthMethod: AuthMethodUserToken, Grants: grants}
 				}
 			} else {
-				uid, err := ParseToken(token, jwtSecret)
+				claims, err := ParseTokenClaims(token, jwtSecret)
 				if err != nil {
 					return httpx.Unauthorized("token 无效或已过期")
 				}
-				parsed, err := uuid.Parse(uid)
+				parsed, err := uuid.Parse(claims.Subject)
 				if err != nil {
 					return httpx.Unauthorized("token 无效")
 				}
-				principal = &AuthPrincipal{UserID: parsed, AuthMethod: AuthMethodJWT, Grants: []Grant{}}
+				if err := users.EnsureJWTUserVersion(c.Request().Context(), parsed, claims.TokenVersion); err != nil {
+					return err
+				}
+				principal = &AuthPrincipal{UserID: parsed, AuthMethod: AuthMethodJWT, Grants: []Grant{}, UserStatusVerified: true}
 			}
 			if principal == nil {
 				return httpx.Unauthorized("认证失败")
 			}
 			if !principal.UserStatusVerified {
-				if err := ensureTokenUserEnabled(c.Request().Context(), users, principal.UserID.String()); err != nil {
+				if err := users.EnsureUserEnabled(c.Request().Context(), principal.UserID); err != nil {
 					return err
 				}
 			}

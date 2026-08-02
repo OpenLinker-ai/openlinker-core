@@ -132,17 +132,7 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest) (*AuthResp
 		return nil, httpx.Internal("创建用户失败")
 	}
 
-	token, err := GenerateToken(user.ID.String(), s.jwtSecret, s.jwtExpire)
-	if err != nil {
-		log.Error().Err(err).Msg("auth.Register: GenerateToken")
-		return nil, httpx.Internal("签发 token 失败")
-	}
-	return &AuthResponse{
-		UserID:      user.ID.String(),
-		Email:       user.Email,
-		DisplayName: user.DisplayName,
-		JWT:         token,
-	}, nil
+	return s.respondWithToken(&user)
 }
 
 // Login 邮箱 + 密码登录。
@@ -169,17 +159,7 @@ func (s *Service) Login(ctx context.Context, req *LoginRequest) (*AuthResponse, 
 		return nil, httpx.Unauthorized("邮箱或密码错误")
 	}
 
-	token, err := GenerateToken(user.ID.String(), s.jwtSecret, s.jwtExpire)
-	if err != nil {
-		log.Error().Err(err).Msg("auth.Login: GenerateToken")
-		return nil, httpx.Internal("签发 token 失败")
-	}
-	return &AuthResponse{
-		UserID:      user.ID.String(),
-		Email:       user.Email,
-		DisplayName: user.DisplayName,
-		JWT:         token,
-	}, nil
+	return s.respondWithToken(&user)
 }
 
 // RefreshToken issues a fresh JWT for the currently authenticated user.
@@ -522,6 +502,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID uuid.UUID, req *Cha
 	tag, err := s.pool.Exec(ctx, `
 UPDATE users
 SET password_hash = $2,
+    token_version = token_version + 1,
     updated_at = NOW()
 WHERE id = $1 AND deleted_at IS NULL
   AND disabled_at IS NULL
@@ -553,6 +534,7 @@ func (s *Service) ResetPassword(ctx context.Context, email, newPassword string) 
 	tag, err := s.pool.Exec(ctx, `
 UPDATE users
 SET password_hash = $2,
+    token_version = token_version + 1,
     updated_at = NOW()
 WHERE id = $1 AND deleted_at IS NULL
   AND disabled_at IS NULL
@@ -626,7 +608,7 @@ func (s *Service) respondWithToken(user *db.User) (*AuthResponse, error) {
 	if err := ensureUserEnabled(user); err != nil {
 		return nil, err
 	}
-	token, err := GenerateToken(user.ID.String(), s.jwtSecret, s.jwtExpire)
+	token, err := GenerateTokenWithVersion(user.ID.String(), s.jwtSecret, s.jwtExpire, user.TokenVersion)
 	if err != nil {
 		log.Error().Err(err).Msg("auth: GenerateToken")
 		return nil, httpx.Internal("签发 token 失败")
