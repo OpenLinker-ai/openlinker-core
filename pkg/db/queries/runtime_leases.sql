@@ -199,6 +199,16 @@ WHERE r.agent_id = sqlc.arg(agent_id)
   END
   AND (
       NOT sqlc.arg(browser_execution_profile)::boolean
+      OR COALESCE(
+          r.request_metadata #>> '{_openlinker_runtime_authority,browser_interaction_policy}',
+          ''
+      ) = CASE
+          WHEN sqlc.arg(full_browser_interaction)::boolean THEN 'full'
+          ELSE 'restricted'
+      END
+  )
+  AND (
+      NOT sqlc.arg(browser_execution_profile)::boolean
       OR EXISTS (
           SELECT 1
           FROM agents a

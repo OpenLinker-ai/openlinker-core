@@ -13,8 +13,8 @@ BEGIN
     FROM pg_catalog.pg_tables
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_tables <> 72 THEN
-        RAISE EXCEPTION 'Core initializer table count is %, expected 72', public_tables;
+    IF public_tables <> 73 THEN
+        RAISE EXCEPTION 'Core initializer table count is %, expected 73', public_tables;
     END IF;
 
     SELECT count(*) INTO public_constraints
@@ -23,16 +23,16 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 616 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 616', public_constraints;
+    IF public_constraints <> 626 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 626', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 266 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 266', public_indexes;
+    IF public_indexes <> 267 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 267', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers
@@ -189,8 +189,85 @@ BEGIN
           AND relation.relname = 'agents'
           AND constraint_row.conname = 'agents_browser_execution_profile_private'
           AND constraint_row.contype = 'c'
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint constraint_row
+        JOIN pg_catalog.pg_class relation ON relation.oid = constraint_row.conrelid
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relname = 'agents'
+          AND constraint_row.conname = 'agents_browser_execution_profile_runtime'
+          AND constraint_row.contype = 'c'
+          AND constraint_row.convalidated
     ) THEN
-        RAISE EXCEPTION 'Core initializer is missing the durable Browser Agent visibility invariant';
+        RAISE EXCEPTION 'Core initializer is missing a durable Browser Agent boundary invariant';
+    END IF;
+
+    IF (
+        SELECT count(*)
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'runtime_agent_execution_profiles'
+          AND column_name IN (
+              'interaction_policy',
+              'browser_mutation_origins',
+              'interaction_policy_generation',
+              'interaction_policy_changed_at',
+              'interaction_policy_changed_by_user_id'
+          )
+          AND is_nullable = 'NO'
+    ) <> 5 OR (
+        SELECT count(*)
+        FROM pg_catalog.pg_constraint constraint_row
+        JOIN pg_catalog.pg_class relation
+          ON relation.oid = constraint_row.conrelid
+        JOIN pg_catalog.pg_namespace namespace
+          ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relname = 'runtime_agent_execution_profiles'
+          AND constraint_row.conname IN (
+              'runtime_agent_execution_profiles_interaction_policy_valid',
+              'runtime_agent_profiles_policy_generation_positive',
+              'runtime_agent_execution_profiles_mutation_origins_consistent',
+              'runtime_agent_execution_profiles_policy_changed_by_user_id_fkey'
+          )
+          AND constraint_row.convalidated
+    ) <> 4 THEN
+        RAISE EXCEPTION 'Core initializer is missing the Browser interaction-policy contract';
+    END IF;
+
+    IF (
+        SELECT count(*)
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'runtime_agent_browser_policy_intents'
+          AND column_name IN (
+              'agent_id',
+              'interaction_policy',
+              'browser_mutation_origins',
+              'configured_at',
+              'configured_by_user_id'
+          )
+          AND is_nullable = 'NO'
+    ) <> 5 OR (
+        SELECT count(*)
+        FROM pg_catalog.pg_constraint constraint_row
+        JOIN pg_catalog.pg_class relation
+          ON relation.oid = constraint_row.conrelid
+        JOIN pg_catalog.pg_namespace namespace
+          ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relname = 'runtime_agent_browser_policy_intents'
+          AND constraint_row.conname IN (
+              'runtime_agent_browser_policy_intents_pkey',
+              'runtime_agent_browser_policy_intents_agent_id_fkey',
+              'runtime_agent_browser_policy_intents_configured_by_user_id_fkey',
+              'runtime_agent_browser_policy_intents_policy_valid',
+              'runtime_agent_browser_policy_intents_origins_consistent'
+          )
+          AND constraint_row.convalidated
+    ) <> 5 THEN
+        RAISE EXCEPTION 'Core initializer is missing the initial Browser policy-intent contract';
     END IF;
 END
 $$;

@@ -664,6 +664,16 @@ WHERE r.agent_id = $1
   END
   AND (
       NOT $2::boolean
+      OR COALESCE(
+          r.request_metadata #>> '{_openlinker_runtime_authority,browser_interaction_policy}',
+          ''
+      ) = CASE
+          WHEN $3::boolean THEN 'full'
+          ELSE 'restricted'
+      END
+  )
+  AND (
+      NOT $2::boolean
       OR EXISTS (
           SELECT 1
           FROM agents a
@@ -698,6 +708,7 @@ FOR UPDATE OF r SKIP LOCKED
 type LockNextClaimableRuntimeRunForAgentParams struct {
 	AgentID                 uuid.UUID `db:"agent_id" json:"agent_id"`
 	BrowserExecutionProfile bool      `db:"browser_execution_profile" json:"browser_execution_profile"`
+	FullBrowserInteraction  bool      `db:"full_browser_interaction" json:"full_browser_interaction"`
 }
 
 type LockNextClaimableRuntimeRunForAgentRow struct {
@@ -721,7 +732,13 @@ type LockNextClaimableRuntimeRunForAgentRow struct {
 }
 
 func (q *Queries) LockNextClaimableRuntimeRunForAgent(ctx context.Context, arg LockNextClaimableRuntimeRunForAgentParams) (LockNextClaimableRuntimeRunForAgentRow, error) {
-	row := q.db.QueryRow(ctx, lockNextClaimableRuntimeRunForAgent, arg.AgentID, arg.BrowserExecutionProfile)
+	row := q.db.QueryRow(
+		ctx,
+		lockNextClaimableRuntimeRunForAgent,
+		arg.AgentID,
+		arg.BrowserExecutionProfile,
+		arg.FullBrowserInteraction,
+	)
 	var i LockNextClaimableRuntimeRunForAgentRow
 	err := row.Scan(
 		&i.ID,

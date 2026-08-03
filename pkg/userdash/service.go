@@ -2,6 +2,7 @@ package userdash
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/browserpolicy"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
@@ -360,6 +362,8 @@ func toRunListItem(r db.Run, agentSlug, agentName string) RunListItem {
 }
 
 func toCallRecordItem(r db.ListCallRecordsForUserRow) CallRecordItem {
+	browserPolicy, browserGeneration, browserOrigins, browserDigest :=
+		validatedCallRecordBrowserPolicy(r)
 	relation := "direct"
 	if r.ParentRunID != "" {
 		relation = "a2a_child"
@@ -387,44 +391,79 @@ func toCallRecordItem(r db.ListCallRecordsForUserRow) CallRecordItem {
 	}
 
 	return CallRecordItem{
-		ID:                        r.ID.String(),
-		RunID:                     r.ID.String(),
-		Direction:                 r.Direction,
-		Relation:                  relation,
-		AgentID:                   r.AgentID.String(),
-		AgentSlug:                 r.AgentSlug,
-		AgentName:                 r.AgentName,
-		TargetAgent:               target,
-		CallerAgent:               caller,
-		Status:                    r.Status,
-		CostCents:                 r.CostCents,
-		CreatorRevenueCents:       r.CreatorRevenueCents,
-		DurationMs:                r.DurationMs,
-		StartedAt:                 r.StartedAt.UTC().Format(time.RFC3339),
-		FinishedAt:                finishedAt,
-		Source:                    r.Source,
-		RuntimeContractID:         r.RuntimeContractID,
-		AgentConnectionMode:       r.AgentConnectionMode,
-		RuntimeTransport:          r.RuntimeTransport,
-		RuntimeTransportReason:    r.RuntimeTransportReason,
-		RuntimeTransportChangedAt: r.RuntimeTransportChangedAt,
-		DispatchState:             r.DispatchState,
-		AttemptCount:              r.AttemptCount,
-		MaxAttempts:               r.MaxAttempts,
-		NextAttemptAt:             r.NextAttemptAt,
-		LatestAttemptID:           optionalDashboardUUID(r.LatestAttemptID),
-		ActiveAttemptID:           optionalDashboardUUID(r.ActiveAttemptID),
-		CancelState:               optionalDashboardString(r.CancelState),
-		CancelRequestedAt:         r.CancelRequestedAt,
-		CancelAcknowledgedAt:      r.CancelAcknowledgedAt,
-		CancelReason:              optionalDashboardString(r.CancelReason),
-		DeadLetteredAt:            r.DeadLetteredAt,
-		ReplayOfRunID:             optionalDashboardUUID(r.ReplayOfRunID),
-		ParentRunID:               r.ParentRunID,
-		ChildCount:                r.ChildCount,
-		CallID:                    firstNonEmpty(r.CallID, r.ProtocolTaskID, r.ID.String()),
-		A2AContext:                toCallRecordA2AContext(r),
+		ID:                                 r.ID.String(),
+		RunID:                              r.ID.String(),
+		Direction:                          r.Direction,
+		Relation:                           relation,
+		AgentID:                            r.AgentID.String(),
+		AgentSlug:                          r.AgentSlug,
+		AgentName:                          r.AgentName,
+		TargetAgent:                        target,
+		CallerAgent:                        caller,
+		Status:                             r.Status,
+		CostCents:                          r.CostCents,
+		CreatorRevenueCents:                r.CreatorRevenueCents,
+		DurationMs:                         r.DurationMs,
+		StartedAt:                          r.StartedAt.UTC().Format(time.RFC3339),
+		FinishedAt:                         finishedAt,
+		Source:                             r.Source,
+		RuntimeContractID:                  r.RuntimeContractID,
+		AgentConnectionMode:                r.AgentConnectionMode,
+		RuntimeTransport:                   r.RuntimeTransport,
+		RuntimeTransportReason:             r.RuntimeTransportReason,
+		RuntimeTransportChangedAt:          r.RuntimeTransportChangedAt,
+		BrowserInteractionPolicy:           browserPolicy,
+		BrowserInteractionPolicyGeneration: browserGeneration,
+		BrowserMutationOrigins:             browserOrigins,
+		BrowserMutationOriginsSHA256:       browserDigest,
+		BrowserContractID:                  browserContractID(browserPolicy),
+		DispatchState:                      r.DispatchState,
+		AttemptCount:                       r.AttemptCount,
+		MaxAttempts:                        r.MaxAttempts,
+		NextAttemptAt:                      r.NextAttemptAt,
+		LatestAttemptID:                    optionalDashboardUUID(r.LatestAttemptID),
+		ActiveAttemptID:                    optionalDashboardUUID(r.ActiveAttemptID),
+		CancelState:                        optionalDashboardString(r.CancelState),
+		CancelRequestedAt:                  r.CancelRequestedAt,
+		CancelAcknowledgedAt:               r.CancelAcknowledgedAt,
+		CancelReason:                       optionalDashboardString(r.CancelReason),
+		DeadLetteredAt:                     r.DeadLetteredAt,
+		ReplayOfRunID:                      optionalDashboardUUID(r.ReplayOfRunID),
+		ParentRunID:                        r.ParentRunID,
+		ChildCount:                         r.ChildCount,
+		CallID:                             firstNonEmpty(r.CallID, r.ProtocolTaskID, r.ID.String()),
+		A2AContext:                         toCallRecordA2AContext(r),
 	}
+}
+
+func validatedCallRecordBrowserPolicy(
+	r db.ListCallRecordsForUserRow,
+) (string, int64, []string, string) {
+	if r.BrowserInteractionPolicyGeneration < 1 {
+		return "", 0, nil, ""
+	}
+	var origins []string
+	if json.Unmarshal(r.BrowserMutationOrigins, &origins) != nil {
+		return "", 0, nil, ""
+	}
+	digest, err := browserpolicy.ValidateCanonical(
+		r.BrowserInteractionPolicy,
+		origins,
+	)
+	if err != nil || digest != r.BrowserMutationOriginsSHA256 {
+		return "", 0, nil, ""
+	}
+	return r.BrowserInteractionPolicy,
+		r.BrowserInteractionPolicyGeneration,
+		append([]string{}, origins...),
+		digest
+}
+
+func browserContractID(policy string) string {
+	if policy == "" {
+		return ""
+	}
+	return browserpolicy.ContractID
 }
 
 func optionalDashboardUUID(value *uuid.UUID) string {

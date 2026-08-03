@@ -23,6 +23,34 @@ SELECT r.id,
        COALESCE(runtime_evidence.transport, '')::text AS runtime_transport,
        COALESCE(runtime_evidence.transport_reason, '')::text AS runtime_transport_reason,
        runtime_evidence.transport_changed_at AS runtime_transport_changed_at,
+       CASE
+           WHEN r.request_metadata #>> '{_openlinker_runtime_authority,execution_profile}' = 'browser'
+           THEN COALESCE(r.request_metadata #>> '{_openlinker_runtime_authority,browser_interaction_policy}', '')
+           ELSE ''
+       END::text AS browser_interaction_policy,
+       CASE
+           WHEN r.request_metadata #>> '{_openlinker_runtime_authority,execution_profile}' = 'browser'
+            AND jsonb_typeof(r.request_metadata #> '{_openlinker_runtime_authority,browser_interaction_policy_generation}') = 'number'
+           THEN CASE
+               WHEN (r.request_metadata #>> '{_openlinker_runtime_authority,browser_interaction_policy_generation}')::numeric BETWEEN 1 AND 9223372036854775807
+                AND (r.request_metadata #>> '{_openlinker_runtime_authority,browser_interaction_policy_generation}')::numeric =
+                    trunc((r.request_metadata #>> '{_openlinker_runtime_authority,browser_interaction_policy_generation}')::numeric)
+               THEN (r.request_metadata #>> '{_openlinker_runtime_authority,browser_interaction_policy_generation}')::bigint
+               ELSE 0
+           END
+           ELSE 0
+       END::bigint AS browser_interaction_policy_generation,
+       CASE
+           WHEN r.request_metadata #>> '{_openlinker_runtime_authority,execution_profile}' = 'browser'
+            AND jsonb_typeof(r.request_metadata #> '{_openlinker_runtime_authority,browser_mutation_origins}') = 'array'
+           THEN r.request_metadata #> '{_openlinker_runtime_authority,browser_mutation_origins}'
+           ELSE '[]'::jsonb
+       END AS browser_mutation_origins,
+       CASE
+           WHEN r.request_metadata #>> '{_openlinker_runtime_authority,execution_profile}' = 'browser'
+           THEN COALESCE(r.request_metadata #>> '{_openlinker_runtime_authority,browser_mutation_origins_sha256}', '')
+           ELSE ''
+       END::text AS browser_mutation_origins_sha256,
        r.dispatch_state,
        r.attempt_count,
        r.max_attempts,
@@ -143,50 +171,54 @@ type ListCallRecordsForUserParams struct {
 }
 
 type ListCallRecordsForUserRow struct {
-	ID                        uuid.UUID  `db:"id" json:"id"`
-	UserID                    uuid.UUID  `db:"user_id" json:"user_id"`
-	AgentID                   uuid.UUID  `db:"agent_id" json:"agent_id"`
-	Status                    string     `db:"status" json:"status"`
-	CostCents                 int32      `db:"cost_cents" json:"cost_cents"`
-	CreatorRevenueCents       int32      `db:"creator_revenue_cents" json:"creator_revenue_cents"`
-	DurationMs                *int32     `db:"duration_ms" json:"duration_ms"`
-	StartedAt                 time.Time  `db:"started_at" json:"started_at"`
-	FinishedAt                *time.Time `db:"finished_at" json:"finished_at"`
-	Source                    string     `db:"source" json:"source"`
-	RuntimeContractID         string     `db:"runtime_contract_id" json:"runtime_contract_id"`
-	AgentConnectionMode       string     `db:"agent_connection_mode" json:"agent_connection_mode"`
-	RuntimeTransport          string     `db:"runtime_transport" json:"runtime_transport"`
-	RuntimeTransportReason    string     `db:"runtime_transport_reason" json:"runtime_transport_reason"`
-	RuntimeTransportChangedAt *time.Time `db:"runtime_transport_changed_at" json:"runtime_transport_changed_at"`
-	DispatchState             string     `db:"dispatch_state" json:"dispatch_state"`
-	AttemptCount              int32      `db:"attempt_count" json:"attempt_count"`
-	MaxAttempts               int32      `db:"max_attempts" json:"max_attempts"`
-	NextAttemptAt             *time.Time `db:"next_attempt_at" json:"next_attempt_at"`
-	LatestAttemptID           *uuid.UUID `db:"latest_attempt_id" json:"latest_attempt_id"`
-	ActiveAttemptID           *uuid.UUID `db:"active_attempt_id" json:"active_attempt_id"`
-	CancelState               *string    `db:"cancel_state" json:"cancel_state"`
-	CancelRequestedAt         *time.Time `db:"cancel_requested_at" json:"cancel_requested_at"`
-	CancelAcknowledgedAt      *time.Time `db:"cancel_acknowledged_at" json:"cancel_acknowledged_at"`
-	CancelReason              *string    `db:"cancel_reason" json:"cancel_reason"`
-	DeadLetteredAt            *time.Time `db:"dead_lettered_at" json:"dead_lettered_at"`
-	ReplayOfRunID             *uuid.UUID `db:"replay_of_run_id" json:"replay_of_run_id"`
-	AgentSlug                 string     `db:"agent_slug" json:"agent_slug"`
-	AgentName                 string     `db:"agent_name" json:"agent_name"`
-	Direction                 string     `db:"direction" json:"direction"`
-	ParentRunID               string     `db:"parent_run_id" json:"parent_run_id"`
-	CallerAgentID             string     `db:"caller_agent_id" json:"caller_agent_id"`
-	CallerAgentSlug           string     `db:"caller_agent_slug" json:"caller_agent_slug"`
-	CallerAgentName           string     `db:"caller_agent_name" json:"caller_agent_name"`
-	ProtocolContextID         string     `db:"protocol_context_id" json:"protocol_context_id"`
-	ProtocolTaskID            string     `db:"protocol_task_id" json:"protocol_task_id"`
-	RootContextID             string     `db:"root_context_id" json:"root_context_id"`
-	ParentContextID           string     `db:"parent_context_id" json:"parent_context_id"`
-	ParentTaskID              string     `db:"parent_task_id" json:"parent_task_id"`
-	TraceID                   string     `db:"trace_id" json:"trace_id"`
-	ReferenceTaskIDs          []string   `db:"reference_task_ids" json:"reference_task_ids"`
-	ContextSource             string     `db:"context_source" json:"context_source"`
-	CallID                    string     `db:"call_id" json:"call_id"`
-	ChildCount                int32      `db:"child_count" json:"child_count"`
+	ID                                 uuid.UUID  `db:"id" json:"id"`
+	UserID                             uuid.UUID  `db:"user_id" json:"user_id"`
+	AgentID                            uuid.UUID  `db:"agent_id" json:"agent_id"`
+	Status                             string     `db:"status" json:"status"`
+	CostCents                          int32      `db:"cost_cents" json:"cost_cents"`
+	CreatorRevenueCents                int32      `db:"creator_revenue_cents" json:"creator_revenue_cents"`
+	DurationMs                         *int32     `db:"duration_ms" json:"duration_ms"`
+	StartedAt                          time.Time  `db:"started_at" json:"started_at"`
+	FinishedAt                         *time.Time `db:"finished_at" json:"finished_at"`
+	Source                             string     `db:"source" json:"source"`
+	RuntimeContractID                  string     `db:"runtime_contract_id" json:"runtime_contract_id"`
+	AgentConnectionMode                string     `db:"agent_connection_mode" json:"agent_connection_mode"`
+	RuntimeTransport                   string     `db:"runtime_transport" json:"runtime_transport"`
+	RuntimeTransportReason             string     `db:"runtime_transport_reason" json:"runtime_transport_reason"`
+	RuntimeTransportChangedAt          *time.Time `db:"runtime_transport_changed_at" json:"runtime_transport_changed_at"`
+	BrowserInteractionPolicy           string     `db:"browser_interaction_policy" json:"browser_interaction_policy"`
+	BrowserInteractionPolicyGeneration int64      `db:"browser_interaction_policy_generation" json:"browser_interaction_policy_generation"`
+	BrowserMutationOrigins             []byte     `db:"browser_mutation_origins" json:"browser_mutation_origins"`
+	BrowserMutationOriginsSHA256       string     `db:"browser_mutation_origins_sha256" json:"browser_mutation_origins_sha256"`
+	DispatchState                      string     `db:"dispatch_state" json:"dispatch_state"`
+	AttemptCount                       int32      `db:"attempt_count" json:"attempt_count"`
+	MaxAttempts                        int32      `db:"max_attempts" json:"max_attempts"`
+	NextAttemptAt                      *time.Time `db:"next_attempt_at" json:"next_attempt_at"`
+	LatestAttemptID                    *uuid.UUID `db:"latest_attempt_id" json:"latest_attempt_id"`
+	ActiveAttemptID                    *uuid.UUID `db:"active_attempt_id" json:"active_attempt_id"`
+	CancelState                        *string    `db:"cancel_state" json:"cancel_state"`
+	CancelRequestedAt                  *time.Time `db:"cancel_requested_at" json:"cancel_requested_at"`
+	CancelAcknowledgedAt               *time.Time `db:"cancel_acknowledged_at" json:"cancel_acknowledged_at"`
+	CancelReason                       *string    `db:"cancel_reason" json:"cancel_reason"`
+	DeadLetteredAt                     *time.Time `db:"dead_lettered_at" json:"dead_lettered_at"`
+	ReplayOfRunID                      *uuid.UUID `db:"replay_of_run_id" json:"replay_of_run_id"`
+	AgentSlug                          string     `db:"agent_slug" json:"agent_slug"`
+	AgentName                          string     `db:"agent_name" json:"agent_name"`
+	Direction                          string     `db:"direction" json:"direction"`
+	ParentRunID                        string     `db:"parent_run_id" json:"parent_run_id"`
+	CallerAgentID                      string     `db:"caller_agent_id" json:"caller_agent_id"`
+	CallerAgentSlug                    string     `db:"caller_agent_slug" json:"caller_agent_slug"`
+	CallerAgentName                    string     `db:"caller_agent_name" json:"caller_agent_name"`
+	ProtocolContextID                  string     `db:"protocol_context_id" json:"protocol_context_id"`
+	ProtocolTaskID                     string     `db:"protocol_task_id" json:"protocol_task_id"`
+	RootContextID                      string     `db:"root_context_id" json:"root_context_id"`
+	ParentContextID                    string     `db:"parent_context_id" json:"parent_context_id"`
+	ParentTaskID                       string     `db:"parent_task_id" json:"parent_task_id"`
+	TraceID                            string     `db:"trace_id" json:"trace_id"`
+	ReferenceTaskIDs                   []string   `db:"reference_task_ids" json:"reference_task_ids"`
+	ContextSource                      string     `db:"context_source" json:"context_source"`
+	CallID                             string     `db:"call_id" json:"call_id"`
+	ChildCount                         int32      `db:"child_count" json:"child_count"`
 }
 
 func (q *Queries) ListCallRecordsForUser(ctx context.Context, arg ListCallRecordsForUserParams) ([]ListCallRecordsForUserRow, error) {
@@ -214,6 +246,10 @@ func (q *Queries) ListCallRecordsForUser(ctx context.Context, arg ListCallRecord
 			&item.RuntimeTransport,
 			&item.RuntimeTransportReason,
 			&item.RuntimeTransportChangedAt,
+			&item.BrowserInteractionPolicy,
+			&item.BrowserInteractionPolicyGeneration,
+			&item.BrowserMutationOrigins,
+			&item.BrowserMutationOriginsSHA256,
 			&item.DispatchState,
 			&item.AttemptCount,
 			&item.MaxAttempts,

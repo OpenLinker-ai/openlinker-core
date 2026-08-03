@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/browserpolicy"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/credential"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
@@ -781,6 +782,7 @@ func (s *Service) attachRuntimeAuthority(
 	metadata map[string]interface{},
 	userID, agentID uuid.UUID,
 	executionProfile string,
+	profile runtimeAgentExecutionProfile,
 ) error {
 	if metadata == nil {
 		return errors.New("runtime authority metadata is unavailable")
@@ -800,6 +802,22 @@ func (s *Service) attachRuntimeAuthority(
 	}
 	if executionProfile != "" {
 		authority["execution_profile"] = executionProfile
+	}
+	if executionProfile == runtimeExecutionProfileBrowser {
+		if !profile.Browser || profile.InteractionPolicyGeneration < 1 {
+			return errors.New("runtime Browser interaction policy is invalid")
+		}
+		digest, policyErr := browserpolicy.ValidateCanonical(
+			profile.InteractionPolicy,
+			profile.BrowserMutationOrigins,
+		)
+		if policyErr != nil || digest != profile.BrowserMutationOriginsSHA256 {
+			return errors.New("runtime Browser mutation origins are invalid")
+		}
+		authority["browser_interaction_policy"] = profile.InteractionPolicy
+		authority["browser_interaction_policy_generation"] = profile.InteractionPolicyGeneration
+		authority["browser_mutation_origins"] = append([]string{}, profile.BrowserMutationOrigins...)
+		authority["browser_mutation_origins_sha256"] = digest
 	}
 	metadata["_openlinker_runtime_authority"] = authority
 	return nil
@@ -1091,6 +1109,7 @@ func (s *Service) createRunningRun(
 		userID,
 		agentID,
 		executionProfile,
+		runtimeProfile,
 	); err != nil {
 		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("runtime.Run: attach Runtime authority")
 		return nil, nil, httpx.Internal("生成 Runtime 调用身份失败")
@@ -1131,6 +1150,32 @@ func (s *Service) createRunningRun(
 		if gateErr := RequireRuntimeClusterOperation(ctx, tx, RuntimeClusterNewRun); gateErr != nil {
 			return gateErr
 		}
+		if runtimeProfile.Browser {
+			stored, lockErr := q.LockRuntimeAgentBrowserProfileForRunCreate(ctx, agentID)
+			if lockErr != nil {
+				if errors.Is(lockErr, pgx.ErrNoRows) {
+					return httpx.Conflict("Browser 执行策略已变更，请重试")
+				}
+				return lockErr
+			}
+			lockedProfile, profileErr := runtimeAgentProfileFromStored(stored)
+			if profileErr != nil || !sameRuntimeBrowserAuthority(lockedProfile, runtimeProfile) {
+				return httpx.Conflict("Browser 执行策略已变更，请重试")
+			}
+		} else if isQueuedRuntimeMode(agent.ConnectionMode) {
+			// Run creation shares the same per-Agent advisory lock as initial
+			// Browser policy staging and first-Session classification. This
+			// prevents a standard authority envelope from being committed in
+			// the gap between an Owner declaring Browser intent and the first
+			// matching Browser Session materializing the sticky profile.
+			declaredBrowser, lockErr := q.LockRuntimeAgentBrowserDeclaration(ctx, agentID)
+			if lockErr != nil {
+				return lockErr
+			}
+			if declaredBrowser {
+				return httpx.Conflict("Browser 执行策略尚未就绪，请等待匹配的 Runtime Session")
+			}
+		}
 		if opts.replayOfRunID != nil {
 			lockedSource, lockErr := q.LockReplaySourceForCreate(ctx, db.LockReplaySourceForCreateParams{
 				ID:     *opts.replayOfRunID,
@@ -1162,6 +1207,7 @@ func (s *Service) createRunningRun(
 				userID,
 				agentID,
 				executionProfile,
+				runtimeProfile,
 			); authorityErr != nil {
 				return authorityErr
 			}
@@ -1366,6 +1412,7 @@ func (s *Service) createRunningRun(
 	}
 	resp.A2AContext = runA2AContextResponseFromRequest(runA2AContext)
 	resp.TaskCallback = taskCallbackResp
+	attachRunBrowserPolicyFromProfile(executionProfile, runtimeProfile, resp)
 	if opts.replayOfRunID != nil {
 		resp.ReplayOfRunID = opts.replayOfRunID.String()
 	}
@@ -1685,6 +1732,7 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 		return nil, httpx.Internal("查询调用传输证据失败")
 	}
 	s.attachRunRequirementEvidence(ctx, runID, resp)
+	s.attachRunBrowserPolicyEvidence(ctx, runID, resp)
 	s.attachRunEvidenceSummary(ctx, runID, resp)
 	delegation, err := s.queries.GetRunDelegationByChild(ctx, runID)
 	if err == nil {
@@ -1764,6 +1812,80 @@ func (s *Service) attachRunTransportEvidence(ctx context.Context, runID uuid.UUI
 	changedAt := evidence.TransportChangedAt
 	resp.RuntimeTransportChangedAt = &changedAt
 	return nil
+}
+
+type persistedRuntimeAuthority struct {
+	ExecutionProfile                   string   `json:"execution_profile"`
+	BrowserInteractionPolicy           string   `json:"browser_interaction_policy"`
+	BrowserInteractionPolicyGeneration int64    `json:"browser_interaction_policy_generation"`
+	BrowserMutationOrigins             []string `json:"browser_mutation_origins"`
+	BrowserMutationOriginsSHA256       string   `json:"browser_mutation_origins_sha256"`
+}
+
+func attachRunBrowserPolicyFromProfile(
+	executionProfile string,
+	profile runtimeAgentExecutionProfile,
+	resp *RunResponse,
+) {
+	if executionProfile != runtimeExecutionProfileBrowser || resp == nil {
+		return
+	}
+	attachValidatedRunBrowserPolicy(
+		persistedRuntimeAuthority{
+			ExecutionProfile:                   executionProfile,
+			BrowserInteractionPolicy:           profile.InteractionPolicy,
+			BrowserInteractionPolicyGeneration: profile.InteractionPolicyGeneration,
+			BrowserMutationOrigins:             profile.BrowserMutationOrigins,
+			BrowserMutationOriginsSHA256:       profile.BrowserMutationOriginsSHA256,
+		},
+		resp,
+	)
+}
+
+func (s *Service) attachRunBrowserPolicyEvidence(
+	ctx context.Context,
+	runID uuid.UUID,
+	resp *RunResponse,
+) {
+	if resp == nil || resp.AgentConnectionMode != connectionModeRuntime {
+		return
+	}
+	payload, err := s.queries.GetRunReplayPayload(ctx, runID)
+	if err != nil {
+		log.Warn().Err(err).Str("run_id", runID.String()).Msg(
+			"runtime.attachRunBrowserPolicyEvidence: GetRunReplayPayload",
+		)
+		return
+	}
+	var metadata struct {
+		Authority persistedRuntimeAuthority `json:"_openlinker_runtime_authority"`
+	}
+	if json.Unmarshal(payload.RequestMetadata, &metadata) != nil {
+		return
+	}
+	attachValidatedRunBrowserPolicy(metadata.Authority, resp)
+}
+
+func attachValidatedRunBrowserPolicy(
+	authority persistedRuntimeAuthority,
+	resp *RunResponse,
+) {
+	if resp == nil || authority.ExecutionProfile != runtimeExecutionProfileBrowser ||
+		authority.BrowserInteractionPolicyGeneration < 1 {
+		return
+	}
+	digest, err := browserpolicy.ValidateCanonical(
+		authority.BrowserInteractionPolicy,
+		authority.BrowserMutationOrigins,
+	)
+	if err != nil || digest != authority.BrowserMutationOriginsSHA256 {
+		return
+	}
+	resp.BrowserInteractionPolicy = authority.BrowserInteractionPolicy
+	resp.BrowserInteractionPolicyGeneration = authority.BrowserInteractionPolicyGeneration
+	resp.BrowserMutationOrigins = append([]string{}, authority.BrowserMutationOrigins...)
+	resp.BrowserMutationOriginsSHA256 = digest
+	resp.BrowserContractID = browserpolicy.ContractID
 }
 
 func (s *Service) attachRunEvidenceSummary(ctx context.Context, runID uuid.UUID, resp *RunResponse) {

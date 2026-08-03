@@ -9,6 +9,12 @@ runtime protocol, and migration contract are declared stable.
 
 ### Added
 
+- Added an Owner-controlled Browser interaction policy for private Runtime
+  Agents. `full` policy is bound to an exact canonical HTTPS mutation-origin
+  scope; `restricted` remains read-only.
+- Added migration 091 with transactional policy staging for Browser Agents that
+  have not established their first Session, plus durable policy generation and
+  mutation-scope evidence on execution profiles, leases, Runs, and CallRecords.
 - Added durable Runtime v2 Core membership, release/schema/contract readiness
   evidence, and GET/HEAD `/readyz` probes for single-instance and HA operation.
 - Added persistent `normal`, `draining`, and `hard_maintenance` gates that
@@ -25,6 +31,13 @@ runtime protocol, and migration contract are declared stable.
 
 ### Changed
 
+- Browser dispatch now requires Workers to declare both Browser execution and
+  full-interaction capabilities when required. Policy generation and origin
+  scope participate in lease fencing, so stale Attachments cannot retain or
+  broaden mutation authority.
+- Browser action journals remain attachment-local and emit one bounded terminal
+  aggregate, preserving constant database row growth between one-action and
+  500-action Runs.
 - Production images now expose their release ID and Git commit to Core. HA
   readiness requires a healthy Redis signal bus, while PostgreSQL reconciliation
   continues during Redis outages.

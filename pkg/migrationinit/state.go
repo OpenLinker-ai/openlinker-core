@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	CoreVersion             int64 = 90
-	CoreUpgradeVersion      int64 = 88
+	CoreVersion             int64 = 91
+	CoreUpgradeVersion      int64 = 90
 	CloudVersion            int64 = 55
-	CoreSchemaDigest              = "7e47d3b82e06f4be0e2c67680fc088a02945bb7be28811e358435323b2397ebe"
-	CoreUpgradeSchemaDigest       = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
+	CoreSchemaDigest              = "1b2591b579018b4edd6465e19f36823fca28af01068742358293d1367c1c1ed8"
+	CoreUpgradeSchemaDigest       = "7e47d3b82e06f4be0e2c67680fc088a02945bb7be28811e358435323b2397ebe"
 	CloudSchemaDigest             = "0cf21f9a518d9875e62e66e1b490148e45b67eaaeddf9cab118efd778575abd5"
 )
 
@@ -74,6 +74,7 @@ var coreTables = []string{
 	"runtime_node_certificates",
 	"runtime_nodes",
 	"runtime_pki_authorities",
+	"runtime_agent_browser_policy_intents",
 	"runtime_agent_execution_profiles",
 	"runtime_resume_grants",
 	"runtime_schema_contracts",
@@ -240,7 +241,7 @@ func Inspect(ctx context.Context, databaseURL string) (Snapshot, error) {
 
 	if snapshot.CoreShape.Tables == int64(len(coreTables)) ||
 		(snapshot.Core.Version == CoreUpgradeVersion &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-2)) {
+			snapshot.CoreShape.Tables == int64(len(coreTables)-1)) {
 		if err := inspectCoreSeeds(ctx, conn, &snapshot.CoreShape); err != nil {
 			return Snapshot{}, err
 		}
@@ -615,9 +616,9 @@ func validateMigrationTableState(owner string, state MigrationTableState) error 
 func validateCoreShape(shape SchemaShape) error {
 	want := SchemaShape{
 		Digest:            CoreSchemaDigest,
-		Tables:            72,
-		Constraints:       616,
-		Indexes:           266,
+		Tables:            73,
+		Constraints:       626,
+		Indexes:           267,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -645,8 +646,8 @@ func validateCoreUpgradeShape(shape SchemaShape) error {
 	want := SchemaShape{
 		Digest:            CoreUpgradeSchemaDigest,
 		Tables:            72,
-		Constraints:       615,
-		Indexes:           265,
+		Constraints:       616,
+		Indexes:           266,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,

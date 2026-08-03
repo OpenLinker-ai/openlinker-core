@@ -106,6 +106,15 @@ func TestAgentSlugTagsStatusAndSQLStateHelpers(t *testing.T) {
 	}) || isBrowserExecutionProfileVisibilityViolation(nil) {
 		t.Fatalf("Browser execution-profile visibility violation was not classified exactly")
 	}
+	if !isBrowserExecutionProfileRuntimeViolation(&pgconn.PgError{
+		Code:           "23514",
+		ConstraintName: "agents_browser_execution_profile_runtime",
+	}) || isBrowserExecutionProfileRuntimeViolation(&pgconn.PgError{
+		Code:           "23514",
+		ConstraintName: "agents_connection_mode_valid",
+	}) || isBrowserExecutionProfileRuntimeViolation(nil) {
+		t.Fatalf("Browser execution-profile runtime violation was not classified exactly")
+	}
 	if !isUndefinedTable(sqlStateErr{state: "42P01"}) || isUndefinedTable(sqlStateErr{state: "23505"}) || isUndefinedTable(nil) {
 		t.Fatalf("isUndefinedTable did not classify SQLSTATE 42P01 only")
 	}
