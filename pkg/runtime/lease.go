@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/browserpolicy"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
@@ -199,6 +200,7 @@ func (s *RuntimeLeaseService) ClaimOffer(
 			db.LockNextClaimableRuntimeRunForAgentParams{
 				AgentID:                 principal.AgentID,
 				BrowserExecutionProfile: runtimeSessionUsesBrowserProfile(principal.Features),
+				FullBrowserInteraction:  runtimeSessionUsesFullBrowserInteraction(principal.Features),
 			},
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -958,7 +960,7 @@ func (s *RuntimeLeaseService) assignmentFromAttempt(
 	}
 	if err := consumeRuntimeExecutionProfile(
 		metadata,
-		runtimeSessionUsesBrowserProfile(principal.Features),
+		principal.Features,
 	); err != nil {
 		return RunAssignedPayload{}, err
 	}
@@ -988,39 +990,67 @@ func (s *RuntimeLeaseService) assignmentFromAttempt(
 
 func consumeRuntimeExecutionProfile(
 	metadata map[string]any,
-	browserProfile bool,
+	features []string,
 ) error {
-	rawAuthority, found := metadata["_openlinker_runtime_authority"]
-	authority, valid := rawAuthority.(map[string]any)
-	if !found || !valid {
-		if browserProfile {
-			return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
-		}
-		return nil
+	browserProfile := runtimeSessionUsesBrowserProfile(features)
+	fullInteraction := runtimeSessionUsesFullBrowserInteraction(features)
+	if fullInteraction && !browserProfile {
+		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 	}
-	rawProfile, found := authority["execution_profile"]
+	rawAuthority, found := metadata["_openlinker_runtime_authority"]
 	if !found {
 		if browserProfile {
 			return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 		}
 		return nil
 	}
-	profile, valid := rawProfile.(string)
+	raw, err := json.Marshal(rawAuthority)
+	if err != nil {
+		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var authority runtimeRunAuthorityWire
+	if err = decoder.Decode(&authority); err != nil {
+		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, err)
+	}
 	expected := runtimeExecutionProfileStandard
 	if browserProfile {
 		expected = runtimeExecutionProfileBrowser
 	}
-	if !valid || profile != expected {
+	if authority.Source != "core" || authority.PrincipalScopeID == "" ||
+		authority.ExecutionProfile != expected {
 		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 	}
-	sanitized := make(map[string]any, len(authority)-1)
-	for key, value := range authority {
-		if key != "execution_profile" {
-			sanitized[key] = value
+	if !browserProfile {
+		if authority.BrowserInteractionPolicy != "" ||
+			authority.BrowserInteractionPolicyGeneration != 0 ||
+			authority.BrowserMutationOrigins != nil ||
+			authority.BrowserMutationOriginsSHA256 != "" {
+			return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 		}
+		return nil
 	}
-	metadata["_openlinker_runtime_authority"] = sanitized
+	digest, policyErr := browserpolicy.ValidateCanonical(
+		authority.BrowserInteractionPolicy,
+		authority.BrowserMutationOrigins,
+	)
+	if policyErr != nil || authority.BrowserInteractionPolicyGeneration < 1 ||
+		digest != authority.BrowserMutationOriginsSHA256 ||
+		(fullInteraction != (authority.BrowserInteractionPolicy == browserpolicy.Full)) {
+		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, policyErr)
+	}
 	return nil
+}
+
+type runtimeRunAuthorityWire struct {
+	PrincipalScopeID                   string   `json:"principal_scope_id"`
+	Source                             string   `json:"source"`
+	ExecutionProfile                   string   `json:"execution_profile"`
+	BrowserInteractionPolicy           string   `json:"browser_interaction_policy,omitempty"`
+	BrowserInteractionPolicyGeneration int64    `json:"browser_interaction_policy_generation,omitempty"`
+	BrowserMutationOrigins             []string `json:"browser_mutation_origins,omitempty"`
+	BrowserMutationOriginsSHA256       string   `json:"browser_mutation_origins_sha256,omitempty"`
 }
 
 func attemptIdentityFromRow(attempt db.RunAttempt) (AttemptIdentity, error) {

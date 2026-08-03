@@ -1621,6 +1621,7 @@ type runtimeSessionTransaction interface {
 	RequireRuntimeClusterOperation(context.Context, RuntimeClusterOperation) error
 	LockSessionIdentity(context.Context, uuid.UUID) error
 	LockRuntimeAgentProfile(context.Context, uuid.UUID) error
+	LockRuntimeAgentBrowserDeclaration(context.Context, uuid.UUID) (bool, error)
 	GetRuntimeAgentExecutionProfileForUpdate(context.Context, uuid.UUID) (db.RuntimeAgentExecutionProfile, error)
 	ClassifyRuntimeAgentBrowserExecutionProfile(context.Context, db.ClassifyRuntimeAgentBrowserExecutionProfileParams) (db.RuntimeAgentExecutionProfile, error)
 	GetRuntimeSessionForUpdate(context.Context, uuid.UUID) (db.RuntimeSession, error)
@@ -1855,6 +1856,13 @@ func (t *postgresRuntimeSessionTransaction) GetRuntimeAgentExecutionProfileForUp
 	agentID uuid.UUID,
 ) (db.RuntimeAgentExecutionProfile, error) {
 	return t.queries.GetRuntimeAgentExecutionProfileForUpdate(ctx, agentID)
+}
+
+func (t *postgresRuntimeSessionTransaction) LockRuntimeAgentBrowserDeclaration(
+	ctx context.Context,
+	agentID uuid.UUID,
+) (bool, error) {
+	return t.queries.LockRuntimeAgentBrowserDeclaration(ctx, agentID)
 }
 
 func (t *postgresRuntimeSessionTransaction) ClassifyRuntimeAgentBrowserExecutionProfile(

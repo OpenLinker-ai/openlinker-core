@@ -34,7 +34,7 @@ runtime-node-inspect: build ## 审计 Runtime Node 证书; 参数放在 RUNTIME_
 test: ## 运行测试(race + cover)
 	go test ./... -race -cover
 
-browser-event-volume-acceptance: ## 一次性 PostgreSQL 验证 Browser 1/500 action 的持久行数恒定
+browser-event-volume-acceptance: ## PostgreSQL 验证 Browser 迁移、旧 Worker 拒绝、1/500 行数与 CallRecord 策略证据
 	./scripts/test-browser-event-volume.sh
 
 runtime-loadtest: ## 通过 WebSocket/长轮询回退对已启动 Core API 压测 Runtime Worker; 用 RUNTIME_LOADTEST_ARGS 覆盖参数
@@ -56,7 +56,7 @@ sqlc: ## 有意迁移手写 DB 层到 sqlc 输出(必须 CONFIRM_OVERWRITE=1)
 	@command -v sqlc >/dev/null 2>&1 || { echo "请先安装 sqlc"; exit 1; }
 	sqlc generate
 
-migrate-up: build ## 初始化当前 Core schema，或从精确版本 088 升级/验证版本 090
+migrate-up: build ## 初始化当前 Core schema，或从精确版本 090 升级/验证版本 091
 	@set -a; . ./$(ENV_FILE); set +a; MIGRATIONS_DIR=./migrations ./bin/api migrate up
 
 migrate-create: ## 创建 migration: make migrate-create name=add_xxx

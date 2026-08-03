@@ -98,39 +98,43 @@ func TestUserDashServiceListCallRecords(t *testing.T) {
 	duration := int32(850)
 	rows := []db.ListCallRecordsForUserRow{
 		{
-			ID:                        uuid.New(),
-			UserID:                    userID,
-			AgentID:                   agentID,
-			Status:                    "success",
-			CostCents:                 0,
-			CreatorRevenueCents:       0,
-			DurationMs:                &duration,
-			StartedAt:                 started,
-			Source:                    "api",
-			RuntimeContractID:         "openlinker.runtime.v2",
-			AgentConnectionMode:       "runtime",
-			RuntimeTransport:          "long_poll",
-			RuntimeTransportReason:    "explicit",
-			RuntimeTransportChangedAt: &transportChangedAt,
-			DispatchState:             "terminal",
-			AttemptCount:              1,
-			MaxAttempts:               3,
-			AgentSlug:                 "child",
-			AgentName:                 "Child Agent",
-			Direction:                 "made",
-			ParentRunID:               parentRunID,
-			CallerAgentID:             callerID.String(),
-			CallerAgentSlug:           "parent",
-			CallerAgentName:           "Parent Agent",
-			ProtocolContextID:         "ctx-protocol",
-			ProtocolTaskID:            "task-child",
-			RootContextID:             "ctx-root",
-			ParentContextID:           "ctx-parent",
-			ParentTaskID:              "task-parent",
-			TraceID:                   "trace-1",
-			ReferenceTaskIDs:          []string{"task-parent"},
-			ContextSource:             "agent_delegation",
-			CallID:                    "task-child",
+			ID:                                 uuid.New(),
+			UserID:                             userID,
+			AgentID:                            agentID,
+			Status:                             "success",
+			CostCents:                          0,
+			CreatorRevenueCents:                0,
+			DurationMs:                         &duration,
+			StartedAt:                          started,
+			Source:                             "api",
+			RuntimeContractID:                  "openlinker.runtime.v2",
+			AgentConnectionMode:                "runtime",
+			RuntimeTransport:                   "long_poll",
+			RuntimeTransportReason:             "explicit",
+			RuntimeTransportChangedAt:          &transportChangedAt,
+			BrowserInteractionPolicy:           "full",
+			BrowserInteractionPolicyGeneration: 9,
+			BrowserMutationOrigins:             []byte(`["https://github.com"]`),
+			BrowserMutationOriginsSHA256:       "2c829a3140408db7e59b0159777c8a00f7496b92bb154365d1fcfabd590b2c98",
+			DispatchState:                      "terminal",
+			AttemptCount:                       1,
+			MaxAttempts:                        3,
+			AgentSlug:                          "child",
+			AgentName:                          "Child Agent",
+			Direction:                          "made",
+			ParentRunID:                        parentRunID,
+			CallerAgentID:                      callerID.String(),
+			CallerAgentSlug:                    "parent",
+			CallerAgentName:                    "Parent Agent",
+			ProtocolContextID:                  "ctx-protocol",
+			ProtocolTaskID:                     "task-child",
+			RootContextID:                      "ctx-root",
+			ParentContextID:                    "ctx-parent",
+			ParentTaskID:                       "task-parent",
+			TraceID:                            "trace-1",
+			ReferenceTaskIDs:                   []string{"task-parent"},
+			ContextSource:                      "agent_delegation",
+			CallID:                             "task-child",
 		},
 	}
 	queries := &fakeDashboardQueries{
@@ -174,6 +178,34 @@ func TestUserDashServiceListCallRecords(t *testing.T) {
 		got.RuntimeTransportReason != "explicit" || got.RuntimeTransportChangedAt == nil ||
 		!got.RuntimeTransportChangedAt.Equal(transportChangedAt) {
 		t.Fatalf("call record execution evidence = %#v", got)
+	}
+	if got.BrowserInteractionPolicy != "full" ||
+		got.BrowserInteractionPolicyGeneration != 9 ||
+		len(got.BrowserMutationOrigins) != 1 ||
+		got.BrowserMutationOrigins[0] != "https://github.com" ||
+		got.BrowserMutationOriginsSHA256 != rows[0].BrowserMutationOriginsSHA256 ||
+		got.BrowserContractID != "openlinker.browser.v2" {
+		t.Fatalf("call record Browser policy evidence = %#v", got)
+	}
+}
+
+func TestValidatedCallRecordBrowserPolicyRejectsForgedEvidence(t *testing.T) {
+	row := db.ListCallRecordsForUserRow{
+		BrowserInteractionPolicy:           "full",
+		BrowserInteractionPolicyGeneration: 3,
+		BrowserMutationOrigins:             []byte(`["https://github.com"]`),
+		BrowserMutationOriginsSHA256:       "2c829a3140408db7e59b0159777c8a00f7496b92bb154365d1fcfabd590b2c98",
+	}
+	policy, generation, origins, digest := validatedCallRecordBrowserPolicy(row)
+	if policy != "full" || generation != 3 || len(origins) != 1 ||
+		origins[0] != "https://github.com" || digest != row.BrowserMutationOriginsSHA256 {
+		t.Fatalf("validated Browser evidence = %q %d %#v %q", policy, generation, origins, digest)
+	}
+
+	row.BrowserMutationOriginsSHA256 = "forged"
+	policy, generation, origins, digest = validatedCallRecordBrowserPolicy(row)
+	if policy != "" || generation != 0 || origins != nil || digest != "" {
+		t.Fatalf("forged Browser evidence was exposed = %q %d %#v %q", policy, generation, origins, digest)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/browserpolicy"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
@@ -253,6 +254,9 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 		return &resp, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
+		if isBrowserExecutionProfileRuntimeViolation(err) {
+			return nil, httpx.Conflict("Browser Agent 必须保持 runtime 连接模式")
+		}
 		if isBrowserExecutionProfileVisibilityViolation(err) {
 			return nil, httpx.Conflict("Browser Agent 必须保持 private")
 		}
@@ -329,6 +333,207 @@ func (s *Service) SetVisibility(ctx context.Context, agentID, creatorID uuid.UUI
 	}
 	resp := s.toAgentResponseWithReadiness(ctx, &updated)
 	return &resp, nil
+}
+
+func (s *Service) UpdateBrowserInteractionPolicy(
+	ctx context.Context,
+	agentID, creatorID uuid.UUID,
+	req *UpdateBrowserInteractionPolicyRequest,
+) (*BrowserInteractionPolicyResponse, error) {
+	if req == nil {
+		return nil, httpx.BadRequest("Browser 交互策略不能为空")
+	}
+	owned, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
+		ID: agentID, CreatorID: creatorID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("Agent 不存在")
+		}
+		log.Error().Err(err).Str("agent_id", agentID.String()).
+			Msg("agent.UpdateBrowserInteractionPolicy: get Agent")
+		return nil, httpx.Internal("查询 Agent 失败")
+	}
+	policy := strings.TrimSpace(req.InteractionPolicy)
+	canonical, digest, err := browserpolicy.Canonicalize(
+		policy,
+		req.BrowserMutationOrigins,
+	)
+	if err != nil {
+		return nil, httpx.Unprocessable("Browser 交互策略或变更 Origin 不合法")
+	}
+	current, err := s.queries.GetRuntimeAgentExecutionProfile(ctx, agentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if owned.Visibility != "private" || owned.ConnectionMode != "runtime" {
+			return nil, httpx.Conflict("首次配置 Browser 策略需要 private Runtime Agent")
+		}
+		intent, stageErr := s.queries.StageRuntimeAgentBrowserPolicyIntentForOwner(
+			ctx,
+			db.StageRuntimeAgentBrowserPolicyIntentForOwnerParams{
+				AgentID:                agentID,
+				ConfiguredByUserID:     creatorID,
+				InteractionPolicy:      policy,
+				BrowserMutationOrigins: canonical,
+			},
+		)
+		if stageErr == nil {
+			return browserInteractionPolicyIntentResponse(intent, digest), nil
+		}
+		if !errors.Is(stageErr, pgx.ErrNoRows) {
+			log.Error().Err(stageErr).Str("agent_id", agentID.String()).
+				Msg("agent.UpdateBrowserInteractionPolicy: stage initial policy")
+			return nil, httpx.Internal("保存初始 Browser 交互策略失败")
+		}
+		// Classification may have won the shared advisory-lock race. Re-read
+		// the execution profile and continue through the ordinary update path.
+		current, err = s.queries.GetRuntimeAgentExecutionProfile(ctx, agentID)
+	}
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.Conflict("请先结束 Browser Run 并排空 Runtime Session 后再修改策略")
+		}
+		log.Error().Err(err).Str("agent_id", agentID.String()).
+			Msg("agent.UpdateBrowserInteractionPolicy: get profile")
+		return nil, httpx.Internal("查询 Browser 执行配置失败")
+	}
+	if current.ExecutionProfile != "browser" {
+		return nil, httpx.Conflict("Agent 当前不是 Browser 执行配置")
+	}
+	if current.InteractionPolicy == policy &&
+		equalStringSlices(current.BrowserMutationOrigins, canonical) {
+		return browserInteractionPolicyResponse(current, digest), nil
+	}
+	updated, err := s.queries.UpdateRuntimeAgentBrowserInteractionPolicyForOwner(
+		ctx,
+		db.UpdateRuntimeAgentBrowserInteractionPolicyForOwnerParams{
+			AgentID:                agentID,
+			InteractionPolicy:      policy,
+			BrowserMutationOrigins: canonical,
+			ChangedByUserID:        creatorID,
+		},
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.Conflict("请先结束 Browser Run 并排空 Runtime Session 后再修改策略")
+		}
+		log.Error().Err(err).Str("agent_id", agentID.String()).
+			Msg("agent.UpdateBrowserInteractionPolicy: update profile")
+		return nil, httpx.Internal("更新 Browser 交互策略失败")
+	}
+	validatedDigest, err := browserpolicy.ValidateCanonical(
+		updated.InteractionPolicy,
+		updated.BrowserMutationOrigins,
+	)
+	if err != nil || validatedDigest != digest ||
+		updated.InteractionPolicyGeneration <= current.InteractionPolicyGeneration {
+		return nil, httpx.Internal("Browser 交互策略持久化校验失败")
+	}
+	return browserInteractionPolicyResponse(updated, validatedDigest), nil
+}
+
+func (s *Service) GetBrowserInteractionPolicy(
+	ctx context.Context,
+	agentID,
+	ownerID uuid.UUID,
+) (*BrowserInteractionPolicyResponse, error) {
+	owned, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
+		ID:        agentID,
+		CreatorID: ownerID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("Agent 不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).
+			Msg("agent.GetBrowserInteractionPolicy: get Agent")
+		return nil, httpx.Internal("读取 Browser 交互策略失败")
+	}
+	if owned.Visibility != "private" || owned.ConnectionMode != "runtime" {
+		return nil, httpx.Conflict("Browser Agent 必须保持 private Runtime 配置")
+	}
+	profile, err := s.queries.GetRuntimeAgentExecutionProfile(ctx, agentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		intent, intentErr := s.queries.GetRuntimeAgentBrowserPolicyIntent(ctx, agentID)
+		switch {
+		case intentErr == nil:
+			digest, validateErr := browserpolicy.ValidateCanonical(
+				intent.InteractionPolicy,
+				intent.BrowserMutationOrigins,
+			)
+			if validateErr != nil {
+				return nil, httpx.Internal("初始 Browser 交互策略持久化校验失败")
+			}
+			return browserInteractionPolicyIntentResponse(intent, digest), nil
+		case errors.Is(intentErr, pgx.ErrNoRows):
+			_, digest, _ := browserpolicy.Canonicalize(browserpolicy.Restricted, []string{})
+			return &BrowserInteractionPolicyResponse{
+				InteractionPolicy:            browserpolicy.Restricted,
+				InteractionPolicyGeneration:  1,
+				BrowserMutationOrigins:       []string{},
+				BrowserMutationOriginsSHA256: digest,
+				ChangedAt:                    owned.CreatedAt.UTC().Format(time.RFC3339Nano),
+			}, nil
+		default:
+			log.Error().Err(intentErr).Str("agent_id", agentID.String()).
+				Msg("agent.GetBrowserInteractionPolicy: get initial intent")
+			return nil, httpx.Internal("读取初始 Browser 交互策略失败")
+		}
+	}
+	if err == nil && profile.ExecutionProfile != "browser" {
+		return nil, httpx.Conflict("Agent 未配置 Browser 执行配置")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).
+			Msg("agent.GetBrowserInteractionPolicy: get profile")
+		return nil, httpx.Internal("读取 Browser 交互策略失败")
+	}
+	digest, err := browserpolicy.ValidateCanonical(
+		profile.InteractionPolicy,
+		profile.BrowserMutationOrigins,
+	)
+	if err != nil {
+		return nil, httpx.Internal("Browser 交互策略持久化校验失败")
+	}
+	return browserInteractionPolicyResponse(profile, digest), nil
+}
+
+func browserInteractionPolicyResponse(
+	profile db.RuntimeAgentExecutionProfile,
+	digest string,
+) *BrowserInteractionPolicyResponse {
+	return &BrowserInteractionPolicyResponse{
+		InteractionPolicy:            profile.InteractionPolicy,
+		InteractionPolicyGeneration:  profile.InteractionPolicyGeneration,
+		BrowserMutationOrigins:       append([]string{}, profile.BrowserMutationOrigins...),
+		BrowserMutationOriginsSHA256: digest,
+		ChangedAt: profile.InteractionPolicyChangedAt.UTC().
+			Format(time.RFC3339Nano),
+	}
+}
+
+func browserInteractionPolicyIntentResponse(
+	intent db.RuntimeAgentBrowserPolicyIntent,
+	digest string,
+) *BrowserInteractionPolicyResponse {
+	return &BrowserInteractionPolicyResponse{
+		InteractionPolicy:            intent.InteractionPolicy,
+		InteractionPolicyGeneration:  1,
+		BrowserMutationOrigins:       append([]string{}, intent.BrowserMutationOrigins...),
+		BrowserMutationOriginsSHA256: digest,
+		ChangedAt:                    intent.ConfiguredAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func equalStringSlices(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) requireBrowserAgentPrivateVisibility(
@@ -1322,6 +1527,13 @@ func isBrowserExecutionProfileVisibilityViolation(err error) bool {
 	return errors.As(err, &pgErr) &&
 		pgErr.Code == "23514" &&
 		pgErr.ConstraintName == "agents_browser_execution_profile_private"
+}
+
+func isBrowserExecutionProfileRuntimeViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == "23514" &&
+		pgErr.ConstraintName == "agents_browser_execution_profile_runtime"
 }
 
 func isUndefinedTable(err error) bool {

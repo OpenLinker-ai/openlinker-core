@@ -19,6 +19,7 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 		"088_browser_human_control.up.sql":           true,
 		"089_user_jwt_token_version.up.sql":          true,
 		"090_task_callback_owner_index.up.sql":       true,
+		"091_browser_interaction_policy.up.sql":      true,
 	}
 	if len(paths) != len(want) {
 		t.Fatalf("migration SQL files = %v, want only current initializer and verifier", paths)
@@ -26,6 +27,31 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 	for _, path := range paths {
 		if !want[filepath.Base(path)] {
 			t.Fatalf("unexpected executable migration file %s", path)
+		}
+	}
+}
+
+func TestBrowserInteractionPolicyForwardMigrationIsBoundedAndAuditable(t *testing.T) {
+	up := readInitializer(t, "../../migrations/091_browser_interaction_policy.up.sql")
+	for _, fragment := range []string{
+		"SET LOCAL lock_timeout = '5s'",
+		"ADD COLUMN interaction_policy text DEFAULT 'restricted'::text NOT NULL",
+		"ADD COLUMN browser_mutation_origins text[] DEFAULT ARRAY[]::text[] NOT NULL",
+		"ADD COLUMN interaction_policy_generation bigint DEFAULT 1 NOT NULL",
+		"interaction_policy_changed_by_user_id = agent.creator_id",
+		"runtime_agent_execution_profiles_mutation_origins_consistent",
+		"runtime_agent_execution_profiles_policy_changed_by_user_id_fkey",
+		"CREATE TABLE public.runtime_agent_browser_policy_intents",
+		"runtime_agent_browser_policy_intents_origins_consistent",
+		"agents_browser_execution_profile_runtime",
+	} {
+		if !strings.Contains(up, fragment) {
+			t.Fatalf("Browser interaction-policy migration missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{"IF NOT EXISTS", "DO $$", "EXECUTE "} {
+		if strings.Contains(up, forbidden) {
+			t.Fatalf("Browser interaction-policy migration hides its transition with %q", forbidden)
 		}
 	}
 }
@@ -192,9 +218,9 @@ func TestCoreFoundationalInitializerContainsPredecessorContracts(t *testing.T) {
 func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	verify := readInitializer(t, "../../migrations/086_current_schema_init_verify.sql")
 	for _, fragment := range []string{
-		"public_tables <> 72",
-		"public_constraints <> 616",
-		"public_indexes <> 266",
+		"public_tables <> 73",
+		"public_constraints <> 626",
+		"public_indexes <> 267",
 		"public_triggers <> 70",
 		"public_functions <> 65",
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",
@@ -211,6 +237,13 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 		"index_metadata.indisvalid",
 		"idx_task_callback_subscriptions_owner is missing or invalid",
 		"agents_browser_execution_profile_private",
+		"agents_browser_execution_profile_runtime",
+		"runtime_agent_execution_profiles_interaction_policy_valid",
+		"runtime_agent_profiles_policy_generation_positive",
+		"runtime_agent_execution_profiles_mutation_origins_consistent",
+		"runtime_agent_execution_profiles_policy_changed_by_user_id_fkey",
+		"runtime_agent_browser_policy_intents_pkey",
+		"runtime_agent_browser_policy_intents_origins_consistent",
 		"users_token_version_nonnegative",
 		"column_name = 'token_version'",
 	} {

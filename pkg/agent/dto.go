@@ -38,6 +38,22 @@ type UpdateVisibilityRequest struct {
 	Visibility string `json:"visibility" validate:"required,oneof=public unlisted private"`
 }
 
+// UpdateBrowserInteractionPolicyRequest changes durable Browser authority.
+// Origins are canonicalized by Core; callers cannot provide a digest or
+// generation and therefore cannot widen or replay the trusted lease tuple.
+type UpdateBrowserInteractionPolicyRequest struct {
+	InteractionPolicy      string   `json:"browser_interaction_policy" validate:"required,oneof=restricted full"`
+	BrowserMutationOrigins []string `json:"browser_mutation_origins" validate:"max=32,dive,required,max=500"`
+}
+
+type BrowserInteractionPolicyResponse struct {
+	InteractionPolicy            string   `json:"browser_interaction_policy"`
+	InteractionPolicyGeneration  int64    `json:"browser_interaction_policy_generation"`
+	BrowserMutationOrigins       []string `json:"browser_mutation_origins"`
+	BrowserMutationOriginsSHA256 string   `json:"browser_mutation_origins_sha256"`
+	ChangedAt                    string   `json:"browser_interaction_policy_changed_at"`
+}
+
 // AgentResponse 单个 Agent 的统一返回 DTO。
 //
 // Phase 2 缺口 2：Status 是从 LifecycleStatus / CertificationStatus 派生的字段，

@@ -545,6 +545,47 @@ func TestRuntimeAttachRequirementEvidenceFromQueries(t *testing.T) {
 	(&Service{requirements: q}).attachRunRequirementEvidence(ctx, runID, nil)
 }
 
+func TestAttachValidatedRunBrowserPolicyRejectsUntrustedEvidence(t *testing.T) {
+	valid := persistedRuntimeAuthority{
+		ExecutionProfile:                   runtimeExecutionProfileBrowser,
+		BrowserInteractionPolicy:           "full",
+		BrowserInteractionPolicyGeneration: 7,
+		BrowserMutationOrigins:             []string{"https://github.com"},
+		BrowserMutationOriginsSHA256:       "2c829a3140408db7e59b0159777c8a00f7496b92bb154365d1fcfabd590b2c98",
+	}
+	resp := &RunResponse{}
+	attachValidatedRunBrowserPolicy(valid, resp)
+	require.Equal(t, "full", resp.BrowserInteractionPolicy)
+	require.Equal(t, int64(7), resp.BrowserInteractionPolicyGeneration)
+	require.Equal(t, []string{"https://github.com"}, resp.BrowserMutationOrigins)
+	require.Equal(t, valid.BrowserMutationOriginsSHA256, resp.BrowserMutationOriginsSHA256)
+	require.Equal(t, "openlinker.browser.v2", resp.BrowserContractID)
+
+	for name, mutate := range map[string]func(*persistedRuntimeAuthority){
+		"non browser profile": func(authority *persistedRuntimeAuthority) {
+			authority.ExecutionProfile = runtimeExecutionProfileStandard
+		},
+		"missing generation": func(authority *persistedRuntimeAuthority) {
+			authority.BrowserInteractionPolicyGeneration = 0
+		},
+		"non canonical origins": func(authority *persistedRuntimeAuthority) {
+			authority.BrowserMutationOrigins = []string{"https://github.com/owner/repo"}
+		},
+		"forged digest": func(authority *persistedRuntimeAuthority) {
+			authority.BrowserMutationOriginsSHA256 = strings.Repeat("0", 64)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			authority := valid
+			mutate(&authority)
+			got := &RunResponse{}
+			attachValidatedRunBrowserPolicy(authority, got)
+			require.Empty(t, got.BrowserInteractionPolicy)
+			require.Empty(t, got.BrowserContractID)
+		})
+	}
+}
+
 func TestRuntimeServiceDependencySettersAndTaskCallbackTrigger(t *testing.T) {
 	svc := &Service{}
 	taskCallback := &recordingTaskCallbackEnqueuer{events: make(chan db.RunEvent, 1)}
@@ -810,14 +851,26 @@ func TestAttachRuntimeAuthorityUsesCorePrincipal(t *testing.T) {
 		userID,
 		agentID,
 		runtimeExecutionProfileBrowser,
+		runtimeAgentExecutionProfile{
+			Known:                        true,
+			Browser:                      true,
+			InteractionPolicy:            "restricted",
+			BrowserMutationOrigins:       []string{},
+			InteractionPolicyGeneration:  1,
+			BrowserMutationOriginsSHA256: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+		},
 	))
 	scopeID, err := runtimePrincipalScopeID(svc.runtimePrincipalScopeKey, userID, agentID)
 	require.NoError(t, err)
 
 	require.Equal(t, map[string]interface{}{
-		"principal_scope_id": scopeID,
-		"source":             "core",
-		"execution_profile":  "browser",
+		"principal_scope_id":                    scopeID,
+		"source":                                "core",
+		"execution_profile":                     "browser",
+		"browser_interaction_policy":            "restricted",
+		"browser_interaction_policy_generation": int64(1),
+		"browser_mutation_origins":              []string{},
+		"browser_mutation_origins_sha256":       "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
 	}, metadata["_openlinker_runtime_authority"])
 	require.NotContains(t, scopeID, userID.String())
 	require.NotContains(t, scopeID, agentID.String())
@@ -831,7 +884,9 @@ func TestAttachRuntimeAuthorityOmitsExecutionProfileOutsideRuntimeQueue(t *testi
 		RuntimePKIMasterSecret: "stable-runtime-master-secret",
 	})
 
-	require.NoError(t, svc.attachRuntimeAuthority(metadata, userID, agentID, ""))
+	require.NoError(t, svc.attachRuntimeAuthority(
+		metadata, userID, agentID, "", runtimeAgentExecutionProfile{},
+	))
 
 	authority, ok := metadata["_openlinker_runtime_authority"].(map[string]interface{})
 	require.True(t, ok)
@@ -916,6 +971,7 @@ func TestAttachRuntimeAuthorityFailsClosedWithoutRuntimeMaster(t *testing.T) {
 		uuid.New(),
 		uuid.New(),
 		runtimeExecutionProfileStandard,
+		runtimeAgentExecutionProfile{},
 	)
 
 	require.ErrorContains(t, err, "scope key is unavailable")

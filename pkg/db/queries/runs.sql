@@ -607,6 +607,34 @@ SELECT r.id,
        COALESCE(runtime_evidence.transport, '')::text AS runtime_transport,
        COALESCE(runtime_evidence.transport_reason, '')::text AS runtime_transport_reason,
        runtime_evidence.transport_changed_at AS runtime_transport_changed_at,
+       CASE
+           WHEN r.request_metadata #>> '{_openlinker_runtime_authority,execution_profile}' = 'browser'
+           THEN COALESCE(r.request_metadata #>> '{_openlinker_runtime_authority,browser_interaction_policy}', '')
+           ELSE ''
+       END::text AS browser_interaction_policy,
+       CASE
+           WHEN r.request_metadata #>> '{_openlinker_runtime_authority,execution_profile}' = 'browser'
+            AND jsonb_typeof(r.request_metadata #> '{_openlinker_runtime_authority,browser_interaction_policy_generation}') = 'number'
+           THEN CASE
+               WHEN (r.request_metadata #>> '{_openlinker_runtime_authority,browser_interaction_policy_generation}')::numeric BETWEEN 1 AND 9223372036854775807
+                AND (r.request_metadata #>> '{_openlinker_runtime_authority,browser_interaction_policy_generation}')::numeric =
+                    trunc((r.request_metadata #>> '{_openlinker_runtime_authority,browser_interaction_policy_generation}')::numeric)
+               THEN (r.request_metadata #>> '{_openlinker_runtime_authority,browser_interaction_policy_generation}')::bigint
+               ELSE 0
+           END
+           ELSE 0
+       END::bigint AS browser_interaction_policy_generation,
+       CASE
+           WHEN r.request_metadata #>> '{_openlinker_runtime_authority,execution_profile}' = 'browser'
+            AND jsonb_typeof(r.request_metadata #> '{_openlinker_runtime_authority,browser_mutation_origins}') = 'array'
+           THEN r.request_metadata #> '{_openlinker_runtime_authority,browser_mutation_origins}'
+           ELSE '[]'::jsonb
+       END AS browser_mutation_origins,
+       CASE
+           WHEN r.request_metadata #>> '{_openlinker_runtime_authority,execution_profile}' = 'browser'
+           THEN COALESCE(r.request_metadata #>> '{_openlinker_runtime_authority,browser_mutation_origins_sha256}', '')
+           ELSE ''
+       END::text AS browser_mutation_origins_sha256,
        r.dispatch_state,
        r.attempt_count,
        r.max_attempts,

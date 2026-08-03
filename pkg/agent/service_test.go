@@ -477,6 +477,66 @@ func TestSetVisibility_HappyPath(t *testing.T) {
 	require.Equal(t, "active", resp.LifecycleStatus)
 }
 
+func TestBrowserInteractionPolicyCanBeOwnerStagedBeforeFirstSession(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	ownerID := insertCreator(t, pool)
+	req := validCreateReq(freshSlug("initial-browser-policy"))
+	req.Visibility = "private"
+	req.ConnectionMode = "runtime"
+	created, err := svc.CreateAgent(ctx, ownerID, req)
+	require.NoError(t, err)
+	agentID := uuid.MustParse(created.ID)
+
+	initial, err := svc.GetBrowserInteractionPolicy(ctx, agentID, ownerID)
+	require.NoError(t, err)
+	require.Equal(t, "restricted", initial.InteractionPolicy)
+	require.Equal(t, int64(1), initial.InteractionPolicyGeneration)
+	require.Empty(t, initial.BrowserMutationOrigins)
+
+	staged, err := svc.UpdateBrowserInteractionPolicy(
+		ctx,
+		agentID,
+		ownerID,
+		&agent.UpdateBrowserInteractionPolicyRequest{
+			InteractionPolicy:      " full ",
+			BrowserMutationOrigins: []string{"https://EXAMPLE.com:443"},
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "full", staged.InteractionPolicy)
+	require.Equal(t, int64(1), staged.InteractionPolicyGeneration)
+	require.Equal(t, []string{"https://example.com"}, staged.BrowserMutationOrigins)
+
+	var profileCount, intentCount int
+	var browserDeclared bool
+	require.NoError(t, pool.QueryRow(ctx, `
+SELECT
+    (SELECT count(*) FROM runtime_agent_execution_profiles WHERE agent_id = $1),
+    (SELECT count(*) FROM runtime_agent_browser_policy_intents WHERE agent_id = $1),
+    (SELECT browser_execution_profile FROM agents WHERE id = $1)`, agentID).
+		Scan(&profileCount, &intentCount, &browserDeclared))
+	require.Zero(t, profileCount)
+	require.Equal(t, 1, intentCount)
+	require.True(t, browserDeclared)
+
+	_, err = svc.SetVisibility(ctx, agentID, ownerID, "public")
+	assertHTTPStatus(t, err, http.StatusConflict)
+	_, err = svc.UpdateAgent(ctx, agentID, ownerID, &agent.UpdateAgentRequest{
+		Name:              "Declared Browser Agent",
+		Description:       "Must retain the Runtime connection boundary.",
+		EndpointURL:       "https://example.com/direct",
+		PricePerCallCents: 0,
+		Tags:              []string{"browser"},
+		Visibility:        "private",
+		ConnectionMode:    "direct_http",
+		ClearEndpointAuth: true,
+	})
+	assertHTTPStatus(t, err, http.StatusConflict)
+}
+
 func TestUpdateAgentNodeVisibilityAndDisabledBoundaries(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)

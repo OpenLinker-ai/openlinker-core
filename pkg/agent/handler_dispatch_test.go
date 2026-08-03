@@ -506,18 +506,19 @@ func TestAgentHandlersPropagateServiceErrors(t *testing.T) {
 }
 
 type mockAgentService struct {
-	err              error
-	calls            []string
-	lastSlug         string
-	lastUserID       uuid.UUID
-	lastAgentID      uuid.UUID
-	lastExampleID    uuid.UUID
-	lastAlertID      uuid.UUID
-	lastAlertLimit   int32
-	lastVisibility   string
-	lastRejectReason string
-	lastCreateAgent  *CreateAgentRequest
-	lastListOptions  AgentListOptions
+	err               error
+	calls             []string
+	lastSlug          string
+	lastUserID        uuid.UUID
+	lastAgentID       uuid.UUID
+	lastExampleID     uuid.UUID
+	lastAlertID       uuid.UUID
+	lastAlertLimit    int32
+	lastVisibility    string
+	lastBrowserPolicy *UpdateBrowserInteractionPolicyRequest
+	lastRejectReason  string
+	lastCreateAgent   *CreateAgentRequest
+	lastListOptions   AgentListOptions
 }
 
 func (m *mockAgentService) record(call string) {
@@ -594,6 +595,44 @@ func (m *mockAgentService) SetVisibility(_ context.Context, agentID, userID uuid
 		return nil, m.err
 	}
 	return &AgentResponse{ID: agentID.String(), Visibility: visibility}, nil
+}
+
+func (m *mockAgentService) UpdateBrowserInteractionPolicy(
+	_ context.Context,
+	agentID, userID uuid.UUID,
+	req *UpdateBrowserInteractionPolicyRequest,
+) (*BrowserInteractionPolicyResponse, error) {
+	m.record("UpdateBrowserInteractionPolicy")
+	m.lastAgentID = agentID
+	m.lastUserID = userID
+	m.lastBrowserPolicy = req
+	if m.err != nil {
+		return nil, m.err
+	}
+	return &BrowserInteractionPolicyResponse{
+		InteractionPolicy:            req.InteractionPolicy,
+		InteractionPolicyGeneration:  2,
+		BrowserMutationOrigins:       append([]string{}, req.BrowserMutationOrigins...),
+		BrowserMutationOriginsSHA256: strings.Repeat("a", 64),
+	}, nil
+}
+
+func (m *mockAgentService) GetBrowserInteractionPolicy(
+	_ context.Context,
+	agentID, userID uuid.UUID,
+) (*BrowserInteractionPolicyResponse, error) {
+	m.record("GetBrowserInteractionPolicy")
+	m.lastAgentID = agentID
+	m.lastUserID = userID
+	if m.err != nil {
+		return nil, m.err
+	}
+	return &BrowserInteractionPolicyResponse{
+		InteractionPolicy:            "restricted",
+		InteractionPolicyGeneration:  1,
+		BrowserMutationOrigins:       []string{},
+		BrowserMutationOriginsSHA256: strings.Repeat("a", 64),
+	}, nil
 }
 
 func (m *mockAgentService) DisableAgent(_ context.Context, agentID, userID uuid.UUID) error {

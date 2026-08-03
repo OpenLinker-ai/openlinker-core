@@ -411,16 +411,21 @@ type RuntimeSession struct {
 // classification. A Browser classification is sticky across Runtime Session
 // retention; only the audited reset path may return it to standard.
 type RuntimeAgentExecutionProfile struct {
-	AgentID                  uuid.UUID  `db:"agent_id" json:"agent_id"`
-	ExecutionProfile         string     `db:"execution_profile" json:"execution_profile"`
-	ClassifiedAt             time.Time  `db:"classified_at" json:"classified_at"`
-	ClassifiedByCredentialID uuid.UUID  `db:"classified_by_credential_id" json:"classified_by_credential_id"`
-	SourceRuntimeSessionID   uuid.UUID  `db:"source_runtime_session_id" json:"source_runtime_session_id"`
-	LastConfirmedAt          time.Time  `db:"last_confirmed_at" json:"last_confirmed_at"`
-	ResetAt                  *time.Time `db:"reset_at" json:"reset_at"`
-	ResetByUserID            *uuid.UUID `db:"reset_by_user_id" json:"reset_by_user_id"`
-	ResetReason              *string    `db:"reset_reason" json:"reset_reason"`
-	ProfilePurgeAttested     *bool      `db:"profile_purge_attested" json:"profile_purge_attested"`
+	AgentID                          uuid.UUID  `db:"agent_id" json:"agent_id"`
+	ExecutionProfile                 string     `db:"execution_profile" json:"execution_profile"`
+	ClassifiedAt                     time.Time  `db:"classified_at" json:"classified_at"`
+	ClassifiedByCredentialID         uuid.UUID  `db:"classified_by_credential_id" json:"classified_by_credential_id"`
+	SourceRuntimeSessionID           uuid.UUID  `db:"source_runtime_session_id" json:"source_runtime_session_id"`
+	LastConfirmedAt                  time.Time  `db:"last_confirmed_at" json:"last_confirmed_at"`
+	ResetAt                          *time.Time `db:"reset_at" json:"reset_at"`
+	ResetByUserID                    *uuid.UUID `db:"reset_by_user_id" json:"reset_by_user_id"`
+	ResetReason                      *string    `db:"reset_reason" json:"reset_reason"`
+	ProfilePurgeAttested             *bool      `db:"profile_purge_attested" json:"profile_purge_attested"`
+	InteractionPolicy                string     `db:"interaction_policy" json:"interaction_policy"`
+	BrowserMutationOrigins           []string   `db:"browser_mutation_origins" json:"browser_mutation_origins"`
+	InteractionPolicyGeneration      int64      `db:"interaction_policy_generation" json:"interaction_policy_generation"`
+	InteractionPolicyChangedAt       time.Time  `db:"interaction_policy_changed_at" json:"interaction_policy_changed_at"`
+	InteractionPolicyChangedByUserID uuid.UUID  `db:"interaction_policy_changed_by_user_id" json:"interaction_policy_changed_by_user_id"`
 }
 
 type RuntimeSessionAttachment struct {

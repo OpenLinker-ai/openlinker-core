@@ -16,17 +16,17 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func TestJWTAndCallbackForwardMigrationsConvergeFromFreshAndVersion88(t *testing.T) {
+func TestBrowserPolicyMigrationConvergesFromFreshAndVersion90(t *testing.T) {
 	baseURL := os.Getenv("TEST_DATABASE_URL")
 	if baseURL == "" {
 		t.Skip("TEST_DATABASE_URL is required")
 	}
-	for _, mode := range []string{"fresh", "version-88"} {
+	for _, mode := range []string{"fresh", "version-90"} {
 		t.Run(mode, func(t *testing.T) {
 			databaseURL := createMigrationTestDatabase(t, baseURL)
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
-			if mode == "version-88" {
+			if mode == "version-90" {
 				conn, err := pgx.Connect(ctx, databaseURL)
 				if err != nil {
 					t.Fatal(err)
@@ -34,9 +34,11 @@ func TestJWTAndCallbackForwardMigrationsConvergeFromFreshAndVersion88(t *testing
 				applyMigrationFile(t, ctx, conn, "086_current_schema_init.up.sql")
 				applyMigrationFile(t, ctx, conn, "087_browser_agent_execution_profile.up.sql")
 				applyMigrationFile(t, ctx, conn, "088_browser_human_control.up.sql")
+				applyMigrationFile(t, ctx, conn, "089_user_jwt_token_version.up.sql")
+				applyMigrationFile(t, ctx, conn, "090_task_callback_owner_index.up.sql")
 				if _, err := conn.Exec(ctx, `
 CREATE TABLE public.schema_migrations (version bigint NOT NULL, dirty boolean NOT NULL);
-INSERT INTO public.schema_migrations VALUES (88, false);
+INSERT INTO public.schema_migrations VALUES (90, false);
 `); err != nil {
 					conn.Close(context.Background())
 					t.Fatal(err)
@@ -48,7 +50,7 @@ INSERT INTO public.schema_migrations VALUES (88, false);
 				}
 				noop, err := snapshot.ValidateCoreUp()
 				if err != nil || noop {
-					t.Fatalf("version 88 preflight noop=%t err=%v", noop, err)
+					t.Fatalf("version 90 preflight noop=%t err=%v", noop, err)
 				}
 			}
 
@@ -67,7 +69,7 @@ INSERT INTO public.schema_migrations VALUES (88, false);
 			}
 			noop, err := snapshot.ValidateCoreUp()
 			if err != nil || !noop {
-				t.Fatalf("version 90 postflight noop=%t err=%v", noop, err)
+				t.Fatalf("version 91 postflight noop=%t err=%v", noop, err)
 			}
 		})
 	}

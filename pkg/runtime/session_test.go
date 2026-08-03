@@ -132,7 +132,7 @@ func TestRuntimeSessionServiceCreateLocksPrincipalAndPersistsAuthenticatedIdenti
 		t.Fatalf("CreateOrAttachSession() error = %v", err)
 	}
 	wantOrder := []string{
-		"lock_session_identity", "lock_agent_profile", "get_execution_profile", "lock_lifecycle_sessions", "lock_nodes", "lock_tokens",
+		"lock_session_identity", "lock_agent_profile", "lock_browser_declaration", "get_execution_profile", "lock_lifecycle_sessions", "lock_nodes", "lock_tokens",
 		"lock_attachments", "list_agent_active", "get_session_for_update", "cluster_gate", "check_generation", "get_node", "list_active", "heartbeat_node", "create_session", "create_attachment",
 	}
 	if !reflect.DeepEqual(tx.operations, wantOrder) {
@@ -185,7 +185,7 @@ func TestRuntimeSessionServiceEnrollsTokenOnlyNodeOnlyInsideCreateTransaction(t 
 	}
 	wantPrefix := []string{
 		"lock_session_identity", "lock_agent_profile",
-		"get_execution_profile", "ensure_token_only_enrollment", "lock_lifecycle_sessions", "lock_nodes",
+		"lock_browser_declaration", "get_execution_profile", "ensure_token_only_enrollment", "lock_lifecycle_sessions", "lock_nodes",
 		"lock_tokens", "lock_attachments", "list_agent_active",
 	}
 	if len(tx.operations) < len(wantPrefix) || !reflect.DeepEqual(tx.operations[:len(wantPrefix)], wantPrefix) {
@@ -217,7 +217,7 @@ func TestRuntimeSessionServiceCreatesDrainingSuccessorWithServerEvidence(t *test
 		t.Fatalf("CreateOrAttachSession() error = %v", err)
 	}
 	wantOrder := []string{
-		"lock_session_identity", "lock_agent_profile", "get_execution_profile", "lock_lifecycle_sessions", "lock_nodes", "lock_tokens",
+		"lock_session_identity", "lock_agent_profile", "lock_browser_declaration", "get_execution_profile", "lock_lifecycle_sessions", "lock_nodes", "lock_tokens",
 		"lock_attachments", "list_agent_active", "get_session_for_update", "cluster_gate", "check_generation",
 		"get_node", "list_active", "heartbeat_node", "create_draining_successor", "create_attachment",
 	}
@@ -1047,6 +1047,8 @@ type sessionTransactionFake struct {
 	active                   []db.RuntimeSession
 	executionProfile         db.RuntimeAgentExecutionProfile
 	executionProfileErr      error
+	browserDeclared          bool
+	browserDeclaredErr       error
 	classifyProfile          db.RuntimeAgentExecutionProfile
 	classifyProfileErr       error
 	classifyProfileParams    db.ClassifyRuntimeAgentBrowserExecutionProfileParams
@@ -1146,6 +1148,14 @@ func (f *sessionTransactionFake) LockRuntimeAgentProfile(context.Context, uuid.U
 	return nil
 }
 
+func (f *sessionTransactionFake) LockRuntimeAgentBrowserDeclaration(
+	context.Context,
+	uuid.UUID,
+) (bool, error) {
+	f.op("lock_browser_declaration")
+	return f.browserDeclared, f.browserDeclaredErr
+}
+
 func (f *sessionTransactionFake) GetRuntimeAgentExecutionProfileForUpdate(
 	context.Context,
 	uuid.UUID,
@@ -1171,8 +1181,11 @@ func (f *sessionTransactionFake) ClassifyRuntimeAgentBrowserExecutionProfile(
 	}
 	if f.classifyProfile.AgentID == uuid.Nil {
 		return db.RuntimeAgentExecutionProfile{
-			AgentID:          params.AgentID,
-			ExecutionProfile: runtimeExecutionProfileBrowser,
+			AgentID:                     params.AgentID,
+			ExecutionProfile:            runtimeExecutionProfileBrowser,
+			InteractionPolicy:           "restricted",
+			BrowserMutationOrigins:      []string{},
+			InteractionPolicyGeneration: 1,
 		}, nil
 	}
 	return f.classifyProfile, nil

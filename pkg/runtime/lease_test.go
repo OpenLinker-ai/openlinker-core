@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -85,25 +86,35 @@ func TestBrowserRuntimeClaimRequiresOwnerPrivateCandidate(t *testing.T) {
 	fixture.tx.candidate.RequestMetadata = []byte(
 		`{"_openlinker_runtime_authority":{` +
 			`"principal_scope_id":"ps1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",` +
-			`"source":"core","execution_profile":"browser"}}`,
+			`"source":"core","execution_profile":"browser",` +
+			`"browser_interaction_policy":"restricted",` +
+			`"browser_interaction_policy_generation":1,` +
+			`"browser_mutation_origins":[],` +
+			`"browser_mutation_origins_sha256":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"}}`,
 	)
 	assigned, err := fixture.service.ClaimOffer(context.Background(), fixture.principal)
 	require.NoError(t, err)
 	require.NotNil(t, assigned)
 	require.True(t, fixture.tx.candidateParams.BrowserExecutionProfile)
+	require.False(t, fixture.tx.candidateParams.FullBrowserInteraction)
 	require.Equal(t, fixture.principal.AgentID, fixture.tx.candidateParams.AgentID)
 	require.Equal(t, map[string]any{
 		"_openlinker_runtime_authority": map[string]any{
-			"principal_scope_id": "ps1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-			"source":             "core",
+			"principal_scope_id":                    "ps1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			"source":                                "core",
+			"execution_profile":                     "browser",
+			"browser_interaction_policy":            "restricted",
+			"browser_interaction_policy_generation": json.Number("1"),
+			"browser_mutation_origins":              []any{},
+			"browser_mutation_origins_sha256":       "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
 		},
 	}, assigned.Metadata)
 }
 
-func TestRuntimeExecutionProfileMarkerFailsClosedAndNeverReachesWorker(t *testing.T) {
+func TestRuntimeExecutionProfileAuthorityFailsClosedAndReachesOnlySDK(t *testing.T) {
 	for _, test := range []struct {
 		name      string
-		browser   bool
+		features  []string
 		metadata  map[string]any
 		wantError bool
 	}{
@@ -113,19 +124,23 @@ func TestRuntimeExecutionProfileMarkerFailsClosedAndNeverReachesWorker(t *testin
 			wantError: false,
 		},
 		{
-			name:    "browser exact match",
-			browser: true,
+			name:     "browser exact match",
+			features: []string{RuntimeBrowserExecutionProfileFeature},
 			metadata: map[string]any{
 				"_openlinker_runtime_authority": map[string]any{
-					"principal_scope_id": "ps1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-					"source":             "core",
-					"execution_profile":  "browser",
+					"principal_scope_id":                    "ps1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+					"source":                                "core",
+					"execution_profile":                     "browser",
+					"browser_interaction_policy":            "restricted",
+					"browser_interaction_policy_generation": int64(1),
+					"browser_mutation_origins":              []string{},
+					"browser_mutation_origins_sha256":       "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
 				},
 			},
 		},
 		{
 			name:      "browser missing marker",
-			browser:   true,
+			features:  []string{RuntimeBrowserExecutionProfileFeature},
 			metadata:  map[string]any{},
 			wantError: true,
 		},
@@ -140,13 +155,16 @@ func TestRuntimeExecutionProfileMarkerFailsClosedAndNeverReachesWorker(t *testin
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := consumeRuntimeExecutionProfile(test.metadata, test.browser)
+			err := consumeRuntimeExecutionProfile(test.metadata, test.features)
 			require.Equal(t, test.wantError, err != nil, "error = %v", err)
 			if err != nil {
 				return
 			}
-			if authority, ok := test.metadata["_openlinker_runtime_authority"].(map[string]any); ok {
-				require.NotContains(t, authority, "execution_profile")
+			if len(test.features) > 0 {
+				authority, ok := test.metadata["_openlinker_runtime_authority"].(map[string]any)
+				require.True(t, ok)
+				require.Equal(t, "browser", authority["execution_profile"],
+					"private authority must survive until the SDK consumes it")
 			}
 		})
 	}

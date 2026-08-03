@@ -29,6 +29,8 @@ type agentService interface {
 	GetMyAgent(context.Context, uuid.UUID, uuid.UUID) (*AgentResponse, error)
 	UpdateAgent(context.Context, uuid.UUID, uuid.UUID, *UpdateAgentRequest) (*AgentResponse, error)
 	SetVisibility(context.Context, uuid.UUID, uuid.UUID, string) (*AgentResponse, error)
+	UpdateBrowserInteractionPolicy(context.Context, uuid.UUID, uuid.UUID, *UpdateBrowserInteractionPolicyRequest) (*BrowserInteractionPolicyResponse, error)
+	GetBrowserInteractionPolicy(context.Context, uuid.UUID, uuid.UUID) (*BrowserInteractionPolicyResponse, error)
 	DisableAgent(context.Context, uuid.UUID, uuid.UUID) error
 	GetAgentOnboarding(context.Context, uuid.UUID, uuid.UUID) (*OnboardingResponse, error)
 	UpsertCapability(context.Context, uuid.UUID, uuid.UUID, *UpsertCapabilityRequest) (*CapabilityResponse, error)
@@ -88,6 +90,8 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	creator.GET("/agents/:id", h.GetMyAgent)
 	creator.PATCH("/agents/:id", h.UpdateAgent)
 	creator.PATCH("/agents/:id/visibility", h.UpdateVisibility)
+	creator.PUT("/agents/:id/browser-interaction-policy", h.UpdateBrowserInteractionPolicy)
+	creator.GET("/agents/:id/browser-interaction-policy", h.GetBrowserInteractionPolicy)
 	creator.DELETE("/agents/:id", h.DisableAgent)
 
 	creator.GET("/agents/:id/onboarding", h.GetAgentOnboarding)
@@ -273,6 +277,51 @@ func (h *Handler) UpdateVisibility(c echo.Context) error {
 		return httpx.Unprocessable(err.Error())
 	}
 	resp, err := h.svc.SetVisibility(c.Request().Context(), id, uid, req.Visibility)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// UpdateBrowserInteractionPolicy changes the owner-only durable Browser
+// policy. Active Sessions/Runs are rejected by the database mutation itself.
+func (h *Handler) UpdateBrowserInteractionPolicy(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	id, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	var req UpdateBrowserInteractionPolicyRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.UpdateBrowserInteractionPolicy(
+		c.Request().Context(), id, uid, &req,
+	)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// GetBrowserInteractionPolicy returns the current owner-only durable Browser
+// interaction authority without exposing Runtime lease state.
+func (h *Handler) GetBrowserInteractionPolicy(c echo.Context) error {
+	userID, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	agentID, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	resp, err := h.svc.GetBrowserInteractionPolicy(c.Request().Context(), agentID, userID)
 	if err != nil {
 		return err
 	}
