@@ -688,6 +688,20 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 			wantFactory:  1,
 		},
 		{
+			name:         "reviewed legacy bridge predecessor up reaches postflight",
+			args:         []string{"up"},
+			env:          map[string]string{"DATABASE_URL": "postgres://db"},
+			snapshot:     legacyBridgeCoreMigrationSnapshot(),
+			migrator:     &fakeMigrator{},
+			postSnapshot: migrationSnapshotPointer(currentCoreMigrationSnapshot()),
+			wantCode:     0,
+			wantOut:      "migrate up: ok",
+			wantSrc:      "file://./migrations",
+			wantDBURL:    "postgres://db",
+			wantInspect:  2,
+			wantFactory:  1,
+		},
+		{
 			name:         "fresh up no change is ok",
 			args:         []string{"up"},
 			env:          map[string]string{"DATABASE_URL": "postgres://db"},
@@ -928,6 +942,24 @@ func reviewedBridgeCoreMigrationSnapshot() migrationinit.Snapshot {
 		CoreShape: migrationinit.SchemaShape{
 			Digest: migrationinit.CoreReviewedBridgeSchemaDigest,
 			Tables: 72, Constraints: 615, Indexes: 265, Triggers: 70,
+			CoreIdentities: 1, RuntimeControls: 1, RuntimeSchemas: 10,
+			CurrentRuntime: 1, RuntimeWires: 5, CurrentWire: 1,
+			PreviousWire: 1, BuiltInSkills: 30, BuiltInSkillCases: 15,
+		},
+	}
+}
+
+func legacyBridgeCoreMigrationSnapshot() migrationinit.Snapshot {
+	return migrationinit.Snapshot{
+		Core: migrationinit.MigrationTableState{
+			Exists:  true,
+			Rows:    1,
+			Version: migrationinit.CoreLegacyBridgeVersion,
+		},
+		NonBookkeepingObjects: 69,
+		CoreShape: migrationinit.SchemaShape{
+			Digest: migrationinit.CoreLegacyBridgeSchemaDigest,
+			Tables: 69, Constraints: 587, Indexes: 259, Triggers: 70,
 			CoreIdentities: 1, RuntimeControls: 1, RuntimeSchemas: 10,
 			CurrentRuntime: 1, RuntimeWires: 5, CurrentWire: 1,
 			PreviousWire: 1, BuiltInSkills: 30, BuiltInSkillCases: 15,

@@ -28,8 +28,15 @@ type Service struct {
 	queries             *db.Queries
 	pool                *pgxpool.Pool
 	runtime             *runtime.Service
+	runUpdates          runtime.RunUpdateSource
 	taskCallbackManager taskCallbackManager
 	maxDelegationDepth  int
+}
+
+// SetRunUpdateSource enables advisory event-driven waits for blocking A2A
+// message/send requests. PostgreSQL remains the authoritative Run state.
+func (s *Service) SetRunUpdateSource(source runtime.RunUpdateSource) {
+	s.runUpdates = source
 }
 
 func NewService(pool *pgxpool.Pool, runtimeSvc *runtime.Service) *Service {
