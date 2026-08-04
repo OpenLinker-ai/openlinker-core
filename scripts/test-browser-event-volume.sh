@@ -201,7 +201,7 @@ run_database_test() {
   run_database_test \
     "$normal_go_cache" \
     ./pkg/migrationinit \
-    TestBrowserPolicyMigrationConvergesFromFreshAndVersion90
+    TestBrowserPolicyMigrationConvergesFromFreshReviewedBridgeAndVersion90
   GOCACHE="$normal_go_cache" go clean -cache
 
   run_database_test \
@@ -237,4 +237,4 @@ run_database_test() {
   GOCACHE="$race_go_cache" go clean -cache
 )
 
-echo "Browser PostgreSQL acceptance passed (fresh/v90 migration, Owner-staged first full Session and Run fence, old-Worker rejection, 1 vs 500 action rows, and CallRecord policy evidence)"
+echo "Browser PostgreSQL acceptance passed (fresh/v86/v90 migration, Owner-staged first full Session and Run fence, old-Worker rejection, 1 vs 500 action rows, and CallRecord policy evidence)"
