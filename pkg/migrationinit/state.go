@@ -16,12 +16,14 @@ import (
 )
 
 const (
-	CoreVersion             int64 = 91
-	CoreUpgradeVersion      int64 = 90
-	CloudVersion            int64 = 55
-	CoreSchemaDigest              = "1b2591b579018b4edd6465e19f36823fca28af01068742358293d1367c1c1ed8"
-	CoreUpgradeSchemaDigest       = "7e47d3b82e06f4be0e2c67680fc088a02945bb7be28811e358435323b2397ebe"
-	CloudSchemaDigest             = "0cf21f9a518d9875e62e66e1b490148e45b67eaaeddf9cab118efd778575abd5"
+	CoreVersion                    int64 = 91
+	CoreUpgradeVersion             int64 = 90
+	CoreReviewedBridgeVersion      int64 = 88
+	CloudVersion                   int64 = 55
+	CoreSchemaDigest                     = "1b2591b579018b4edd6465e19f36823fca28af01068742358293d1367c1c1ed8"
+	CoreUpgradeSchemaDigest              = "7e47d3b82e06f4be0e2c67680fc088a02945bb7be28811e358435323b2397ebe"
+	CoreReviewedBridgeSchemaDigest       = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
+	CloudSchemaDigest                    = "0cf21f9a518d9875e62e66e1b490148e45b67eaaeddf9cab118efd778575abd5"
 )
 
 var coreTables = []string{
@@ -240,7 +242,8 @@ func Inspect(ctx context.Context, databaseURL string) (Snapshot, error) {
 	}
 
 	if snapshot.CoreShape.Tables == int64(len(coreTables)) ||
-		(snapshot.Core.Version == CoreUpgradeVersion &&
+		((snapshot.Core.Version == CoreUpgradeVersion ||
+			snapshot.Core.Version == CoreReviewedBridgeVersion) &&
 			snapshot.CoreShape.Tables == int64(len(coreTables)-1)) {
 		if err := inspectCoreSeeds(ctx, conn, &snapshot.CoreShape); err != nil {
 			return Snapshot{}, err
@@ -512,6 +515,14 @@ func (s Snapshot) ValidateCoreUp() (bool, error) {
 			return false, err
 		}
 		return false, nil
+	case CoreReviewedBridgeVersion:
+		if err := validateCoreReviewedBridgeShape(s.CoreShape); err != nil {
+			return false, err
+		}
+		if err := s.validateKnownRelations(); err != nil {
+			return false, err
+		}
+		return false, nil
 	default:
 		return false, fmt.Errorf(
 			"Core migration %d is unsupported; rebuild an empty database at version %d",
@@ -543,6 +554,14 @@ func (s Snapshot) ValidateCloudUp() (bool, error) {
 		}
 	case CoreUpgradeVersion:
 		if err := validateCoreUpgradeShape(s.CoreShape); err != nil {
+			return false, fmt.Errorf(
+				"Cloud initialization requires current Core: %w",
+				err,
+			)
+		}
+		coreUpgradeable = true
+	case CoreReviewedBridgeVersion:
+		if err := validateCoreReviewedBridgeShape(s.CoreShape); err != nil {
 			return false, fmt.Errorf(
 				"Cloud initialization requires current Core: %w",
 				err,
@@ -676,6 +695,46 @@ func validateCoreUpgradeShape(shape SchemaShape) error {
 		return fmt.Errorf(
 			"Core schema fingerprint mismatch for supported version %d upgrade: %s",
 			CoreUpgradeVersion,
+			formatShape(shape),
+		)
+	}
+	return nil
+}
+
+func validateCoreReviewedBridgeShape(shape SchemaShape) error {
+	want := SchemaShape{
+		Digest:            CoreReviewedBridgeSchemaDigest,
+		Tables:            72,
+		Constraints:       615,
+		Indexes:           265,
+		Triggers:          70,
+		CoreIdentities:    1,
+		RuntimeControls:   1,
+		RuntimeSchemas:    10,
+		CurrentRuntime:    1,
+		RuntimeWires:      5,
+		CurrentWire:       1,
+		PreviousWire:      1,
+		BuiltInSkills:     30,
+		BuiltInSkillCases: 15,
+	}
+	if shape.Digest != want.Digest ||
+		shape.Tables != want.Tables ||
+		shape.Constraints != want.Constraints ||
+		shape.Indexes != want.Indexes ||
+		shape.Triggers != want.Triggers ||
+		shape.CoreIdentities != want.CoreIdentities ||
+		shape.RuntimeControls != want.RuntimeControls ||
+		shape.RuntimeSchemas != want.RuntimeSchemas ||
+		shape.CurrentRuntime != want.CurrentRuntime ||
+		shape.RuntimeWires != want.RuntimeWires ||
+		shape.CurrentWire != want.CurrentWire ||
+		shape.PreviousWire != want.PreviousWire ||
+		shape.BuiltInSkills != want.BuiltInSkills ||
+		shape.BuiltInSkillCases < want.BuiltInSkillCases {
+		return fmt.Errorf(
+			"Core schema fingerprint mismatch for reviewed version %d bridge: %s",
+			CoreReviewedBridgeVersion,
 			formatShape(shape),
 		)
 	}
