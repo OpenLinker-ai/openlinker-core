@@ -16,11 +16,13 @@ func TestValidateCoreUp(t *testing.T) {
 		{name: "current", snapshot: currentCoreSnapshot(), wantNoop: true},
 		{name: "supported predecessor", snapshot: upgradeableCoreSnapshot()},
 		{name: "reviewed bridge predecessor", snapshot: reviewedBridgeCoreSnapshot()},
+		{name: "reviewed legacy bridge predecessor", snapshot: legacyBridgeCoreSnapshot()},
 		{name: "nonempty without bookkeeping", snapshot: Snapshot{NonBookkeepingObjects: 1}, wantError: "requires an empty database"},
 		{name: "Cloud bookkeeping before Core", snapshot: Snapshot{Cloud: MigrationTableState{Exists: true, Rows: 1, Version: CloudVersion}}, wantError: "Cloud migration bookkeeping"},
 		{name: "legacy", snapshot: withCoreState(currentCoreSnapshot(), MigrationTableState{Exists: true, Rows: 1, Version: 81}), wantError: "unsupported"},
 		{name: "predecessor definition drift", snapshot: withCoreDigest(upgradeableCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
 		{name: "reviewed bridge definition drift", snapshot: withCoreDigest(reviewedBridgeCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
+		{name: "reviewed legacy bridge definition drift", snapshot: withCoreDigest(legacyBridgeCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
 		{name: "dirty", snapshot: withCoreState(currentCoreSnapshot(), MigrationTableState{Exists: true, Rows: 1, Version: CoreVersion, Dirty: true}), wantError: "dirty"},
 		{name: "malformed", snapshot: withCoreState(currentCoreSnapshot(), MigrationTableState{Exists: true, Rows: 2}), wantError: "exactly one"},
 		{name: "partial current", snapshot: withCoreShape(currentCoreSnapshot(), SchemaShape{Tables: 69}), wantError: "fingerprint mismatch"},
@@ -65,6 +67,7 @@ func TestValidateCloudUp(t *testing.T) {
 		{name: "current", snapshot: current, wantNoop: true},
 		{name: "current Cloud accepts exact Core predecessor preflight", snapshot: upgradeableCloudSnapshot(current), wantNoop: true},
 		{name: "current Cloud accepts exact reviewed Core bridge preflight", snapshot: reviewedBridgeCloudSnapshot(current), wantNoop: true},
+		{name: "current Cloud accepts exact reviewed legacy Core bridge preflight", snapshot: legacyBridgeCloudSnapshot(current), wantNoop: true},
 		{name: "Core missing", snapshot: Snapshot{}, wantError: "current Core"},
 		{name: "Core legacy", snapshot: withCoreState(fresh, MigrationTableState{Exists: true, Rows: 1, Version: 81}), wantError: "current Core"},
 		{name: "Core predecessor", snapshot: withCoreShape(withCoreState(fresh, MigrationTableState{Exists: true, Rows: 1, Version: CoreUpgradeVersion}), upgradeableCoreShape()), wantError: "complete its supported migration"},
@@ -188,6 +191,37 @@ func reviewedBridgeCoreShape() SchemaShape {
 	}
 }
 
+func legacyBridgeCoreSnapshot() Snapshot {
+	return Snapshot{
+		Core: MigrationTableState{
+			Exists:  true,
+			Rows:    1,
+			Version: CoreLegacyBridgeVersion,
+		},
+		CoreShape:             legacyBridgeCoreShape(),
+		NonBookkeepingObjects: 69,
+	}
+}
+
+func legacyBridgeCoreShape() SchemaShape {
+	return SchemaShape{
+		Digest:            CoreLegacyBridgeSchemaDigest,
+		Tables:            69,
+		Constraints:       587,
+		Indexes:           259,
+		Triggers:          70,
+		CoreIdentities:    1,
+		RuntimeControls:   1,
+		RuntimeSchemas:    10,
+		CurrentRuntime:    1,
+		RuntimeWires:      5,
+		CurrentWire:       1,
+		PreviousWire:      1,
+		BuiltInSkills:     30,
+		BuiltInSkillCases: 15,
+	}
+}
+
 func upgradeableCloudSnapshot(current Snapshot) Snapshot {
 	current.Core = MigrationTableState{
 		Exists:  true,
@@ -207,6 +241,17 @@ func reviewedBridgeCloudSnapshot(current Snapshot) Snapshot {
 	}
 	current.CoreShape = reviewedBridgeCoreShape()
 	current.NonBookkeepingObjects = 79
+	return current
+}
+
+func legacyBridgeCloudSnapshot(current Snapshot) Snapshot {
+	current.Core = MigrationTableState{
+		Exists:  true,
+		Rows:    1,
+		Version: CoreLegacyBridgeVersion,
+	}
+	current.CoreShape = legacyBridgeCoreShape()
+	current.NonBookkeepingObjects = 76
 	return current
 }
 

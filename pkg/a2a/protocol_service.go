@@ -84,6 +84,12 @@ func (s *Service) SendProtocolMessage(ctx context.Context, userID uuid.UUID, slu
 	if err != nil {
 		return nil, err
 	}
+	if !shouldReturnA2AMessageImmediately(params) && isQueuedRuntimeConnectionMode(agent.ConnectionMode) && !isTerminalProtocolRunStatus(resp.Status) {
+		resp, err = s.waitForProtocolRun(ctx, userID, resp)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return applyProtocolContinuation(taskFromRun(resp, params.Message.ContextID, nil, nil), continuation), nil
 }
 

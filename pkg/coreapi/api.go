@@ -246,6 +246,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	go webhook.StartWorker(rootCtx, webhookSvc)
 
 	a2aSvc := a2a.NewService(pool, runtimeSvc)
+	a2aSvc.SetRunUpdateSource(runUpdates)
 	a2aSvc.SetTaskCallbackManager(webhookSvc)
 	a2aHandler := a2a.NewHandler(a2aSvc)
 	a2aHandler.SetAgentCardProvider(agentMarketSvc)
