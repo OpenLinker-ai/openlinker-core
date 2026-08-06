@@ -3102,6 +3102,21 @@ func TestCapabilityMessageArtifactQueriesScanRowsAndArgs(t *testing.T) {
 		t.Fatalf("ListRunArtifactsByRun scan = %#v closed=%v", artifacts, artifactRows.closed)
 	}
 
+	dbtx.row = fakeRow{values: []any{true}}
+	hasArtifacts, err := q.HasRunArtifactsByRun(context.Background(), runID)
+	if err != nil || !hasArtifacts {
+		t.Fatalf("HasRunArtifactsByRun = %t, %v", hasArtifacts, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "HasRunArtifactsByRun")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID}) {
+		t.Fatalf("HasRunArtifactsByRun args = %#v", dbtx.queryRowArgs)
+	}
+	dbtx.row = fakeRow{values: []any{false}}
+	hasArtifacts, err = q.HasRunArtifactsByRun(context.Background(), runID)
+	if err != nil || hasArtifacts {
+		t.Fatalf("HasRunArtifactsByRun empty = %t, %v", hasArtifacts, err)
+	}
+
 	dbtx.row = fakeRow{values: []any{int32(4), true}}
 	artifactSummary, err := q.GetRunArtifactSummary(context.Background(), runID)
 	if err != nil || artifactSummary.ArtifactCount != 4 || !artifactSummary.PublicSafe {

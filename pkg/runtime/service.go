@@ -2484,11 +2484,11 @@ func createRunArtifacts(ctx context.Context, q *db.Queries, runID uuid.UUID, out
 			// A streamed artifact is already the durable output. Do not add a
 			// second generic "Agent output" record merely because the final Result
 			// has no explicit artifact list.
-			existing, err := q.ListRunArtifactsByRun(ctx, runID)
+			existing, err := q.HasRunArtifactsByRun(ctx, runID)
 			if err != nil {
 				return err
 			}
-			if len(existing) > 0 {
+			if existing {
 				continue
 			}
 		}
