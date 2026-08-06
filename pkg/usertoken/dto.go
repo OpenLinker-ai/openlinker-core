@@ -51,6 +51,8 @@ type ListOptions struct {
 	Offset  int32
 	SortBy  string
 	SortDir string
+	Status  string
+	Query   string
 }
 
 type ListResponse struct {

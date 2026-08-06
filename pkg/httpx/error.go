@@ -68,6 +68,12 @@ func SendError(c echo.Context, err error) error {
 	// 兼容 echo.HTTPError
 	var ee *echo.HTTPError
 	if errors.As(err, &ee) {
+		if ee.Code == http.StatusNotFound {
+			return c.JSON(http.StatusNotFound, ErrorResponse{Error: ErrorBody{
+				Code:    CodeNotFound,
+				Message: "资源不存在",
+			}})
+		}
 		return c.JSON(ee.Code, ErrorResponse{Error: ErrorBody{
 			Code:    CodeInternal,
 			Message: ee.Error(),

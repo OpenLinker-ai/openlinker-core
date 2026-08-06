@@ -138,13 +138,16 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req *CreateReque
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID, opts ListOptions) (*ListResponse, error) {
 	opts = normalizeListOptions(opts)
-	tokens, err := s.queries.ListUserTokensByUser(ctx, db.ListUserTokensByUserParams{
-		UserID: userID, Limit: opts.Limit, Offset: opts.Offset, SortBy: opts.SortBy, SortDir: opts.SortDir,
+	tokens, err := s.queries.ListUserTokensByUserFiltered(ctx, db.ListUserTokensByUserFilteredParams{
+		UserID: userID, Status: opts.Status, Search: opts.Query,
+		Limit: opts.Limit, Offset: opts.Offset, SortBy: opts.SortBy, SortDir: opts.SortDir,
 	})
 	if err != nil {
 		return nil, httpx.Internal("查询 User Token 失败")
 	}
-	total, err := s.queries.CountUserTokensByUser(ctx, userID)
+	total, err := s.queries.CountUserTokensByUserFiltered(ctx, db.CountUserTokensByUserFilteredParams{
+		UserID: userID, Status: opts.Status, Search: opts.Query,
+	})
 	if err != nil {
 		return nil, httpx.Internal("查询 User Token 失败")
 	}
@@ -620,6 +623,16 @@ func normalizeListOptions(opts ListOptions) ListOptions {
 	}
 	if opts.SortDir != "asc" {
 		opts.SortDir = "desc"
+	}
+	opts.Status = strings.ToLower(strings.TrimSpace(opts.Status))
+	switch opts.Status {
+	case "active", "revoked", "expired", "all":
+	default:
+		opts.Status = "all"
+	}
+	opts.Query = strings.TrimSpace(opts.Query)
+	if runes := []rune(opts.Query); len(runes) > 120 {
+		opts.Query = string(runes[:120])
 	}
 	return opts
 }

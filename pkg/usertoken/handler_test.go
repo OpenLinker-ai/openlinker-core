@@ -17,17 +17,45 @@ import (
 
 type fakeTokenService struct {
 	createCalled bool
+	listOpts     ListOptions
 }
 
 func (f *fakeTokenService) Create(_ context.Context, userID uuid.UUID, req *CreateRequest) (*TokenResponse, error) {
 	f.createCalled = true
 	return &TokenResponse{ID: uuid.NewString(), UserID: userID.String(), Name: req.Name, Grants: []GrantResponse{}, Scopes: []string{}, PlaintextToken: "ol_user_once"}, nil
 }
-func (f *fakeTokenService) List(context.Context, uuid.UUID, ListOptions) (*ListResponse, error) {
+func (f *fakeTokenService) List(_ context.Context, _ uuid.UUID, opts ListOptions) (*ListResponse, error) {
+	f.listOpts = opts
 	return &ListResponse{}, nil
 }
 func (f *fakeTokenService) Get(context.Context, uuid.UUID, uuid.UUID) (*TokenResponse, error) {
 	return nil, errors.New("not used")
+}
+
+func TestUserTokenListParsesStatusAndSearchBeforeServicePagination(t *testing.T) {
+	userID := uuid.New()
+	svc := &fakeTokenService{}
+	h := NewHandler(svc)
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/user-tokens?status=active&q=prod&limit=7&offset=14", nil), rec)
+	c.Set(string(httpx.CtxKeyUserID), userID.String())
+	c.Set(string(httpx.CtxKeyAuthMethod), auth.AuthMethodJWT)
+	if err := h.List(c); err != nil {
+		t.Fatalf("List error = %v", err)
+	}
+	if svc.listOpts.Status != "active" || svc.listOpts.Query != "prod" || svc.listOpts.Limit != 7 || svc.listOpts.Offset != 14 {
+		t.Fatalf("list opts = %#v", svc.listOpts)
+	}
+
+	invalid := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/user-tokens?status=unknown", nil), httptest.NewRecorder())
+	invalid.Set(string(httpx.CtxKeyUserID), userID.String())
+	invalid.Set(string(httpx.CtxKeyAuthMethod), auth.AuthMethodJWT)
+	err := h.List(invalid)
+	var httpErr *httpx.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadRequest {
+		t.Fatalf("invalid status error = %#v", err)
+	}
 }
 func (f *fakeTokenService) Update(context.Context, uuid.UUID, uuid.UUID, *UpdateRequest) (*TokenResponse, error) {
 	return nil, errors.New("not used")
