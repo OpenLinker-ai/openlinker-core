@@ -49,6 +49,20 @@ func TestUserTokenQueriesScanCredentialAndGrantRows(t *testing.T) {
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "CreateUserTokenCoreGrant")
 
+	secondTokenID := uuid.New()
+	dbtx.queryRows = &fakeRows{rows: [][]any{
+		{grantID, tokenID, "agents:run", "agent", &agentID, []byte(`{}`), now},
+		{uuid.New(), secondTokenID, "runs:read", "run", nil, []byte(`{}`), now},
+	}}
+	grants, err := q.ListUserTokenCoreGrantsForTokens(context.Background(), []uuid.UUID{tokenID, secondTokenID})
+	if err != nil || len(grants) != 2 || grants[0].TokenID != tokenID || grants[1].TokenID != secondTokenID {
+		t.Fatalf("ListUserTokenCoreGrantsForTokens = %#v, %v", grants, err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListUserTokenCoreGrantsForTokens")
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{[]uuid.UUID{tokenID, secondTokenID}}) {
+		t.Fatalf("batch grant args = %#v", dbtx.queryArgs)
+	}
+
 	if err := q.TouchUserToken(context.Background(), tokenID); err != nil {
 		t.Fatal(err)
 	}

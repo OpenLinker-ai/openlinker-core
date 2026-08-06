@@ -152,13 +152,23 @@ func (s *Service) List(ctx context.Context, userID uuid.UUID, opts ListOptions) 
 	if err != nil {
 		return nil, err
 	}
-	items := make([]TokenResponse, 0, len(tokens))
-	for _, token := range tokens {
-		grants, err := s.queries.ListUserTokenCoreGrants(ctx, token.ID)
+	grantsByToken := make(map[uuid.UUID][]db.UserTokenCoreGrant, len(tokens))
+	if len(tokens) > 0 {
+		tokenIDs := make([]uuid.UUID, len(tokens))
+		for i, token := range tokens {
+			tokenIDs[i] = token.ID
+		}
+		grants, err := s.queries.ListUserTokenCoreGrantsForTokens(ctx, tokenIDs)
 		if err != nil {
 			return nil, httpx.Internal("查询 User Token 权限失败")
 		}
-		items = append(items, tokenResponse(token, grants, issuer))
+		for _, grant := range grants {
+			grantsByToken[grant.TokenID] = append(grantsByToken[grant.TokenID], grant)
+		}
+	}
+	items := make([]TokenResponse, 0, len(tokens))
+	for _, token := range tokens {
+		items = append(items, tokenResponse(token, grantsByToken[token.ID], issuer))
 	}
 	return &ListResponse{
 		Items: items, Total: total, Limit: opts.Limit, Offset: opts.Offset,

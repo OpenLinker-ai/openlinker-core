@@ -1,5 +1,5 @@
 // Hand-maintained SQL query implementation.
-// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
+// sqlc comparison output is isolated under .sqlc/generated; review it manually before any migration of this runtime package.
 
 package db
 
@@ -76,6 +76,17 @@ func (q *Queries) ListRunMessagesByRun(ctx context.Context, runID uuid.UUID) ([]
 		return nil, err
 	}
 	return items, nil
+}
+
+const countRunMessagesByRun = `-- name: CountRunMessagesByRun :one
+SELECT COUNT(*)::int
+FROM run_messages
+WHERE run_id = $1`
+
+func (q *Queries) CountRunMessagesByRun(ctx context.Context, runID uuid.UUID) (int32, error) {
+	var count int32
+	err := q.db.QueryRow(ctx, countRunMessagesByRun, runID).Scan(&count)
+	return count, err
 }
 
 const listRunMessagesByRuns = `-- name: ListRunMessagesByRuns :many
