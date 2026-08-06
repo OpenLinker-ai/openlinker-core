@@ -246,6 +246,29 @@ func (q *Queries) ListUserTokenCoreGrants(ctx context.Context, tokenID uuid.UUID
 	return items, rows.Err()
 }
 
+const listUserTokenCoreGrantsForTokens = `-- name: ListUserTokenCoreGrantsForTokens :many
+SELECT id, token_id, permission, resource_type, resource_id, constraints, created_at
+FROM user_token_core_grants
+WHERE token_id = ANY($1::uuid[])
+ORDER BY token_id, permission, resource_type, resource_id NULLS FIRST`
+
+func (q *Queries) ListUserTokenCoreGrantsForTokens(ctx context.Context, tokenIDs []uuid.UUID) ([]UserTokenCoreGrant, error) {
+	rows, err := q.db.Query(ctx, listUserTokenCoreGrantsForTokens, tokenIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]UserTokenCoreGrant, 0)
+	for rows.Next() {
+		var grant UserTokenCoreGrant
+		if err := scanUserTokenCoreGrant(rows, &grant); err != nil {
+			return nil, err
+		}
+		items = append(items, grant)
+	}
+	return items, rows.Err()
+}
+
 const deleteUserTokenCoreGrants = `-- name: DeleteUserTokenCoreGrants :exec
 DELETE FROM user_token_core_grants WHERE token_id = $1`
 

@@ -30,6 +30,12 @@ FROM run_artifacts
 WHERE run_id = $1
 ORDER BY created_at ASC, id ASC;
 
+-- name: GetRunArtifactSummary :one
+SELECT COUNT(*)::int AS artifact_count,
+       COALESCE(BOOL_OR(visibility = 'public_example'), FALSE) AS public_safe
+FROM run_artifacts
+WHERE run_id = $1;
+
 -- name: GetRunArtifactBySourceID :one
 SELECT id, run_id, artifact_type, title, content, visibility, source_artifact_id,
        mime_type, file_uri, file_name, file_sha256, file_size_bytes, created_at

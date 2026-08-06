@@ -1,6 +1,6 @@
 // Hand-maintained SQL query implementation.
-// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
-// 包路径与 sqlc.yaml 中 `package: db` + `out: pkg/db/generated` 一致。
+// sqlc comparison output is isolated under .sqlc/generated; review it manually before any migration of this runtime package.
+// 运行时包继续位于 pkg/db/generated；sqlc 对照输出隔离在 .sqlc/generated。
 
 package db
 

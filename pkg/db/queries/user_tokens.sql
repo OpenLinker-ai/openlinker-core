@@ -75,6 +75,12 @@ FROM user_token_core_grants
 WHERE token_id = $1
 ORDER BY permission, resource_type, resource_id NULLS FIRST;
 
+-- name: ListUserTokenCoreGrantsForTokens :many
+SELECT id, token_id, permission, resource_type, resource_id, constraints, created_at
+FROM user_token_core_grants
+WHERE token_id = ANY($1::uuid[])
+ORDER BY token_id, permission, resource_type, resource_id NULLS FIRST;
+
 -- name: DeleteUserTokenCoreGrants :exec
 DELETE FROM user_token_core_grants WHERE token_id = $1;
 

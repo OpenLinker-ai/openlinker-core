@@ -1,5 +1,5 @@
 // Hand-maintained SQL query implementation.
-// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
+// sqlc comparison output is isolated under .sqlc/generated; review it manually before any migration of this runtime package.
 //
 // 模块 3（市场查询）独立文件。Phase 2 缺口 2 之后市场过滤口径：
 //   visibility = 'public' AND lifecycle_status = 'active'

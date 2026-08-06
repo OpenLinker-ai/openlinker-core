@@ -1,5 +1,5 @@
 // Hand-maintained SQL query implementation.
-// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
+// sqlc comparison output is isolated under .sqlc/generated; review it manually before any migration of this runtime package.
 //
 // Phase 2 §7：用户侧 Output Delivery。
 // 风格参考 webhooks.sql.go：const + 方法，逐字段 Scan。

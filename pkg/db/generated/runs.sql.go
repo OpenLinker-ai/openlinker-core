@@ -1,5 +1,5 @@
 // Hand-maintained SQL query implementation.
-// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
+// sqlc comparison output is isolated under .sqlc/generated; review it manually before any migration of this runtime package.
 //
 // 模块 4 / 6 共享此文件初始内容。
 //   - 模块 4 (runtime) 写入到本文件

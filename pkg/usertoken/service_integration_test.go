@@ -55,6 +55,10 @@ func TestServiceCreateVerifyShrinkRevokeIntegration(t *testing.T) {
 	if created.PlaintextToken == "" || created.IssuerInstanceID == "" {
 		t.Fatalf("created = %#v", created)
 	}
+	listed, err := svc.List(ctx, userID, ListOptions{Limit: 20, SortBy: "created_at", SortDir: "desc"})
+	if err != nil || len(listed.Items) != 1 || len(listed.Items[0].Grants) != 2 {
+		t.Fatalf("listed tokens = %#v, %v", listed, err)
+	}
 	principal, err := svc.VerifyPrincipal(ctx, created.PlaintextToken)
 	if err != nil || principal.TokenID == nil || principal.TokenID.String() != created.ID || !principal.UserStatusVerified {
 		t.Fatalf("principal = %#v, %v", principal, err)

@@ -1,5 +1,5 @@
 // Hand-maintained SQL query implementation.
-// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
+// sqlc comparison output is isolated under .sqlc/generated; review it manually before any migration of this runtime package.
 
 package db
 
@@ -109,6 +109,24 @@ func (q *Queries) ListRunArtifactsByRun(ctx context.Context, runID uuid.UUID) ([
 		return nil, err
 	}
 	return items, nil
+}
+
+const getRunArtifactSummary = `-- name: GetRunArtifactSummary :one
+SELECT COUNT(*)::int AS artifact_count,
+       COALESCE(BOOL_OR(visibility = 'public_example'), FALSE) AS public_safe
+FROM run_artifacts
+WHERE run_id = $1`
+
+type GetRunArtifactSummaryRow struct {
+	ArtifactCount int32 `db:"artifact_count" json:"artifact_count"`
+	PublicSafe    bool  `db:"public_safe" json:"public_safe"`
+}
+
+func (q *Queries) GetRunArtifactSummary(ctx context.Context, runID uuid.UUID) (GetRunArtifactSummaryRow, error) {
+	row := q.db.QueryRow(ctx, getRunArtifactSummary, runID)
+	var summary GetRunArtifactSummaryRow
+	err := row.Scan(&summary.ArtifactCount, &summary.PublicSafe)
+	return summary, err
 }
 
 const getRunArtifactBySourceID = `-- name: GetRunArtifactBySourceID :one

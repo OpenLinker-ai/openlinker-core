@@ -1,5 +1,5 @@
 // Hand-maintained SQL query implementation.
-// Do not run sqlc generate against pkg/db/generated; use make sqlc CONFIRM_OVERWRITE=1 only for an intentional migration.
+// sqlc comparison output is isolated under .sqlc/generated; review it manually before any migration of this runtime package.
 //
 // 模块 2 / 3 共享此文件。模块 3 的市场查询在 agents_market.sql.go 独立维护。
 

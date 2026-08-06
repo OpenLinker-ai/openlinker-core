@@ -48,11 +48,7 @@ fmt: ## 格式化
 	gofmt -s -w .
 	go vet ./...
 
-sqlc: ## 有意迁移手写 DB 层到 sqlc 输出(必须 CONFIRM_OVERWRITE=1)
-	@if [ "$(CONFIRM_OVERWRITE)" != "1" ]; then \
-		echo "拒绝覆盖手写 pkg/db/generated: 仅在确认迁移方案后使用 make sqlc CONFIRM_OVERWRITE=1"; \
-		exit 1; \
-	fi
+sqlc: ## 生成隔离的 sqlc 对照代码到 .sqlc/generated（不覆盖手写 DB 层）
 	@command -v sqlc >/dev/null 2>&1 || { echo "请先安装 sqlc"; exit 1; }
 	sqlc generate
 

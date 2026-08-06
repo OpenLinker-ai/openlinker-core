@@ -1904,21 +1904,16 @@ func (s *Service) attachRunEvidenceSummary(ctx context.Context, runID uuid.UUID,
 		summary.MissingSkillCount = len(resp.RequirementEvidence.MissingSkillIDs) + len(resp.RequirementEvidence.MissingMCPTools)
 		summary.UsedMCPToolCount = len(resp.RequirementEvidence.UsedMCPTools)
 	}
-	if artifacts, err := s.queries.ListRunArtifactsByRun(ctx, runID); err == nil {
-		summary.ArtifactCount = len(artifacts)
-		for _, artifact := range artifacts {
-			if artifact.Visibility == "public_example" {
-				summary.PublicSafe = true
-				break
-			}
-		}
+	if artifactSummary, err := s.queries.GetRunArtifactSummary(ctx, runID); err == nil {
+		summary.ArtifactCount = int(artifactSummary.ArtifactCount)
+		summary.PublicSafe = artifactSummary.PublicSafe
 	} else {
-		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.attachRunEvidenceSummary: ListRunArtifactsByRun")
+		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.attachRunEvidenceSummary: GetRunArtifactSummary")
 	}
-	if messages, err := s.queries.ListRunMessagesByRun(ctx, runID); err == nil {
-		summary.MessageCount = len(messages)
+	if messageCount, err := s.queries.CountRunMessagesByRun(ctx, runID); err == nil {
+		summary.MessageCount = int(messageCount)
 	} else {
-		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.attachRunEvidenceSummary: ListRunMessagesByRun")
+		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.attachRunEvidenceSummary: CountRunMessagesByRun")
 	}
 	resp.EvidenceSummary = summary
 }

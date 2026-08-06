@@ -15,6 +15,11 @@ FROM run_messages
 WHERE run_id = $1
 ORDER BY created_at ASC, id ASC;
 
+-- name: CountRunMessagesByRun :one
+SELECT COUNT(*)::int
+FROM run_messages
+WHERE run_id = $1;
+
 -- name: ListRunMessagesByRuns :many
 SELECT id, run_id, event_sequence, role, content, payload, created_at
 FROM run_messages

@@ -3056,6 +3056,16 @@ func TestCapabilityMessageArtifactQueriesScanRowsAndArgs(t *testing.T) {
 		t.Fatalf("ListRunMessagesByRun scan = %#v closed=%v", messages, messageRows.closed)
 	}
 
+	dbtx.row = fakeRow{values: []any{int32(3)}}
+	messageCount, err := q.CountRunMessagesByRun(context.Background(), runID)
+	if err != nil || messageCount != 3 {
+		t.Fatalf("CountRunMessagesByRun = %d, %v", messageCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountRunMessagesByRun")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID}) {
+		t.Fatalf("CountRunMessagesByRun args = %#v", dbtx.queryRowArgs)
+	}
+
 	dbtx.row = fakeRow{values: artifactValues}
 	artifact, err := q.CreateRunArtifact(context.Background(), CreateRunArtifactParams{
 		RunID:            runID,
@@ -3090,6 +3100,16 @@ func TestCapabilityMessageArtifactQueriesScanRowsAndArgs(t *testing.T) {
 	requireSQLName(t, dbtx.querySQL, "ListRunArtifactsByRun")
 	if !artifactRows.closed || len(artifacts) != 1 || artifacts[0].ID != artifactID {
 		t.Fatalf("ListRunArtifactsByRun scan = %#v closed=%v", artifacts, artifactRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(4), true}}
+	artifactSummary, err := q.GetRunArtifactSummary(context.Background(), runID)
+	if err != nil || artifactSummary.ArtifactCount != 4 || !artifactSummary.PublicSafe {
+		t.Fatalf("GetRunArtifactSummary = %#v, %v", artifactSummary, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetRunArtifactSummary")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID}) {
+		t.Fatalf("GetRunArtifactSummary args = %#v", dbtx.queryRowArgs)
 	}
 
 	dbtx.row = fakeRow{values: artifactValues}
