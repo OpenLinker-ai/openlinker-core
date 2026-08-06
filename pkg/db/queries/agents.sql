@@ -90,6 +90,21 @@ SELECT id, creator_id, slug, name, description, endpoint_url,
 FROM agents
 WHERE id = $1;
 
+-- name: GetAgentRunTargetByID :one
+-- Run 创建的单次权威读取：Agent 调用属性与当前 input_schema/version
+-- 必须来自同一数据库快照。历史 Agent 没有 capability 时保留 NULL。
+SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
+       a.endpoint_auth_header, a.price_per_call_cents, a.tags,
+       a.lifecycle_status, a.visibility, a.certification_status,
+       a.rejection_reason, a.certified_at,
+       a.total_calls, a.total_revenue_cents,
+       a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
+       c.input_schema AS capability_input_schema,
+       c.version AS capability_version
+FROM agents a
+LEFT JOIN agent_capabilities c ON c.agent_id = a.id
+WHERE a.id = $1;
+
 -- name: ListAgentsByCreator :many
 SELECT id, creator_id, slug, name, description, endpoint_url,
        endpoint_auth_header, price_per_call_cents, tags,
