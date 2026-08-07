@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
@@ -315,6 +316,7 @@ func (s *Service) validateWorkflowRequestInputMappings(
 	edges []map[string]interface{},
 ) error {
 	parentsByNode := make(map[string][]string, len(nodes))
+	inputSchemasByAgentID := make(map[uuid.UUID]map[string]interface{}, len(nodes))
 	for _, edge := range edges {
 		from := workflowEdgeEndpoint(edge, "from", "source", "source_key", "sourceKey")
 		to := workflowEdgeEndpoint(edge, "to", "target", "target_key", "targetKey")
@@ -331,16 +333,19 @@ func (s *Service) validateWorkflowRequestInputMappings(
 		if !configured {
 			continue
 		}
-		capability, err := s.queries.GetAgentCapabilityByAgentID(ctx, node.AgentID)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return workflowInputMappingHTTPError(key, errors.New("Agent 缺少 capability"))
+		schema, cached := inputSchemasByAgentID[node.AgentID]
+		if !cached {
+			capability, err := s.queries.GetAgentCapabilityByAgentID(ctx, node.AgentID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return workflowInputMappingHTTPError(key, errors.New("Agent 缺少 capability"))
+				}
+				return httpx.Internal("查询 workflow node Agent capability 失败")
 			}
-			return httpx.Internal("查询 workflow node Agent capability 失败")
-		}
-		var schema map[string]interface{}
-		if err := json.Unmarshal(capability.InputSchema, &schema); err != nil {
-			return workflowInputMappingHTTPError(key, errors.New("Agent input_schema 无效"))
+			if err := json.Unmarshal(capability.InputSchema, &schema); err != nil {
+				return workflowInputMappingHTTPError(key, errors.New("Agent input_schema 无效"))
+			}
+			inputSchemasByAgentID[node.AgentID] = schema
 		}
 		if err := workflowInputMappingCoversRequired(mapping, schema); err != nil {
 			return workflowInputMappingHTTPError(key, err)
