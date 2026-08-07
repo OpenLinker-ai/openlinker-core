@@ -111,6 +111,20 @@ func (q *Queries) ListRunArtifactsByRun(ctx context.Context, runID uuid.UUID) ([
 	return items, nil
 }
 
+const hasRunArtifactsByRun = `-- name: HasRunArtifactsByRun :one
+SELECT EXISTS (
+    SELECT 1
+    FROM run_artifacts
+    WHERE run_id = $1
+) AS has_artifacts`
+
+func (q *Queries) HasRunArtifactsByRun(ctx context.Context, runID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, hasRunArtifactsByRun, runID)
+	var hasArtifacts bool
+	err := row.Scan(&hasArtifacts)
+	return hasArtifacts, err
+}
+
 const getRunArtifactSummary = `-- name: GetRunArtifactSummary :one
 SELECT COUNT(*)::int AS artifact_count,
        COALESCE(BOOL_OR(visibility = 'public_example'), FALSE) AS public_safe

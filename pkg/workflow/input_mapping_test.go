@@ -1,13 +1,56 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
+
+type countingCapabilityDB struct {
+	queryRowCalls int
+	inputSchema   []byte
+}
+
+func (d *countingCapabilityDB) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
+	panic("unexpected Exec")
+}
+
+func (d *countingCapabilityDB) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
+	panic("unexpected Query")
+}
+
+func (d *countingCapabilityDB) QueryRow(_ context.Context, _ string, args ...interface{}) pgx.Row {
+	d.queryRowCalls++
+	agentID := args[0].(uuid.UUID)
+	return capabilityInputSchemaRow{agentID: agentID, inputSchema: d.inputSchema}
+}
+
+type capabilityInputSchemaRow struct {
+	agentID     uuid.UUID
+	inputSchema []byte
+}
+
+func (r capabilityInputSchemaRow) Scan(dest ...interface{}) error {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	*dest[0].(*uuid.UUID) = uuid.New()
+	*dest[1].(*uuid.UUID) = r.agentID
+	*dest[2].(*[]byte) = append([]byte(nil), r.inputSchema...)
+	*dest[3].(*[]byte) = []byte(`{"type":"object"}`)
+	*dest[4].(*string) = "test capability"
+	*dest[5].(*int32) = 1
+	*dest[6].(*time.Time) = now
+	*dest[7].(*time.Time) = now
+	return nil
+}
 
 func TestWorkflowStepInputLegacyEnvelopeIsUnchanged(t *testing.T) {
 	original := map[string]interface{}{"topic": "runtime"}
@@ -98,6 +141,35 @@ func TestWorkflowInputMappingRequiredCoverage(t *testing.T) {
 	err = workflowInputMappingCoversRequired(mapping, schema)
 	if err == nil || !strings.Contains(err.Error(), "weeks") {
 		t.Fatalf("coverage error = %v", err)
+	}
+}
+
+func TestValidateWorkflowRequestInputMappingsMemoizesCapabilityByAgent(t *testing.T) {
+	agentID := uuid.New()
+	queries := &countingCapabilityDB{inputSchema: []byte(`{
+		"type":"object",
+		"properties":{"task":{"type":"string"}},
+		"required":["task"]
+	}`)}
+	svc := &Service{queries: db.New(queries)}
+	config := map[string]interface{}{
+		"input_mapping": map[string]interface{}{
+			"version": "v1",
+			"fields": map[string]interface{}{
+				"task": map[string]interface{}{"source": "constant", "value": "audit"},
+			},
+		},
+	}
+	nodes := []WorkflowNodeRequest{
+		{Key: "first", AgentID: agentID, Config: config},
+		{Key: "second", AgentID: agentID, Config: config},
+	}
+
+	if err := svc.validateWorkflowRequestInputMappings(context.Background(), nodes, nil); err != nil {
+		t.Fatalf("validateWorkflowRequestInputMappings error = %v", err)
+	}
+	if queries.queryRowCalls != 1 {
+		t.Fatalf("GetAgentCapabilityByAgentID calls = %d, want 1", queries.queryRowCalls)
 	}
 }
 

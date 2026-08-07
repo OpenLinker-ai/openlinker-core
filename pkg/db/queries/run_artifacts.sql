@@ -36,6 +36,13 @@ SELECT COUNT(*)::int AS artifact_count,
 FROM run_artifacts
 WHERE run_id = $1;
 
+-- name: HasRunArtifactsByRun :one
+SELECT EXISTS (
+    SELECT 1
+    FROM run_artifacts
+    WHERE run_id = $1
+) AS has_artifacts;
+
 -- name: GetRunArtifactBySourceID :one
 SELECT id, run_id, artifact_type, title, content, visibility, source_artifact_id,
        mime_type, file_uri, file_name, file_sha256, file_size_bytes, created_at
