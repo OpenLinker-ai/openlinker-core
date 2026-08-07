@@ -31,15 +31,15 @@ func NewHandler(svc dashboardService) *Handler {
 }
 
 func (h *Handler) RegisterCoreAPI(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
-	h.registerRoutes(api.Group("", jwtMiddleware))
-}
-
-func (h *Handler) registerRoutes(g *echo.Group) {
-	g.GET("/runs", h.ListRuns)
-	g.GET("/call-records", h.ListCallRecords)
-	g.GET("/dashboard", h.GetDashboard)
-	g.GET("/creator/dashboard", h.GetCreatorDashboard)
-	g.GET("/creator/agents/:id/runs", h.ListCreatorAgentRuns)
+	// Do not create an authenticated Group with an empty prefix here. Echo
+	// implements group middleware by registering prefix-level 404 catch-alls;
+	// an empty prefix would authenticate every unknown /api/v1 path before the
+	// router can return its stable NOT_FOUND response.
+	api.GET("/runs", h.ListRuns, jwtMiddleware)
+	api.GET("/call-records", h.ListCallRecords, jwtMiddleware)
+	api.GET("/dashboard", h.GetDashboard, jwtMiddleware)
+	api.GET("/creator/dashboard", h.GetCreatorDashboard, jwtMiddleware)
+	api.GET("/creator/agents/:id/runs", h.ListCreatorAgentRuns, jwtMiddleware)
 }
 
 func (h *Handler) ListRuns(c echo.Context) error {
