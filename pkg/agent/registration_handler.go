@@ -182,12 +182,35 @@ func parseAgentTokenListOptions(c echo.Context) (ListAgentTokensOptions, error) 
 	if err != nil {
 		return ListAgentTokensOptions{}, err
 	}
+	status, err := parseAgentTokenListStatus(c.QueryParam("status"))
+	if err != nil {
+		return ListAgentTokensOptions{}, err
+	}
+	query := strings.TrimSpace(c.QueryParam("q"))
+	if len([]rune(query)) > 120 {
+		return ListAgentTokensOptions{}, httpx.BadRequest("q 最多 120 个字符")
+	}
 	return normalizeAgentTokenListOptions(ListAgentTokensOptions{
 		Limit:   limit,
 		Offset:  offset,
 		SortBy:  strings.TrimSpace(c.QueryParam("sort_by")),
 		SortDir: strings.ToLower(strings.TrimSpace(c.QueryParam("sort_dir"))),
+		Status:  status,
+		Query:   query,
 	}), nil
+}
+
+func parseAgentTokenListStatus(raw string) (string, error) {
+	status := strings.ToLower(strings.TrimSpace(raw))
+	if status == "" {
+		return "all", nil
+	}
+	switch status {
+	case "active", "revoked", "expired", "all":
+		return status, nil
+	default:
+		return "", httpx.BadRequest("status 必须是 active、revoked、expired 或 all")
+	}
 }
 
 func parseInt32ListQuery(raw string, fallback, minValue, maxValue int32, name string) (int32, error) {

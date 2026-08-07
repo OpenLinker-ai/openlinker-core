@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -177,4 +178,36 @@ func TestValidateJSONAgainstSchemaExtendedTypes(t *testing.T) {
 	_, err = stringArray([]interface{}{"ok", 2})
 	require.Error(t, err)
 	require.False(t, schemaAllowsType(map[string]interface{}{"type": 7}, "object"))
+}
+
+func TestValidateInputAgainstSchemaReturnsStableViolation(t *testing.T) {
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"budget": map[string]interface{}{"type": "integer"},
+		},
+		"required":             []interface{}{"budget"},
+		"additionalProperties": false,
+	}
+
+	tests := []struct {
+		name   string
+		input  map[string]interface{}
+		path   string
+		reason string
+	}{
+		{name: "missing required", input: map[string]interface{}{}, path: "input.budget", reason: "missing_required"},
+		{name: "type mismatch", input: map[string]interface{}{"budget": "large"}, path: "input.budget", reason: "type_mismatch"},
+		{name: "additional property", input: map[string]interface{}{"budget": 3, "secret": true}, path: "input.secret", reason: "additional_property"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateInputAgainstSchema(tc.input, schema)
+			var violation *InputSchemaViolation
+			require.True(t, errors.As(err, &violation), "error = %v", err)
+			assert.Equal(t, tc.path, violation.Path)
+			assert.Equal(t, tc.reason, violation.Reason)
+		})
+	}
 }

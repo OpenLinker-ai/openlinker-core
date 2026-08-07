@@ -255,6 +255,59 @@ func (q *Queries) GetAgentByID(ctx context.Context, id uuid.UUID) (Agent, error)
 	return a, err
 }
 
+const getAgentRunTargetByID = `-- name: GetAgentRunTargetByID :one
+SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
+       a.endpoint_auth_header, a.price_per_call_cents, a.tags,
+       a.lifecycle_status, a.visibility, a.certification_status,
+       a.rejection_reason, a.certified_at,
+       a.total_calls, a.total_revenue_cents,
+       a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
+       c.input_schema AS capability_input_schema,
+       c.version AS capability_version
+FROM agents a
+LEFT JOIN agent_capabilities c ON c.agent_id = a.id
+WHERE a.id = $1`
+
+// AgentRunTarget is the immutable Run-creation view of an Agent and its
+// current input contract. A nil CapabilityVersion means that the historical
+// Agent has no published capability and retains legacy input behavior.
+type AgentRunTarget struct {
+	Agent                 Agent
+	CapabilityInputSchema []byte
+	CapabilityVersion     *int32
+}
+
+func (q *Queries) GetAgentRunTargetByID(ctx context.Context, id uuid.UUID) (AgentRunTarget, error) {
+	row := q.db.QueryRow(ctx, getAgentRunTargetByID, id)
+	var target AgentRunTarget
+	err := row.Scan(
+		&target.Agent.ID,
+		&target.Agent.CreatorID,
+		&target.Agent.Slug,
+		&target.Agent.Name,
+		&target.Agent.Description,
+		&target.Agent.EndpointURL,
+		&target.Agent.EndpointAuthHeader,
+		&target.Agent.PricePerCallCents,
+		&target.Agent.Tags,
+		&target.Agent.LifecycleStatus,
+		&target.Agent.Visibility,
+		&target.Agent.CertificationStatus,
+		&target.Agent.RejectionReason,
+		&target.Agent.CertifiedAt,
+		&target.Agent.TotalCalls,
+		&target.Agent.TotalRevenueCents,
+		&target.Agent.WebhookURL,
+		&target.Agent.ConnectionMode,
+		&target.Agent.MCPToolName,
+		&target.Agent.CreatedAt,
+		&target.Agent.UpdatedAt,
+		&target.CapabilityInputSchema,
+		&target.CapabilityVersion,
+	)
+	return target, err
+}
+
 const listAgentsByCreator = `-- name: ListAgentsByCreator :many
 SELECT id, creator_id, slug, name, description, endpoint_url,
        endpoint_auth_header, price_per_call_cents, tags,

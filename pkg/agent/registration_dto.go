@@ -17,6 +17,8 @@ type ListAgentTokensOptions struct {
 	Offset  int32
 	SortBy  string
 	SortDir string
+	Status  string
+	Query   string
 }
 
 // AgentTokenResponse 列表 / 创建共用响应。

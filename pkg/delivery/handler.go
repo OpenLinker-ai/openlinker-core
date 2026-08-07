@@ -50,16 +50,18 @@ func NewHandler(svc deliveryService) *Handler {
 //	GET    /deliveries                             外部投递历史列表
 //	POST   /deliveries/:id/retry                   重试 failed
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
-	g := api.Group("", jwtMiddleware)
-	g.POST("/delivery-targets", h.CreateTarget)
-	g.GET("/delivery-targets", h.ListTargets)
-	g.PATCH("/delivery-targets/:id", h.UpdateTarget)
-	g.DELETE("/delivery-targets/:id", h.DeleteTarget)
-	g.POST("/delivery-targets/:id/default", h.SetDefault)
-	g.POST("/runs/:id/deliver", h.DeliverRun)
-	g.GET("/runs/:id/deliveries", h.ListDeliveries)
-	g.GET("/deliveries", h.ListAllDeliveries)
-	g.POST("/deliveries/:id/retry", h.RetryDelivery)
+	// Keep authentication on concrete routes. Echo's empty-prefix Group would
+	// install an authenticated /api/v1/* not-found route and misclassify valid
+	// User Tokens as invalid JWTs whenever a caller mistypes an API path.
+	api.POST("/delivery-targets", h.CreateTarget, jwtMiddleware)
+	api.GET("/delivery-targets", h.ListTargets, jwtMiddleware)
+	api.PATCH("/delivery-targets/:id", h.UpdateTarget, jwtMiddleware)
+	api.DELETE("/delivery-targets/:id", h.DeleteTarget, jwtMiddleware)
+	api.POST("/delivery-targets/:id/default", h.SetDefault, jwtMiddleware)
+	api.POST("/runs/:id/deliver", h.DeliverRun, jwtMiddleware)
+	api.GET("/runs/:id/deliveries", h.ListDeliveries, jwtMiddleware)
+	api.GET("/deliveries", h.ListAllDeliveries, jwtMiddleware)
+	api.POST("/deliveries/:id/retry", h.RetryDelivery, jwtMiddleware)
 }
 
 func (h *Handler) CreateTarget(c echo.Context) error {

@@ -19,6 +19,7 @@ import (
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/externalexecution"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 func TestConfigureGothSetsSessionStoreAndProviders(t *testing.T) {
@@ -277,6 +278,33 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		if routes[legacy] {
 			t.Fatalf("legacy Hosted bridge route %s must not be registered", legacy)
 		}
+	}
+
+	// A syntactically valid User Token header must be irrelevant when the
+	// router cannot resolve a path. Before the root-level protected groups were
+	// removed, Echo's generated group 404 route ran JWT auth first and returned
+	// the misleading "token invalid or expired" response.
+	e.HTTPErrorHandler = func(err error, c echo.Context) { _ = httpx.SendError(c, err) }
+	for _, target := range []string{
+		"/api/v1/zzz-unknown",
+		"/api/v1/agents/zzz/unknown-sub",
+	} {
+		t.Run("unknown route "+target, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, target, nil)
+			request.Header.Set(echo.HeaderAuthorization, "Bearer ol_user_"+strings.Repeat("a", 64))
+			response := httptest.NewRecorder()
+			e.ServeHTTP(response, request)
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("unknown route status = %d body=%s", response.Code, response.Body.String())
+			}
+			var body httpx.ErrorResponse
+			if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+				t.Fatalf("decode unknown route response: %v", err)
+			}
+			if body.Error.Code != httpx.CodeNotFound || strings.Contains(strings.ToLower(body.Error.Message), "token") {
+				t.Fatalf("unknown route body = %#v", body)
+			}
+		})
 	}
 }
 

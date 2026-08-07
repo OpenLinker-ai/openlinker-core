@@ -308,12 +308,12 @@ func TestRegistrationApprovalAndMetricHandlersDispatchServices(t *testing.T) {
 
 	c, rec = newAgentDispatchContext(agentDispatchRequest{
 		method: http.MethodGet,
-		target: "/creator/agent-tokens?limit=5&offset=10&sort_by=name&sort_dir=asc",
+		target: "/creator/agent-tokens?limit=5&offset=10&sort_by=name&sort_dir=asc&status=active&q=runtime",
 		userID: userID.String(),
 	})
 	requireNoDispatchError(t, reg.ListAgentTokens(c))
 	requireDispatchStatus(t, rec, http.StatusOK)
-	if regSvc.lastListOpts.Limit != 5 || regSvc.lastListOpts.Offset != 10 || regSvc.lastListOpts.SortBy != "name" || regSvc.lastListOpts.SortDir != "asc" {
+	if regSvc.lastListOpts.Limit != 5 || regSvc.lastListOpts.Offset != 10 || regSvc.lastListOpts.SortBy != "name" || regSvc.lastListOpts.SortDir != "asc" || regSvc.lastListOpts.Status != "active" || regSvc.lastListOpts.Query != "runtime" {
 		t.Fatalf("list opts = %#v", regSvc.lastListOpts)
 	}
 

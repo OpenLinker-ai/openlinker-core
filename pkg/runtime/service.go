@@ -823,26 +823,30 @@ func (s *Service) attachRuntimeAuthority(
 	return nil
 }
 
-func attachRunA2AContextToInput(input map[string]interface{}, ctx *RunA2AContextRequest) {
+func attachRunA2AContextToInput(
+	input map[string]interface{},
+	ctx *RunA2AContextRequest,
+	inputSchema map[string]interface{},
+) {
 	if input == nil || ctx == nil {
 		return
 	}
-	if ctx.ProtocolContextID != "" {
+	if ctx.ProtocolContextID != "" && inputSchemaAllowsServerField(inputSchema, "a2a_context_id") {
 		input["a2a_context_id"] = ctx.ProtocolContextID
 	}
-	if ctx.ProtocolTaskID != "" {
+	if ctx.ProtocolTaskID != "" && inputSchemaAllowsServerField(inputSchema, "a2a_task_id") {
 		input["a2a_task_id"] = ctx.ProtocolTaskID
 	}
-	if ctx.RootContextID != "" {
+	if ctx.RootContextID != "" && inputSchemaAllowsServerField(inputSchema, "a2a_root_context_id") {
 		input["a2a_root_context_id"] = ctx.RootContextID
 	}
-	if ctx.ParentContextID != "" {
+	if ctx.ParentContextID != "" && inputSchemaAllowsServerField(inputSchema, "a2a_parent_context_id") {
 		input["a2a_parent_context_id"] = ctx.ParentContextID
 	}
-	if ctx.ParentTaskID != "" {
+	if ctx.ParentTaskID != "" && inputSchemaAllowsServerField(inputSchema, "a2a_parent_task_id") {
 		input["a2a_parent_task_id"] = ctx.ParentTaskID
 	}
-	if len(ctx.ReferenceTaskIDs) > 0 {
+	if len(ctx.ReferenceTaskIDs) > 0 && inputSchemaAllowsServerField(inputSchema, "a2a_reference_task_ids") {
 		input["a2a_reference_task_ids"] = ctx.ReferenceTaskIDs
 	}
 }
@@ -1029,16 +1033,26 @@ func (s *Service) createRunningRun(
 	// Validate mutable creation eligibility only after ruling out a committed
 	// replay. Concurrent requests still race through the unique key below.
 
-	agent, err := s.queries.GetAgentByID(ctx, agentID)
+	target, err := s.queries.GetAgentRunTargetByID(ctx, agentID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil, httpx.NotFound("Agent 不存在")
 		}
-		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("runtime.Run: GetAgentByID")
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("runtime.Run: GetAgentRunTargetByID")
 		return nil, nil, httpx.Internal("查询 Agent 失败")
 	}
+	agent := target.Agent
 	if agent.LifecycleStatus != "active" || (agent.Visibility == "private" && agent.CreatorID != userID) {
 		return nil, nil, httpx.Forbidden("Agent 未公开或已下架")
+	}
+	inputSchema, schemaErr := validateRunTargetApplicationInput(target, req.Input)
+	if schemaErr != nil {
+		var httpErr *httpx.HTTPError
+		if errors.As(schemaErr, &httpErr) {
+			return nil, nil, httpErr
+		}
+		log.Error().Err(schemaErr).Str("agent_id", agentID.String()).Msg("runtime.Run: validate Agent input schema")
+		return nil, nil, httpx.Internal("Agent input_schema 配置无效")
 	}
 	if agent.ConnectionMode == "" {
 		agent.ConnectionMode = connectionModeDirectHTTP
@@ -1115,7 +1129,7 @@ func (s *Service) createRunningRun(
 		return nil, nil, httpx.Internal("生成 Runtime 调用身份失败")
 	}
 	normalizedReq.A2AContext = runA2AContext
-	attachRunA2AContextToInput(normalizedReq.Input, runA2AContext)
+	attachRunA2AContextToInput(normalizedReq.Input, runA2AContext, inputSchema)
 	req = &normalizedReq
 
 	// 2. Core does not perform commercial settlement. Historical financial

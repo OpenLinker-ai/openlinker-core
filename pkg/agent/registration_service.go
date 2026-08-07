@@ -157,30 +157,40 @@ func (s *RegistrationService) ListAgentTokens(ctx context.Context, creatorID uui
 			log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registration.ListAgentTokens: GetAgentByIDForOwner")
 			return nil, httpx.Internal("查询 Agent 失败")
 		}
-		tokens, err = s.queries.ListAgentTokensByCreatorAndAgent(ctx, db.ListAgentTokensByCreatorAndAgentParams{
+		tokens, err = s.queries.ListAgentTokensByCreatorAndAgentFiltered(ctx, db.ListAgentTokensByCreatorAndAgentFilteredParams{
 			CreatorUserID: creatorID,
 			AgentID:       *agentID,
+			FilterStatus:  opts.Status,
+			Search:        opts.Query,
 			Limit:         opts.Limit,
 			Offset:        opts.Offset,
 			SortBy:        opts.SortBy,
 			SortDir:       opts.SortDir,
 		})
 		if err == nil {
-			total, err = s.queries.CountAgentTokensByCreatorAndAgent(ctx, db.CountAgentTokensByCreatorAndAgentParams{
+			total, err = s.queries.CountAgentTokensByCreatorAndAgentFiltered(ctx, db.CountAgentTokensByCreatorAndAgentFilteredParams{
 				CreatorUserID: creatorID,
 				AgentID:       *agentID,
+				FilterStatus:  opts.Status,
+				Search:        opts.Query,
 			})
 		}
 	} else {
-		tokens, err = s.queries.ListAgentTokensByCreator(ctx, db.ListAgentTokensByCreatorParams{
+		tokens, err = s.queries.ListAgentTokensByCreatorFiltered(ctx, db.ListAgentTokensByCreatorFilteredParams{
 			CreatorUserID: creatorID,
+			FilterStatus:  opts.Status,
+			Search:        opts.Query,
 			Limit:         opts.Limit,
 			Offset:        opts.Offset,
 			SortBy:        opts.SortBy,
 			SortDir:       opts.SortDir,
 		})
 		if err == nil {
-			total, err = s.queries.CountAgentTokensByCreator(ctx, creatorID)
+			total, err = s.queries.CountAgentTokensByCreatorFiltered(ctx, db.CountAgentTokensByCreatorFilteredParams{
+				CreatorUserID: creatorID,
+				FilterStatus:  opts.Status,
+				Search:        opts.Query,
+			})
 		}
 	}
 	if err != nil {
@@ -347,6 +357,16 @@ func normalizeAgentTokenListOptions(opts ListAgentTokensOptions) ListAgentTokens
 	}
 	if opts.SortDir != "asc" {
 		opts.SortDir = "desc"
+	}
+	opts.Status = strings.ToLower(strings.TrimSpace(opts.Status))
+	switch opts.Status {
+	case "active", "revoked", "expired", "all":
+	default:
+		opts.Status = "all"
+	}
+	opts.Query = strings.TrimSpace(opts.Query)
+	if runes := []rune(opts.Query); len(runes) > 120 {
+		opts.Query = string(runes[:120])
 	}
 	return opts
 }

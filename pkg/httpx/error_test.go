@@ -47,6 +47,36 @@ func TestSendErrorWritesHTTPErrorResponse(t *testing.T) {
 }
 
 func TestSendErrorHandlesEchoAndUnknownErrors(t *testing.T) {
+	t.Run("an unregistered API route uses the stable not-found envelope", func(t *testing.T) {
+		e := echo.New()
+		e.HTTPErrorHandler = func(err error, c echo.Context) { _ = SendError(c, err) }
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/does-not-exist", nil)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("unregistered route status = %d", rec.Code)
+		}
+		got := decodeError(t, rec)
+		if got.Error.Code != CodeNotFound || got.Error.Message != "资源不存在" {
+			t.Fatalf("unregistered route body = %+v", got)
+		}
+	})
+
+	t.Run("echo not found uses a stable public envelope", func(t *testing.T) {
+		c, rec := newTestContext()
+		if err := SendError(c, echo.NewHTTPError(http.StatusNotFound)); err != nil {
+			t.Fatalf("SendError echo not found: %v", err)
+		}
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("echo not found status = %d", rec.Code)
+		}
+		got := decodeError(t, rec)
+		if got.Error.Code != CodeNotFound || got.Error.Message != "资源不存在" {
+			t.Fatalf("echo not found body = %+v", got)
+		}
+	})
+
 	c, rec := newTestContext()
 	if err := SendError(c, echo.NewHTTPError(http.StatusTeapot, "short and stout")); err != nil {
 		t.Fatalf("SendError echo error: %v", err)

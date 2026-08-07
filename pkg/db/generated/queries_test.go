@@ -3978,6 +3978,14 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "GetAgentByID")
 
+	capabilityVersion := int32(3)
+	dbtx.row = fakeRow{values: append(append([]any{}, agentValues...), []byte(`{"type":"object"}`), &capabilityVersion)}
+	target, err := q.GetAgentRunTargetByID(context.Background(), agentID)
+	if err != nil || target.Agent.ID != agentID || target.CapabilityVersion == nil || *target.CapabilityVersion != capabilityVersion {
+		t.Fatalf("GetAgentRunTargetByID = %#v, %v", target, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetAgentRunTargetByID")
+
 	if rows, err := q.RequestCertification(context.Background(), RequestCertificationParams{ID: agentID, CreatorID: creatorID}); err != nil || rows != 4 {
 		t.Fatalf("RequestCertification = %d, %v", rows, err)
 	}
