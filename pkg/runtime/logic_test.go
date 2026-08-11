@@ -197,11 +197,15 @@ func TestRuntimeCallAgentDispatchAndDryRun(t *testing.T) {
 	directClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		require.Equal(t, "shared-secret", r.Header.Get("X-OpenLinker-Token"))
 		require.NotEmpty(t, r.Header.Get("X-OpenLinker-Run-Id"))
+		require.Empty(t, r.Header.Get("X-OpenLinker-User-Id"))
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotDirect))
 		return testHTTPResponse(http.StatusOK, `{"output":{"answer":"direct-ok"},"events":[{"event_type":"run.message.delta","payload":{"text":"working"}}]}`), nil
 	})}
 
-	svc := NewService(nil, &config.Config{APIURL: "https://api.example.com"})
+	svc := NewService(nil, &config.Config{
+		APIURL:                 "https://api.example.com",
+		RuntimePKIMasterSecret: thirdPartyTransportTestMasterSecret,
+	})
 	svc.SetHTTPClient(directClient)
 	agent := &db.Agent{
 		ID:                 uuid.New(),
@@ -222,6 +226,8 @@ func TestRuntimeCallAgentDispatchAndDryRun(t *testing.T) {
 	require.Equal(t, callerAgentID.String(), gotDirect.CallerAgentID)
 	require.NotNil(t, gotDirect.A2A)
 	require.Equal(t, runID.String(), gotDirect.A2A.CurrentRunID)
+	require.NotContains(t, gotDirect.Metadata, "trace_id")
+	require.Regexp(t, `^ps1_[A-Za-z0-9_-]{43}$`, gotDirect.Metadata["principal_scope_id"])
 
 	dryOutput, dryErr := svc.DryRun(context.Background(), agent, map[string]interface{}{"ping": true})
 	require.Empty(t, dryErr)
@@ -273,7 +279,10 @@ func TestRuntimeMCPServerProtocolEdges(t *testing.T) {
 		return testHTTPResponse(http.StatusOK, `{"result":{"structuredContent":{"answer":"mcp-ok"}}}`), nil
 	})}
 
-	svc := NewService(nil, &config.Config{APIURL: "https://api.example.com"})
+	svc := NewService(nil, &config.Config{
+		APIURL:                 "https://api.example.com",
+		RuntimePKIMasterSecret: thirdPartyTransportTestMasterSecret,
+	})
 	svc.SetHTTPClient(mcpClient)
 	agent := &db.Agent{
 		ID:                 uuid.New(),
@@ -294,7 +303,11 @@ func TestRuntimeMCPServerProtocolEdges(t *testing.T) {
 	require.Equal(t, "tools/call", got.Method)
 	require.Equal(t, toolName, got.Params.Name)
 	require.Equal(t, "shanghai", got.Params.Arguments["city"])
-	require.Equal(t, "trace-mcp", got.Params.Metadata["trace_id"])
+	require.NotContains(t, got.Params.Metadata, "trace_id")
+	require.NotContains(t, got.Params.Metadata, "user_id")
+	expectedScopeID, err := runtimePrincipalScopeID(svc.runtimePrincipalScopeKey, userID, agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, expectedScopeID, got.Params.Metadata["principal_scope_id"])
 	require.NotNil(t, got.Params.Metadata["a2a"])
 
 	agent.MCPToolName = nil

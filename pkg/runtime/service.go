@@ -754,6 +754,59 @@ func trustedRunMetadata(input map[string]interface{}) map[string]interface{} {
 	return out
 }
 
+// Metadata keys that must never reach an endpoint the platform does not
+// control: another party's platform identity, the caller's order/request
+// bookkeeping, internal service topology, and Core's private execution
+// authority.
+//
+// This is the second line of defence. Cloud and Core no longer put these into
+// execution metadata at the source, but replayed legacy executions restore
+// metadata verbatim from stored records, so the outbound projection is what
+// actually guarantees they never leave the platform.
+var thirdPartyDeniedMetadataKeys = map[string]struct{}{
+	"_openlinker_runtime_authority": {},
+	"actor_user_id":                 {},
+	"buyer_user_id":                 {},
+	"caller_service_id":             {},
+	"external_order_id":             {},
+	"external_request_id":           {},
+	"principal_scope_id":            {},
+	"seller_user_id":                {},
+	"target_owner_user_id":          {},
+	"trace_id":                      {},
+	"user_id":                       {},
+	"x-openlinker-user-id":          {},
+}
+
+// thirdPartyAgentMetadata projects run metadata for delivery to an endpoint the
+// platform does not control (direct_http and mcp_server). Caller-supplied
+// metadata is forwarded untouched so custom keys keep working; platform
+// identity is replaced by principal_scope_id, an HMAC over (user, agent) that
+// cannot be reversed into a platform user id.
+//
+// Only top-level keys are removed: everything Cloud and Core inject lives at
+// the top level, while nested values belong to the caller and must survive
+// unmodified. The runtime connection mode does not go through here — it keeps
+// the full private authority, since Runtime Worker is not a third party.
+func (s *Service) thirdPartyAgentMetadata(
+	metadata map[string]interface{}, userID, agentID uuid.UUID,
+) (map[string]interface{}, error) {
+	scopeID, err := runtimePrincipalScopeID(s.runtimePrincipalScopeKey, userID, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("derive third-party Agent principal scope: %w", err)
+	}
+	out := make(map[string]interface{}, len(metadata)+1)
+	for key, value := range metadata {
+		normalizedKey := strings.ToLower(strings.TrimSpace(key))
+		if _, denied := thirdPartyDeniedMetadataKeys[normalizedKey]; denied {
+			continue
+		}
+		out[key] = value
+	}
+	out["principal_scope_id"] = scopeID
+	return out, nil
+}
+
 func deriveRuntimePrincipalScopeKey(cfg *config.Config) []byte {
 	rootSecret := cfg.EffectiveRuntimeMasterSecret()
 	if rootSecret == "" {
@@ -2111,9 +2164,13 @@ func (s *Service) callAgentEndpoint(
 	ctx context.Context, agent *db.Agent, runID, userID uuid.UUID, req *RunRequest, delegation *Delegation,
 ) (map[string]interface{}, []AgentEvent, *AgentError, error) {
 	conversation := s.conversationContextForRun(ctx, runID)
+	metadata, err := s.thirdPartyAgentMetadata(req.Metadata, userID, agent.ID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	request := AgentRequest{
 		Input:        req.Input,
-		Metadata:     req.Metadata,
+		Metadata:     metadata,
 		RunID:        runID.String(),
 		A2A:          s.agentA2AContextForRequest(runID, delegation, req),
 		Conversation: conversation,
@@ -2134,10 +2191,10 @@ func (s *Service) callAgentEndpoint(
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("User-Agent", "OpenLinker/1.0")
+	// Run id stays: the endpoint operator needs it to reconcile and debug.
+	// The platform user id does not go out — metadata carries the irreversible
+	// principal_scope_id instead.
 	httpReq.Header.Set("X-OpenLinker-Run-Id", runID.String())
-	if delegation == nil {
-		httpReq.Header.Set("X-OpenLinker-User-Id", userID.String())
-	}
 	httpReq.Header.Set("X-OpenLinker-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
 	if agent.EndpointAuthHeader != nil && *agent.EndpointAuthHeader != "" {
 		// 创作者注册时填的预共享 token，平台→endpoint 携带；前端永不返回。
@@ -2320,14 +2377,14 @@ func (s *Service) callMCPServer(
 		return nil, nil, &AgentError{Code: "MCP_TOOL_MISSING", Message: "Agent 未配置 MCP tool"}, nil
 	}
 
-	metadata := map[string]interface{}{
-		"run_id":   runID.String(),
-		"user_id":  userID.String(),
-		"platform": "openlinker",
+	metadata, err := s.thirdPartyAgentMetadata(req.Metadata, userID, agent.ID)
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	for k, v := range req.Metadata {
-		metadata[k] = v
-	}
+	// Set after the caller's metadata so these stay authoritative, and carry no
+	// platform user id — principal_scope_id already identifies the caller.
+	metadata["run_id"] = runID.String()
+	metadata["platform"] = "openlinker"
 	if delegation != nil {
 		metadata["parent_run_id"] = delegation.ParentRunID.String()
 		metadata["caller_agent_id"] = delegation.CallerAgentID.String()

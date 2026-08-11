@@ -906,13 +906,15 @@ var downstreamReplayIdentityFields = map[string]struct{}{
 func runtimeCreationRequest(record ExecutionRecord, parsed parsedExecution) (*runtime.RunRequest, string, error) {
 	switch record.RequestFingerprintVersion {
 	case currentRequestFingerprintVersion:
-		metadata := make(map[string]interface{}, len(parsed.metadata)+3)
+		// The caller's request id, service identity and trace id stay in the
+		// external-execution record (they are columns on that table and feed the
+		// request fingerprint); they are deliberately not copied into run
+		// metadata, because run metadata is what gets projected out to
+		// third-party Agent endpoints.
+		metadata := make(map[string]interface{}, len(parsed.metadata))
 		for key, value := range parsed.metadata {
 			metadata[key] = value
 		}
-		metadata["external_request_id"] = parsed.externalRequestID.String()
-		metadata["caller_service_id"] = parsed.callerServiceID
-		metadata["trace_id"] = parsed.traceID
 		return &runtime.RunRequest{
 			AgentID:          parsed.targetID.String(),
 			Input:            parsed.input,

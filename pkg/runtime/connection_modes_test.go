@@ -16,6 +16,17 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
+const thirdPartyTransportTestMasterSecret = "third-party-transport-test-master-secret"
+
+func newThirdPartyTransportTestService(client *http.Client) *Service {
+	svc := NewService(nil, &config.Config{
+		APIURL:                 "https://api.example.test",
+		RuntimePKIMasterSecret: thirdPartyTransportTestMasterSecret,
+	})
+	svc.SetHTTPClient(client)
+	return svc
+}
+
 func TestCallAgentEndpointSendsDirectHTTPEnvelope(t *testing.T) {
 	token := "direct-secret"
 	runID := uuid.New()
@@ -37,19 +48,28 @@ func TestCallAgentEndpointSendsDirectHTTPEnvelope(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc := &Service{
-		cfg:        &config.Config{APIURL: "https://api.example.test"},
-		httpClient: server.Client(),
-	}
+	svc := newThirdPartyTransportTestService(server.Client())
 	agent := &db.Agent{
+		ID:                 uuid.New(),
 		EndpointURL:        server.URL,
 		EndpointAuthHeader: &token,
 		ConnectionMode:     connectionModeDirectHTTP,
 	}
 
+	requestMetadata := map[string]interface{}{
+		"client_version":                "1.2.3",
+		"trace_id":                      "trace-direct",
+		"seller_user_id":                uuid.NewString(),
+		"Caller_Service_ID":             "openlinker-cloud",
+		" external_request_id ":         uuid.NewString(),
+		"X-OpenLinker-User-Id":          uuid.NewString(),
+		"_openlinker_runtime_authority": map[string]interface{}{"principal_scope_id": "spoofed"},
+		"principal_scope_id":            "spoofed",
+		"caller_payload":                map[string]interface{}{"seller_user_id": "caller-owned-nested-value"},
+	}
 	output, events, agentErr, callErr := svc.callAgentEndpoint(context.Background(), agent, runID, userID, &RunRequest{
 		Input:    map[string]interface{}{"q": "hello"},
-		Metadata: map[string]interface{}{"trace_id": "trace-direct"},
+		Metadata: requestMetadata,
 	}, nil)
 
 	require.NoError(t, callErr)
@@ -65,13 +85,24 @@ func TestCallAgentEndpointSendsDirectHTTPEnvelope(t *testing.T) {
 
 	assert.Equal(t, token, capturedHeader.Get("X-OpenLinker-Token"))
 	assert.Equal(t, runID.String(), capturedHeader.Get("X-OpenLinker-Run-Id"))
-	assert.Equal(t, userID.String(), capturedHeader.Get("X-OpenLinker-User-Id"))
+	assert.Empty(t, capturedHeader.Get("X-OpenLinker-User-Id"))
 	assert.Equal(t, "application/json", capturedHeader.Get("Accept"))
 	assert.Equal(t, "OpenLinker/1.0", capturedHeader.Get("User-Agent"))
 
 	assert.Equal(t, runID.String(), captured.RunID)
 	assert.Equal(t, "hello", captured.Input["q"])
-	assert.Equal(t, "trace-direct", captured.Metadata["trace_id"])
+	expectedScopeID, err := runtimePrincipalScopeID(svc.runtimePrincipalScopeKey, userID, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, expectedScopeID, captured.Metadata["principal_scope_id"])
+	assert.Equal(t, "1.2.3", captured.Metadata["client_version"])
+	assert.Equal(t, map[string]interface{}{"seller_user_id": "caller-owned-nested-value"}, captured.Metadata["caller_payload"])
+	for _, key := range []string{
+		"trace_id", "seller_user_id", "Caller_Service_ID", " external_request_id ",
+		"X-OpenLinker-User-Id", "_openlinker_runtime_authority",
+	} {
+		assert.NotContains(t, captured.Metadata, key)
+	}
+	assert.Equal(t, "trace-direct", requestMetadata["trace_id"], "outbound projection must not mutate caller metadata")
 	require.NotNil(t, captured.A2A)
 	assert.Equal(t, runID.String(), captured.A2A.CurrentRunID)
 }
@@ -83,11 +114,9 @@ func TestCallAgentEndpointPreservesTopLevelJSONResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc := &Service{
-		cfg:        &config.Config{APIURL: "https://api.example.test"},
-		httpClient: server.Client(),
-	}
+	svc := newThirdPartyTransportTestService(server.Client())
 	agent := &db.Agent{
+		ID:             uuid.New(),
 		EndpointURL:    server.URL,
 		ConnectionMode: connectionModeDirectHTTP,
 	}
@@ -120,9 +149,10 @@ func TestCallMCPServerUsesToolsCall(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc := &Service{httpClient: server.Client()}
+	svc := newThirdPartyTransportTestService(server.Client())
 	toolName := "analyze_contract"
 	agent := &db.Agent{
+		ID:                 uuid.New(),
 		EndpointURL:        server.URL,
 		EndpointAuthHeader: &token,
 		ConnectionMode:     connectionModeMCPServer,
@@ -130,8 +160,15 @@ func TestCallMCPServerUsesToolsCall(t *testing.T) {
 	}
 	runID := uuid.New()
 
-	output, events, agentErr, callErr := svc.callMCPServer(context.Background(), agent, runID, uuid.New(), &RunRequest{
+	userID := uuid.New()
+	output, events, agentErr, callErr := svc.callMCPServer(context.Background(), agent, runID, userID, &RunRequest{
 		Input: map[string]interface{}{"text": "hello"},
+		Metadata: map[string]interface{}{
+			"client_version": "1.2.3",
+			"user_id":        uuid.NewString(),
+			"Seller_User_ID": uuid.NewString(),
+			"trace_id":       "internal-trace",
+		},
 	}, nil)
 
 	require.NoError(t, callErr)
@@ -147,6 +184,56 @@ func TestCallMCPServerUsesToolsCall(t *testing.T) {
 	args, ok := params["arguments"].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, "hello", args["text"])
+	metadata, ok := params["_meta"].(map[string]interface{})
+	if !ok {
+		metadata, ok = params["metadata"].(map[string]interface{})
+	}
+	require.True(t, ok)
+	expectedScopeID, err := runtimePrincipalScopeID(svc.runtimePrincipalScopeKey, userID, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, expectedScopeID, metadata["principal_scope_id"])
+	assert.Equal(t, runID.String(), metadata["run_id"])
+	assert.Equal(t, "openlinker", metadata["platform"])
+	assert.Equal(t, "1.2.3", metadata["client_version"])
+	assert.NotContains(t, metadata, "user_id")
+	assert.NotContains(t, metadata, "Seller_User_ID")
+	assert.NotContains(t, metadata, "trace_id")
+}
+
+func TestThirdPartyTransportsFailClosedWithoutPrincipalScopeKey(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(*Service, *db.Agent) error
+	}{
+		{
+			name: "direct http",
+			call: func(svc *Service, agent *db.Agent) error {
+				_, _, _, err := svc.callAgentEndpoint(context.Background(), agent, uuid.New(), uuid.New(), &RunRequest{Input: map[string]interface{}{}}, nil)
+				return err
+			},
+		},
+		{
+			name: "mcp server",
+			call: func(svc *Service, agent *db.Agent) error {
+				toolName := "safe_tool"
+				agent.MCPToolName = &toolName
+				_, _, _, err := svc.callMCPServer(context.Background(), agent, uuid.New(), uuid.New(), &RunRequest{Input: map[string]interface{}{}}, nil)
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
+			defer server.Close()
+			svc := &Service{httpClient: server.Client()}
+			agent := &db.Agent{ID: uuid.New(), EndpointURL: server.URL}
+			err := tt.call(svc, agent)
+			require.ErrorContains(t, err, "principal scope")
+			assert.Zero(t, calls)
+		})
+	}
 }
 
 func TestCallAgentEndpointRejectsOversizedResponseBody(t *testing.T) {
@@ -155,8 +242,9 @@ func TestCallAgentEndpointRejectsOversizedResponseBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc := &Service{httpClient: server.Client()}
+	svc := newThirdPartyTransportTestService(server.Client())
 	agent := &db.Agent{
+		ID:             uuid.New(),
 		EndpointURL:    server.URL,
 		ConnectionMode: connectionModeDirectHTTP,
 	}
@@ -176,9 +264,10 @@ func TestCallMCPServerRejectsOversizedResponseBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc := &Service{httpClient: server.Client()}
+	svc := newThirdPartyTransportTestService(server.Client())
 	toolName := "analyze_contract"
 	agent := &db.Agent{
+		ID:             uuid.New(),
 		EndpointURL:    server.URL,
 		ConnectionMode: connectionModeMCPServer,
 		MCPToolName:    &toolName,

@@ -117,7 +117,7 @@ func TestStartExecutionIsIdempotentAndRejectsSemanticReuse(t *testing.T) {
 	}
 	req := &ExecutionRequest{
 		ExternalRequestID: requestID.String(), TargetType: TargetTypeAgent, TargetID: targetID.String(), Input: map[string]interface{}{"topic": "Go"}, TraceID: "trace-1",
-		Metadata:             map[string]interface{}{"external_order_id": requestID.String(), "seller_user_id": ownerID.String()},
+		Metadata:             map[string]interface{}{"order_ref": "stable"},
 		ExpectedContractHash: validation.ContractHash, InputSchema: inputSchema,
 	}
 
@@ -135,17 +135,13 @@ func TestStartExecutionIsIdempotentAndRejectsSemanticReuse(t *testing.T) {
 	if len(runtimeSvc.startActors) != 1 || runtimeSvc.startActors[0] != actorID {
 		t.Fatalf("StartRun actors = %v, want signed actor %s", runtimeSvc.startActors, actorID)
 	}
-	if got := runtimeSvc.startRequests[0].Metadata["caller_service_id"]; got != "openlinker-cloud" {
-		t.Fatalf("caller_service_id metadata = %#v", got)
+	if got := runtimeSvc.startRequests[0].Metadata["order_ref"]; got != "stable" {
+		t.Fatalf("forwarded custom metadata order_ref = %#v", got)
 	}
-	if got := runtimeSvc.startRequests[0].Metadata["external_order_id"]; got != requestID.String() {
-		t.Fatalf("forwarded metadata external_order_id = %#v", got)
-	}
-	if got := runtimeSvc.startRequests[0].Metadata["seller_user_id"]; got != ownerID.String() {
-		t.Fatalf("forwarded metadata seller_user_id = %#v", got)
-	}
-	if _, leaked := runtimeSvc.startRequests[0].Metadata["target_owner_user_id"]; leaked {
-		t.Fatal("transient target owner must not be persisted in runtime metadata")
+	for _, internalKey := range []string{"caller_service_id", "external_request_id", "trace_id", "target_owner_user_id"} {
+		if _, leaked := runtimeSvc.startRequests[0].Metadata[internalKey]; leaked {
+			t.Fatalf("internal %s must not be persisted in runtime metadata", internalKey)
+		}
 	}
 
 	mutated := *req
@@ -164,7 +160,7 @@ func TestStartExecutionIsIdempotentAndRejectsSemanticReuse(t *testing.T) {
 	assertHTTPStatus(t, err, 409)
 
 	mutated = *req
-	mutated.Metadata = map[string]interface{}{"external_order_id": requestID.String(), "seller_user_id": uuid.NewString()}
+	mutated.Metadata = map[string]interface{}{"order_ref": "changed"}
 	_, err = svc.StartExecution(context.Background(), testPrincipal(actorID), &mutated)
 	assertHTTPStatus(t, err, 409)
 
@@ -303,8 +299,13 @@ func TestStartExecutionRecoversUnattachedRunBeforeDeletedTargetLookup(t *testing
 	if runtimeSvc.lookupCalls != 1 || runtimeSvc.startCalls != 0 || store.resolveCalls != 0 {
 		t.Fatalf("lookup/start/target resolves = %d/%d/%d, want 1/0/0", runtimeSvc.lookupCalls, runtimeSvc.startCalls, store.resolveCalls)
 	}
-	if got := runtimeSvc.lookupRequests[0].Metadata["external_request_id"]; got != requestID.String() {
+	if got := runtimeSvc.lookupRequests[0].Metadata["order_ref"]; got != "stable" {
 		t.Fatalf("recovery lookup metadata = %#v", runtimeSvc.lookupRequests[0].Metadata)
+	}
+	for _, internalKey := range []string{"caller_service_id", "external_request_id", "trace_id"} {
+		if _, leaked := runtimeSvc.lookupRequests[0].Metadata[internalKey]; leaked {
+			t.Fatalf("recovery lookup leaked internal %s metadata: %#v", internalKey, runtimeSvc.lookupRequests[0].Metadata)
+		}
 	}
 }
 
