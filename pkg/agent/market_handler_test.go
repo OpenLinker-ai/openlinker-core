@@ -307,6 +307,38 @@ func TestGetBySlugForOwner_HandlerReturnsPrivateOwnedAgent(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, otherResp.StatusCode, "body=%s", string(otherRaw))
 }
 
+func TestGetBySlugForOwner_HandlerReturnsDisabledOwnedAgent(t *testing.T) {
+	srv, pool := setupProtectedMarketTestServer(t)
+	creatorID, _ := setupTestData(t, pool)
+	otherCreatorID := insertCreatorUser(t, pool, "Other Creator")
+	ctx := context.Background()
+
+	agentID := createApprovedAgent(t, pool, creatorID, "handler-owner-disabled")
+	_, err := pool.Exec(ctx, `UPDATE agents SET lifecycle_status='disabled' WHERE id=$1`, agentID)
+	require.NoError(t, err)
+
+	publicResp, publicRaw := getJSON(t, srv.URL, "/api/v1/agents/handler-owner-disabled", nil)
+	assert.Equal(t, http.StatusNotFound, publicResp.StatusCode, "body=%s", string(publicRaw))
+
+	ownerResp, ownerRaw := getJSON(t, srv.URL,
+		"/api/v1/creator/agents/by-slug/handler-owner-disabled",
+		map[string]string{"Authorization": signJWT(t, creatorID)},
+	)
+	assert.Equal(t, http.StatusOK, ownerResp.StatusCode, "body=%s", string(ownerRaw))
+	assert.NotContains(t, string(ownerRaw), "endpoint_auth_header")
+
+	var detail map[string]any
+	require.NoError(t, json.Unmarshal(ownerRaw, &detail), "raw=%s", string(ownerRaw))
+	assert.Equal(t, "handler-owner-disabled", detail["slug"])
+	assert.Equal(t, "disabled", detail["lifecycle_status"])
+
+	otherResp, otherRaw := getJSON(t, srv.URL,
+		"/api/v1/creator/agents/by-slug/handler-owner-disabled",
+		map[string]string{"Authorization": signJWT(t, otherCreatorID)},
+	)
+	assert.Equal(t, http.StatusNotFound, otherResp.StatusCode, "body=%s", string(otherRaw))
+}
+
 func TestGetAgentCard_HandlerHappyPath(t *testing.T) {
 	t.Setenv("AGENT_CARD_SIGNING_SEED", "agent-card-test-signing-seed")
 	srv, pool := setupTestServer(t)
