@@ -44,6 +44,7 @@ type RuntimeWorkbenchRuntime struct {
 	ActiveNodeCount       int32            `json:"active_node_count"`
 	ActiveSessionCount    int32            `json:"active_session_count"`
 	ReadySessionCount     int32            `json:"ready_session_count"`
+	WorkerFeatures        []string         `json:"worker_features"`
 	DrainingSessionCount  int32            `json:"draining_session_count"`
 	TotalCapacity         int32            `json:"total_capacity"`
 	TotalInflight         int32            `json:"total_inflight"`

@@ -21,6 +21,7 @@ type runtimeWorkbenchSnapshot struct {
 	activeNodeCount       int32
 	activeSessionCount    int32
 	readySessionCount     int32
+	workerFeatures        []string
 	drainingSessionCount  int32
 	totalCapacity         int32
 	totalInflight         int32
@@ -79,6 +80,7 @@ func (s *Service) GetRuntimeWorkbench(
 		ActiveNodeCount:       snapshot.activeNodeCount,
 		ActiveSessionCount:    snapshot.activeSessionCount,
 		ReadySessionCount:     snapshot.readySessionCount,
+		WorkerFeatures:        append([]string{}, snapshot.workerFeatures...),
 		DrainingSessionCount:  snapshot.drainingSessionCount,
 		TotalCapacity:         snapshot.totalCapacity,
 		TotalInflight:         snapshot.totalInflight,
@@ -119,7 +121,7 @@ WITH current_contract AS (
     FROM runtime_schema_contracts
     WHERE is_current
 ), live_sessions AS (
-    SELECT s.runtime_session_id, s.node_id, s.agent_id, s.status,
+    SELECT s.runtime_session_id, s.node_id, s.agent_id, s.status, s.features,
            s.capacity, s.inflight, s.heartbeat_at,
            attachment.transport, attachment.transport_reason,
            attachment.transport_changed_at,
@@ -171,6 +173,9 @@ SELECT contract.runtime_contract_id,
        (SELECT COUNT(*)::int FROM live_sessions),
        (SELECT COUNT(*)::int FROM live_sessions
         WHERE status = 'active' AND node_status = 'active'),
+       COALESCE((SELECT features FROM live_sessions
+        WHERE status = 'active' AND node_status = 'active'
+        ORDER BY runtime_session_id LIMIT 1), ARRAY[]::text[]),
        (SELECT COUNT(*)::int FROM live_sessions
         WHERE status = 'draining' OR node_status = 'draining'),
        COALESCE((SELECT SUM(capacity)::int FROM live_nodes), 0),
@@ -210,6 +215,7 @@ FROM current_contract contract`
 		&snapshot.activeNodeCount,
 		&snapshot.activeSessionCount,
 		&snapshot.readySessionCount,
+		&snapshot.workerFeatures,
 		&snapshot.drainingSessionCount,
 		&snapshot.totalCapacity,
 		&snapshot.totalInflight,

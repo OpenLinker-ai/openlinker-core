@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -224,6 +225,7 @@ func TestRuntimeWorkbenchShowsSessionAndBacklog(t *testing.T) {
 	assert.Equal(t, int32(1), workbench.Runtime.ActiveNodeCount)
 	assert.Equal(t, int32(1), workbench.Runtime.ActiveSessionCount)
 	assert.Equal(t, int32(1), workbench.Runtime.ReadySessionCount)
+	assert.ElementsMatch(t, runtime.RuntimeRequiredFeatures(), workbench.Runtime.WorkerFeatures)
 	assert.Equal(t, int32(4), workbench.Runtime.TotalCapacity)
 	assert.Equal(t, int32(1), workbench.Runtime.PendingRunCount)
 	assert.Equal(t, runtime.RuntimeContractID, workbench.Runtime.RuntimeContractID)
@@ -316,6 +318,7 @@ func insertRuntimeWorkbenchSession(
 	pool *pgxpool.Pool,
 	ownerID, agentID uuid.UUID,
 	age time.Duration,
+	extraFeatures ...string,
 ) {
 	t.Helper()
 	nodeID := uuid.New()
@@ -325,6 +328,8 @@ func insertRuntimeWorkbenchSession(
 	prefix := "ol_agent_" + credentialID.String()[:8]
 	serial := strings.ReplaceAll(nodeID.String(), "-", "")
 	thumbprint := serial + serial
+	features := append(runtime.RuntimeRequiredFeatures(), extraFeatures...)
+	sort.Strings(features)
 	err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(context.Background(), `
 INSERT INTO agent_tokens (
@@ -345,7 +350,7 @@ INSERT INTO runtime_nodes (
           $4, $5, $6, 4, 0, 'active',
           clock_timestamp() - ($7::bigint * INTERVAL '1 millisecond'))`,
 			nodeID, serial, thumbprint, runtime.RuntimeContractID,
-			runtime.RuntimeContractDigest, runtime.RuntimeRequiredFeatures(), age.Milliseconds()); err != nil {
+			runtime.RuntimeContractDigest, features, age.Milliseconds()); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(context.Background(), `
@@ -360,7 +365,7 @@ INSERT INTO runtime_sessions (
           clock_timestamp() - ($10::bigint * INTERVAL '1 millisecond'))`,
 			sessionID, nodeID, agentID, credentialID, serial,
 			runtime.RuntimeContractID, runtime.RuntimeContractDigest,
-			runtime.RuntimeRequiredFeatures(), coreID, age.Milliseconds()); err != nil {
+			features, coreID, age.Milliseconds()); err != nil {
 			return err
 		}
 		_, err := tx.Exec(context.Background(), `
