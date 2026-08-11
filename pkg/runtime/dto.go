@@ -6,7 +6,9 @@ import "time"
 //
 // AgentID 在 service 层 uuid.Parse 校验。
 // Input 必填，为创作者 endpoint 接收的入参（透传）。
-// Metadata 可选，平台原样转发给 endpoint，常用于 trace_id / 客户端版本等。
+// Metadata 可选。普通调用方字段会转发给第三方 endpoint；平台身份、内部编排
+// 和私有 authority 字段会在出站边界被剔除，并由 Core 加入不可逆的
+// principal_scope_id。queued Runtime 保留完整的私有 authority。
 type RunRequest struct {
 	AgentID        string                 `json:"agent_id" validate:"required,uuid"`
 	Input          map[string]interface{} `json:"input" validate:"required"`
@@ -355,7 +357,7 @@ type RunMessageResponse struct {
 
 // AgentRequest 平台 → 创作者 endpoint 的请求体。
 //
-// RunID 让创作者侧可对账 / 排查；Metadata 原样转发。
+// RunID 让创作者侧可对账 / 排查；Metadata 是经过第三方出站投影的公开上下文。
 type AgentRequest struct {
 	Input         map[string]interface{} `json:"input"`
 	Metadata      map[string]interface{} `json:"metadata,omitempty"`
