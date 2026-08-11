@@ -38,7 +38,7 @@ func (h *MarketHandler) Register(api *echo.Group) {
 
 // RegisterProtected 注册创作者侧只读路由。
 //
-//	GET /creator/agents/by-slug/:slug  当前创作者自测详情（允许自己的 private Agent）
+//	GET /creator/agents/by-slug/:slug  当前创作者详情（允许自己的 private/disabled Agent）
 func (h *MarketHandler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
 	creator := api.Group("/creator", jwtMiddleware)
 	creator.GET("/agents/by-slug/:slug", h.GetBySlugForOwner)
@@ -104,7 +104,7 @@ func (h *MarketHandler) GetBySlug(c echo.Context) error {
 
 // GetBySlugForOwner Agent 创作者自测详情。
 //
-// 非 owner / 不存在 / 已下架统一 404；private 仅 owner 可见。
+// 非 owner / 不存在统一 404；private/disabled 仅 owner 可见。
 func (h *MarketHandler) GetBySlugForOwner(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {

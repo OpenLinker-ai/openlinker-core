@@ -776,6 +776,28 @@ func TestGetBySlugForOwner_ReturnsPrivateOwnedAgent(t *testing.T) {
 	assertHTTPStatus(t, err, http.StatusNotFound)
 }
 
+func TestGetBySlugForOwner_ReturnsDisabledOwnedAgent(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := agent.NewMarketService(pool)
+	creatorID, _ := setupTestData(t, pool)
+	otherCreatorID := insertCreatorUser(t, pool, "Other Creator")
+	ctx := context.Background()
+
+	createApprovedAgent(t, pool, creatorID, "owner-disabled", WithStatus("disabled"))
+
+	_, err := svc.GetBySlug(ctx, "owner-disabled")
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	detail, err := svc.GetBySlugForOwner(ctx, "owner-disabled", creatorID)
+	require.NoError(t, err)
+	require.NotNil(t, detail)
+	assert.Equal(t, "owner-disabled", detail.Slug)
+	assert.Equal(t, "disabled", detail.LifecycleStatus)
+
+	_, err = svc.GetBySlugForOwner(ctx, "owner-disabled", otherCreatorID)
+	assertHTTPStatus(t, err, http.StatusNotFound)
+}
+
 func TestGetBySlug_DisabledNotReturned(t *testing.T) {
 	// Phase 2 缺口 2 后：pending/rejected 仍能按 slug 访问（与市场列表一致），
 	// 详情页拒绝的是 disabled (lifecycle) 与 private (visibility)。unlisted 凭直链可访问。

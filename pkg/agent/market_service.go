@@ -219,7 +219,7 @@ func (s *MarketService) GetBySlug(ctx context.Context, slug string) (*AgentDetai
 
 // GetBySlugForOwner 按 slug 查询当前创作者自己的 Agent 详情。
 //
-// 仅用于创作者自测入口：private 也允许 owner 访问；非 owner / disabled 仍返回 404。
+// private 和 disabled 均允许 owner 访问；非 owner 仍返回 404。
 // endpoint_auth_header 永不暴露给前端。
 func (s *MarketService) GetBySlugForOwner(ctx context.Context, slug string, creatorID uuid.UUID) (*AgentDetailResponse, error) {
 	if slug == "" {

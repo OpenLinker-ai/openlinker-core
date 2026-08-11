@@ -470,8 +470,7 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
 FROM agents a
 JOIN users u ON u.id = a.creator_id
 WHERE a.slug = $1
-  AND a.creator_id = $2
-  AND a.lifecycle_status = 'active'`
+  AND a.creator_id = $2`
 
 type GetAgentBySlugForOwnerParams struct {
 	Slug      string    `db:"slug" json:"slug"`
@@ -483,7 +482,7 @@ type GetAgentBySlugForOwnerRow struct {
 	CreatorName string `db:"creator_name" json:"creator_name"`
 }
 
-// GetAgentBySlugForOwner 创作者自测详情。owner 可按 slug 访问自己的 private/unlisted/public active Agent。
+// GetAgentBySlugForOwner 创作者详情。owner 可按 slug 访问自己的 private/unlisted/public Agent，包括 disabled Agent。
 func (q *Queries) GetAgentBySlugForOwner(ctx context.Context, arg GetAgentBySlugForOwnerParams) (GetAgentBySlugForOwnerRow, error) {
 	row := q.db.QueryRow(ctx, getAgentBySlugForOwner, arg.Slug, arg.CreatorID)
 	var r GetAgentBySlugForOwnerRow
