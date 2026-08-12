@@ -206,7 +206,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	}
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
 	runtimeHandler.SetRunUpdateSource(runUpdates)
-	configureRuntime(
+	runtimePresence := configureRuntime(
 		rootCtx, runtimeHandler, runtimeSvc, pool, cfg, opts.CoreInstanceID,
 		opts.RuntimeSignalBus, eventWake,
 	)
@@ -247,6 +247,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 
 	a2aSvc := a2a.NewService(pool, runtimeSvc)
 	a2aSvc.SetRunUpdateSource(runUpdates)
+	a2aSvc.SetRuntimePresenceStore(runtimePresence)
 	a2aSvc.SetTaskCallbackManager(webhookSvc)
 	a2aHandler := a2a.NewHandler(a2aSvc)
 	a2aHandler.SetAgentCardProvider(agentMarketSvc)
@@ -474,13 +475,13 @@ func configureRuntime(
 	coreInstanceID uuid.UUID,
 	signalBus runtime.RuntimeSignalBus,
 	eventWake eventwake.TopicSource,
-) {
+) runtime.RuntimePresenceStore {
 	if handler == nil || runtimeService == nil || pool == nil || cfg == nil {
-		return
+		return nil
 	}
 	if coreInstanceID == uuid.Nil {
 		log.Error().Msg("agent runtime disabled: Core instance identity is missing")
-		return
+		return nil
 	}
 	runtimeService.ConfigureCoreRuntime(coreInstanceID)
 	runtimeService.StartCoreAttemptCancellationCoordinator(rootCtx)
@@ -607,6 +608,7 @@ func configureRuntime(
 			eventWake,
 		)
 	}
+	return presence
 }
 
 func configureRuntimeAttachOnly(

@@ -50,7 +50,15 @@ func (s *Service) GetRuntimeWorkbench(
 		return nil, httpx.ServiceUnavailable("Runtime 工作台暂不可用")
 	}
 
-	snapshot, err := s.runtimeWorkbenchSnapshot(ctx, agentID)
+	presences := []coreruntime.RuntimePresence{}
+	if s.runtimePresence != nil {
+		presences, err = s.runtimePresence.ListByAgent(ctx, agentID)
+		if err != nil {
+			log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("a2a.GetRuntimeWorkbench: lease-backed presence unavailable")
+			presences = nil
+		}
+	}
+	snapshot, err := s.runtimeWorkbenchSnapshot(ctx, agentID, presences)
 	if err != nil {
 		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("a2a.GetRuntimeWorkbench: snapshot")
 		return nil, httpx.Internal("查询 Runtime Worker 状态失败")
@@ -114,12 +122,29 @@ func (s *Service) GetRuntimeWorkbench(
 func (s *Service) runtimeWorkbenchSnapshot(
 	ctx context.Context,
 	agentID uuid.UUID,
+	presences []coreruntime.RuntimePresence,
 ) (runtimeWorkbenchSnapshot, error) {
+	presenceSessionIDs := make([]uuid.UUID, 0, len(presences))
+	presenceCoreIDs := make([]uuid.UUID, 0, len(presences))
+	presenceNodeIDs := make([]uuid.UUID, 0, len(presences))
+	for _, presence := range presences {
+		if presence.AgentID != agentID || presence.RuntimeSessionID == uuid.Nil ||
+			presence.CoreInstanceID == uuid.Nil || presence.NodeID == uuid.Nil {
+			continue
+		}
+		presenceSessionIDs = append(presenceSessionIDs, presence.RuntimeSessionID)
+		presenceCoreIDs = append(presenceCoreIDs, presence.CoreInstanceID)
+		presenceNodeIDs = append(presenceNodeIDs, presence.NodeID)
+	}
 	const statement = `
 WITH current_contract AS (
     SELECT runtime_contract_id, runtime_contract_digest
     FROM runtime_schema_contracts
     WHERE is_current
+), lease_backed_presence AS (
+    SELECT DISTINCT runtime_session_id, core_instance_id, node_id
+    FROM unnest($3::uuid[], $4::uuid[], $5::uuid[])
+         AS presence(runtime_session_id, core_instance_id, node_id)
 ), live_sessions AS (
     SELECT s.runtime_session_id, s.node_id, s.agent_id, s.status, s.features,
            s.capacity, s.inflight, s.heartbeat_at,
@@ -140,11 +165,16 @@ WITH current_contract AS (
       ON attachment.runtime_session_id = s.runtime_session_id
      AND attachment.core_instance_id = s.attached_core_instance_id
      AND attachment.detached_at IS NULL
+    LEFT JOIN lease_backed_presence presence
+      ON presence.runtime_session_id = s.runtime_session_id
+     AND presence.core_instance_id = s.attached_core_instance_id
+     AND presence.node_id = s.node_id
     WHERE s.agent_id = $1
       AND s.status IN ('active', 'draining')
       AND s.attached_core_instance_id IS NOT NULL
       AND s.disconnected_at IS NULL
-      AND s.heartbeat_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
+      AND (presence.runtime_session_id IS NOT NULL OR
+           s.heartbeat_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond'))
       AND s.protocol_version = 2
       AND s.runtime_contract_id = 'openlinker.runtime.v2'
       AND n.status IN ('active', 'draining')
@@ -156,7 +186,8 @@ WITH current_contract AS (
       AND n.node_version = s.node_version
       AND n.features @> s.features
       AND s.features @> n.features
-      AND n.last_seen_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
+      AND (presence.runtime_session_id IS NOT NULL OR
+           n.last_seen_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond'))
       AND token.status = 'active_runtime'
       AND token.revoked_at IS NULL
       AND token.scopes @> ARRAY['agent:pull']::text[]
@@ -209,6 +240,9 @@ FROM current_contract contract`
 		statement,
 		agentID,
 		coreruntime.CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
+		presenceSessionIDs,
+		presenceCoreIDs,
+		presenceNodeIDs,
 	).Scan(
 		&snapshot.runtimeContractID,
 		&snapshot.runtimeContractDigest,
@@ -361,7 +395,7 @@ func runtimeWorkbenchDiagnostics(
 			Severity: "warning",
 			Summary:  "Runtime Worker 还没连上。启动 Runtime Worker 后会优先使用 WebSocket；网络不合适时会自动切到长轮询。",
 			TechnicalDetail: fmt.Sprintf(
-				"No live supported-contract Runtime Session in the %d-second database-clock window; transport_policy=ws_primary_long_poll_fallback.",
+				"No live supported-contract Runtime Session from lease-backed presence or the %d-second database-clock fallback window; transport_policy=ws_primary_long_poll_fallback.",
 				int(coreruntime.CurrentRuntimeLivenessPolicy().SessionStaleAfter/time.Second),
 			),
 			NextAction: "start_runtime",
