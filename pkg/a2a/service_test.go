@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -205,7 +206,7 @@ func TestRuntimeWorkbenchShowsSessionAndBacklog(t *testing.T) {
 	agentID := insertAgent(t, pool, ownerID, "https://example.com/runtime")
 	makeRuntimePullAgent(t, pool, agentID)
 	runID := insertParentRun(t, pool, ownerID, agentID)
-	insertRuntimeWorkbenchSession(t, pool, ownerID, agentID, 30*time.Second)
+	_ = insertRuntimeWorkbenchSession(t, pool, ownerID, agentID, 30*time.Second)
 
 	workbench, err := svc.GetRuntimeWorkbench(context.Background(), ownerID, agentID)
 	require.NoError(t, err)
@@ -224,6 +225,7 @@ func TestRuntimeWorkbenchShowsSessionAndBacklog(t *testing.T) {
 	assert.Equal(t, int32(1), workbench.Runtime.ActiveNodeCount)
 	assert.Equal(t, int32(1), workbench.Runtime.ActiveSessionCount)
 	assert.Equal(t, int32(1), workbench.Runtime.ReadySessionCount)
+	assert.ElementsMatch(t, runtime.RuntimeRequiredFeatures(), workbench.Runtime.WorkerFeatures)
 	assert.Equal(t, int32(4), workbench.Runtime.TotalCapacity)
 	assert.Equal(t, int32(1), workbench.Runtime.PendingRunCount)
 	assert.Equal(t, runtime.RuntimeContractID, workbench.Runtime.RuntimeContractID)
@@ -259,11 +261,58 @@ WHERE agent_id = $1 AND status IN ('active', 'draining')`, agentID)
 		return err
 	})
 	require.NoError(t, err)
-	insertRuntimeWorkbenchSession(t, pool, ownerID, agentID, 46*time.Second)
+	_ = insertRuntimeWorkbenchSession(t, pool, ownerID, agentID, 46*time.Second)
 	stale, err := svc.GetRuntimeWorkbench(context.Background(), ownerID, agentID)
 	require.NoError(t, err)
 	assert.Equal(t, "offline", stale.Runtime.ConnectionStatus)
 	assert.Equal(t, "unknown", stale.Runtime.CurrentTransport)
+}
+
+func TestRuntimeWorkbenchUsesLeaseBackedPresenceBeyondDatabaseWindow(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	ownerID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, ownerID, "https://example.com/runtime")
+	makeRuntimePullAgent(t, pool, agentID)
+	presence := insertRuntimeWorkbenchSession(t, pool, ownerID, agentID, 46*time.Second)
+	store := &runtimeWorkbenchPresenceStore{presences: []runtime.RuntimePresence{presence}}
+	svc.SetRuntimePresenceStore(store)
+
+	workbench, err := svc.GetRuntimeWorkbench(context.Background(), ownerID, agentID)
+	require.NoError(t, err)
+	assert.Equal(t, "online", workbench.Runtime.ConnectionStatus)
+	assert.Equal(t, int32(1), workbench.Runtime.ReadySessionCount)
+	assert.Equal(t, "long_poll", workbench.Runtime.CurrentTransport)
+
+	store.presences[0].CoreInstanceID = uuid.New()
+	mismatched, err := svc.GetRuntimeWorkbench(context.Background(), ownerID, agentID)
+	require.NoError(t, err)
+	assert.Equal(t, "offline", mismatched.Runtime.ConnectionStatus)
+}
+
+type runtimeWorkbenchPresenceStore struct {
+	presences []runtime.RuntimePresence
+	err       error
+}
+
+func (s *runtimeWorkbenchPresenceStore) Refresh(context.Context, runtime.RuntimePresence, time.Duration) error {
+	return s.err
+}
+
+func (s *runtimeWorkbenchPresenceStore) ListByAgent(_ context.Context, agentID uuid.UUID) ([]runtime.RuntimePresence, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	presences := make([]runtime.RuntimePresence, 0, len(s.presences))
+	for _, presence := range s.presences {
+		if presence.AgentID == agentID {
+			presences = append(presences, presence)
+		}
+	}
+	return presences, nil
+}
+
+func (s *runtimeWorkbenchPresenceStore) Remove(context.Context, runtime.RuntimePresence) error {
+	return s.err
 }
 
 func TestRuntimeWorkbenchShowsOfflineBacklogWithoutClaimLanguage(t *testing.T) {
@@ -316,7 +365,8 @@ func insertRuntimeWorkbenchSession(
 	pool *pgxpool.Pool,
 	ownerID, agentID uuid.UUID,
 	age time.Duration,
-) {
+	extraFeatures ...string,
+) runtime.RuntimePresence {
 	t.Helper()
 	nodeID := uuid.New()
 	credentialID := uuid.New()
@@ -325,6 +375,8 @@ func insertRuntimeWorkbenchSession(
 	prefix := "ol_agent_" + credentialID.String()[:8]
 	serial := strings.ReplaceAll(nodeID.String(), "-", "")
 	thumbprint := serial + serial
+	features := append(runtime.RuntimeRequiredFeatures(), extraFeatures...)
+	sort.Strings(features)
 	err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(context.Background(), `
 INSERT INTO agent_tokens (
@@ -345,7 +397,7 @@ INSERT INTO runtime_nodes (
           $4, $5, $6, 4, 0, 'active',
           clock_timestamp() - ($7::bigint * INTERVAL '1 millisecond'))`,
 			nodeID, serial, thumbprint, runtime.RuntimeContractID,
-			runtime.RuntimeContractDigest, runtime.RuntimeRequiredFeatures(), age.Milliseconds()); err != nil {
+			runtime.RuntimeContractDigest, features, age.Milliseconds()); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(context.Background(), `
@@ -360,7 +412,7 @@ INSERT INTO runtime_sessions (
           clock_timestamp() - ($10::bigint * INTERVAL '1 millisecond'))`,
 			sessionID, nodeID, agentID, credentialID, serial,
 			runtime.RuntimeContractID, runtime.RuntimeContractDigest,
-			runtime.RuntimeRequiredFeatures(), coreID, age.Milliseconds()); err != nil {
+			features, coreID, age.Milliseconds()); err != nil {
 			return err
 		}
 		_, err := tx.Exec(context.Background(), `
@@ -371,6 +423,14 @@ INSERT INTO runtime_session_attachments (
 		return err
 	})
 	require.NoError(t, err)
+	return runtime.RuntimePresence{
+		CoreInstanceID: coreID, NodeID: nodeID, AgentID: agentID,
+		RuntimeSessionID: sessionID, ConnectionID: "ws:workbench-test",
+		WorkerID: "workbench-worker", Capacity: 2, Inflight: 0,
+		NodeVersion: "workbench-v2", Transport: runtime.RuntimeTransportLongPoll,
+		TransportReason:    runtime.RuntimeTransportReasonWebSocketUnavailable,
+		TransportChangedAt: time.Now().UTC(),
+	}
 }
 
 func TestListParentRunsAggregatesRootContextAndChildrenTree(t *testing.T) {

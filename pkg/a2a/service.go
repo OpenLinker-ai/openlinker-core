@@ -28,6 +28,7 @@ type Service struct {
 	queries             *db.Queries
 	pool                *pgxpool.Pool
 	runtime             *runtime.Service
+	runtimePresence     runtime.RuntimePresenceStore
 	runUpdates          runtime.RunUpdateSource
 	taskCallbackManager taskCallbackManager
 	maxDelegationDepth  int
@@ -37,6 +38,13 @@ type Service struct {
 // message/send requests. PostgreSQL remains the authoritative Run state.
 func (s *Service) SetRunUpdateSource(source runtime.RunUpdateSource) {
 	s.runUpdates = source
+}
+
+// SetRuntimePresenceStore lets owner diagnostics reuse the same expiring
+// lease-backed presence that Runtime dispatch uses. PostgreSQL identity,
+// attachment, contract, Node and credential rows remain authoritative.
+func (s *Service) SetRuntimePresenceStore(store runtime.RuntimePresenceStore) {
+	s.runtimePresence = store
 }
 
 func NewService(pool *pgxpool.Pool, runtimeSvc *runtime.Service) *Service {
