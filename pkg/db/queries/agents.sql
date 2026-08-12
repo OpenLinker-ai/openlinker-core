@@ -908,13 +908,12 @@ WHERE a.slug = $1
   AND a.lifecycle_status = 'active';
 
 -- name: GetAgentBySlugForOwner :one
--- 创作者自测详情：owner 可按 slug 访问自己的 private/unlisted/public active Agent。
+-- 创作者详情：owner 可按 slug 访问自己的 private/unlisted/public Agent，包括 disabled Agent。
 SELECT a.*, u.display_name AS creator_name
 FROM agents a
 JOIN users u ON u.id = a.creator_id
 WHERE a.slug = $1
-  AND a.creator_id = $2
-  AND a.lifecycle_status = 'active';
+  AND a.creator_id = $2;
 
 -- ## 共用 - 占位
 -- name: AgentsCount :one
