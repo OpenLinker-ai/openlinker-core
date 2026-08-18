@@ -272,6 +272,7 @@ func (h *Handler) RegisterObservation(api *echo.Group, jwtMw echo.MiddlewareFunc
 	api.GET("/runs/:id/observation", h.GetBrowserObservation, jwtMw)
 	api.POST("/runs/:id/observation/start", h.StartBrowserObservation, jwtMw)
 	api.POST("/runs/:id/observation/stop", h.StopBrowserObservation, jwtMw)
+	api.GET("/runs/:id/observation/frame", h.GetBrowserObservationFrame, jwtMw)
 }
 
 func (h *Handler) RegisterAdmin(api *echo.Group, jwtMw, adminMw echo.MiddlewareFunc) {
@@ -1362,4 +1363,26 @@ func browserObservationHTTPError(err error) error {
 		return httpx.Forbidden("无权观察该 Run")
 	}
 	return httpx.Internal("观察请求失败")
+}
+
+func (h *Handler) GetBrowserObservationFrame(c echo.Context) error {
+	_, runID, err := h.browserObservationIdentity(c)
+	if err != nil {
+		return err
+	}
+	after, err := strconv.ParseInt(c.QueryParam("after"), 10, 64)
+	if err != nil || after < 0 {
+		after = 0
+	}
+	frame, err := h.browserObservation.WaitFrame(c.Request().Context(), runID, after)
+	if err != nil {
+		return browserObservationHTTPError(err)
+	}
+	// Frames are live page content: never cached, never stored by an
+	// intermediary, and never shared.
+	c.Response().Header().Set("Cache-Control", "private, no-store")
+	if frame == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	return c.JSON(http.StatusOK, frame)
 }

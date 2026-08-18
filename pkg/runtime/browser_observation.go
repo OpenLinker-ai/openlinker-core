@@ -45,6 +45,7 @@ type BrowserObservation struct {
 	now      func() time.Time
 	sender   browserObserverCommandSender
 	instance uuid.UUID
+	frames   *observationFrameBuffer
 }
 
 type browserObserverCommandSender interface {
@@ -59,7 +60,12 @@ func NewBrowserObservation(
 	if now == nil {
 		now = time.Now
 	}
-	return &BrowserObservation{pool: pool, now: now, instance: instance}
+	return &BrowserObservation{
+		pool:     pool,
+		now:      now,
+		instance: instance,
+		frames:   newObservationFrameBuffer(),
+	}
 }
 
 func (observation *BrowserObservation) BindCommandSender(
@@ -123,10 +129,12 @@ RETURNING id
 		return BrowserObservationState{}, ErrObservationAlreadyActive
 	}
 
+	observation.frames.open(runID, leaseID)
 	if err := observation.sender.SendBrowserObserverCommand(
 		identity.RuntimeSessionID,
 		command,
 	); err != nil {
+		observation.frames.close(runID)
 		observation.close(ctx, leaseID, "channel_unavailable")
 		return BrowserObservationState{}, ErrObservationChannelUnavailable
 	}
@@ -178,6 +186,8 @@ WHERE run_id = $1 AND status = 'active'
 			LeaseID:   leaseID,
 		})
 	}
+	count := observation.frames.close(runID)
+	_ = observation.RecordFrames(ctx, leaseID, count)
 	return observation.close(ctx, leaseID, endReason)
 }
 
@@ -186,16 +196,30 @@ func (observation *BrowserObservation) close(
 	leaseID uuid.UUID,
 	endReason string,
 ) error {
+	// A normal close knows the exact total, so the count stops being a lower
+	// bound here and only here.
 	_, err := observation.pool.Exec(ctx, `
 UPDATE browser_observation_audits
 SET status = 'closed',
     ended_at = $2,
     end_reason = $3,
+    frame_count = GREATEST(frame_count, $4),
     frame_count_complete = true,
     updated_at = clock_timestamp()
 WHERE lease_id = $1 AND status = 'active'
-`, leaseID, observation.now().UTC(), endReason)
+`, leaseID, observation.now().UTC(), endReason, observation.finalFrameCount(leaseID))
 	return err
+}
+
+func (observation *BrowserObservation) finalFrameCount(leaseID uuid.UUID) int64 {
+	observation.frames.mu.Lock()
+	defer observation.frames.mu.Unlock()
+	for _, live := range observation.frames.live {
+		if live.leaseID == leaseID {
+			return live.count
+		}
+	}
+	return 0
 }
 
 // RecordFrames persists a lower bound for the frame count while an observation
@@ -356,4 +380,74 @@ WHERE run_id = $1 AND status = 'active'
 	state.Active = true
 	state.LeaseExpiresAt = &expiresAt
 	return state, nil
+}
+
+// HandleEvent consumes one Worker event. It returns the ack the Worker is
+// waiting on: the window is a single unacknowledged event, so failing to ack
+// stops the stream rather than dropping one frame.
+func (observation *BrowserObservation) HandleEvent(
+	ctx context.Context,
+	event BrowserObserverEventPayload,
+) (BrowserObserverEventAckPayload, error) {
+	if observation == nil {
+		return BrowserObserverEventAckPayload{}, ErrObservationChannelUnavailable
+	}
+	if err := event.Validate(); err != nil {
+		return BrowserObserverEventAckPayload{}, err
+	}
+	runID := event.AttemptIdentity.RunID
+	switch event.Kind {
+	case BrowserObserverFrame:
+		if err := observation.frames.publish(runID, event.LeaseID, BrowserObservationFrame{
+			FrameSeq:   event.EventSeq,
+			CapturedAt: event.CapturedAt.UTC(),
+			MIMEType:   event.Frame.MIMEType,
+			Data:       event.Frame.Data,
+			Width:      event.Frame.Width,
+			Height:     event.Frame.Height,
+		}); err != nil {
+			return BrowserObserverEventAckPayload{}, err
+		}
+		// Persist a lower bound on an interval, not per frame: the point is that
+		// a Core which exits mid-observation leaves a bound behind.
+		if event.EventSeq%observationCountFlushFrames == 0 {
+			_ = observation.RecordFrames(ctx, event.LeaseID, observation.frames.frameCount(runID))
+		}
+	case BrowserObserverStopped:
+		_ = observation.Stop(ctx, runID, "worker_stopped")
+	case BrowserObserverError:
+		_ = observation.Stop(ctx, runID, boundedObservationEndReason(event.ErrorCode))
+	}
+	return BrowserObserverEventAckPayload{
+		AttemptIdentity: event.AttemptIdentity,
+		LeaseID:         event.LeaseID,
+		EventSeq:        event.EventSeq,
+	}, nil
+}
+
+// WaitFrame serves one long poll. A nil frame with no error means the poll timed
+// out with nothing new, which is a normal empty response rather than a failure.
+func (observation *BrowserObservation) WaitFrame(
+	ctx context.Context,
+	runID uuid.UUID,
+	after int64,
+) (*BrowserObservationFrame, error) {
+	if observation == nil {
+		return nil, ErrObservationChannelUnavailable
+	}
+	return observation.frames.wait(ctx, runID, after)
+}
+
+// observationCountFlushFrames turns the flush interval into a frame count at
+// the default interval, so the flush stays periodic without a second timer.
+const observationCountFlushFrames = int64(observationCountFlushInterval / (observationDefaultFrameIntervalMS * time.Millisecond))
+
+func boundedObservationEndReason(code string) string {
+	if code == "" {
+		return "worker_error"
+	}
+	if len(code) > 100 {
+		return code[:100]
+	}
+	return code
 }

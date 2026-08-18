@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -231,4 +232,131 @@ func httpStatusOf(t *testing.T, err error) int {
 	}
 	t.Fatalf("error %v is not an HTTP error", err)
 	return 0
+}
+
+func observationFrame(seq int64) BrowserObservationFrame {
+	return BrowserObservationFrame{
+		FrameSeq:   seq,
+		CapturedAt: time.Now().UTC(),
+		MIMEType:   "image/jpeg",
+		Data:       []byte{0xff, 0xd8, 0xff, 0xd9},
+		Width:      1280,
+		Height:     720,
+	}
+}
+
+// A frame from a lease that no longer owns the Run belongs to an observation
+// that already ended, so it must not reach the current viewer.
+func TestObservationFrameBufferRejectsStaleLeases(t *testing.T) {
+	t.Parallel()
+	buffer := newObservationFrameBuffer()
+	runID := uuid.New()
+	current := uuid.New()
+	buffer.open(runID, current)
+
+	if err := buffer.publish(runID, current, observationFrame(1)); err != nil {
+		t.Fatalf("current lease frame rejected: %v", err)
+	}
+	if err := buffer.publish(runID, uuid.New(), observationFrame(2)); err == nil {
+		t.Fatal("a frame from a superseded lease was accepted")
+	}
+	// A regressing sequence would let a replayed frame overwrite a newer one.
+	if err := buffer.publish(runID, current, observationFrame(1)); err == nil {
+		t.Fatal("a regressing frame sequence was accepted")
+	}
+	if err := buffer.publish(uuid.New(), current, observationFrame(2)); err == nil {
+		t.Fatal("a frame for an unobserved Run was accepted")
+	}
+}
+
+func TestObservationFrameBufferRejectsMalformedFrames(t *testing.T) {
+	t.Parallel()
+	buffer := newObservationFrameBuffer()
+	runID := uuid.New()
+	leaseID := uuid.New()
+	buffer.open(runID, leaseID)
+	for name, mutate := range map[string]func(*BrowserObservationFrame){
+		"wrong mime": func(f *BrowserObservationFrame) { f.MIMEType = "image/png" },
+		"no data":    func(f *BrowserObservationFrame) { f.Data = nil },
+		"zero width": func(f *BrowserObservationFrame) { f.Width = 0 },
+		"zero seq":   func(f *BrowserObservationFrame) { f.FrameSeq = 0 },
+		"oversized": func(f *BrowserObservationFrame) {
+			f.Data = make([]byte, observationFrameBytesLimit+1)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			frame := observationFrame(1)
+			mutate(&frame)
+			if buffer.publish(runID, leaseID, frame) == nil {
+				t.Fatalf("%s frame was accepted", name)
+			}
+		})
+	}
+}
+
+// A waiter must see a frame published after it started waiting, and must be
+// woken when the observation closes rather than holding until the timeout.
+func TestObservationFrameBufferWakesWaiters(t *testing.T) {
+	t.Parallel()
+	buffer := newObservationFrameBuffer()
+	runID := uuid.New()
+	leaseID := uuid.New()
+	buffer.open(runID, leaseID)
+
+	delivered := make(chan *BrowserObservationFrame, 1)
+	go func() {
+		frame, _ := buffer.wait(t.Context(), runID, 0)
+		delivered <- frame
+	}()
+	time.Sleep(20 * time.Millisecond)
+	if err := buffer.publish(runID, leaseID, observationFrame(7)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case frame := <-delivered:
+		if frame == nil || frame.FrameSeq != 7 {
+			t.Fatalf("waiter received %#v", frame)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a published frame never reached the waiter")
+	}
+
+	ended := make(chan error, 1)
+	go func() {
+		_, err := buffer.wait(t.Context(), runID, 7)
+		ended <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	buffer.close(runID)
+	select {
+	case err := <-ended:
+		if err == nil {
+			t.Fatal("closing the observation did not end the wait")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("closing the observation left a waiter hanging")
+	}
+}
+
+// The public frame shape must not leak the identities the Worker and Core use
+// between themselves.
+func TestObservationFrameCarriesNoIdentity(t *testing.T) {
+	t.Parallel()
+	raw, err := json.Marshal(observationFrame(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	expected := []string{"frame_seq", "captured_at", "mime_type", "data", "width", "height"}
+	if len(fields) != len(expected) {
+		t.Fatalf("frame fields = %v, want exactly %v", fields, expected)
+	}
+	for _, name := range expected {
+		if _, ok := fields[name]; !ok {
+			t.Fatalf("frame is missing %s", name)
+		}
+	}
 }
