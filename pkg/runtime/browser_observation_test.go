@@ -1,10 +1,14 @@
 package runtime
 
 import (
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 func observerIdentity() BrowserObserverIdentity {
@@ -168,4 +172,63 @@ func (stubObserverSender) SendBrowserObserverCommand(
 	BrowserObserverCommandPayload,
 ) error {
 	return nil
+}
+
+// The feature is read from the current Session's declaration, so a Runtime that
+// reconnects without it stops being observable immediately.
+func TestObservationFeatureDeclaration(t *testing.T) {
+	t.Parallel()
+	if !observationFeatureDeclared([]string{"other", BrowserObservationFeature}) {
+		t.Fatal("a declared feature was not detected")
+	}
+	for name, features := range map[string][]string{
+		"empty":         nil,
+		"unrelated":     {"browser_human_control.v1"},
+		"near miss":     {"browser_authenticated_observation"},
+		"wrong version": {"browser_authenticated_observation.v2"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if observationFeatureDeclared(features) {
+				t.Fatalf("%v was treated as declaring observation", features)
+			}
+		})
+	}
+}
+
+// Each failure mode has to reach the caller as its own status: an old Runtime,
+// a Worker on another Core instance and a Run someone else owns are different
+// problems with different fixes.
+func TestObservationErrorsMapToDistinctStatuses(t *testing.T) {
+	t.Parallel()
+	seen := map[int]string{}
+	for _, err := range []error{
+		ErrObservationChannelUnavailable,
+		ErrObservationAlreadyActive,
+		ErrObservationUnsupported,
+		ErrObservationForbidden,
+	} {
+		mapped := browserObservationHTTPError(err)
+		status := httpStatusOf(t, mapped)
+		if existing, clash := seen[status]; clash {
+			t.Fatalf("%v and %s share status %d", err, existing, status)
+		}
+		seen[status] = err.Error()
+	}
+	if len(seen) != 4 {
+		t.Fatalf("expected four distinct statuses, got %d", len(seen))
+	}
+}
+
+func httpStatusOf(t *testing.T, err error) int {
+	t.Helper()
+	var coreErr *httpx.HTTPError
+	if errors.As(err, &coreErr) {
+		return coreErr.Status
+	}
+	var echoErr *echo.HTTPError
+	if errors.As(err, &echoErr) {
+		return echoErr.Code
+	}
+	t.Fatalf("error %v is not an HTTP error", err)
+	return 0
 }

@@ -255,3 +255,105 @@ func (observation *BrowserObservation) RunGC(ctx context.Context) {
 		}
 	}
 }
+
+// ErrObservationUnsupported is returned when the Runtime holding this Run never
+// declared the observation feature. Reporting it distinctly keeps an old Runtime
+// from looking like a broken one.
+var ErrObservationUnsupported = errors.New("browser observation is unsupported by this Runtime")
+
+// ErrObservationForbidden is returned when the caller may not observe this Run.
+var ErrObservationForbidden = errors.New("browser observation is not permitted for this caller")
+
+// ResolveIdentity finds the Attempt to observe and authorizes the caller.
+//
+// An owner may only observe their own Run. An admin may observe any Run, but
+// arrives through a separate route with its own permission and a recorded
+// reason, so the two never collapse into one check.
+func (observation *BrowserObservation) ResolveIdentity(
+	ctx context.Context,
+	runID uuid.UUID,
+	callerUserID uuid.UUID,
+	isAdmin bool,
+) (BrowserObserverIdentity, error) {
+	if observation == nil || observation.pool == nil {
+		return BrowserObserverIdentity{}, ErrObservationChannelUnavailable
+	}
+	var ownerID uuid.UUID
+	var identity BrowserObserverIdentity
+	var features []string
+	err := observation.pool.QueryRow(ctx, `
+SELECT r.user_id,
+       c.attempt_id,
+       c.session_epoch,
+       c.attachment_id,
+       c.runtime_session_id,
+       COALESCE(s.features, ARRAY[]::text[])
+FROM runs r
+JOIN browser_run_controls c ON c.run_id = r.id
+LEFT JOIN runtime_sessions s ON s.id = c.runtime_session_id
+WHERE r.id = $1
+`, runID).Scan(
+		&ownerID,
+		&identity.AttemptID,
+		&identity.SessionEpoch,
+		&identity.AttachmentID,
+		&identity.RuntimeSessionID,
+		&features,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return BrowserObserverIdentity{}, ErrObservationForbidden
+	}
+	if err != nil {
+		return BrowserObserverIdentity{}, err
+	}
+	if !isAdmin && ownerID != callerUserID {
+		return BrowserObserverIdentity{}, ErrObservationForbidden
+	}
+	if !observationFeatureDeclared(features) {
+		return BrowserObserverIdentity{}, ErrObservationUnsupported
+	}
+	identity.RunID = runID
+	return identity, nil
+}
+
+// observationFeatureDeclared checks the current Session's declaration. A Runtime
+// that reconnects without the feature must stop being observable immediately,
+// so this is read per request rather than cached.
+func observationFeatureDeclared(features []string) bool {
+	for _, feature := range features {
+		if feature == BrowserObservationFeature {
+			return true
+		}
+	}
+	return false
+}
+
+// BrowserObservationFeature is the optional Runtime capability that gates this
+// whole surface.
+const BrowserObservationFeature = "browser_authenticated_observation.v1"
+
+// State reports the live observation for a Run, if any.
+func (observation *BrowserObservation) State(
+	ctx context.Context,
+	runID uuid.UUID,
+) (BrowserObservationState, error) {
+	if observation == nil || observation.pool == nil {
+		return BrowserObservationState{}, ErrObservationChannelUnavailable
+	}
+	state := BrowserObservationState{RunID: runID}
+	var expiresAt time.Time
+	err := observation.pool.QueryRow(ctx, `
+SELECT lease_id, lease_expires_at, frame_count, frame_count_complete
+FROM browser_observation_audits
+WHERE run_id = $1 AND status = 'active'
+`, runID).Scan(&state.LeaseID, &expiresAt, &state.FrameCount, &state.FrameCountComplete)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return state, nil
+	}
+	if err != nil {
+		return BrowserObservationState{}, err
+	}
+	state.Active = true
+	state.LeaseExpiresAt = &expiresAt
+	return state, nil
+}

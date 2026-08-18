@@ -27,13 +27,14 @@ const ssePollInterval = time.Second
 
 // Handler 调用执行 HTTP 入口。
 type Handler struct {
-	svc            runtimeService
-	validator      *validator.Validate
-	cfg            *config.Config
-	runtime        *RuntimeHTTPController
-	observer       WorkerObserver
-	runUpdates     RunUpdateSource
-	browserControl *BrowserHumanControl
+	svc                runtimeService
+	validator          *validator.Validate
+	cfg                *config.Config
+	runtime            *RuntimeHTTPController
+	observer           WorkerObserver
+	runUpdates         RunUpdateSource
+	browserControl     *BrowserHumanControl
+	browserObservation *BrowserObservation
 }
 
 type runtimeService interface {
@@ -62,6 +63,11 @@ func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 		BrowserHumanControl() *BrowserHumanControl
 	}); ok {
 		h.browserControl = provider.BrowserHumanControl()
+	}
+	if provider, ok := svc.(interface {
+		BrowserObservation() *BrowserObservation
+	}); ok {
+		h.browserObservation = provider.BrowserObservation()
 	}
 	if len(cfg) > 0 {
 		h.cfg = cfg[0]
@@ -258,7 +264,25 @@ func browserControlHTTPError(err error) error {
 // RegisterAdmin mounts read-only runtime operational inventory. Core API owns
 // the concrete JWT/admin middleware wiring so this package stays independent
 // from admin policy.
+// RegisterObservation mounts read-only observation on JWT only. It is not folded
+// into RegisterProtected because that group runs hybrid middleware: observation
+// is a person watching a live screen, so it must bind to a short-lived session
+// rather than a long-lived token that can be scripted.
+func (h *Handler) RegisterObservation(api *echo.Group, jwtMw echo.MiddlewareFunc) {
+	api.GET("/runs/:id/observation", h.GetBrowserObservation, jwtMw)
+	api.POST("/runs/:id/observation/start", h.StartBrowserObservation, jwtMw)
+	api.POST("/runs/:id/observation/stop", h.StopBrowserObservation, jwtMw)
+}
+
 func (h *Handler) RegisterAdmin(api *echo.Group, jwtMw, adminMw echo.MiddlewareFunc) {
+	// Cross-user observation is a separate route with its own permission, so an
+	// owner-scoped grant can never widen into watching someone else's Run.
+	api.POST(
+		"/admin/runs/:id/observation/start",
+		h.StartAdminBrowserObservation,
+		jwtMw,
+		adminMw,
+	)
 	api.GET("/admin/runtime/dead-letters", h.ListRuntimeDeadLetters, jwtMw, adminMw)
 	api.GET("/admin/runtime/nodes", h.ListRuntimeNodes, jwtMw, adminMw)
 	api.POST("/admin/runtime/nodes/:id/drain", h.DrainRuntimeNode, jwtMw, adminMw)
@@ -1225,4 +1249,117 @@ func isTerminalRunEvent(eventType string) bool {
 	default:
 		return false
 	}
+}
+
+type browserObservationStartRequest struct {
+	Reason string `json:"reason"`
+}
+
+func (h *Handler) GetBrowserObservation(c echo.Context) error {
+	_, runID, err := h.browserObservationIdentity(c)
+	if err != nil {
+		return err
+	}
+	state, err := h.browserObservation.State(c.Request().Context(), runID)
+	if err != nil {
+		return browserObservationHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, state)
+}
+
+func (h *Handler) StartBrowserObservation(c echo.Context) error {
+	return h.startBrowserObservation(c, false)
+}
+
+func (h *Handler) StartAdminBrowserObservation(c echo.Context) error {
+	return h.startBrowserObservation(c, true)
+}
+
+func (h *Handler) startBrowserObservation(c echo.Context, isAdmin bool) error {
+	userID, runID, err := h.browserObservationIdentity(c)
+	if err != nil {
+		return err
+	}
+	var request browserObservationStartRequest
+	if isAdmin {
+		if bindErr := c.Bind(&request); bindErr != nil {
+			return httpx.BadRequest("请求体不是合法 JSON")
+		}
+		if strings.TrimSpace(request.Reason) == "" {
+			return httpx.BadRequest("跨用户观察必须提供 reason")
+		}
+	}
+	identity, err := h.browserObservation.ResolveIdentity(
+		c.Request().Context(),
+		runID,
+		userID,
+		isAdmin,
+	)
+	if err != nil {
+		return browserObservationHTTPError(err)
+	}
+	state, err := h.browserObservation.Start(
+		c.Request().Context(),
+		runID,
+		userID,
+		isAdmin,
+		strings.TrimSpace(request.Reason),
+		identity,
+	)
+	if err != nil {
+		return browserObservationHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, state)
+}
+
+func (h *Handler) StopBrowserObservation(c echo.Context) error {
+	_, runID, err := h.browserObservationIdentity(c)
+	if err != nil {
+		return err
+	}
+	if err := h.browserObservation.Stop(
+		c.Request().Context(),
+		runID,
+		"observer_stopped",
+	); err != nil {
+		return browserObservationHTTPError(err)
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (h *Handler) browserObservationIdentity(
+	c echo.Context,
+) (uuid.UUID, uuid.UUID, error) {
+	if h == nil || h.browserObservation == nil {
+		return uuid.Nil, uuid.Nil, httpx.ServiceUnavailable("浏览器只读观察能力不可用")
+	}
+	userID, err := userIDFromCtx(c)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, err
+	}
+	runID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return uuid.Nil, uuid.Nil, httpx.BadRequest("id 不是合法 uuid")
+	}
+	return userID, runID, nil
+}
+
+func browserObservationHTTPError(err error) error {
+	switch {
+	case errors.Is(err, ErrObservationChannelUnavailable):
+		// The Worker is attached to another Core instance. Saying so plainly
+		// keeps a multi-instance deployment from looking like a Runtime that
+		// simply never sends frames.
+		return httpx.ServiceUnavailable("该 Run 的观察通道不在当前 Core 实例上")
+	case errors.Is(err, ErrObservationAlreadyActive):
+		return httpx.Conflict("该 Run 已有活动的观察")
+	case errors.Is(err, ErrObservationUnsupported):
+		return echo.NewHTTPError(
+			http.StatusNotImplemented,
+			"该 Runtime 不支持只读观察",
+		)
+	case errors.Is(err, ErrObservationForbidden):
+		return httpx.Forbidden("无权观察该 Run")
+	}
+	return httpx.Internal("观察请求失败")
 }
