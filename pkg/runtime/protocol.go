@@ -47,7 +47,14 @@ const (
 	RuntimeMessageBrowserViewerCommand  RuntimeMessageType = "browser.viewer.command"
 	RuntimeMessageBrowserViewerFrame    RuntimeMessageType = "browser.viewer.frame"
 	RuntimeMessageBrowserViewerFrameAck RuntimeMessageType = "browser.viewer.frame.ack"
-	RuntimeMessageError                 RuntimeMessageType = "runtime.error"
+
+	// Authenticated read-only observation. Separate from browser.viewer.* on
+	// purpose: observing while the Agent keeps working is a different capability
+	// from taking control away from it, and they must not share a message space.
+	RuntimeMessageBrowserObserverCommand  RuntimeMessageType = "browser.observer.command"
+	RuntimeMessageBrowserObserverEvent    RuntimeMessageType = "browser.observer.event"
+	RuntimeMessageBrowserObserverEventAck RuntimeMessageType = "browser.observer.event.ack"
+	RuntimeMessageError                   RuntimeMessageType = "runtime.error"
 )
 
 // RuntimeEnvelopeFields are common to every Runtime WebSocket message.
