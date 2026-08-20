@@ -34,6 +34,13 @@ runtime-node-inspect: build ## 审计 Runtime Node 证书; 参数放在 RUNTIME_
 test: ## 运行测试(race + cover)
 	go test ./... -race -cover
 
+test-integration: ## 全量集成测试:四个环境变量缺一个就会静默跳过对应用例
+	@: $${TEST_DATABASE_URL:?TEST_DATABASE_URL is required}
+	@: $${RUNTIME_V2_TEST_DATABASE_URL:?RUNTIME_V2_TEST_DATABASE_URL is required}
+	@: $${CUTOVER_RETIREMENT_TEST_DATABASE_URL:?CUTOVER_RETIREMENT_TEST_DATABASE_URL is required}
+	@: $${TEST_REDIS_URL:?TEST_REDIS_URL is required}
+	go test -p 1 ./...
+
 browser-event-volume-acceptance: ## PostgreSQL 验证 Browser 迁移、旧 Worker 拒绝、1/500 行数与 CallRecord 策略证据
 	./scripts/test-browser-event-volume.sh
 
