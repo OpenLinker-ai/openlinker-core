@@ -246,6 +246,11 @@ func (s *Service) AppendRuntimeEvent(
 	if err != nil {
 		return RuntimeEventAck{}, err
 	}
+	if req.EventType == "run.browser.lifecycle" && s.browserObservation != nil {
+		// Projected separately from takeover: observation needs the identity of a
+		// running Attempt, which the pause projection never records.
+		_ = s.browserObservation.ProjectFromEvent(ctx, identity, req.Payload)
+	}
 	if req.EventType == "run.browser.lifecycle" && s.browserControl != nil {
 		if projectionErr := s.browserControl.PauseFromEvent(
 			ctx,

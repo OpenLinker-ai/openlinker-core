@@ -20,6 +20,7 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 		"089_user_jwt_token_version.up.sql":          true,
 		"090_task_callback_owner_index.up.sql":       true,
 		"091_browser_interaction_policy.up.sql":      true,
+		"092_browser_observation_audit.up.sql":       true,
 	}
 	if len(paths) != len(want) {
 		t.Fatalf("migration SQL files = %v, want only current initializer and verifier", paths)
@@ -260,4 +261,20 @@ func readInitializer(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(raw)
+}
+
+// The schema digest and object counts are read from a live PostgreSQL catalog,
+// so a new migration cannot refresh them offline. Without this check the repo
+// reaches a state where every test passes and the deployment postflight rejects
+// the schema, which is the most expensive place to learn about it.
+func TestCoreSchemaShapeWasMeasuredForTheCurrentMigrationVersion(t *testing.T) {
+	if CoreShapeVersion != CoreVersion {
+		t.Fatalf(
+			"schema shape was measured for version %d but migrations are at %d: "+
+				"apply migrations 086..%03d to a clean PostgreSQL 16, read the shape "+
+				"with inspectShape, then update CoreSchemaDigest, the object counts "+
+				"and CoreShapeVersion together",
+			CoreShapeVersion, CoreVersion, CoreVersion,
+		)
+	}
 }

@@ -1,5 +1,24 @@
 BEGIN;
 
+-- Observation needs the live Browser identity of a running Run, which
+-- browser_run_controls cannot provide: that row exists only while a challenge
+-- has paused the Run for takeover. This projection is written from the ready
+-- lifecycle event, so a normally executing Run is observable.
+CREATE TABLE public.browser_observable_attempts (
+    run_id uuid NOT NULL,
+    attempt_id uuid NOT NULL,
+    runtime_session_id uuid NOT NULL,
+    browser_session_id uuid NOT NULL,
+    session_epoch bigint NOT NULL,
+    attachment_id uuid NOT NULL,
+    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT browser_observable_attempts_pkey PRIMARY KEY (run_id),
+    CONSTRAINT browser_observable_attempts_run_id_fkey
+        FOREIGN KEY (run_id) REFERENCES public.runs(id) ON DELETE CASCADE,
+    CONSTRAINT browser_observable_attempts_epoch_positive
+        CHECK (session_epoch > 0)
+);
+
 -- Authenticated read-only observation is a separate capability from human
 -- takeover: separate lease, separate authorization, separate audit. Sharing the
 -- takeover audit table would make "was allowed to watch" indistinguishable from

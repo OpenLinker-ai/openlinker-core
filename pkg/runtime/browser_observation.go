@@ -170,7 +170,7 @@ func (observation *BrowserObservation) Stop(
 SELECT a.lease_id, a.attempt_id, a.session_epoch, a.attachment_id,
        c.runtime_session_id
 FROM browser_observation_audits a
-JOIN browser_run_controls c ON c.run_id = a.run_id
+JOIN browser_observable_attempts c ON c.run_id = a.run_id
 WHERE a.run_id = $1 AND a.status = 'active'
 `, runID).Scan(&leaseID, &attemptID, &epoch, &attachmentID, &sessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -320,7 +320,7 @@ SELECT r.user_id,
        c.runtime_session_id,
        COALESCE(s.features, ARRAY[]::text[])
 FROM runs r
-JOIN browser_run_controls c ON c.run_id = r.id
+JOIN browser_observable_attempts c ON c.run_id = r.id
 LEFT JOIN runtime_sessions s ON s.id = c.runtime_session_id
 WHERE r.id = $1
 `, runID).Scan(
@@ -421,9 +421,9 @@ func (observation *BrowserObservation) HandleEvent(
 			_ = observation.RecordFrames(ctx, event.LeaseID, observation.frames.frameCount(runID))
 		}
 	case BrowserObserverStopped:
-		_ = observation.Stop(ctx, runID, "worker_stopped")
+		observation.closeAsync(runID, "worker_stopped")
 	case BrowserObserverError:
-		_ = observation.Stop(ctx, runID, boundedObservationEndReason(event.ErrorCode))
+		observation.closeAsync(runID, boundedObservationEndReason(event.ErrorCode))
 	}
 	return BrowserObserverEventAckPayload{
 		AttemptIdentity: event.AttemptIdentity,
@@ -432,7 +432,22 @@ func (observation *BrowserObservation) HandleEvent(
 	}, nil
 }
 
-// WaitFrame serves one long poll. A nil frame with no error means the poll timed
+// closeAsync ends an observation off the caller's goroutine.
+//
+// HandleEvent runs while the Runtime WebSocket holds its lifecycle lock, and
+// Stop sends a command that takes the same lock to read. Go's RWMutex is not
+// reentrant, so closing inline would deadlock the connection and the ack would
+// never be written. The Worker has already stopped in both of these cases, so
+// the command is only a confirmation and losing its ordering costs nothing.
+func (observation *BrowserObservation) closeAsync(runID uuid.UUID, endReason string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = observation.Stop(ctx, runID, endReason)
+	}()
+}
+
+// WaitFrame serves one long poll.// WaitFrame serves one long poll. A nil frame with no error means the poll timed
 // out with nothing new, which is a normal empty response rather than a failure.
 func (observation *BrowserObservation) WaitFrame(
 	ctx context.Context,
@@ -489,4 +504,61 @@ func (observation *BrowserObservation) AuthorizeOwner(
 		return ErrObservationForbidden
 	}
 	return nil
+}
+
+// ProjectFromEvent records the live Browser identity of a running Run.
+//
+// Observation cannot read browser_run_controls: that row is written only when a
+// challenge pauses the Run for takeover, so a normally executing Run has none --
+// and "watch while the Agent keeps working" is the entire point of this surface.
+// The ready lifecycle event carries the same identity fields the pause event
+// does, so the observable identity is projected from there instead.
+func (observation *BrowserObservation) ProjectFromEvent(
+	ctx context.Context,
+	identity RuntimeAttemptIdentity,
+	payload map[string]any,
+) error {
+	if observation == nil || observation.pool == nil {
+		return nil
+	}
+	phase, _ := payload["phase"].(string)
+	switch phase {
+	case "ready":
+	case "closed", "failed":
+		// The Attempt is gone, so any observation of it must end rather than
+		// linger against an identity the Runtime no longer holds.
+		return observation.Stop(ctx, identity.RunID, "run_browser_closed")
+	default:
+		return nil
+	}
+	if identity.RuntimeSessionID == nil {
+		return nil
+	}
+	browserSessionID, err := browserPayloadUUID(payload, "browser_session_id")
+	if err != nil {
+		return nil
+	}
+	attachmentID, err := browserPayloadUUID(payload, "attachment_id")
+	if err != nil {
+		return nil
+	}
+	sessionEpoch, err := browserPayloadUint64(payload, "session_epoch")
+	if err != nil {
+		return nil
+	}
+	_, err = observation.pool.Exec(ctx, `
+INSERT INTO browser_observable_attempts (
+    run_id, attempt_id, runtime_session_id, browser_session_id,
+    session_epoch, attachment_id, updated_at
+) VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp())
+ON CONFLICT (run_id) DO UPDATE SET
+    attempt_id = EXCLUDED.attempt_id,
+    runtime_session_id = EXCLUDED.runtime_session_id,
+    browser_session_id = EXCLUDED.browser_session_id,
+    session_epoch = EXCLUDED.session_epoch,
+    attachment_id = EXCLUDED.attachment_id,
+    updated_at = clock_timestamp()
+`, identity.RunID, identity.AttemptID, *identity.RuntimeSessionID,
+		browserSessionID, sessionEpoch, attachmentID)
+	return err
 }

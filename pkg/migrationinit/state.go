@@ -16,8 +16,15 @@ import (
 )
 
 const (
-	CoreVersion                    int64 = 91
-	CoreUpgradeVersion             int64 = 90
+	CoreVersion int64 = 92
+	// CoreShapeVersion is the migration version the shape constants below were
+	// measured against. The digest and the object counts come from a live
+	// catalog, so adding a migration cannot update them offline; leaving them
+	// stale would pass every test and then fail the postflight shape check at
+	// deploy time. A test requires these two to match, turning that into a
+	// local failure with an explicit instruction.
+	CoreShapeVersion               int64 = 91
+	CoreUpgradeVersion             int64 = 91
 	CoreReviewedBridgeVersion      int64 = 88
 	CoreLegacyBridgeVersion        int64 = 86
 	CloudVersion                   int64 = 55
@@ -44,6 +51,8 @@ var coreTables = []string{
 	"agent_tokens",
 	"agents",
 	"browser_human_control_audits",
+	"browser_observable_attempts",
+	"browser_observation_audits",
 	"browser_run_controls",
 	"core_instance_identity",
 	"delivery_targets",
