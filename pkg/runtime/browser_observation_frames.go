@@ -139,20 +139,39 @@ func (buffer *observationFrameBuffer) close(runID uuid.UUID) int64 {
 	return buffer.closeLocked(runID)
 }
 
-// abandoned lists the observations no viewer has polled within the grace
-// period. Core cannot be told that a browser went away -- a crashed tab sends
-// nothing -- so absence of polling is the only evidence there is.
-func (buffer *observationFrameBuffer) abandoned(grace time.Duration) []observationLease {
+// closeAbandoned closes the observations no viewer has polled within the grace
+// period, and returns them. Core cannot be told that a browser went away -- a
+// crashed tab sends nothing -- so absence of polling is the only evidence there
+// is.
+//
+// Selecting and closing happen under one lock. Between a separate select and
+// close a viewer can poll, and the observation it is actively reading would be
+// torn down anyway on evidence that was true a moment ago and is not any more.
+func (buffer *observationFrameBuffer) closeAbandoned(
+	grace time.Duration,
+) []observationClosure {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
-	var stale []observationLease
+	var closed []observationClosure
 	cutoff := buffer.now().Add(-grace)
 	for runID, live := range buffer.live {
-		if live.lastPolledAt.Before(cutoff) {
-			stale = append(stale, observationLease{runID: runID, leaseID: live.leaseID})
+		if !live.lastPolledAt.Before(cutoff) {
+			continue
 		}
+		closed = append(closed, observationClosure{
+			observationLease: observationLease{runID: runID, leaseID: live.leaseID},
+			frames:           buffer.closeLocked(runID),
+		})
 	}
-	return stale
+	return closed
+}
+
+// observationClosure is a lease that has just been closed, with the frame total
+// it served. The two travel together because the count is only knowable at the
+// moment the buffer is dropped.
+type observationClosure struct {
+	observationLease
+	frames int64
 }
 
 // observationLease names one observation by the two identifiers every teardown

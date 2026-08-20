@@ -545,10 +545,11 @@ func (observation *BrowserObservation) ReconcileAbandoned(ctx context.Context) {
 	if observation == nil || observation.pool == nil {
 		return
 	}
-	for _, lease := range observation.frames.abandoned(observationPollGrace) {
-		count := observation.frames.closeLease(lease.runID, lease.leaseID)
-		_ = observation.RecordFrames(ctx, lease.leaseID, count)
-		_ = observation.stopObservedLease(ctx, lease.runID, lease.leaseID, "viewer_abandoned")
+	for _, closed := range observation.frames.closeAbandoned(observationPollGrace) {
+		_ = observation.RecordFrames(ctx, closed.leaseID, closed.frames)
+		_ = observation.stopObservedLease(
+			ctx, closed.runID, closed.leaseID, "viewer_abandoned",
+		)
 	}
 }
 

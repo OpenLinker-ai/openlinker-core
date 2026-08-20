@@ -519,3 +519,56 @@ func TestObservationCloseLeaseOnlyClosesItsOwn(t *testing.T) {
 		t.Fatal("the successor survived its own teardown")
 	}
 }
+
+// Selecting abandoned observations and closing them must be one step. A viewer
+// polling in between would have its live observation torn down on evidence that
+// stopped being true.
+func TestObservationCloseAbandonedIsOneStep(t *testing.T) {
+	t.Parallel()
+	clock := time.Now()
+	buffer := newObservationFrameBuffer(4)
+	buffer.now = func() time.Time { return clock }
+	watched := observationBufferIdentity()
+	forgotten := observationBufferIdentity()
+	watchedLease := uuid.New()
+	forgottenLease := uuid.New()
+	buffer.open(watched.RunID, watchedLease, uuid.New(), watched)
+	buffer.open(forgotten.RunID, forgottenLease, uuid.New(), forgotten)
+
+	// Both are inside the grace period to begin with.
+	if closed := buffer.closeAbandoned(time.Minute); len(closed) != 0 {
+		t.Fatalf("closed %d observations that were still being polled", len(closed))
+	}
+
+	clock = clock.Add(2 * time.Minute)
+	// One viewer comes back; a poll is what proves someone is still reading.
+	go func() { _, _ = buffer.wait(t.Context(), watched.RunID, 0) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		buffer.mu.Lock()
+		polled := buffer.live[watched.RunID].lastPolledAt.Equal(clock)
+		buffer.mu.Unlock()
+		if polled {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the poll never registered")
+		}
+	}
+
+	closed := buffer.closeAbandoned(time.Minute)
+	if len(closed) != 1 {
+		t.Fatalf("closed %d observations, want only the unpolled one", len(closed))
+	}
+	if closed[0].runID != forgotten.RunID || closed[0].leaseID != forgottenLease {
+		t.Fatal("the wrong observation was reclaimed")
+	}
+	// Returned as closed, so the caller never has to close it a second time and
+	// cannot close a successor by doing so.
+	if buffer.admit(forgotten.RunID, forgottenLease, uuid.New(), forgotten, 1) {
+		t.Fatal("the reclaimed observation was still live")
+	}
+	if held := buffer.count(); held != 1 {
+		t.Fatalf("the buffer holds %d observations, want the polled one", held)
+	}
+}
