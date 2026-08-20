@@ -23,8 +23,9 @@ constraints keep both declared and classified Browser Agents in Runtime mode;
 standard Sessions, publication and connection-mode changes therefore cannot
 race past the initial policy decision.
 
-The migration command accepts only a truly empty database, the exact clean
-version `091` predecessor, or the exact clean version `091` current schema.
+The migration command accepts only a truly empty database, an exact clean
+supported predecessor (`091`, `088` or `086`), or the exact clean version `092`
+current schema.
 Exactness is enforced with catalog object counts and a SHA-256 fingerprint over
 table, column/default, constraint, index, trigger, and function definitions.
 Legacy, dirty, partial, or malformed databases are rejected before the

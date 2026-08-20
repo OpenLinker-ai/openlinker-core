@@ -9,6 +9,7 @@ package runtime
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -24,4 +25,17 @@ func (s *Service) SetHTTPClient(c *http.Client) {
 // observation was still recorded as active.
 func (observation *BrowserObservation) DropLocalFramesForTest(runID uuid.UUID) {
 	observation.frames.close(runID)
+}
+
+// AgeLastPollForTest backdates when a Run's observation was last polled, so the
+// abandonment grace can be exercised without waiting it out.
+func (observation *BrowserObservation) AgeLastPollForTest(
+	runID uuid.UUID,
+	age time.Duration,
+) {
+	observation.frames.mu.Lock()
+	defer observation.frames.mu.Unlock()
+	if live := observation.frames.live[runID]; live != nil {
+		live.lastPolledAt = live.lastPolledAt.Add(-age)
+	}
 }

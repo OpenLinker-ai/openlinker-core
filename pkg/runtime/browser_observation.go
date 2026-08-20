@@ -41,6 +41,11 @@ const (
 	// this one closes it. Long enough that a live instance reconciles its own
 	// first, short enough that a crashed instance does not block the Run.
 	observationForeignReconcileGrace = 2 * time.Minute
+	// How long an observation may go unpolled before it is treated as abandoned.
+	// A viewer that is still watching re-polls at least once per long-poll
+	// timeout, so this is two missed polls: long enough that a slow network is
+	// not mistaken for a closed tab.
+	observationPollGrace = 3 * observationWaitTimeout
 )
 
 // ErrObservationInactive is returned when a Run has no live observation to read
@@ -531,6 +536,51 @@ WHERE lease_id = $1 AND status = 'closed'
 	return err
 }
 
+// ReconcileAbandoned ends observations no viewer is reading any more. The
+// browser sends a stop when it can, but a crashed tab or a lost network sends
+// nothing, so the absence of polling is what Core actually goes on. Without this
+// such an observation holds its lease for the whole TTL and the Run cannot be
+// observed by anyone else in the meantime.
+func (observation *BrowserObservation) ReconcileAbandoned(ctx context.Context) {
+	if observation == nil || observation.pool == nil {
+		return
+	}
+	for _, lease := range observation.frames.abandoned(observationPollGrace) {
+		count := observation.frames.closeLease(lease.runID, lease.leaseID)
+		_ = observation.RecordFrames(ctx, lease.leaseID, count)
+		_ = observation.stopObservedLease(ctx, lease.runID, lease.leaseID, "viewer_abandoned")
+	}
+}
+
+// stopObservedLease tells the Worker to drop a lease and closes its audit. The
+// remote stop is best effort: the audit is what makes the Run observable again.
+func (observation *BrowserObservation) stopObservedLease(
+	ctx context.Context,
+	runID uuid.UUID,
+	leaseID uuid.UUID,
+	endReason string,
+) error {
+	var identity BrowserObserverIdentity
+	err := observation.pool.QueryRow(ctx, `
+SELECT a.attempt_id, a.session_epoch, a.attachment_sha256,
+       c.browser_session_sha256, c.runtime_session_id
+FROM browser_observation_audits a
+JOIN browser_observable_attempts c
+  ON c.run_id = a.run_id AND c.attempt_id = a.attempt_id
+WHERE a.lease_id = $1 AND a.status = 'active'
+`, leaseID).Scan(
+		&identity.AttemptID, &identity.SessionEpoch, &identity.AttachmentSHA256,
+		&identity.BrowserSessionSHA256, &identity.RuntimeSessionID,
+	)
+	if err == nil {
+		identity.RunID = runID
+		observation.stopRemote(identity, leaseID)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	return observation.close(ctx, leaseID, endReason)
+}
+
 // ReconcileForeignExpired closes expired audits left behind by an instance that
 // is no longer running. It is separate from ReconcileExpired because there is no
 // in-process state to release, and because an audit must not be closed out from
@@ -576,6 +626,7 @@ func (observation *BrowserObservation) RunGC(ctx context.Context) {
 func (observation *BrowserObservation) reconcile(ctx context.Context) {
 	_ = observation.ReconcileExpired(ctx)
 	_ = observation.ReconcileForeignExpired(ctx)
+	observation.ReconcileAbandoned(ctx)
 }
 
 // ErrObservationUnsupported is returned when the Runtime holding this Run never

@@ -894,3 +894,50 @@ func TestBrowserObservationRejectsReplayedEventSequences(t *testing.T) {
 	require.True(t, live.Active, "a replayed stopped ended the live observation")
 	require.Equal(t, state.LeaseID, live.LeaseID)
 }
+
+// A crashed tab sends no stop, so the only evidence Core has that nobody is
+// watching is that nobody is polling. Without this the lease is held for the
+// whole TTL and the Run cannot be observed by anyone else meanwhile.
+func TestBrowserObservationReclaimsAnUnpolledObservation(t *testing.T) {
+	pool, service, fixture, capture, ownerID := observationFixture(t)
+	observation := service.BrowserObservation()
+	appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+
+	identity, err := observation.ResolveIdentity(
+		context.Background(), fixture.identity.RunID, ownerID, false,
+	)
+	require.NoError(t, err)
+	state, err := observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+
+	// A viewer that is still watching keeps its observation.
+	observation.ReconcileAbandoned(context.Background())
+	live, err := observation.State(context.Background(), fixture.identity.RunID)
+	require.NoError(t, err)
+	require.True(t, live.Active, "an observation inside the grace period was reclaimed")
+
+	service.BrowserObservation().AgeLastPollForTest(
+		fixture.identity.RunID, 4*time.Minute,
+	)
+	observation.ReconcileAbandoned(context.Background())
+
+	ended, err := observation.State(context.Background(), fixture.identity.RunID)
+	require.NoError(t, err)
+	require.False(t, ended.Active, "an unpolled observation was not reclaimed")
+
+	var endReason string
+	require.NoError(t, pool.QueryRow(context.Background(), `
+SELECT end_reason FROM browser_observation_audits WHERE lease_id = $1
+`, state.LeaseID).Scan(&endReason))
+	require.Equal(t, "viewer_abandoned", endReason)
+	require.Contains(t, capture.actions(), runtime.BrowserObserverStop,
+		"the Worker must be told to drop the lease it is still holding")
+
+	// And the Run is observable again rather than blocked until the TTL.
+	_, err = observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+}

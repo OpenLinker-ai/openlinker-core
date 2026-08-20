@@ -40,6 +40,10 @@ type observationLiveFrame struct {
 	frame     *BrowserObservationFrame
 	notify    chan struct{}
 	count     int64
+	// When a viewer last asked for a frame. A viewer that is still watching polls
+	// at least once per long-poll timeout, so a gap much larger than that means
+	// nobody is on the other end any more.
+	lastPolledAt time.Time
 	// The highest event sequence accepted from the Worker. The Worker numbers
 	// every event it sends from one counter, so this is what makes a replayed or
 	// reordered event -- of any kind, not only a frame -- detectable.
@@ -119,7 +123,10 @@ func (buffer *observationFrameBuffer) open(
 		leaseID:   leaseID,
 		commandID: commandID,
 		identity:  identity,
-		notify:    make(chan struct{}),
+		// Counted from the start, so an observation nobody ever polls is reaped
+		// on the same schedule as one whose viewer went away.
+		lastPolledAt: buffer.now(),
+		notify:       make(chan struct{}),
 	}
 	return true
 }
@@ -130,6 +137,29 @@ func (buffer *observationFrameBuffer) close(runID uuid.UUID) int64 {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
 	return buffer.closeLocked(runID)
+}
+
+// abandoned lists the observations no viewer has polled within the grace
+// period. Core cannot be told that a browser went away -- a crashed tab sends
+// nothing -- so absence of polling is the only evidence there is.
+func (buffer *observationFrameBuffer) abandoned(grace time.Duration) []observationLease {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	var stale []observationLease
+	cutoff := buffer.now().Add(-grace)
+	for runID, live := range buffer.live {
+		if live.lastPolledAt.Before(cutoff) {
+			stale = append(stale, observationLease{runID: runID, leaseID: live.leaseID})
+		}
+	}
+	return stale
+}
+
+// observationLease names one observation by the two identifiers every teardown
+// path needs.
+type observationLease struct {
+	runID   uuid.UUID
+	leaseID uuid.UUID
 }
 
 // closeLocked is close without taking the lock. Callers hold it.
@@ -296,6 +326,7 @@ func (buffer *observationFrameBuffer) wait(
 		return nil, ErrObservationInactive
 	}
 	live.waiter++
+	live.lastPolledAt = buffer.now()
 	waiter := live.waiter
 	// Wakes the poll being superseded so it returns now instead of holding its
 	// request open until the timeout it can no longer be served by.
