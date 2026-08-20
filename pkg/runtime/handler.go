@@ -1395,6 +1395,10 @@ func browserObservationHTTPError(err error) error {
 		)
 	case errors.Is(err, ErrObservationForbidden):
 		return httpx.Forbidden("无权观察该 Run")
+	case errors.Is(err, ErrObservationInactive):
+		// Not an error condition for the caller: the observation ended. 409 so a
+		// polling viewer stops polling and re-reads state.
+		return httpx.Conflict("该 Run 当前没有进行中的观察")
 	case errors.Is(err, ErrObservationBusy):
 		return echo.NewHTTPError(
 			http.StatusTooManyRequests,
@@ -1426,11 +1430,11 @@ func (h *Handler) GetBrowserObservationFrame(c echo.Context) error {
 	); err != nil {
 		return browserObservationHTTPError(err)
 	}
-	after, err := strconv.ParseInt(c.QueryParam("after"), 10, 64)
-	if err != nil || after < 0 {
-		after = 0
-	}
-	frame, err := h.browserObservation.WaitFrame(c.Request().Context(), runID, after)
+	frame, err := h.browserObservation.WaitFrame(
+		c.Request().Context(),
+		runID,
+		observationFrameCursor(c),
+	)
 	if err != nil {
 		return browserObservationHTTPError(err)
 	}

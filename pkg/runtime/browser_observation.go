@@ -37,7 +37,16 @@ const (
 	observationStartHandshakeTimeout = 15 * time.Second
 	// Fallback ceiling when the deployment does not configure one.
 	observationDefaultQuota = 32
+	// How long an expired audit owned by another instance is left alone before
+	// this one closes it. Long enough that a live instance reconciles its own
+	// first, short enough that a crashed instance does not block the Run.
+	observationForeignReconcileGrace = 2 * time.Minute
 )
+
+// ErrObservationInactive is returned when a Run has no live observation to read
+// from. It is separate from a failure so a viewer polling an observation that
+// just ended gets a plain answer instead of an internal error.
+var ErrObservationInactive = errors.New("browser observation is not active for this Run")
 
 // ErrObservationBusy is returned when this instance is already at its
 // concurrent-observation ceiling.
@@ -350,19 +359,29 @@ func (observation *BrowserObservation) Stop(
 	// Joined on the Attempt as well as the Run. Joining on run_id alone could
 	// pair an old audit with a Runtime Session that has since been replaced, and
 	// the stop would be addressed to the wrong Session.
+	var owner uuid.UUID
 	err := observation.pool.QueryRow(ctx, `
-SELECT a.lease_id, a.attempt_id, a.session_epoch,
+SELECT a.lease_id, a.attempt_id, a.session_epoch, a.core_instance_id,
        a.attachment_sha256, c.browser_session_sha256, c.runtime_session_id
 FROM browser_observation_audits a
 JOIN browser_observable_attempts c
   ON c.run_id = a.run_id AND c.attempt_id = a.attempt_id
 WHERE a.run_id = $1 AND a.status = 'active'
-`, runID).Scan(&leaseID, &attemptID, &epoch, &attachmentDigest, &sessionDigest, &sessionID)
+`, runID).Scan(
+		&leaseID, &attemptID, &epoch, &owner,
+		&attachmentDigest, &sessionDigest, &sessionID,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
+	}
+	// Only the owning instance can finish the teardown: the frame buffer and its
+	// waiters live there. Closing the audit from elsewhere would leave that
+	// buffer open, its quota slot held, and its viewers polling a dead lease.
+	if owner != observation.instance {
+		return ErrObservationChannelUnavailable
 	}
 	if observation.sender != nil && sessionID != uuid.Nil {
 		_ = observation.sender.SendBrowserObserverCommand(sessionID, BrowserObserverCommandPayload{
@@ -443,14 +462,68 @@ func (observation *BrowserObservation) ReconcileExpired(ctx context.Context) err
 	if observation == nil || observation.pool == nil {
 		return nil
 	}
-	_, err := observation.pool.Exec(ctx, `
+	// Only this instance's observations are reconciled here, and the rows it
+	// closes are returned so their in-process state can be released too. A pure
+	// SQL close would leave the frame buffer open forever: its waiters would
+	// never be woken and its quota slot never returned.
+	rows, err := observation.pool.Query(ctx, `
 UPDATE browser_observation_audits
 SET status = 'closed',
     ended_at = COALESCE(ended_at, lease_expires_at),
     end_reason = 'lease_expired_reconciled',
     updated_at = clock_timestamp()
 WHERE status = 'active' AND lease_expires_at <= $1
-`, observation.now().UTC())
+  AND core_instance_id = $2
+RETURNING run_id, lease_id
+`, observation.now().UTC(), observation.instance)
+	if err != nil {
+		return err
+	}
+	type expiredObservation struct {
+		runID   uuid.UUID
+		leaseID uuid.UUID
+	}
+	var expired []expiredObservation
+	for rows.Next() {
+		var row expiredObservation
+		if scanErr := rows.Scan(&row.runID, &row.leaseID); scanErr != nil {
+			rows.Close()
+			return scanErr
+		}
+		expired = append(expired, row)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, row := range expired {
+		observation.resolveHandshake(row.leaseID, "lease_expired")
+		count := observation.frames.closeLease(row.runID, row.leaseID)
+		_ = observation.RecordFrames(ctx, row.leaseID, count)
+	}
+	return nil
+}
+
+// ReconcileForeignExpired closes expired audits left behind by an instance that
+// is no longer running. It is separate from ReconcileExpired because there is no
+// in-process state to release, and because an audit must not be closed out from
+// under an instance that is still serving it.
+func (observation *BrowserObservation) ReconcileForeignExpired(ctx context.Context) error {
+	if observation == nil || observation.pool == nil {
+		return nil
+	}
+	// The grace period is what distinguishes a dead instance from a live one
+	// that has not run its own reconcile tick yet.
+	_, err := observation.pool.Exec(ctx, `
+UPDATE browser_observation_audits
+SET status = 'closed',
+    ended_at = COALESCE(ended_at, lease_expires_at),
+    end_reason = 'lease_expired_reconciled',
+    updated_at = clock_timestamp()
+WHERE status = 'active'
+  AND lease_expires_at <= $1
+  AND core_instance_id <> $2
+`, observation.now().UTC().Add(-observationForeignReconcileGrace), observation.instance)
 	return err
 }
 
@@ -460,7 +533,7 @@ func (observation *BrowserObservation) RunGC(ctx context.Context) {
 	if observation == nil || observation.pool == nil {
 		return
 	}
-	_ = observation.ReconcileExpired(ctx)
+	observation.reconcile(ctx)
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -468,9 +541,14 @@ func (observation *BrowserObservation) RunGC(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = observation.ReconcileExpired(ctx)
+			observation.reconcile(ctx)
 		}
 	}
+}
+
+func (observation *BrowserObservation) reconcile(ctx context.Context) {
+	_ = observation.ReconcileExpired(ctx)
+	_ = observation.ReconcileForeignExpired(ctx)
 }
 
 // ErrObservationUnsupported is returned when the Runtime holding this Run never
@@ -582,16 +660,27 @@ func (observation *BrowserObservation) State(
 	}
 	state := BrowserObservationState{RunID: runID}
 	var expiresAt time.Time
+	var owner uuid.UUID
 	err := observation.pool.QueryRow(ctx, `
-SELECT lease_id, lease_expires_at, frame_count, frame_count_complete
+SELECT lease_id, lease_expires_at, frame_count, frame_count_complete,
+       core_instance_id
 FROM browser_observation_audits
 WHERE run_id = $1 AND status = 'active'
-`, runID).Scan(&state.LeaseID, &expiresAt, &state.FrameCount, &state.FrameCountComplete)
+`, runID).Scan(
+		&state.LeaseID, &expiresAt, &state.FrameCount, &state.FrameCountComplete,
+		&owner,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return state, nil
 	}
 	if err != nil {
 		return BrowserObservationState{}, err
+	}
+	// Reporting an observation this instance cannot serve would send the viewer
+	// on to poll a frame buffer that only exists in another process, which
+	// presents as a live observation that never produces a frame.
+	if owner != observation.instance {
+		return BrowserObservationState{}, ErrObservationChannelUnavailable
 	}
 	state.Active = true
 	state.LeaseExpiresAt = &expiresAt

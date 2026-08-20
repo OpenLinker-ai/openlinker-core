@@ -370,3 +370,86 @@ SELECT count(*) FROM browser_observable_attempts WHERE run_id = $1
 `, fixture.identity.RunID).Scan(&projections))
 	require.Zero(t, projections)
 }
+
+// An expired lease has to release this instance's memory as well as the audit
+// row. A SQL-only reconcile leaves the frame buffer open: its poller is never
+// woken and its quota slot is never returned.
+func TestBrowserObservationReconcileReleasesInProcessState(t *testing.T) {
+	pool, service, fixture, _, ownerID := observationFixture(t)
+	observation := service.BrowserObservation()
+	appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+
+	identity, err := observation.ResolveIdentity(
+		context.Background(), fixture.identity.RunID, ownerID, false,
+	)
+	require.NoError(t, err)
+	state, err := observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+
+	// Expire the lease the way time would.
+	_, err = pool.Exec(context.Background(), `
+UPDATE browser_observation_audits
+SET lease_expires_at = clock_timestamp() - interval '1 minute'
+WHERE lease_id = $1
+`, state.LeaseID)
+	require.NoError(t, err)
+
+	waited := make(chan error, 1)
+	go func() {
+		_, frameErr := observation.WaitFrame(context.Background(), fixture.identity.RunID, 0)
+		waited <- frameErr
+	}()
+
+	require.NoError(t, observation.ReconcileExpired(context.Background()))
+
+	select {
+	case frameErr := <-waited:
+		require.ErrorIs(t, frameErr, runtime.ErrObservationInactive)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reconcile left a poller waiting on a closed observation")
+	}
+
+	// And the Run is observable again rather than holding a slot forever.
+	_, err = observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+}
+
+// An observation belongs to the Core instance holding the Worker socket. Another
+// instance must refuse instead of reporting a live observation whose frames only
+// exist in a different process.
+func TestBrowserObservationFailsClosedOnAnotherInstance(t *testing.T) {
+	pool, service, fixture, _, ownerID := observationFixture(t)
+	observation := service.BrowserObservation()
+	appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+
+	identity, err := observation.ResolveIdentity(
+		context.Background(), fixture.identity.RunID, ownerID, false,
+	)
+	require.NoError(t, err)
+	state, err := observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+
+	live, err := observation.State(context.Background(), fixture.identity.RunID)
+	require.NoError(t, err)
+	require.True(t, live.Active)
+
+	// Stands in for the audit having been opened by a different Core process.
+	_, err = pool.Exec(context.Background(), `
+UPDATE browser_observation_audits SET core_instance_id = $2 WHERE lease_id = $1
+`, state.LeaseID, uuid.New())
+	require.NoError(t, err)
+
+	_, err = observation.State(context.Background(), fixture.identity.RunID)
+	require.ErrorIs(t, err, runtime.ErrObservationChannelUnavailable)
+	require.ErrorIs(
+		t,
+		observation.Stop(context.Background(), fixture.identity.RunID, "viewer_stopped"),
+		runtime.ErrObservationChannelUnavailable,
+	)
+}

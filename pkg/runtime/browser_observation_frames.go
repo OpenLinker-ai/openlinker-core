@@ -128,7 +128,7 @@ func (buffer *observationFrameBuffer) wait(
 	live := buffer.live[runID]
 	if live == nil {
 		buffer.mu.Unlock()
-		return nil, errors.New("browser observation is not active")
+		return nil, ErrObservationInactive
 	}
 	live.waiter++
 	waiter := live.waiter
@@ -141,8 +141,11 @@ func (buffer *observationFrameBuffer) wait(
 		buffer.mu.Lock()
 		live = buffer.live[runID]
 		if live == nil {
+			// The observation ended while this poll was waiting. Reported as an
+			// ended observation, not a failure: the viewer's next step is to
+			// re-read state, not to retry the frame.
 			buffer.mu.Unlock()
-			return nil, errors.New("browser observation is not active")
+			return nil, ErrObservationInactive
 		}
 		if live.waiter != waiter {
 			// A newer poll took over. Returning empty rather than erroring lets
