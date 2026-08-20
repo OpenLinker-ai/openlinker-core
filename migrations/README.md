@@ -4,7 +4,7 @@
 canonical seed data for a fresh database. The migration runner then applies
 `087_browser_agent_execution_profile.up.sql`,
 `088_browser_human_control.up.sql`, `089_user_jwt_token_version.up.sql`,
-`090_task_callback_owner_index.up.sql`, and
+`090_task_callback_owner_index.up.sql`,
 `091_browser_interaction_policy.up.sql`, and
 `092_browser_observation_audit.up.sql`. The only supported installed-schema
 upgrade is from the exact clean version `091` predecessor to version `092`.
@@ -24,7 +24,7 @@ standard Sessions, publication and connection-mode changes therefore cannot
 race past the initial policy decision.
 
 The migration command accepts only a truly empty database, the exact clean
-version `090` predecessor, or the exact clean version `091` current schema.
+version `091` predecessor, or the exact clean version `091` current schema.
 Exactness is enforced with catalog object counts and a SHA-256 fingerprint over
 table, column/default, constraint, index, trigger, and function definitions.
 Legacy, dirty, partial, or malformed databases are rejected before the

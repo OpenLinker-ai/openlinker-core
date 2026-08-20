@@ -278,9 +278,25 @@ func (h *Handler) RegisterObservation(api *echo.Group, jwtMw echo.MiddlewareFunc
 func (h *Handler) RegisterAdmin(api *echo.Group, jwtMw, adminMw echo.MiddlewareFunc) {
 	// Cross-user observation is a separate route with its own permission, so an
 	// owner-scoped grant can never widen into watching someone else's Run.
+	// Cross-user observation needs the whole surface, not only start: an admin
+	// who can begin an observation but cannot read or end it would leave a lease
+	// running with no way to stop it.
 	api.POST(
 		"/admin/runs/:id/observation/start",
 		h.StartAdminBrowserObservation,
+		jwtMw,
+		adminMw,
+	)
+	api.GET("/admin/runs/:id/observation", h.GetAdminBrowserObservation, jwtMw, adminMw)
+	api.GET(
+		"/admin/runs/:id/observation/frame",
+		h.GetAdminBrowserObservationFrame,
+		jwtMw,
+		adminMw,
+	)
+	api.POST(
+		"/admin/runs/:id/observation/stop",
+		h.StopAdminBrowserObservation,
 		jwtMw,
 		adminMw,
 	)
@@ -1379,6 +1395,19 @@ func browserObservationHTTPError(err error) error {
 		)
 	case errors.Is(err, ErrObservationForbidden):
 		return httpx.Forbidden("无权观察该 Run")
+	case errors.Is(err, ErrObservationBusy):
+		return echo.NewHTTPError(
+			http.StatusTooManyRequests,
+			"当前 Core 实例的并发观察数已达上限",
+		)
+	case errors.Is(err, ErrObservationNotConfirmed):
+		// Distinct from the channel error: the command was delivered and the
+		// Worker did not confirm, which is a Runtime-side refusal or stall
+		// rather than a routing problem.
+		return echo.NewHTTPError(
+			http.StatusGatewayTimeout,
+			"Runtime 未确认观察启动",
+		)
 	}
 	return httpx.Internal("观察请求失败")
 }
@@ -1412,4 +1441,59 @@ func (h *Handler) GetBrowserObservationFrame(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	return c.JSON(http.StatusOK, frame)
+}
+
+// The admin variants skip the owner check because the admin permission on the
+// route is the authorization. They are otherwise identical, so the owner and
+// admin paths cannot drift in what they return.
+
+func (h *Handler) GetAdminBrowserObservation(c echo.Context) error {
+	_, runID, err := h.browserObservationIdentity(c)
+	if err != nil {
+		return err
+	}
+	state, err := h.browserObservation.State(c.Request().Context(), runID)
+	if err != nil {
+		return browserObservationHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, state)
+}
+
+func (h *Handler) GetAdminBrowserObservationFrame(c echo.Context) error {
+	_, runID, err := h.browserObservationIdentity(c)
+	if err != nil {
+		return err
+	}
+	frame, err := h.browserObservation.WaitFrame(c.Request().Context(), runID, observationFrameCursor(c))
+	if err != nil {
+		return browserObservationHTTPError(err)
+	}
+	c.Response().Header().Set("Cache-Control", "private, no-store")
+	if frame == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	return c.JSON(http.StatusOK, frame)
+}
+
+func (h *Handler) StopAdminBrowserObservation(c echo.Context) error {
+	_, runID, err := h.browserObservationIdentity(c)
+	if err != nil {
+		return err
+	}
+	if err := h.browserObservation.Stop(
+		c.Request().Context(),
+		runID,
+		"admin_stopped",
+	); err != nil {
+		return browserObservationHTTPError(err)
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func observationFrameCursor(c echo.Context) int64 {
+	after, err := strconv.ParseInt(c.QueryParam("after"), 10, 64)
+	if err != nil || after < 0 {
+		return 0
+	}
+	return after
 }

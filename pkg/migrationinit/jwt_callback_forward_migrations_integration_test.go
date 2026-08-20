@@ -16,29 +16,33 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func TestBrowserPolicyMigrationConvergesFromFreshReviewedBridgeAndVersion90(t *testing.T) {
+// The supported predecessors move with every migration. 092 makes 091 the
+// upgrade version, so the forward path is proven from there rather than from
+// the version that used to be current.
+func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91(t *testing.T) {
 	baseURL := os.Getenv("TEST_DATABASE_URL")
 	if baseURL == "" {
 		t.Skip("TEST_DATABASE_URL is required")
 	}
-	for _, mode := range []string{"fresh", "version-86", "version-90"} {
+	for _, mode := range []string{"fresh", "version-86", "version-91"} {
 		t.Run(mode, func(t *testing.T) {
 			databaseURL := createMigrationTestDatabase(t, baseURL)
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
-			if mode == "version-86" || mode == "version-90" {
+			if mode == "version-86" || mode == "version-91" {
 				conn, err := pgx.Connect(ctx, databaseURL)
 				if err != nil {
 					t.Fatal(err)
 				}
 				applyMigrationFile(t, ctx, conn, "086_current_schema_init.up.sql")
 				version := int64(86)
-				if mode == "version-90" {
+				if mode == "version-91" {
 					applyMigrationFile(t, ctx, conn, "087_browser_agent_execution_profile.up.sql")
 					applyMigrationFile(t, ctx, conn, "088_browser_human_control.up.sql")
 					applyMigrationFile(t, ctx, conn, "089_user_jwt_token_version.up.sql")
 					applyMigrationFile(t, ctx, conn, "090_task_callback_owner_index.up.sql")
-					version = 90
+					applyMigrationFile(t, ctx, conn, "091_browser_interaction_policy.up.sql")
+					version = 91
 				}
 				if _, err := conn.Exec(ctx, `CREATE TABLE public.schema_migrations (version bigint NOT NULL, dirty boolean NOT NULL)`); err != nil {
 					conn.Close(context.Background())

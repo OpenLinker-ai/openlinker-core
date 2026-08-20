@@ -29,7 +29,7 @@ func TestValidateCoreUp(t *testing.T) {
 		{name: "definition drift with stable counts", snapshot: withCoreDigest(currentCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
 		{name: "invalid callback owner index", snapshot: withCallbackOwnerIndexValidity(currentCoreSnapshot(), false), wantError: "idx_task_callback_subscriptions_owner is missing or invalid"},
 		{name: "historical Browser Agent not backfilled", snapshot: withUnclassifiedBrowserAgents(currentCoreSnapshot(), 1), wantError: "backfill is incomplete"},
-		{name: "unknown public relation", snapshot: withRelationCount(currentCoreSnapshot(), 74), wantError: "ownership mismatch"},
+		{name: "unknown public relation", snapshot: withRelationCount(currentCoreSnapshot(), 76), wantError: "ownership mismatch"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -55,7 +55,7 @@ func TestValidateCloudUp(t *testing.T) {
 	current := fresh
 	current.Cloud = MigrationTableState{Exists: true, Rows: 1, Version: CloudVersion}
 	current.CloudShape = currentCloudShape()
-	current.NonBookkeepingObjects = 80
+	current.NonBookkeepingObjects = 82
 
 	tests := []struct {
 		name      string
@@ -80,7 +80,7 @@ func TestValidateCloudUp(t *testing.T) {
 		{name: "Core callback owner index invalid", snapshot: withCallbackOwnerIndexValidity(current, false), wantError: "idx_task_callback_subscriptions_owner is missing or invalid"},
 		{name: "Cloud schema drift", snapshot: withCloudShape(current, SchemaShape{Tables: 7, Constraints: 71, Indexes: 30, Triggers: 5, GuardFunctions: 1}), wantError: "fingerprint mismatch"},
 		{name: "Cloud definition drift with stable counts", snapshot: withCloudDigest(current, "wrong"), wantError: "fingerprint mismatch"},
-		{name: "unknown public relation", snapshot: withRelationCount(current, 81), wantError: "ownership mismatch"},
+		{name: "unknown public relation", snapshot: withRelationCount(current, 83), wantError: "ownership mismatch"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -105,7 +105,7 @@ func currentCoreSnapshot() Snapshot {
 	return Snapshot{
 		Core:                    MigrationTableState{Exists: true, Rows: 1, Version: CoreVersion},
 		CoreShape:               currentCoreShape(),
-		NonBookkeepingObjects:   73,
+		NonBookkeepingObjects:   75,
 		CallbackOwnerIndexValid: true,
 	}
 }
@@ -113,9 +113,9 @@ func currentCoreSnapshot() Snapshot {
 func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
-		Tables:            73,
-		Constraints:       626,
-		Indexes:           267,
+		Tables:            75,
+		Constraints:       641,
+		Indexes:           272,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -137,16 +137,16 @@ func upgradeableCoreSnapshot() Snapshot {
 			Version: CoreUpgradeVersion,
 		},
 		CoreShape:             upgradeableCoreShape(),
-		NonBookkeepingObjects: 72,
+		NonBookkeepingObjects: 73,
 	}
 }
 
 func upgradeableCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreUpgradeSchemaDigest,
-		Tables:            72,
-		Constraints:       616,
-		Indexes:           266,
+		Tables:            73,
+		Constraints:       626,
+		Indexes:           267,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -229,7 +229,7 @@ func upgradeableCloudSnapshot(current Snapshot) Snapshot {
 		Version: CoreUpgradeVersion,
 	}
 	current.CoreShape = upgradeableCoreShape()
-	current.NonBookkeepingObjects = 79
+	current.NonBookkeepingObjects = 80
 	return current
 }
 

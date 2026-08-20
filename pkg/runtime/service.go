@@ -201,6 +201,10 @@ func (s *Service) ConfigureCoreRuntime(coreInstanceID uuid.UUID) {
 		return
 	}
 	s.coreInstanceID = coreInstanceID
+	// The observation is created before the process identity is known, so it is
+	// handed over here. Without this it keeps the zero instance and fails every
+	// start closed, which is safe but makes the whole surface unusable.
+	s.browserObservation.BindInstance(coreInstanceID)
 }
 
 func (s *Service) BrowserObservation() *BrowserObservation {
@@ -246,19 +250,21 @@ func (s *Service) AppendRuntimeEvent(
 	if err != nil {
 		return RuntimeEventAck{}, err
 	}
-	if req.EventType == "run.browser.lifecycle" && ack.Inserted &&
-		s.browserObservation != nil {
+	if req.EventType == "run.browser.lifecycle" && s.browserObservation != nil {
 		// Projected separately from takeover: observation needs the identity of a
 		// running Attempt, which the pause projection never records.
 		//
-		// Gated on Inserted so a legitimate replay of an older ready event cannot
-		// overwrite the projection of the Attempt now running. The error is
-		// returned rather than dropped: acking while the projection failed would
-		// leave observation quietly unusable with nothing to show for it.
+		// Deliberately not gated on Inserted: a projection that failed after the
+		// event was appended is only ever retried as a replay, and skipping
+		// replays would drop it for good. ProjectFromEvent carries its own
+		// replay fences instead. The error is returned rather than dropped:
+		// acking while the projection failed would leave observation quietly
+		// unusable with nothing to show for it.
 		if projectionErr := s.browserObservation.ProjectFromEvent(
 			ctx,
 			identity,
 			req.Payload,
+			ack.ClientEventSeq,
 		); projectionErr != nil {
 			return RuntimeEventAck{}, httpx.Internal("浏览器观察身份投影失败")
 		}

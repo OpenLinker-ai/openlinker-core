@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,7 +31,24 @@ const (
 	// Frame counts are persisted on this cadence so a crashed Core still leaves a
 	// lower bound behind rather than a zero.
 	observationCountFlushInterval = 5 * time.Second
+	// How long start waits for the Worker to confirm. The command is a one-way
+	// push with no reply channel, so the confirmation is the started event and
+	// the wait is what turns "accepted" into "actually observing".
+	observationStartHandshakeTimeout = 15 * time.Second
+	// Concurrent observations one Core instance will hold. Every one of them
+	// pins a frame buffer and a Runtime lease, so the ceiling is explicit rather
+	// than whatever the database happens to allow.
+	observationInstanceQuota = 32
 )
+
+// ErrObservationBusy is returned when this instance is already at its
+// concurrent-observation ceiling.
+var ErrObservationBusy = errors.New("browser observation capacity is exhausted on this Core instance")
+
+// ErrObservationNotConfirmed is returned when the Worker never confirmed a
+// start. The lease is torn down before it surfaces, so the Run is left
+// observable rather than pinned by an observation that never began.
+var ErrObservationNotConfirmed = errors.New("browser observation was not confirmed by the Worker")
 
 type BrowserObservationState struct {
 	RunID              uuid.UUID  `json:"run_id"`
@@ -47,6 +65,11 @@ type BrowserObservation struct {
 	sender   browserObserverCommandSender
 	instance uuid.UUID
 	frames   *observationFrameBuffer
+
+	// Pending start handshakes, keyed by lease. A start blocks on its channel
+	// until the Worker's first lifecycle event for that exact lease arrives.
+	handshakeMu sync.Mutex
+	handshakes  map[uuid.UUID]chan string
 }
 
 type browserObserverCommandSender interface {
@@ -62,11 +85,22 @@ func NewBrowserObservation(
 		now = time.Now
 	}
 	return &BrowserObservation{
-		pool:     pool,
-		now:      now,
-		instance: instance,
-		frames:   newObservationFrameBuffer(),
+		pool:       pool,
+		now:        now,
+		instance:   instance,
+		frames:     newObservationFrameBuffer(),
+		handshakes: make(map[uuid.UUID]chan string),
 	}
+}
+
+// BindInstance records which Core process owns observations started here. It is
+// separate from construction because the process identity is only known once
+// cluster membership is configured.
+func (observation *BrowserObservation) BindInstance(instance uuid.UUID) {
+	if observation == nil || instance == uuid.Nil {
+		return
+	}
+	observation.instance = instance
 }
 
 func (observation *BrowserObservation) BindCommandSender(
@@ -93,8 +127,18 @@ func (observation *BrowserObservation) Start(
 	if observation == nil || observation.pool == nil || observation.sender == nil {
 		return BrowserObservationState{}, ErrObservationChannelUnavailable
 	}
+	// Frames and wakeups live in this process's memory, so an observation is only
+	// serviceable by the instance that owns it. Recording the instance lets a
+	// later request on another one refuse instead of polling a buffer that will
+	// never fill.
+	if observation.instance == uuid.Nil {
+		return BrowserObservationState{}, ErrObservationChannelUnavailable
+	}
 	if isAdmin && reason == "" {
 		return BrowserObservationState{}, errors.New("cross-user browser observation requires a reason")
+	}
+	if observation.frames.count() >= observationInstanceQuota {
+		return BrowserObservationState{}, ErrObservationBusy
 	}
 	now := observation.now().UTC()
 	leaseID := uuid.New()
@@ -117,12 +161,13 @@ func (observation *BrowserObservation) Start(
 INSERT INTO browser_observation_audits (
     run_id, attempt_id, observer_user_id, observer_is_admin, reason,
     session_epoch, attachment_sha256, lease_id, lease_expires_at,
-    status, started_at, frame_count, frame_count_complete
-) VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8,$9,'active',$10,0,false)
+    core_instance_id, status, started_at, frame_count, frame_count_complete
+) VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8,$9,$11,'active',$10,0,false)
 RETURNING id
 `,
 		runID, identity.AttemptID, observerUserID, isAdmin, reason,
 		identity.SessionEpoch, identity.AttachmentSHA256, leaseID, expiresAt, now,
+		observation.instance,
 	).Scan(&auditID)
 	if err != nil {
 		// The partial unique index makes a second active row impossible, so a
@@ -131,13 +176,26 @@ RETURNING id
 	}
 
 	observation.frames.open(runID, leaseID)
+	// Registered before the command is sent, because the started event can come
+	// back before this goroutine reaches the wait.
+	confirmed := observation.registerHandshake(leaseID)
+	defer observation.resolveHandshake(leaseID, "")
 	if err := observation.sender.SendBrowserObserverCommand(
 		identity.RuntimeSessionID,
 		command,
 	); err != nil {
 		observation.frames.close(runID)
-		observation.close(ctx, leaseID, "channel_unavailable")
+		_ = observation.close(ctx, leaseID, "channel_unavailable")
 		return BrowserObservationState{}, ErrObservationChannelUnavailable
+	}
+	if failure := observation.awaitStart(ctx, confirmed); failure != nil {
+		// The Worker may still be holding the lease -- a timeout cannot tell a
+		// slow Worker from a dead one -- so the remote stop is sent regardless
+		// and only the local teardown is authoritative.
+		observation.frames.closeLease(runID, leaseID)
+		observation.stopRemote(identity, leaseID)
+		_ = observation.close(ctx, leaseID, "start_not_confirmed")
+		return BrowserObservationState{}, failure
 	}
 	return BrowserObservationState{
 		RunID:          runID,
@@ -145,6 +203,124 @@ RETURNING id
 		LeaseID:        leaseID,
 		LeaseExpiresAt: &expiresAt,
 	}, nil
+}
+
+// CloseSessionObservations ends every observation bound to a Runtime Session.
+// A disconnected Worker cannot answer a stop command and will drop its lease on
+// its own TTL, so the audit has to be closed from this side or it stays active
+// and its unique index blocks the Run from ever being observed again.
+func (observation *BrowserObservation) CloseSessionObservations(
+	ctx context.Context,
+	runtimeSessionID uuid.UUID,
+	endReason string,
+) error {
+	if observation == nil || observation.pool == nil || runtimeSessionID == uuid.Nil {
+		return nil
+	}
+	rows, err := observation.pool.Query(ctx, `
+SELECT a.run_id, a.lease_id
+FROM browser_observation_audits a
+JOIN browser_observable_attempts c
+  ON c.run_id = a.run_id AND c.attempt_id = a.attempt_id
+WHERE c.runtime_session_id = $1 AND a.status = 'active'
+`, runtimeSessionID)
+	if err != nil {
+		return err
+	}
+	type endedObservation struct {
+		runID   uuid.UUID
+		leaseID uuid.UUID
+	}
+	var ended []endedObservation
+	for rows.Next() {
+		var row endedObservation
+		if scanErr := rows.Scan(&row.runID, &row.leaseID); scanErr != nil {
+			rows.Close()
+			return scanErr
+		}
+		ended = append(ended, row)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, row := range ended {
+		observation.resolveHandshake(row.leaseID, endReason)
+		count := observation.frames.closeLease(row.runID, row.leaseID)
+		_ = observation.RecordFrames(ctx, row.leaseID, count)
+		if closeErr := observation.close(ctx, row.leaseID, endReason); closeErr != nil {
+			err = closeErr
+		}
+	}
+	return err
+}
+
+// awaitStart blocks until the Worker reports started, reports a failure, or the
+// handshake times out. A start that returns without this wait would report
+// success for an observation the Worker may have refused outright.
+func (observation *BrowserObservation) awaitStart(
+	ctx context.Context,
+	confirmed <-chan string,
+) error {
+	timeout := time.NewTimer(observationStartHandshakeTimeout)
+	defer timeout.Stop()
+	select {
+	case outcome := <-confirmed:
+		if outcome == "" {
+			return nil
+		}
+		return fmt.Errorf("%w: %s", ErrObservationNotConfirmed, outcome)
+	case <-timeout.C:
+		return ErrObservationNotConfirmed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (observation *BrowserObservation) registerHandshake(leaseID uuid.UUID) <-chan string {
+	confirmed := make(chan string, 1)
+	observation.handshakeMu.Lock()
+	defer observation.handshakeMu.Unlock()
+	observation.handshakes[leaseID] = confirmed
+	return confirmed
+}
+
+// resolveHandshake settles a pending start. It is also how the waiter
+// deregisters itself, so a lifecycle event arriving after the wait gave up does
+// not accumulate a channel nobody reads.
+func (observation *BrowserObservation) resolveHandshake(leaseID uuid.UUID, failure string) {
+	observation.handshakeMu.Lock()
+	confirmed := observation.handshakes[leaseID]
+	delete(observation.handshakes, leaseID)
+	observation.handshakeMu.Unlock()
+	if confirmed == nil {
+		return
+	}
+	select {
+	case confirmed <- failure:
+	default:
+	}
+}
+
+// stopRemote tells the Worker to drop a lease without touching any local state.
+// Used where the audit is being closed by the caller and the only thing left is
+// to release the Runtime side.
+func (observation *BrowserObservation) stopRemote(
+	identity BrowserObserverIdentity,
+	leaseID uuid.UUID,
+) {
+	if observation.sender == nil || identity.RuntimeSessionID == uuid.Nil {
+		return
+	}
+	_ = observation.sender.SendBrowserObserverCommand(
+		identity.RuntimeSessionID,
+		BrowserObserverCommandPayload{
+			AttemptIdentity: identity,
+			CommandID:       uuid.New(),
+			Action:          BrowserObserverStop,
+			LeaseID:         leaseID,
+		},
+	)
 }
 
 // Stop ends an observation and closes its audit record. It is safe to call for
@@ -313,10 +489,16 @@ func (observation *BrowserObservation) ResolveIdentity(
 		return BrowserObserverIdentity{}, ErrObservationChannelUnavailable
 	}
 	var ownerID uuid.UUID
+	var runStatus string
+	var dispatchState string
+	var activeAttemptID *uuid.UUID
 	var identity BrowserObserverIdentity
 	var features []string
 	err := observation.pool.QueryRow(ctx, `
 SELECT r.user_id,
+       r.status,
+       r.dispatch_state,
+       r.active_attempt_id,
        c.attempt_id,
        c.session_epoch,
        c.browser_session_sha256,
@@ -325,10 +507,13 @@ SELECT r.user_id,
        COALESCE(s.features, ARRAY[]::text[])
 FROM runs r
 JOIN browser_observable_attempts c ON c.run_id = r.id
-LEFT JOIN runtime_sessions s ON s.id = c.runtime_session_id
+LEFT JOIN runtime_sessions s ON s.runtime_session_id = c.runtime_session_id
 WHERE r.id = $1
 `, runID).Scan(
 		&ownerID,
+		&runStatus,
+		&dispatchState,
+		&activeAttemptID,
 		&identity.AttemptID,
 		&identity.SessionEpoch,
 		&identity.BrowserSessionSHA256,
@@ -343,6 +528,18 @@ WHERE r.id = $1
 		return BrowserObserverIdentity{}, err
 	}
 	if !isAdmin && ownerID != callerUserID {
+		return BrowserObserverIdentity{}, ErrObservationForbidden
+	}
+	// A projection can outlive the Attempt it describes if a teardown was
+	// missed, so the Run itself has to still be running and still be on the
+	// Attempt the projection names. Without this a stale row would authorize an
+	// observation of an Attempt the Runtime has already left.
+	// executing, not offered: an Attempt that has only been offered has no
+	// Worker running a Browser yet, so there is nothing to observe.
+	if runStatus != "running" || dispatchState != "executing" {
+		return BrowserObserverIdentity{}, ErrObservationForbidden
+	}
+	if activeAttemptID == nil || *activeAttemptID != identity.AttemptID {
 		return BrowserObserverIdentity{}, ErrObservationForbidden
 	}
 	if !observationFeatureDeclared(features) {
@@ -409,6 +606,8 @@ func (observation *BrowserObservation) HandleEvent(
 	}
 	runID := event.AttemptIdentity.RunID
 	switch event.Kind {
+	case BrowserObserverStarted:
+		observation.resolveHandshake(event.LeaseID, "")
 	case BrowserObserverFrame:
 		if err := observation.frames.publish(runID, event.LeaseID, BrowserObservationFrame{
 			FrameSeq:   event.EventSeq,
@@ -426,8 +625,13 @@ func (observation *BrowserObservation) HandleEvent(
 			_ = observation.RecordFrames(ctx, event.LeaseID, observation.frames.frameCount(runID))
 		}
 	case BrowserObserverStopped:
+		observation.resolveHandshake(event.LeaseID, "stopped")
 		observation.closeLeaseAsync(event.LeaseID, event.AttemptIdentity, "worker_stopped")
 	case BrowserObserverError:
+		observation.resolveHandshake(
+			event.LeaseID,
+			boundedObservationEndReason(event.ErrorCode),
+		)
 		observation.closeLeaseAsync(
 			event.LeaseID,
 			event.AttemptIdentity,
@@ -465,14 +669,56 @@ func (observation *BrowserObservation) closeLeaseAsync(
 	}()
 }
 
-// closeRunAsync ends whatever lease a Run currently has. Only lifecycle
-// teardown uses it, where the Attempt itself is gone and no successor can exist.
-func (observation *BrowserObservation) closeRunAsync(runID uuid.UUID, endReason string) {
+// closeAttemptAsync ends the observation of one Attempt and forgets it.
+//
+// It resolves the lease from the audit itself rather than from the projection,
+// so teardown does not depend on a row it is about to delete. The remote stop is
+// best effort: the Attempt has already gone, and the audit must close whether or
+// not the Worker is still reachable.
+func (observation *BrowserObservation) closeAttemptAsync(
+	runID uuid.UUID,
+	attemptID uuid.UUID,
+	endReason string,
+) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		_ = observation.Stop(ctx, runID, endReason)
+		_ = observation.closeAttempt(ctx, runID, attemptID, endReason)
 	}()
+}
+
+func (observation *BrowserObservation) closeAttempt(
+	ctx context.Context,
+	runID uuid.UUID,
+	attemptID uuid.UUID,
+	endReason string,
+) error {
+	if observation == nil || observation.pool == nil {
+		return nil
+	}
+	var leaseID uuid.UUID
+	err := observation.pool.QueryRow(ctx, `
+SELECT lease_id FROM browser_observation_audits
+WHERE run_id = $1 AND attempt_id = $2 AND status = 'active'
+`, runID, attemptID).Scan(&leaseID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Nothing was being observed; still forget the Attempt below.
+	case err != nil:
+		return err
+	default:
+		count := observation.frames.closeLease(runID, leaseID)
+		_ = observation.RecordFrames(ctx, leaseID, count)
+		if closeErr := observation.close(ctx, leaseID, endReason); closeErr != nil {
+			return closeErr
+		}
+	}
+	_, err = observation.pool.Exec(
+		ctx,
+		`DELETE FROM browser_observable_attempts WHERE run_id = $1 AND attempt_id = $2`,
+		runID, attemptID,
+	)
+	return err
 }
 
 // closeLease closes exactly the named lease, refusing to touch a successor.
@@ -571,6 +817,7 @@ func (observation *BrowserObservation) ProjectFromEvent(
 	ctx context.Context,
 	identity RuntimeAttemptIdentity,
 	payload map[string]any,
+	eventSeq int64,
 ) error {
 	if observation == nil || observation.pool == nil {
 		return nil
@@ -579,23 +826,31 @@ func (observation *BrowserObservation) ProjectFromEvent(
 	switch phase {
 	case "ready":
 	case "closed", "failed":
-		// The Attempt is gone. Drop the projection so a later start cannot
-		// resolve a stale identity, and end any observation off this goroutine:
-		// this runs under the WebSocket lifecycle read lock and Stop takes it
-		// again through the sender, which Go's RWMutex does not allow.
-		if _, err := observation.pool.Exec(
-			ctx,
-			`DELETE FROM browser_observable_attempts WHERE run_id = $1`,
+		// The Attempt is gone, so close the audit and drop the projection.
+		//
+		// The audit is closed from the lifecycle identity alone, never through a
+		// path that reads the projection: deleting the projection first and then
+		// closing through it leaves the audit active forever, and its unique
+		// index then blocks the Run from ever being observed again. Closing runs
+		// off this goroutine because the lifecycle handler holds the WebSocket
+		// lifecycle read lock, which the sender takes again.
+		observation.closeAttemptAsync(
 			identity.RunID,
-		); err != nil {
-			return err
-		}
-		observation.closeRunAsync(identity.RunID, "run_browser_closed")
+			identity.AttemptID,
+			"run_browser_closed",
+		)
 		return nil
 	default:
 		return nil
 	}
 	if identity.RuntimeSessionID == nil {
+		return nil
+	}
+	// A Runtime that does not support observation still reports ready, and its
+	// ready event carries no observation identity. Absence is that case and is
+	// skipped; a present-but-malformed identity is a contract violation and is
+	// reported below.
+	if !browserPayloadHasObservationIdentity(payload) {
 		return nil
 	}
 	// The ready event publishes hashed identity, never the raw UUIDs. Reading
@@ -612,21 +867,51 @@ func (observation *BrowserObservation) ProjectFromEvent(
 	if err != nil {
 		return err
 	}
+	// Runs on replays too, not only on first insert. A projection that failed
+	// after the event was appended would otherwise be skipped on every retry and
+	// lost for good, leaving the Run permanently unobservable.
+	//
+	// Replay safety comes from two fences instead. The Run must still be on the
+	// Attempt this event names, so a replay belonging to a finished Attempt
+	// cannot overwrite the Attempt now running; and within one Attempt the event
+	// sequence must not go backwards.
 	_, err = observation.pool.Exec(ctx, `
 INSERT INTO browser_observable_attempts (
     run_id, attempt_id, runtime_session_id, browser_session_sha256,
-    session_epoch, browser_attachment_sha256, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp())
+    session_epoch, browser_attachment_sha256, event_seq, updated_at
+)
+SELECT $1,$2,$3,$4,$5,$6,$7,clock_timestamp()
+FROM runs r
+WHERE r.id = $1 AND r.active_attempt_id = $2
 ON CONFLICT (run_id) DO UPDATE SET
     attempt_id = EXCLUDED.attempt_id,
     runtime_session_id = EXCLUDED.runtime_session_id,
     browser_session_sha256 = EXCLUDED.browser_session_sha256,
     session_epoch = EXCLUDED.session_epoch,
     browser_attachment_sha256 = EXCLUDED.browser_attachment_sha256,
+    event_seq = EXCLUDED.event_seq,
     updated_at = clock_timestamp()
+WHERE browser_observable_attempts.attempt_id <> EXCLUDED.attempt_id
+   OR browser_observable_attempts.event_seq <= EXCLUDED.event_seq
 `, identity.RunID, identity.AttemptID, *identity.RuntimeSessionID,
-		sessionDigest, sessionEpoch, attachmentDigest)
+		sessionDigest, sessionEpoch, attachmentDigest, eventSeq)
 	return err
+}
+
+// browserPayloadHasObservationIdentity reports whether the event claims an
+// observable identity at all. It checks only for presence: the fields are
+// validated where they are read.
+func browserPayloadHasObservationIdentity(payload map[string]any) bool {
+	for _, key := range []string{
+		"browser_session_sha256",
+		"browser_session_epoch",
+		"browser_attachment_sha256",
+	} {
+		if _, present := payload[key]; present {
+			return true
+		}
+	}
+	return false
 }
 
 func browserPayloadSHA256(payload map[string]any, key string) (string, error) {

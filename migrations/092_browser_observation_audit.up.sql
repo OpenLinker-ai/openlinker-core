@@ -12,6 +12,9 @@ CREATE TABLE public.browser_observable_attempts (
     browser_session_sha256 text NOT NULL,
     session_epoch bigint NOT NULL,
     browser_attachment_sha256 text NOT NULL,
+    -- The Worker event sequence this projection came from, so a replayed older
+    -- event cannot overwrite a newer one within the same Attempt.
+    event_seq bigint NOT NULL DEFAULT 0,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT browser_observable_attempts_pkey PRIMARY KEY (run_id),
     CONSTRAINT browser_observable_attempts_run_id_fkey
@@ -44,6 +47,10 @@ CREATE TABLE public.browser_observation_audits (
     -- Persisted so a Core that exits mid-observation can still be reconciled:
     -- without it a crashed observation stays active forever.
     lease_expires_at timestamp with time zone NOT NULL,
+    -- Frames live in one Core process's memory, so an observation belongs to the
+    -- instance that opened it and another instance must refuse rather than serve
+    -- a buffer it does not have.
+    core_instance_id uuid NOT NULL,
     status text NOT NULL,
     started_at timestamp with time zone NOT NULL,
     ended_at timestamp with time zone,
@@ -78,7 +85,9 @@ CREATE TABLE public.browser_observation_audits (
             OR (ended_at IS NOT NULL AND end_reason IS NOT NULL)
         ),
     CONSTRAINT browser_observation_audits_frame_count_non_negative
-        CHECK (frame_count >= 0)
+        CHECK (frame_count >= 0),
+    CONSTRAINT browser_observation_audits_attachment_digest_hex
+        CHECK (attachment_sha256 ~ '^[0-9a-f]{64}$')
 );
 
 -- One live observation per Run: the Runtime lease is singular, so a second

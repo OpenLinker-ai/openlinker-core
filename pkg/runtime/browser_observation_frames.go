@@ -35,6 +35,11 @@ type observationLiveFrame struct {
 	frame   *BrowserObservationFrame
 	notify  chan struct{}
 	count   int64
+	// Identifies the one downstream viewer allowed to poll. A newer poll takes
+	// over from an older one rather than being refused, because a reloaded tab
+	// leaves its previous long poll hanging for the full timeout and refusing
+	// would lock the viewer out for that whole window.
+	waiter int64
 }
 
 type observationFrameBuffer struct {
@@ -119,12 +124,31 @@ func (buffer *observationFrameBuffer) wait(
 ) (*BrowserObservationFrame, error) {
 	deadline := time.NewTimer(observationWaitTimeout)
 	defer deadline.Stop()
+	buffer.mu.Lock()
+	live := buffer.live[runID]
+	if live == nil {
+		buffer.mu.Unlock()
+		return nil, errors.New("browser observation is not active")
+	}
+	live.waiter++
+	waiter := live.waiter
+	// Wakes the poll being superseded so it returns now instead of holding its
+	// request open until the timeout it can no longer be served by.
+	close(live.notify)
+	live.notify = make(chan struct{})
+	buffer.mu.Unlock()
 	for {
 		buffer.mu.Lock()
-		live := buffer.live[runID]
+		live = buffer.live[runID]
 		if live == nil {
 			buffer.mu.Unlock()
 			return nil, errors.New("browser observation is not active")
+		}
+		if live.waiter != waiter {
+			// A newer poll took over. Returning empty rather than erroring lets
+			// the superseded request finish as an ordinary idle long poll.
+			buffer.mu.Unlock()
+			return nil, nil
 		}
 		if live.frame != nil && live.frame.FrameSeq > after {
 			copied := *live.frame
@@ -156,4 +180,12 @@ func (buffer *observationFrameBuffer) closeLease(runID, leaseID uuid.UUID) int64
 	}
 	buffer.mu.Unlock()
 	return buffer.close(runID)
+}
+
+// count reports how many observations this instance is holding open, which is
+// what the concurrency quota is measured against.
+func (buffer *observationFrameBuffer) count() int {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return len(buffer.live)
 }

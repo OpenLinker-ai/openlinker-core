@@ -352,7 +352,15 @@ type eventStoreFixture struct {
 	coreInstanceID uuid.UUID
 }
 
-func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL time.Duration) eventStoreFixture {
+// extraFeatures are declared on the Node and Session at creation. A Session's
+// feature list is immutable by trigger, so an optional capability has to be
+// declared here and cannot be added to a fixture after the fact.
+func insertEventStoreExecutingAttempt(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	leaseTTL time.Duration,
+	extraFeatures ...string,
+) eventStoreFixture {
 	t.Helper()
 	userID := insertRuntimeUser(t, pool)
 	creatorID := insertCreator(t, pool)
@@ -380,6 +388,7 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 		"persistent_spool",
 		"session_drain",
 	}
+	features = append(features, extraFeatures...)
 	keyHash := sha256.Sum256([]byte("event-store-key/" + runID.String()))
 	fingerprint := sha256.Sum256([]byte("event-store-fingerprint/" + runID.String()))
 	prefix := "ol_agent_" + strings.ReplaceAll(credentialID.String(), "-", "")[:12]

@@ -219,9 +219,9 @@ func TestCoreFoundationalInitializerContainsPredecessorContracts(t *testing.T) {
 func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	verify := readInitializer(t, "../../migrations/086_current_schema_init_verify.sql")
 	for _, fragment := range []string{
-		"public_tables <> 73",
-		"public_constraints <> 626",
-		"public_indexes <> 267",
+		"public_tables <> 75",
+		"public_constraints <> 641",
+		"public_indexes <> 272",
 		"public_triggers <> 70",
 		"public_functions <> 65",
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",

@@ -572,6 +572,11 @@ func configureRuntime(
 		},
 	})
 	go runtimeService.BrowserHumanControl().RunGC(rootCtx)
+	// Reconciles observations whose lease expired while still marked active. A
+	// Core that exits mid-observation cannot run its own teardown, so without
+	// this the audit stays active and its unique index blocks the Run from ever
+	// being observed again.
+	go runtimeService.BrowserObservation().RunGC(rootCtx)
 	go runtime.StartRuntimeMaintenanceWorkerWithWake(
 		rootCtx,
 		runtime.NewRuntimeDeadlineReconciler(pool, nil),

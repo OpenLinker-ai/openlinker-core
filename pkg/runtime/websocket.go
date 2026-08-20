@@ -1609,6 +1609,21 @@ func (c *runtimeWSConnection) cleanup() {
 				log.Warn().Msg("Runtime websocket maintenance did not stop before cleanup")
 			}
 		}
+		// Ends observations before the Session state changes. The Worker is gone
+		// and cannot answer a stop, so its lease will lapse on its own TTL while
+		// the audit here would stay active forever.
+		if c.controller.dependencies.BrowserObservation != nil &&
+			c.sessionPrincipal.RuntimeSessionID != uuid.Nil {
+			observationCtx, observationCancel := context.WithTimeout(
+				context.Background(), runtimeWSCleanupTimeout,
+			)
+			if observationErr := c.controller.dependencies.BrowserObservation.CloseSessionObservations(
+				observationCtx, c.sessionPrincipal.RuntimeSessionID, "session_disconnected",
+			); observationErr != nil {
+				log.Warn().Err(observationErr).Msg("Runtime websocket close browser observations")
+			}
+			observationCancel()
+		}
 		if c.attached {
 			closeCtx, closeCancel := context.WithTimeout(context.Background(), runtimeWSCleanupTimeout)
 			detached := false
