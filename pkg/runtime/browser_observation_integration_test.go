@@ -5,6 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/labstack/echo/v4"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -940,4 +944,110 @@ SELECT end_reason FROM browser_observation_audits WHERE lease_id = $1
 		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
 	)
 	require.NoError(t, err)
+}
+
+// The refusals, driven through the real middleware chain. The online acceptance
+// asserts the same statuses, but a status that only lives in an online script is
+// not pinned by anything: this is where a change that starts answering 404, or
+// starts letting a signed-in stranger read a Run, gets caught.
+func TestBrowserObservationRefusesEveryUnauthorizedCaller(t *testing.T) {
+	e, pool, service := setupObservationHandlerTest(t)
+	fixture := insertEventStoreExecutingAttempt(
+		t, pool, 5*time.Minute, runtime.BrowserObservationFeature,
+	)
+	appendBrowserLifecycle(
+		t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"),
+	)
+	var ownerID uuid.UUID
+	require.NoError(t, pool.QueryRow(
+		context.Background(),
+		`SELECT user_id FROM runs WHERE id = $1`,
+		fixture.identity.RunID,
+	).Scan(&ownerID))
+	stranger := insertRuntimeUser(t, pool)
+	unknownRun := uuid.New()
+
+	for name, testCase := range map[string]struct {
+		method string
+		target string
+		body   any
+		header map[string]string
+		want   int
+	}{
+		"no session": {
+			method: http.MethodGet,
+			target: "/api/v1/runs/" + fixture.identity.RunID.String() + "/observation",
+			want:   http.StatusUnauthorized,
+		},
+		"signed in but not the Owner": {
+			method: http.MethodGet,
+			target: "/api/v1/runs/" + fixture.identity.RunID.String() + "/observation",
+			header: map[string]string{"Authorization": signJWT(t, stranger)},
+			want:   http.StatusForbidden,
+		},
+		"a stranger cannot read frames either": {
+			method: http.MethodGet,
+			target: "/api/v1/runs/" + fixture.identity.RunID.String() + "/observation/frame",
+			header: map[string]string{"Authorization": signJWT(t, stranger)},
+			want:   http.StatusForbidden,
+		},
+		"a stranger cannot start one": {
+			method: http.MethodPost,
+			target: "/api/v1/runs/" + fixture.identity.RunID.String() + "/observation/start",
+			header: map[string]string{"Authorization": signJWT(t, stranger)},
+			want:   http.StatusForbidden,
+		},
+		"a stranger cannot stop one": {
+			method: http.MethodPost,
+			target: "/api/v1/runs/" + fixture.identity.RunID.String() + "/observation/stop",
+			header: map[string]string{"Authorization": signJWT(t, stranger)},
+			want:   http.StatusForbidden,
+		},
+		// Identical to the Owner's answer for a Run they do not own, on purpose:
+		// telling them apart turns this endpoint into a Run id oracle.
+		"a Run that does not exist": {
+			method: http.MethodGet,
+			target: "/api/v1/runs/" + unknownRun.String() + "/observation",
+			header: map[string]string{"Authorization": signJWT(t, ownerID)},
+			want:   http.StatusForbidden,
+		},
+		"cross-user observation without a reason": {
+			method: http.MethodPost,
+			target: "/api/v1/admin/runs/" + fixture.identity.RunID.String() + "/observation/start",
+			body:   map[string]any{},
+			header: map[string]string{"Authorization": signJWT(t, ownerID)},
+			want:   http.StatusBadRequest,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder, _ := doRequest(t, e, testCase.method, testCase.target, testCase.body, testCase.header)
+			require.Equal(t, testCase.want, recorder.Code)
+		})
+	}
+}
+
+// setupObservationHandlerTest mounts the observation surface the way the
+// application does: JWT only for the Owner routes, JWT plus admin for the
+// cross-user ones. The admin middleware here admits every authenticated caller,
+// so the reason check is what these cases actually exercise.
+func setupObservationHandlerTest(t *testing.T) (*echo.Echo, *pgxpool.Pool, *runtime.Service) {
+	t.Helper()
+	pool := setupTestDB(t)
+	service := newTestService(t, pool)
+	handler := runtime.NewHandler(service)
+
+	e := echo.New()
+	e.HTTPErrorHandler = func(err error, c echo.Context) {
+		if c.Response().Committed {
+			return
+		}
+		_ = httpx.SendError(c, err)
+	}
+	api := e.Group("/api/v1")
+	jwtMW := auth.JWTMiddlewareWithUserStatus(testHandlerSecret, auth.NewDBUserStatusChecker(pool))
+	handler.RegisterObservation(api, jwtMW)
+	handler.RegisterAdmin(api, jwtMW, func(next echo.HandlerFunc) echo.HandlerFunc {
+		return next
+	})
+	return e, pool, service
 }
