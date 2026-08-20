@@ -246,10 +246,22 @@ func (s *Service) AppendRuntimeEvent(
 	if err != nil {
 		return RuntimeEventAck{}, err
 	}
-	if req.EventType == "run.browser.lifecycle" && s.browserObservation != nil {
+	if req.EventType == "run.browser.lifecycle" && ack.Inserted &&
+		s.browserObservation != nil {
 		// Projected separately from takeover: observation needs the identity of a
 		// running Attempt, which the pause projection never records.
-		_ = s.browserObservation.ProjectFromEvent(ctx, identity, req.Payload)
+		//
+		// Gated on Inserted so a legitimate replay of an older ready event cannot
+		// overwrite the projection of the Attempt now running. The error is
+		// returned rather than dropped: acking while the projection failed would
+		// leave observation quietly unusable with nothing to show for it.
+		if projectionErr := s.browserObservation.ProjectFromEvent(
+			ctx,
+			identity,
+			req.Payload,
+		); projectionErr != nil {
+			return RuntimeEventAck{}, httpx.Internal("浏览器观察身份投影失败")
+		}
 	}
 	if req.EventType == "run.browser.lifecycle" && s.browserControl != nil {
 		if projectionErr := s.browserControl.PauseFromEvent(

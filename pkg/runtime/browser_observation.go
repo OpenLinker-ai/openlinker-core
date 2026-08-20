@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -115,13 +116,13 @@ func (observation *BrowserObservation) Start(
 	err := observation.pool.QueryRow(ctx, `
 INSERT INTO browser_observation_audits (
     run_id, attempt_id, observer_user_id, observer_is_admin, reason,
-    session_epoch, attachment_id, lease_id, lease_expires_at,
+    session_epoch, attachment_sha256, lease_id, lease_expires_at,
     status, started_at, frame_count, frame_count_complete
 ) VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8,$9,'active',$10,0,false)
 RETURNING id
 `,
 		runID, identity.AttemptID, observerUserID, isAdmin, reason,
-		identity.SessionEpoch, identity.AttachmentID, leaseID, expiresAt, now,
+		identity.SessionEpoch, identity.AttachmentSHA256, leaseID, expiresAt, now,
 	).Scan(&auditID)
 	if err != nil {
 		// The partial unique index makes a second active row impossible, so a
@@ -161,18 +162,19 @@ func (observation *BrowserObservation) Stop(
 	var sessionID uuid.UUID
 	var attemptID uuid.UUID
 	var epoch int64
-	var attachmentID uuid.UUID
-	// The Runtime Session comes from the live control row, not the audit: the
-	// audit records who observed what, while the Session is where the stop
-	// command has to be delivered. Leaving it unset made every stop a no-op that
-	// still closed the audit, so the Worker kept the lease until its TTL.
+	var sessionDigest string
+	var attachmentDigest string
+	// Joined on the Attempt as well as the Run. Joining on run_id alone could
+	// pair an old audit with a Runtime Session that has since been replaced, and
+	// the stop would be addressed to the wrong Session.
 	err := observation.pool.QueryRow(ctx, `
-SELECT a.lease_id, a.attempt_id, a.session_epoch, a.attachment_id,
-       c.runtime_session_id
+SELECT a.lease_id, a.attempt_id, a.session_epoch,
+       a.attachment_sha256, c.browser_session_sha256, c.runtime_session_id
 FROM browser_observation_audits a
-JOIN browser_observable_attempts c ON c.run_id = a.run_id
+JOIN browser_observable_attempts c
+  ON c.run_id = a.run_id AND c.attempt_id = a.attempt_id
 WHERE a.run_id = $1 AND a.status = 'active'
-`, runID).Scan(&leaseID, &attemptID, &epoch, &attachmentID, &sessionID)
+`, runID).Scan(&leaseID, &attemptID, &epoch, &attachmentDigest, &sessionDigest, &sessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -182,11 +184,12 @@ WHERE a.run_id = $1 AND a.status = 'active'
 	if observation.sender != nil && sessionID != uuid.Nil {
 		_ = observation.sender.SendBrowserObserverCommand(sessionID, BrowserObserverCommandPayload{
 			AttemptIdentity: BrowserObserverIdentity{
-				RunID:            runID,
-				AttemptID:        attemptID,
-				SessionEpoch:     epoch,
-				AttachmentID:     attachmentID,
-				RuntimeSessionID: sessionID,
+				RunID:                runID,
+				AttemptID:            attemptID,
+				SessionEpoch:         epoch,
+				BrowserSessionSHA256: sessionDigest,
+				AttachmentSHA256:     attachmentDigest,
+				RuntimeSessionID:     sessionID,
 			},
 			CommandID: uuid.New(),
 			Action:    BrowserObserverStop,
@@ -316,7 +319,8 @@ func (observation *BrowserObservation) ResolveIdentity(
 SELECT r.user_id,
        c.attempt_id,
        c.session_epoch,
-       c.attachment_id,
+       c.browser_session_sha256,
+       c.browser_attachment_sha256,
        c.runtime_session_id,
        COALESCE(s.features, ARRAY[]::text[])
 FROM runs r
@@ -327,7 +331,8 @@ WHERE r.id = $1
 		&ownerID,
 		&identity.AttemptID,
 		&identity.SessionEpoch,
-		&identity.AttachmentID,
+		&identity.BrowserSessionSHA256,
+		&identity.AttachmentSHA256,
 		&identity.RuntimeSessionID,
 		&features,
 	)
@@ -421,9 +426,13 @@ func (observation *BrowserObservation) HandleEvent(
 			_ = observation.RecordFrames(ctx, event.LeaseID, observation.frames.frameCount(runID))
 		}
 	case BrowserObserverStopped:
-		observation.closeAsync(runID, "worker_stopped")
+		observation.closeLeaseAsync(event.LeaseID, event.AttemptIdentity, "worker_stopped")
 	case BrowserObserverError:
-		observation.closeAsync(runID, boundedObservationEndReason(event.ErrorCode))
+		observation.closeLeaseAsync(
+			event.LeaseID,
+			event.AttemptIdentity,
+			boundedObservationEndReason(event.ErrorCode),
+		)
 	}
 	return BrowserObserverEventAckPayload{
 		AttemptIdentity: event.AttemptIdentity,
@@ -432,19 +441,64 @@ func (observation *BrowserObservation) HandleEvent(
 	}, nil
 }
 
-// closeAsync ends an observation off the caller's goroutine.
+// closeLeaseAsync ends one specific lease off the caller's goroutine.
 //
-// HandleEvent runs while the Runtime WebSocket holds its lifecycle lock, and
-// Stop sends a command that takes the same lock to read. Go's RWMutex is not
-// reentrant, so closing inline would deadlock the connection and the ack would
-// never be written. The Worker has already stopped in both of these cases, so
-// the command is only a confirmation and losing its ordering costs nothing.
-func (observation *BrowserObservation) closeAsync(runID uuid.UUID, endReason string) {
+// Naming the lease matters: a stopped event from lease A can arrive after the
+// user has already started lease B on the same Run, and closing "whatever this
+// Run is observing now" would tear down B. The Attempt is checked as well, so a
+// late event from a previous Attempt cannot close the current one either.
+//
+// It runs off the caller's goroutine because HandleEvent executes while the
+// Runtime WebSocket holds its lifecycle lock, and Stop takes that same lock
+// through the sender. Go's RWMutex is not reentrant, so closing inline would
+// deadlock the connection and the ack would never be written. The Worker has
+// already stopped in these cases, so the confirmation's ordering costs nothing.
+func (observation *BrowserObservation) closeLeaseAsync(
+	leaseID uuid.UUID,
+	identity BrowserObserverIdentity,
+	endReason string,
+) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = observation.closeLease(ctx, leaseID, identity, endReason)
+	}()
+}
+
+// closeRunAsync ends whatever lease a Run currently has. Only lifecycle
+// teardown uses it, where the Attempt itself is gone and no successor can exist.
+func (observation *BrowserObservation) closeRunAsync(runID uuid.UUID, endReason string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		_ = observation.Stop(ctx, runID, endReason)
 	}()
+}
+
+// closeLease closes exactly the named lease, refusing to touch a successor.
+func (observation *BrowserObservation) closeLease(
+	ctx context.Context,
+	leaseID uuid.UUID,
+	identity BrowserObserverIdentity,
+	endReason string,
+) error {
+	if observation == nil || observation.pool == nil {
+		return nil
+	}
+	var runID uuid.UUID
+	err := observation.pool.QueryRow(ctx, `
+SELECT run_id FROM browser_observation_audits
+WHERE lease_id = $1 AND attempt_id = $2 AND status = 'active'
+`, leaseID, identity.AttemptID).Scan(&runID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	count := observation.frames.closeLease(runID, leaseID)
+	_ = observation.RecordFrames(ctx, leaseID, count)
+	return observation.close(ctx, leaseID, endReason)
 }
 
 // WaitFrame serves one long poll.// WaitFrame serves one long poll. A nil frame with no error means the poll timed
@@ -525,40 +579,60 @@ func (observation *BrowserObservation) ProjectFromEvent(
 	switch phase {
 	case "ready":
 	case "closed", "failed":
-		// The Attempt is gone, so any observation of it must end rather than
-		// linger against an identity the Runtime no longer holds.
-		return observation.Stop(ctx, identity.RunID, "run_browser_closed")
+		// The Attempt is gone. Drop the projection so a later start cannot
+		// resolve a stale identity, and end any observation off this goroutine:
+		// this runs under the WebSocket lifecycle read lock and Stop takes it
+		// again through the sender, which Go's RWMutex does not allow.
+		if _, err := observation.pool.Exec(
+			ctx,
+			`DELETE FROM browser_observable_attempts WHERE run_id = $1`,
+			identity.RunID,
+		); err != nil {
+			return err
+		}
+		observation.closeRunAsync(identity.RunID, "run_browser_closed")
+		return nil
 	default:
 		return nil
 	}
 	if identity.RuntimeSessionID == nil {
 		return nil
 	}
-	browserSessionID, err := browserPayloadUUID(payload, "browser_session_id")
+	// The ready event publishes hashed identity, never the raw UUIDs. Reading
+	// the raw names here is what made this projection silently never write.
+	sessionDigest, err := browserPayloadSHA256(payload, "browser_session_sha256")
 	if err != nil {
-		return nil
+		return err
 	}
-	attachmentID, err := browserPayloadUUID(payload, "attachment_id")
+	attachmentDigest, err := browserPayloadSHA256(payload, "browser_attachment_sha256")
 	if err != nil {
-		return nil
+		return err
 	}
-	sessionEpoch, err := browserPayloadUint64(payload, "session_epoch")
+	sessionEpoch, err := browserPayloadUint64(payload, "browser_session_epoch")
 	if err != nil {
-		return nil
+		return err
 	}
 	_, err = observation.pool.Exec(ctx, `
 INSERT INTO browser_observable_attempts (
-    run_id, attempt_id, runtime_session_id, browser_session_id,
-    session_epoch, attachment_id, updated_at
+    run_id, attempt_id, runtime_session_id, browser_session_sha256,
+    session_epoch, browser_attachment_sha256, updated_at
 ) VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp())
 ON CONFLICT (run_id) DO UPDATE SET
     attempt_id = EXCLUDED.attempt_id,
     runtime_session_id = EXCLUDED.runtime_session_id,
-    browser_session_id = EXCLUDED.browser_session_id,
+    browser_session_sha256 = EXCLUDED.browser_session_sha256,
     session_epoch = EXCLUDED.session_epoch,
-    attachment_id = EXCLUDED.attachment_id,
+    browser_attachment_sha256 = EXCLUDED.browser_attachment_sha256,
     updated_at = clock_timestamp()
 `, identity.RunID, identity.AttemptID, *identity.RuntimeSessionID,
-		browserSessionID, sessionEpoch, attachmentID)
+		sessionDigest, sessionEpoch, attachmentDigest)
 	return err
+}
+
+func browserPayloadSHA256(payload map[string]any, key string) (string, error) {
+	value, _ := payload[key].(string)
+	if !validSHA256Hex(value) {
+		return "", fmt.Errorf("browser lifecycle %s is invalid", key)
+	}
+	return value, nil
 }

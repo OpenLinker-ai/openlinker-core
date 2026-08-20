@@ -268,6 +268,15 @@ func readInitializer(t *testing.T, path string) string {
 // reaches a state where every test passes and the deployment postflight rejects
 // the schema, which is the most expensive place to learn about it.
 func TestCoreSchemaShapeWasMeasuredForTheCurrentMigrationVersion(t *testing.T) {
+	if CoreUpgradeShapeVersion != CoreUpgradeVersion {
+		t.Fatalf(
+			"upgrade shape was measured for predecessor %d but the supported "+
+				"predecessor is %d: remeasure CoreUpgradeSchemaDigest and the "+
+				"upgrade counts against a clean version %d schema, then update "+
+				"CoreUpgradeShapeVersion with them",
+			CoreUpgradeShapeVersion, CoreUpgradeVersion, CoreUpgradeVersion,
+		)
+	}
 	if CoreShapeVersion != CoreVersion {
 		t.Fatalf(
 			"schema shape was measured for version %d but migrations are at %d: "+

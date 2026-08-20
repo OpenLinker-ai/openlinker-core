@@ -144,3 +144,16 @@ func (buffer *observationFrameBuffer) wait(
 		}
 	}
 }
+
+// closeLease closes a Run's buffer only when the named lease still owns it, so a
+// late teardown cannot drop the buffer a successor observation is filling.
+func (buffer *observationFrameBuffer) closeLease(runID, leaseID uuid.UUID) int64 {
+	buffer.mu.Lock()
+	live := buffer.live[runID]
+	if live == nil || live.leaseID != leaseID {
+		buffer.mu.Unlock()
+		return 0
+	}
+	buffer.mu.Unlock()
+	return buffer.close(runID)
+}

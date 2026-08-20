@@ -3,6 +3,7 @@ package runtime
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,11 +15,12 @@ import (
 
 func observerIdentity() BrowserObserverIdentity {
 	return BrowserObserverIdentity{
-		RunID:            uuid.New(),
-		AttemptID:        uuid.New(),
-		SessionEpoch:     3,
-		AttachmentID:     uuid.New(),
-		RuntimeSessionID: uuid.New(),
+		RunID:                uuid.New(),
+		AttemptID:            uuid.New(),
+		SessionEpoch:         3,
+		BrowserSessionSHA256: strings.Repeat("a", 64),
+		AttachmentSHA256:     strings.Repeat("b", 64),
+		RuntimeSessionID:     uuid.New(),
 	}
 }
 
@@ -57,7 +59,8 @@ func TestBrowserObserverCommandValidation(t *testing.T) {
 		"no lease":      func(c *BrowserObserverCommandPayload) { c.LeaseID = uuid.Nil },
 		"bad action":    func(c *BrowserObserverCommandPayload) { c.Action = "observe" },
 		"zero epoch":    func(c *BrowserObserverCommandPayload) { c.AttemptIdentity.SessionEpoch = 0 },
-		"no attachment": func(c *BrowserObserverCommandPayload) { c.AttemptIdentity.AttachmentID = uuid.Nil },
+		"no attachment": func(c *BrowserObserverCommandPayload) { c.AttemptIdentity.AttachmentSHA256 = "" },
+		"bad digest":    func(c *BrowserObserverCommandPayload) { c.AttemptIdentity.BrowserSessionSHA256 = "zz" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			command := observerCommand(BrowserObserverStart)

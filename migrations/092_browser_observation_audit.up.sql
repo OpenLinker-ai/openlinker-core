@@ -8,15 +8,21 @@ CREATE TABLE public.browser_observable_attempts (
     run_id uuid NOT NULL,
     attempt_id uuid NOT NULL,
     runtime_session_id uuid NOT NULL,
-    browser_session_id uuid NOT NULL,
+    -- Hashed, because the ready lifecycle event only ever publishes hashes.
+    browser_session_sha256 text NOT NULL,
     session_epoch bigint NOT NULL,
-    attachment_id uuid NOT NULL,
+    browser_attachment_sha256 text NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT browser_observable_attempts_pkey PRIMARY KEY (run_id),
     CONSTRAINT browser_observable_attempts_run_id_fkey
         FOREIGN KEY (run_id) REFERENCES public.runs(id) ON DELETE CASCADE,
     CONSTRAINT browser_observable_attempts_epoch_positive
-        CHECK (session_epoch > 0)
+        CHECK (session_epoch > 0),
+    CONSTRAINT browser_observable_attempts_digests_hex
+        CHECK (
+            browser_session_sha256 ~ '^[0-9a-f]{64}$'
+            AND browser_attachment_sha256 ~ '^[0-9a-f]{64}$'
+        )
 );
 
 -- Authenticated read-only observation is a separate capability from human
@@ -33,7 +39,7 @@ CREATE TABLE public.browser_observation_audits (
     observer_is_admin boolean DEFAULT false NOT NULL,
     reason text,
     session_epoch bigint NOT NULL,
-    attachment_id uuid NOT NULL,
+    attachment_sha256 text NOT NULL,
     lease_id uuid NOT NULL,
     -- Persisted so a Core that exits mid-observation can still be reconciled:
     -- without it a crashed observation stays active forever.

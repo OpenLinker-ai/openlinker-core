@@ -32,12 +32,18 @@ const (
 	BrowserObserverMaxFrameBytes      = 1 << 20
 )
 
+// BrowserObserverIdentity carries hashed Browser identity. The ready lifecycle
+// event publishes browser_session_sha256 and browser_attachment_sha256 and never
+// the underlying UUIDs, so Core cannot send raw IDs here without being told
+// something it is deliberately not told. The Worker rehashes its own identity to
+// verify, which is no weaker.
 type BrowserObserverIdentity struct {
-	RunID            uuid.UUID `json:"run_id"`
-	AttemptID        uuid.UUID `json:"attempt_id"`
-	SessionEpoch     int64     `json:"session_epoch"`
-	AttachmentID     uuid.UUID `json:"attachment_id"`
-	RuntimeSessionID uuid.UUID `json:"runtime_session_id"`
+	RunID                uuid.UUID `json:"run_id"`
+	AttemptID            uuid.UUID `json:"attempt_id"`
+	SessionEpoch         int64     `json:"session_epoch"`
+	BrowserSessionSHA256 string    `json:"browser_session_sha256"`
+	AttachmentSHA256     string    `json:"browser_attachment_sha256"`
+	RuntimeSessionID     uuid.UUID `json:"runtime_session_id"`
 }
 
 type BrowserObserverCommandPayload struct {
@@ -76,7 +82,9 @@ type BrowserObserverEventAckPayload struct {
 
 func (identity BrowserObserverIdentity) validate() error {
 	if identity.RunID == uuid.Nil || identity.AttemptID == uuid.Nil ||
-		identity.SessionEpoch < 1 || identity.AttachmentID == uuid.Nil ||
+		identity.SessionEpoch < 1 ||
+		!validSHA256Hex(identity.BrowserSessionSHA256) ||
+		!validSHA256Hex(identity.AttachmentSHA256) ||
 		identity.RuntimeSessionID == uuid.Nil {
 		return runtimeValidationError("browser observer identity is invalid", nil)
 	}

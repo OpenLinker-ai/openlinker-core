@@ -23,7 +23,12 @@ const (
 	// stale would pass every test and then fail the postflight shape check at
 	// deploy time. A test requires these two to match, turning that into a
 	// local failure with an explicit instruction.
-	CoreShapeVersion               int64 = 91
+	CoreShapeVersion int64 = 91
+	// CoreUpgradeShapeVersion is the predecessor version CoreUpgradeSchemaDigest
+	// and the upgrade counts were measured against. Raising CoreUpgradeVersion
+	// without remeasuring would make the upgrade path validate a predecessor
+	// against another version's fingerprint.
+	CoreUpgradeShapeVersion        int64 = 90
 	CoreUpgradeVersion             int64 = 91
 	CoreReviewedBridgeVersion      int64 = 88
 	CoreLegacyBridgeVersion        int64 = 86
