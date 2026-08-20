@@ -162,11 +162,17 @@ func (observation *BrowserObservation) Stop(
 	var attemptID uuid.UUID
 	var epoch int64
 	var attachmentID uuid.UUID
+	// The Runtime Session comes from the live control row, not the audit: the
+	// audit records who observed what, while the Session is where the stop
+	// command has to be delivered. Leaving it unset made every stop a no-op that
+	// still closed the audit, so the Worker kept the lease until its TTL.
 	err := observation.pool.QueryRow(ctx, `
-SELECT lease_id, attempt_id, session_epoch, attachment_id
-FROM browser_observation_audits
-WHERE run_id = $1 AND status = 'active'
-`, runID).Scan(&leaseID, &attemptID, &epoch, &attachmentID)
+SELECT a.lease_id, a.attempt_id, a.session_epoch, a.attachment_id,
+       c.runtime_session_id
+FROM browser_observation_audits a
+JOIN browser_run_controls c ON c.run_id = a.run_id
+WHERE a.run_id = $1 AND a.status = 'active'
+`, runID).Scan(&leaseID, &attemptID, &epoch, &attachmentID, &sessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -176,10 +182,11 @@ WHERE run_id = $1 AND status = 'active'
 	if observation.sender != nil && sessionID != uuid.Nil {
 		_ = observation.sender.SendBrowserObserverCommand(sessionID, BrowserObserverCommandPayload{
 			AttemptIdentity: BrowserObserverIdentity{
-				RunID:        runID,
-				AttemptID:    attemptID,
-				SessionEpoch: epoch,
-				AttachmentID: attachmentID,
+				RunID:            runID,
+				AttemptID:        attemptID,
+				SessionEpoch:     epoch,
+				AttachmentID:     attachmentID,
+				RuntimeSessionID: sessionID,
 			},
 			CommandID: uuid.New(),
 			Action:    BrowserObserverStop,
@@ -450,4 +457,36 @@ func boundedObservationEndReason(code string) string {
 		return code[:100]
 	}
 	return code
+}
+
+// AuthorizeOwner rejects a caller who does not own the Run. Every observation
+// endpoint calls it, including the read-only ones: state reveals that a Run is
+// being watched and the frame endpoint returns the page itself, so neither may
+// rely on start having been authorized earlier.
+func (observation *BrowserObservation) AuthorizeOwner(
+	ctx context.Context,
+	runID uuid.UUID,
+	callerUserID uuid.UUID,
+) error {
+	if observation == nil || observation.pool == nil {
+		return ErrObservationChannelUnavailable
+	}
+	var ownerID uuid.UUID
+	err := observation.pool.QueryRow(
+		ctx,
+		`SELECT user_id FROM runs WHERE id = $1`,
+		runID,
+	).Scan(&ownerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// A missing Run and someone else's Run are indistinguishable to the
+		// caller on purpose: otherwise this endpoint enumerates Run IDs.
+		return ErrObservationForbidden
+	}
+	if err != nil {
+		return err
+	}
+	if ownerID != callerUserID {
+		return ErrObservationForbidden
+	}
+	return nil
 }

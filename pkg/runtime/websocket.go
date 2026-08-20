@@ -669,6 +669,8 @@ func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 		err = c.handleDrain(envelope)
 	case RuntimeMessageBrowserViewerFrame:
 		err = c.handleBrowserViewerFrame(envelope)
+	case RuntimeMessageBrowserObserverEvent:
+		err = c.handleBrowserObserverEvent(envelope)
 	default:
 		err = runtimeTransportValidationError()
 	}
@@ -677,6 +679,43 @@ func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 		return false
 	}
 	return c.replyErrorAndMaybeClose(envelope, err, false)
+}
+
+// handleBrowserObserverEvent consumes one Worker event and returns its ack. The
+// Worker window is a single unacknowledged event, so failing to ack here stops
+// the observation rather than dropping one frame.
+func (c *runtimeWSConnection) handleBrowserObserverEvent(
+	envelope RuntimeEnvelope,
+) error {
+	if c.controller.dependencies.BrowserObservation == nil {
+		return runtimeUnavailableError()
+	}
+	payload, err := DecodeRuntimeMessagePayload[BrowserObserverEventPayload](
+		envelope,
+		RuntimeMessageBrowserObserverEvent,
+	)
+	if err != nil {
+		return err
+	}
+	// The Session on the wire must be the one this connection authenticated as,
+	// or a Worker could report frames under another Runtime's identity.
+	if payload.AttemptIdentity.RuntimeSessionID !=
+		c.sessionPrincipal.RuntimeSessionID {
+		return runtimeTransportValidationError()
+	}
+	ack, err := c.controller.dependencies.BrowserObservation.HandleEvent(
+		c.ctx,
+		payload,
+	)
+	if err != nil {
+		return runtimeTransportValidationError()
+	}
+	return sendRuntimeWSReply(
+		c,
+		envelope,
+		RuntimeMessageBrowserObserverEventAck,
+		ack,
+	)
 }
 
 func (c *runtimeWSConnection) handleBrowserViewerFrame(

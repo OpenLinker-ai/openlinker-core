@@ -1257,9 +1257,20 @@ type browserObservationStartRequest struct {
 }
 
 func (h *Handler) GetBrowserObservation(c echo.Context) error {
-	_, runID, err := h.browserObservationIdentity(c)
+	userID, runID, err := h.browserObservationIdentity(c)
 	if err != nil {
 		return err
+	}
+	// Reading observation state exposes whether someone is watching a Run and
+	// how many frames they have seen, so it needs the same owner check as
+	// starting one. Resolving the JWT alone would let any signed-in user probe
+	// any Run by UUID.
+	if err := h.browserObservation.AuthorizeOwner(
+		c.Request().Context(),
+		runID,
+		userID,
+	); err != nil {
+		return browserObservationHTTPError(err)
 	}
 	state, err := h.browserObservation.State(c.Request().Context(), runID)
 	if err != nil {
@@ -1314,9 +1325,16 @@ func (h *Handler) startBrowserObservation(c echo.Context, isAdmin bool) error {
 }
 
 func (h *Handler) StopBrowserObservation(c echo.Context) error {
-	_, runID, err := h.browserObservationIdentity(c)
+	userID, runID, err := h.browserObservationIdentity(c)
 	if err != nil {
 		return err
+	}
+	if err := h.browserObservation.AuthorizeOwner(
+		c.Request().Context(),
+		runID,
+		userID,
+	); err != nil {
+		return browserObservationHTTPError(err)
 	}
 	if err := h.browserObservation.Stop(
 		c.Request().Context(),
@@ -1366,9 +1384,18 @@ func browserObservationHTTPError(err error) error {
 }
 
 func (h *Handler) GetBrowserObservationFrame(c echo.Context) error {
-	_, runID, err := h.browserObservationIdentity(c)
+	userID, runID, err := h.browserObservationIdentity(c)
 	if err != nil {
 		return err
+	}
+	// The frame endpoint is the one that actually returns page pixels, so it
+	// carries the same check rather than trusting that start already ran.
+	if err := h.browserObservation.AuthorizeOwner(
+		c.Request().Context(),
+		runID,
+		userID,
+	); err != nil {
+		return browserObservationHTTPError(err)
 	}
 	after, err := strconv.ParseInt(c.QueryParam("after"), 10, 64)
 	if err != nil || after < 0 {

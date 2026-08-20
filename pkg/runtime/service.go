@@ -74,20 +74,21 @@ type TaskCallbackEnqueuer interface {
 // network I/O. Progress is written through EventStore and terminal facts only
 // through ResultFinalizer (or the database deadline reconciler after a crash).
 type Service struct {
-	queries         *db.Queries
-	requirements    runRequirementQueries
-	pool            *pgxpool.Pool
-	cfg             *config.Config
-	httpClient      *http.Client
-	taskCallbackSvc TaskCallbackEnqueuer
-	eventStore      *EventStore
-	resultFinalizer *ResultFinalizer
-	cancellation    *RuntimeCancellationCoordinator
-	coreInstanceID  uuid.UUID
-	coreExecutions  *coreAttemptRegistry
-	effectWorker    *RunEffectWorker
-	bestEffortDBSem chan struct{}
-	browserControl  *BrowserHumanControl
+	queries            *db.Queries
+	requirements       runRequirementQueries
+	pool               *pgxpool.Pool
+	cfg                *config.Config
+	httpClient         *http.Client
+	taskCallbackSvc    TaskCallbackEnqueuer
+	eventStore         *EventStore
+	resultFinalizer    *ResultFinalizer
+	cancellation       *RuntimeCancellationCoordinator
+	coreInstanceID     uuid.UUID
+	coreExecutions     *coreAttemptRegistry
+	effectWorker       *RunEffectWorker
+	bestEffortDBSem    chan struct{}
+	browserControl     *BrowserHumanControl
+	browserObservation *BrowserObservation
 	// Derived once from Config.EffectiveRuntimeMasterSecret. The root secret is
 	// never copied into Run metadata or exposed to a Runtime worker.
 	runtimePrincipalScopeKey []byte
@@ -184,6 +185,7 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		httpClient:               endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
 		runtimePrincipalScopeKey: deriveRuntimePrincipalScopeKey(cfg),
 		browserControl:           NewBrowserHumanControl(pool),
+		browserObservation:       NewBrowserObservation(pool, nil, uuid.Nil),
 	}
 	svc.resultFinalizer = NewResultFinalizer(pool, nil, nil)
 	svc.cancellation = NewRuntimeCancellationCoordinator(pool)
@@ -199,6 +201,13 @@ func (s *Service) ConfigureCoreRuntime(coreInstanceID uuid.UUID) {
 		return
 	}
 	s.coreInstanceID = coreInstanceID
+}
+
+func (s *Service) BrowserObservation() *BrowserObservation {
+	if s == nil {
+		return nil
+	}
+	return s.browserObservation
 }
 
 func (s *Service) BrowserHumanControl() *BrowserHumanControl {

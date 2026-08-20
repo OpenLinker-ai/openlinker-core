@@ -211,6 +211,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 		opts.RuntimeSignalBus, eventWake,
 	)
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
+	// Observation mounts on JWT only, not the hybrid group: watching a live
+	// screen is a person at a session, not a scriptable long-lived token.
+	runtimeHandler.RegisterObservation(api, jwtMiddleware)
 	runtimeHandler.RegisterAgentRuntime(api)
 	if opts.AdminMiddleware != nil {
 		runtimeHandler.RegisterAdmin(api, jwtMiddleware, opts.AdminMiddleware)
@@ -560,6 +563,7 @@ func configureRuntime(
 		SessionLeases:       sessionLeases,
 		AdmissionLimiter:    runtime.NewRuntimeAdmissionLimiter(runtime.RuntimeAdmissionLimitConfig{}),
 		BrowserControl:      runtimeService.BrowserHumanControl(),
+		BrowserObservation:  runtimeService.BrowserObservation(),
 		CoreInstanceID:      coreInstanceID,
 		WebSocketConcurrency: runtime.RuntimeWebSocketConcurrencyConfig{
 			ConnectionMaxInflight: cfg.RuntimeWSConnectionMaxInflight,
