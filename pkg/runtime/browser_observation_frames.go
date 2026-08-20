@@ -102,6 +102,24 @@ func (buffer *observationFrameBuffer) close(runID uuid.UUID) int64 {
 	return live.count
 }
 
+// owns reports whether an event names the observation this Run is actually
+// running: the same lease, the same start command, and the same Attempt
+// identity. Every event kind is checked, not just frames -- a lifecycle event
+// from a superseded command would otherwise close the observation that replaced
+// it.
+func (buffer *observationFrameBuffer) owns(
+	runID, leaseID, commandID uuid.UUID,
+	identity BrowserObserverIdentity,
+) bool {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	live := buffer.live[runID]
+	return live != nil &&
+		live.leaseID == leaseID &&
+		live.commandID == commandID &&
+		live.identity == identity
+}
+
 // publish accepts a frame only for the lease that currently owns the Run and
 // only if it advances the sequence. A frame from a superseded lease belongs to
 // an observation that has already ended.

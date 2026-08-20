@@ -728,6 +728,20 @@ func (observation *BrowserObservation) HandleEvent(
 		return BrowserObserverEventAckPayload{}, err
 	}
 	runID := event.AttemptIdentity.RunID
+	// Every kind is correlated, not only frames. A stopped or error event from a
+	// superseded command names a lease that may still look current, and acting
+	// on it would close the observation that replaced it.
+	if !observation.frames.owns(
+		runID,
+		event.LeaseID,
+		event.CommandID,
+		event.AttemptIdentity,
+	) {
+		return BrowserObserverEventAckPayload{}, runtimeValidationError(
+			"browser observer event does not name a live observation",
+			nil,
+		)
+	}
 	switch event.Kind {
 	case BrowserObserverStarted:
 		observation.resolveHandshake(event.LeaseID, "")

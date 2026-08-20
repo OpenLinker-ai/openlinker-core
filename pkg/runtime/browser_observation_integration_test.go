@@ -116,6 +116,19 @@ func browserReadyPayload(epoch int64, session, attachment string) map[string]any
 	}
 }
 
+// observationServiceWithQuota builds a service whose ceiling is set explicitly.
+// The quota is only meaningfully tested against the real start path: the window
+// a non-atomic check leaves open is the database round trip, not the few
+// nanoseconds inside the buffer.
+func observationServiceWithQuota(t *testing.T, pool *pgxpool.Pool, quota int) *runtime.Service {
+	t.Helper()
+	cfg := newTestConfig()
+	cfg.BrowserObservationQuota = quota
+	service := runtime.NewService(pool, cfg)
+	service.ConfigureCoreRuntime(uuid.New())
+	return service
+}
+
 func observationFixture(t *testing.T) (
 	*pgxpool.Pool,
 	*runtime.Service,
@@ -577,4 +590,164 @@ func observationStartCommandID(t *testing.T, pool *pgxpool.Pool, leaseID uuid.UU
 		leaseID,
 	).Scan(&commandID))
 	return commandID
+}
+
+// Concurrent starts on different Runs must not all pass a capacity check and
+// then all take a slot. The ceiling is one, so exactly one start may win.
+func TestBrowserObservationQuotaHoldsUnderConcurrentStarts(t *testing.T) {
+	pool := setupTestDB(t)
+	requireReliableRuntimeSchema(t, pool)
+	service := observationServiceWithQuota(t, pool, 1)
+	observation := service.BrowserObservation()
+	capture := &observerCommandCapture{
+		observation: observation,
+		reply:       runtime.BrowserObserverStarted,
+	}
+	observation.BindCommandSender(capture)
+
+	const racers = 8
+	identities := make([]runtime.BrowserObserverIdentity, 0, racers)
+	owners := make([]uuid.UUID, 0, racers)
+	for range racers {
+		fixture := insertEventStoreExecutingAttempt(
+			t, pool, 5*time.Minute, runtime.BrowserObservationFeature,
+		)
+		appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+		var ownerID uuid.UUID
+		require.NoError(t, pool.QueryRow(
+			context.Background(),
+			`SELECT user_id FROM runs WHERE id = $1`,
+			fixture.identity.RunID,
+		).Scan(&ownerID))
+		identity, err := observation.ResolveIdentity(
+			context.Background(), fixture.identity.RunID, ownerID, false,
+		)
+		require.NoError(t, err)
+		identities = append(identities, identity)
+		owners = append(owners, ownerID)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, racers)
+	var ready, done sync.WaitGroup
+	ready.Add(racers)
+	done.Add(racers)
+	for index := range racers {
+		go func() {
+			defer done.Done()
+			ready.Done()
+			<-start
+			_, err := observation.Start(
+				context.Background(),
+				identities[index].RunID,
+				owners[index],
+				false,
+				"",
+				identities[index],
+			)
+			results <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	done.Wait()
+	close(results)
+
+	admitted := 0
+	for err := range results {
+		if err == nil {
+			admitted++
+			continue
+		}
+		require.ErrorIs(t, err, runtime.ErrObservationBusy)
+	}
+	require.Equal(t, 1, admitted, "a ceiling of one admitted more than one observation")
+
+	// The refused starts must not leave audits behind for Runs nobody is
+	// watching, or those Runs stay unobservable until the lease expires.
+	var active int
+	require.NoError(t, pool.QueryRow(context.Background(), `
+SELECT count(*) FROM browser_observation_audits WHERE status = 'active'
+`).Scan(&active))
+	require.Equal(t, 1, active)
+}
+
+// A stopped or error event carries no page content, so it was correlated on the
+// lease alone. That is not enough: a Worker still answering a superseded command
+// names a lease that can look current, and acting on it closes the observation
+// that replaced it.
+func TestBrowserObservationLifecycleEventsAreCorrelated(t *testing.T) {
+	pool, service, fixture, _, ownerID := observationFixture(t)
+	observation := service.BrowserObservation()
+	appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+
+	identity, err := observation.ResolveIdentity(
+		context.Background(), fixture.identity.RunID, ownerID, false,
+	)
+	require.NoError(t, err)
+	state, err := observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+	commandID := observationStartCommandID(t, pool, state.LeaseID)
+
+	drifted := identity
+	drifted.SessionEpoch++
+	for name, event := range map[string]runtime.BrowserObserverEventPayload{
+		"stopped from another command": {
+			AttemptIdentity: identity,
+			CommandID:       uuid.New(),
+			LeaseID:         state.LeaseID,
+			EventSeq:        2,
+			Kind:            runtime.BrowserObserverStopped,
+		},
+		"error from another command": {
+			AttemptIdentity: identity,
+			CommandID:       uuid.New(),
+			LeaseID:         state.LeaseID,
+			EventSeq:        3,
+			Kind:            runtime.BrowserObserverError,
+			ErrorCode:       "browser_unavailable",
+		},
+		"stopped from another attempt": {
+			AttemptIdentity: drifted,
+			CommandID:       commandID,
+			LeaseID:         state.LeaseID,
+			EventSeq:        4,
+			Kind:            runtime.BrowserObserverStopped,
+		},
+		"started from another command": {
+			AttemptIdentity: identity,
+			CommandID:       uuid.New(),
+			LeaseID:         state.LeaseID,
+			EventSeq:        5,
+			Kind:            runtime.BrowserObserverStarted,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, handleErr := observation.HandleEvent(context.Background(), event)
+			require.Error(t, handleErr)
+		})
+	}
+
+	// None of them may have ended the observation that is actually running.
+	live, err := observation.State(context.Background(), fixture.identity.RunID)
+	require.NoError(t, err)
+	require.True(t, live.Active)
+	require.Equal(t, state.LeaseID, live.LeaseID)
+
+	// The matching stop still works, so the correlation is not simply refusing
+	// everything.
+	_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
+		AttemptIdentity: identity,
+		CommandID:       commandID,
+		LeaseID:         state.LeaseID,
+		EventSeq:        6,
+		Kind:            runtime.BrowserObserverStopped,
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		ended, stateErr := observation.State(context.Background(), fixture.identity.RunID)
+		return stateErr == nil && !ended.Active
+	}, 5*time.Second, 50*time.Millisecond)
 }
