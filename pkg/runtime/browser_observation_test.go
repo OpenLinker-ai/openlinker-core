@@ -443,3 +443,79 @@ func TestObservationFrameCarriesNoIdentity(t *testing.T) {
 		}
 	}
 }
+
+// A tombstone exists to settle the one terminal event that races an explicit
+// stop. It must not answer that event twice, and it must not still be answering
+// long after the observation ended.
+func TestObservationRetiredTombstonesAreBounded(t *testing.T) {
+	t.Parallel()
+	clock := time.Now()
+	buffer := newObservationFrameBuffer(4)
+	buffer.now = func() time.Time { return clock }
+	identity := observationBufferIdentity()
+	leaseID := uuid.New()
+	commandID := uuid.New()
+	buffer.open(identity.RunID, leaseID, commandID, identity)
+	if !buffer.admit(identity.RunID, leaseID, commandID, identity, 4) {
+		t.Fatal("a live event was not admitted")
+	}
+	buffer.close(identity.RunID)
+
+	// The stopped that trails the stop settles once.
+	if !buffer.settleRetired(leaseID, commandID, identity, 5) {
+		t.Fatal("the terminal event racing the stop was not settled")
+	}
+	if buffer.settleRetired(leaseID, commandID, identity, 5) {
+		t.Fatal("the same terminal event settled twice")
+	}
+	// A sequence from before the observation ended is a replay either way.
+	if buffer.settleRetired(leaseID, commandID, identity, 4) {
+		t.Fatal("a sequence already consumed while live was settled")
+	}
+	// Another command or another Attempt is not this observation.
+	if buffer.settleRetired(leaseID, uuid.New(), identity, 6) {
+		t.Fatal("a terminal event naming another command was settled")
+	}
+	drifted := identity
+	drifted.SessionEpoch++
+	if buffer.settleRetired(leaseID, commandID, drifted, 6) {
+		t.Fatal("a terminal event naming another Attempt was settled")
+	}
+
+	clock = clock.Add(observationRetiredTTL + time.Second)
+	if buffer.settleRetired(leaseID, commandID, identity, 7) {
+		t.Fatal("a tombstone outside its window still settled")
+	}
+	// And it is dropped rather than left to be re-checked forever.
+	buffer.mu.Lock()
+	_, known := buffer.retired[leaseID]
+	order := len(buffer.retiredOrder)
+	buffer.mu.Unlock()
+	if known || order != 0 {
+		t.Fatalf("an expired tombstone was kept: known=%v order=%d", known, order)
+	}
+}
+
+// The lease check exists so a teardown can only close the observation it names.
+// Checking and closing under separate locks lets a successor open in the gap and
+// be closed by its predecessor's teardown.
+func TestObservationCloseLeaseOnlyClosesItsOwn(t *testing.T) {
+	t.Parallel()
+	buffer := newObservationFrameBuffer(4)
+	identity := observationBufferIdentity()
+	successor := uuid.New()
+	successorCommand := uuid.New()
+	buffer.open(identity.RunID, uuid.New(), uuid.New(), identity)
+	buffer.open(identity.RunID, successor, successorCommand, identity)
+
+	if closed := buffer.closeLease(identity.RunID, uuid.New()); closed != 0 {
+		t.Fatal("a teardown for an unrelated lease closed something")
+	}
+	if !buffer.admit(identity.RunID, successor, successorCommand, identity, 1) {
+		t.Fatal("the successor observation was closed by another lease teardown")
+	}
+	buffer.closeLease(identity.RunID, successor)
+	if buffer.admit(identity.RunID, successor, successorCommand, identity, 2) {
+		t.Fatal("the successor survived its own teardown")
+	}
+}

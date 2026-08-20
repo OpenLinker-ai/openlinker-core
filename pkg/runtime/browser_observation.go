@@ -795,8 +795,9 @@ func (observation *BrowserObservation) HandleEvent(
 // of every observation into a protocol failure on the Worker. Acknowledging is
 // safe precisely because nothing is matched: no state is touched. It is narrowed
 // to leases this process actually issued, named by the same command and identity
-// they were issued with, so it settles the race it exists for and not any
-// terminal event that happens to arrive.
+// they were issued with, inside the window such an event can legitimately
+// arrive in and with a sequence not settled before, so it settles the race it
+// exists for and not any terminal event that happens to arrive.
 //
 // Everything else is refused. A frame carries page content and must never be
 // accepted under an observation Core cannot identify; a started for an unknown
@@ -807,10 +808,11 @@ func (observation *BrowserObservation) acknowledgeUnmatchedEvent(
 ) (BrowserObserverEventAckPayload, error) {
 	switch event.Kind {
 	case BrowserObserverStopped, BrowserObserverError:
-		if observation.frames.wasRetired(
+		if observation.frames.settleRetired(
 			event.LeaseID,
 			event.CommandID,
 			event.AttemptIdentity,
+			event.EventSeq,
 		) {
 			return BrowserObserverEventAckPayload{
 				AttemptIdentity: event.AttemptIdentity,

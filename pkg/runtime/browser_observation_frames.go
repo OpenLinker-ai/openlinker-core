@@ -58,16 +58,29 @@ type observationLiveFrame struct {
 type retiredObservation struct {
 	commandID uuid.UUID
 	identity  BrowserObserverIdentity
+	// The last sequence this observation consumed while it was live, advanced
+	// again by each settle. Without it a terminal event can be replayed for as
+	// long as the tombstone survives.
+	lastEventSeq int64
+	retiredAt    time.Time
 }
 
-// How many ended observations are remembered. A terminal event follows its stop
-// by one round trip, so this only has to outlive that; it is a bound, not a
-// history.
-const observationRetiredLimit = 256
+const (
+	// How many ended observations are remembered. A terminal event follows its
+	// stop by one round trip, so this only has to outlive that; it is a bound,
+	// not a history.
+	observationRetiredLimit = 256
+	// And for no longer than this. The count alone is not a bound: on a quiet
+	// Core a tombstone could survive for days and keep answering for a lease
+	// that ended long ago.
+	observationRetiredTTL = 2 * time.Minute
+)
 
 type observationFrameBuffer struct {
-	mu           sync.Mutex
-	quota        int
+	mu    sync.Mutex
+	quota int
+	// Injected so the tombstone window can be tested without waiting it out.
+	now          func() time.Time
 	live         map[uuid.UUID]*observationLiveFrame
 	retired      map[uuid.UUID]retiredObservation
 	retiredOrder []uuid.UUID
@@ -76,6 +89,7 @@ type observationFrameBuffer struct {
 func newObservationFrameBuffer(quota int) *observationFrameBuffer {
 	return &observationFrameBuffer{
 		quota:   quota,
+		now:     time.Now,
 		live:    make(map[uuid.UUID]*observationLiveFrame),
 		retired: make(map[uuid.UUID]retiredObservation),
 	}
@@ -115,6 +129,11 @@ func (buffer *observationFrameBuffer) open(
 func (buffer *observationFrameBuffer) close(runID uuid.UUID) int64 {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
+	return buffer.closeLocked(runID)
+}
+
+// closeLocked is close without taking the lock. Callers hold it.
+func (buffer *observationFrameBuffer) closeLocked(runID uuid.UUID) int64 {
 	live := buffer.live[runID]
 	if live == nil {
 		return 0
@@ -131,8 +150,10 @@ func (buffer *observationFrameBuffer) retire(live *observationLiveFrame) {
 		return
 	}
 	buffer.retired[live.leaseID] = retiredObservation{
-		commandID: live.commandID,
-		identity:  live.identity,
+		commandID:    live.commandID,
+		identity:     live.identity,
+		lastEventSeq: live.lastEventSeq,
+		retiredAt:    buffer.now(),
 	}
 	buffer.retiredOrder = append(buffer.retiredOrder, live.leaseID)
 	if len(buffer.retiredOrder) > observationRetiredLimit {
@@ -141,16 +162,46 @@ func (buffer *observationFrameBuffer) retire(live *observationLiveFrame) {
 	}
 }
 
-// wasRetired reports whether a lease is one this process opened and has since
-// ended, named by the same command and identity it was opened with.
-func (buffer *observationFrameBuffer) wasRetired(
+// settleRetired reports whether a terminal event may be acknowledged without
+// acting: the lease must be one this process opened and has since ended, named
+// by the same command and identity, still inside the window a terminal event
+// can legitimately arrive in, and carrying a sequence that has not been settled
+// before. The sequence is consumed here, so the same event cannot settle twice.
+func (buffer *observationFrameBuffer) settleRetired(
 	leaseID, commandID uuid.UUID,
 	identity BrowserObserverIdentity,
+	eventSeq int64,
 ) bool {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
 	retired, known := buffer.retired[leaseID]
-	return known && retired.commandID == commandID && retired.identity == identity
+	if !known || retired.commandID != commandID || retired.identity != identity {
+		return false
+	}
+	if buffer.now().Sub(retired.retiredAt) > observationRetiredTTL {
+		buffer.forgetRetired(leaseID)
+		return false
+	}
+	if eventSeq <= retired.lastEventSeq {
+		return false
+	}
+	retired.lastEventSeq = eventSeq
+	buffer.retired[leaseID] = retired
+	return true
+}
+
+// forgetRetired drops one tombstone. Callers hold the lock.
+func (buffer *observationFrameBuffer) forgetRetired(leaseID uuid.UUID) {
+	delete(buffer.retired, leaseID)
+	for index, retired := range buffer.retiredOrder {
+		if retired == leaseID {
+			buffer.retiredOrder = append(
+				buffer.retiredOrder[:index],
+				buffer.retiredOrder[index+1:]...,
+			)
+			return
+		}
+	}
 }
 
 // admit decides whether an event may be acted on, and consumes its sequence in
@@ -290,13 +341,15 @@ func (buffer *observationFrameBuffer) wait(
 // late teardown cannot drop the buffer a successor observation is filling.
 func (buffer *observationFrameBuffer) closeLease(runID, leaseID uuid.UUID) int64 {
 	buffer.mu.Lock()
-	live := buffer.live[runID]
-	if live == nil || live.leaseID != leaseID {
-		buffer.mu.Unlock()
+	defer buffer.mu.Unlock()
+	// Checked and closed under one lock. Releasing between the two lets a
+	// successor observation open for this Run in the gap and be closed by a
+	// teardown that was only ever entitled to close its predecessor -- which is
+	// the exact bug this lease check exists to prevent.
+	if live := buffer.live[runID]; live == nil || live.leaseID != leaseID {
 		return 0
 	}
-	buffer.mu.Unlock()
-	return buffer.close(runID)
+	return buffer.closeLocked(runID)
 }
 
 // count reports how many observations this instance is holding open, which is
