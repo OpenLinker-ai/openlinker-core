@@ -693,22 +693,22 @@ func TestBrowserObservationLifecycleEventsAreCorrelated(t *testing.T) {
 
 	drifted := identity
 	drifted.SessionEpoch++
-	// A terminal event that names nothing live is settled rather than refused --
-	// an ordinary stop always produces one -- but it must still not act. A
-	// started that names nothing live is refused, because it means the Worker
-	// believes it is observing something this Core has torn down.
+	// While the observation is live, none of these name it, and none of their
+	// leases have been retired here, so every one is refused. The narrow case
+	// that is settled instead -- a terminal event for a lease this process
+	// issued and has since ended -- is covered by the explicit stop test.
 	uncorrelated := map[string]struct {
 		event     runtime.BrowserObserverEventPayload
 		wantError bool
 	}{
-		"stopped from another command": {event: runtime.BrowserObserverEventPayload{
+		"stopped from another command": {wantError: true, event: runtime.BrowserObserverEventPayload{
 			AttemptIdentity: identity,
 			CommandID:       uuid.New(),
 			LeaseID:         state.LeaseID,
 			EventSeq:        2,
 			Kind:            runtime.BrowserObserverStopped,
 		}},
-		"error from another command": {event: runtime.BrowserObserverEventPayload{
+		"error from another command": {wantError: true, event: runtime.BrowserObserverEventPayload{
 			AttemptIdentity: identity,
 			CommandID:       uuid.New(),
 			LeaseID:         state.LeaseID,
@@ -716,7 +716,7 @@ func TestBrowserObservationLifecycleEventsAreCorrelated(t *testing.T) {
 			Kind:            runtime.BrowserObserverError,
 			ErrorCode:       "browser_unavailable",
 		}},
-		"stopped from another attempt": {event: runtime.BrowserObserverEventPayload{
+		"stopped from another attempt": {wantError: true, event: runtime.BrowserObserverEventPayload{
 			AttemptIdentity: drifted,
 			CommandID:       commandID,
 			LeaseID:         state.LeaseID,
@@ -798,6 +798,17 @@ func TestBrowserObservationExplicitStopSettlesTheWorkerStopped(t *testing.T) {
 	require.NoError(t, err, "the Worker's stopped must settle rather than fail")
 	require.Equal(t, int64(2), ack.EventSeq)
 
+	// A terminal event for a lease this Core never issued is refused even after
+	// the observation ended: the settle is for the race, not for any stopped.
+	_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
+		AttemptIdentity: identity,
+		CommandID:       uuid.New(),
+		LeaseID:         uuid.New(),
+		EventSeq:        7,
+		Kind:            runtime.BrowserObserverStopped,
+	})
+	require.Error(t, err)
+
 	// A late frame is still refused: acknowledging a terminal event is not the
 	// same as accepting page content under an observation that has ended.
 	captured := time.Now().UTC()
@@ -867,7 +878,9 @@ func TestBrowserObservationRejectsReplayedEventSequences(t *testing.T) {
 	require.Error(t, err, "a regressing sequence must not be accepted")
 
 	// A lifecycle event carries no content, which is exactly why its sequence was
-	// never checked before. A stale stopped must not end the live observation.
+	// never checked before. A stale stopped against a live observation is a
+	// replay, so it is refused, and above all it must not end that observation.
+	// The settle path is only for a lease that has already been retired here.
 	_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
 		AttemptIdentity: identity,
 		CommandID:       commandID,
@@ -875,7 +888,7 @@ func TestBrowserObservationRejectsReplayedEventSequences(t *testing.T) {
 		EventSeq:        3,
 		Kind:            runtime.BrowserObserverStopped,
 	})
-	require.NoError(t, err, "a stale terminal event settles rather than fails")
+	require.Error(t, err, "a replayed terminal event must not be accepted")
 	live, err := observation.State(context.Background(), fixture.identity.RunID)
 	require.NoError(t, err)
 	require.True(t, live.Active, "a replayed stopped ended the live observation")

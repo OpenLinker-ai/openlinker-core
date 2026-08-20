@@ -51,16 +51,33 @@ type observationLiveFrame struct {
 	waiter int64
 }
 
+// retiredObservation is what an observation this process opened leaves behind
+// when it ends. It exists only so a terminal event that arrives after the fact
+// can be recognised as ours and settled, instead of being answered by a rule
+// that would settle any terminal event at all.
+type retiredObservation struct {
+	commandID uuid.UUID
+	identity  BrowserObserverIdentity
+}
+
+// How many ended observations are remembered. A terminal event follows its stop
+// by one round trip, so this only has to outlive that; it is a bound, not a
+// history.
+const observationRetiredLimit = 256
+
 type observationFrameBuffer struct {
-	mu    sync.Mutex
-	quota int
-	live  map[uuid.UUID]*observationLiveFrame
+	mu           sync.Mutex
+	quota        int
+	live         map[uuid.UUID]*observationLiveFrame
+	retired      map[uuid.UUID]retiredObservation
+	retiredOrder []uuid.UUID
 }
 
 func newObservationFrameBuffer(quota int) *observationFrameBuffer {
 	return &observationFrameBuffer{
-		quota: quota,
-		live:  make(map[uuid.UUID]*observationLiveFrame),
+		quota:   quota,
+		live:    make(map[uuid.UUID]*observationLiveFrame),
+		retired: make(map[uuid.UUID]retiredObservation),
 	}
 }
 
@@ -81,6 +98,7 @@ func (buffer *observationFrameBuffer) open(
 		return false
 	}
 	if previous := buffer.live[runID]; previous != nil {
+		buffer.retire(previous)
 		close(previous.notify)
 	}
 	buffer.live[runID] = &observationLiveFrame{
@@ -102,8 +120,37 @@ func (buffer *observationFrameBuffer) close(runID uuid.UUID) int64 {
 		return 0
 	}
 	delete(buffer.live, runID)
+	buffer.retire(live)
 	close(live.notify)
 	return live.count
+}
+
+// retire remembers an ended observation. Callers hold the lock.
+func (buffer *observationFrameBuffer) retire(live *observationLiveFrame) {
+	if _, known := buffer.retired[live.leaseID]; known {
+		return
+	}
+	buffer.retired[live.leaseID] = retiredObservation{
+		commandID: live.commandID,
+		identity:  live.identity,
+	}
+	buffer.retiredOrder = append(buffer.retiredOrder, live.leaseID)
+	if len(buffer.retiredOrder) > observationRetiredLimit {
+		delete(buffer.retired, buffer.retiredOrder[0])
+		buffer.retiredOrder = buffer.retiredOrder[1:]
+	}
+}
+
+// wasRetired reports whether a lease is one this process opened and has since
+// ended, named by the same command and identity it was opened with.
+func (buffer *observationFrameBuffer) wasRetired(
+	leaseID, commandID uuid.UUID,
+	identity BrowserObserverIdentity,
+) bool {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	retired, known := buffer.retired[leaseID]
+	return known && retired.commandID == commandID && retired.identity == identity
 }
 
 // admit decides whether an event may be acted on, and consumes its sequence in

@@ -788,27 +788,36 @@ func (observation *BrowserObservation) HandleEvent(
 
 // acknowledgeUnmatchedEvent answers an event this Core is not going to act on.
 //
-// A terminal event is acknowledged rather than refused. An explicit stop closes
-// the observation here and only then reaches the Worker, so the stopped event it
-// sends back always arrives after the observation is gone; refusing it would
-// turn the ordinary end of every observation into a protocol failure on the
-// Worker. Acknowledging is safe precisely because the event was not matched: no
-// state is touched.
+// A terminal event for an observation this process opened and has since ended is
+// acknowledged rather than refused. An explicit stop closes the observation here
+// and only then reaches the Worker, so the stopped event it sends back always
+// arrives after the observation is gone; refusing it would turn the ordinary end
+// of every observation into a protocol failure on the Worker. Acknowledging is
+// safe precisely because nothing is matched: no state is touched. It is narrowed
+// to leases this process actually issued, named by the same command and identity
+// they were issued with, so it settles the race it exists for and not any
+// terminal event that happens to arrive.
 //
-// Anything else is refused. A frame carries page content and must never be
-// accepted under an observation Core cannot identify, and a started for an
-// unknown observation means the Worker believes it is observing something this
-// Core has already torn down -- refusing is what stops it.
+// Everything else is refused. A frame carries page content and must never be
+// accepted under an observation Core cannot identify; a started for an unknown
+// observation means the Worker believes it is observing something this Core has
+// already torn down, and refusing is what stops it.
 func (observation *BrowserObservation) acknowledgeUnmatchedEvent(
 	event BrowserObserverEventPayload,
 ) (BrowserObserverEventAckPayload, error) {
 	switch event.Kind {
 	case BrowserObserverStopped, BrowserObserverError:
-		return BrowserObserverEventAckPayload{
-			AttemptIdentity: event.AttemptIdentity,
-			LeaseID:         event.LeaseID,
-			EventSeq:        event.EventSeq,
-		}, nil
+		if observation.frames.wasRetired(
+			event.LeaseID,
+			event.CommandID,
+			event.AttemptIdentity,
+		) {
+			return BrowserObserverEventAckPayload{
+				AttemptIdentity: event.AttemptIdentity,
+				LeaseID:         event.LeaseID,
+				EventSeq:        event.EventSeq,
+			}, nil
+		}
 	}
 	return BrowserObserverEventAckPayload{}, runtimeValidationError(
 		"browser observer event does not name a live observation",
