@@ -104,7 +104,7 @@ func NewBrowserObservation(
 		now:        now,
 		instance:   instance,
 		quota:      quota,
-		frames:     newObservationFrameBuffer(),
+		frames:     newObservationFrameBuffer(quota),
 		handshakes: make(map[uuid.UUID]chan string),
 	}
 }
@@ -153,9 +153,6 @@ func (observation *BrowserObservation) Start(
 	if isAdmin && reason == "" {
 		return BrowserObservationState{}, errors.New("cross-user browser observation requires a reason")
 	}
-	if observation.frames.count() >= observation.quota {
-		return BrowserObservationState{}, ErrObservationBusy
-	}
 	now := observation.now().UTC()
 	leaseID := uuid.New()
 	expiresAt := now.Add(observationDefaultTTL)
@@ -177,13 +174,14 @@ func (observation *BrowserObservation) Start(
 INSERT INTO browser_observation_audits (
     run_id, attempt_id, observer_user_id, observer_is_admin, reason,
     session_epoch, attachment_sha256, lease_id, lease_expires_at,
-    core_instance_id, status, started_at, frame_count, frame_count_complete
-) VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8,$9,$11,'active',$10,0,false)
+    command_id, core_instance_id, status, started_at, frame_count,
+    frame_count_complete
+) VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8,$9,$12,$11,'active',$10,0,false)
 RETURNING id
 `,
 		runID, identity.AttemptID, observerUserID, isAdmin, reason,
 		identity.SessionEpoch, identity.AttachmentSHA256, leaseID, expiresAt, now,
-		observation.instance,
+		observation.instance, command.CommandID,
 	).Scan(&auditID)
 	if err != nil {
 		// The partial unique index makes a second active row impossible, so a
@@ -191,7 +189,15 @@ RETURNING id
 		return BrowserObservationState{}, ErrObservationAlreadyActive
 	}
 
-	observation.frames.open(runID, leaseID)
+	// The audit row is claimed first, so this is the only start that can be
+	// admitting this Run, and the ceiling is then applied in the same step that
+	// takes the slot. Checking capacity separately would let concurrent starts
+	// on different Runs all pass the check and then all open.
+	if !observation.frames.open(runID, leaseID, command.CommandID, identity) {
+		_ = observation.close(ctx, leaseID, "instance_saturated")
+		return BrowserObservationState{}, ErrObservationBusy
+	}
+
 	// Registered before the command is sent, because the started event can come
 	// back before this goroutine reaches the wait.
 	confirmed := observation.registerHandshake(leaseID)
@@ -499,9 +505,30 @@ RETURNING run_id, lease_id
 	for _, row := range expired {
 		observation.resolveHandshake(row.leaseID, "lease_expired")
 		count := observation.frames.closeLease(row.runID, row.leaseID)
-		_ = observation.RecordFrames(ctx, row.leaseID, count)
+		// Not RecordFrames: that only writes to an active audit, and the update
+		// above has already closed this one, so the count would be dropped on
+		// exactly the path that knows the final total.
+		_ = observation.recordFinalFrames(ctx, row.leaseID, count)
 	}
 	return nil
+}
+
+// recordFinalFrames writes the total onto an audit this instance has just
+// closed. The count is exact -- it is what this process actually buffered -- so
+// it also settles frame_count_complete.
+func (observation *BrowserObservation) recordFinalFrames(
+	ctx context.Context,
+	leaseID uuid.UUID,
+	count int64,
+) error {
+	_, err := observation.pool.Exec(ctx, `
+UPDATE browser_observation_audits
+SET frame_count = GREATEST(frame_count, $2),
+    frame_count_complete = true,
+    updated_at = clock_timestamp()
+WHERE lease_id = $1 AND status = 'closed'
+`, leaseID, count)
+	return err
 }
 
 // ReconcileForeignExpired closes expired audits left behind by an instance that
@@ -705,14 +732,20 @@ func (observation *BrowserObservation) HandleEvent(
 	case BrowserObserverStarted:
 		observation.resolveHandshake(event.LeaseID, "")
 	case BrowserObserverFrame:
-		if err := observation.frames.publish(runID, event.LeaseID, BrowserObservationFrame{
-			FrameSeq:   event.EventSeq,
-			CapturedAt: event.CapturedAt.UTC(),
-			MIMEType:   event.Frame.MIMEType,
-			Data:       event.Frame.Data,
-			Width:      event.Frame.Width,
-			Height:     event.Frame.Height,
-		}); err != nil {
+		if err := observation.frames.publish(
+			runID,
+			event.LeaseID,
+			event.CommandID,
+			event.AttemptIdentity,
+			BrowserObservationFrame{
+				FrameSeq:   event.EventSeq,
+				CapturedAt: event.CapturedAt.UTC(),
+				MIMEType:   event.Frame.MIMEType,
+				Data:       event.Frame.Data,
+				Width:      event.Frame.Width,
+				Height:     event.Frame.Height,
+			},
+		); err != nil {
 			return BrowserObserverEventAckPayload{}, err
 		}
 		// Persist a lower bound on an interval, not per frame: the point is that
@@ -843,7 +876,7 @@ WHERE lease_id = $1 AND attempt_id = $2 AND status = 'active'
 	return observation.close(ctx, leaseID, endReason)
 }
 
-// WaitFrame serves one long poll.// WaitFrame serves one long poll. A nil frame with no error means the poll timed
+// WaitFrame serves one long poll. A nil frame with no error means the poll timed
 // out with nothing new, which is a normal empty response rather than a failure.
 func (observation *BrowserObservation) WaitFrame(
 	ctx context.Context,
@@ -853,7 +886,40 @@ func (observation *BrowserObservation) WaitFrame(
 	if observation == nil {
 		return nil, ErrObservationChannelUnavailable
 	}
-	return observation.frames.wait(ctx, runID, after)
+	frame, err := observation.frames.wait(ctx, runID, after)
+	if !errors.Is(err, ErrObservationInactive) {
+		return frame, err
+	}
+	// No local buffer can mean two different things, and they need different
+	// answers: the observation ended, or it belongs to another Core instance and
+	// this one can never serve it. Only this path touches the database, so a
+	// normal poll stays in memory.
+	return nil, observation.absentFrameReason(ctx, runID)
+}
+
+func (observation *BrowserObservation) absentFrameReason(
+	ctx context.Context,
+	runID uuid.UUID,
+) error {
+	if observation.pool == nil {
+		return ErrObservationInactive
+	}
+	var owner uuid.UUID
+	err := observation.pool.QueryRow(ctx, `
+SELECT core_instance_id FROM browser_observation_audits
+WHERE run_id = $1 AND status = 'active'
+`, runID).Scan(&owner)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ErrObservationInactive
+	case err != nil:
+		return err
+	case owner != observation.instance:
+		return ErrObservationChannelUnavailable
+	}
+	// Active, owned here, and yet no buffer: the observation was torn down
+	// locally and the audit has not caught up. Ended, from the viewer's side.
+	return ErrObservationInactive
 }
 
 // observationCountFlushFrames turns the flush interval into a frame count at

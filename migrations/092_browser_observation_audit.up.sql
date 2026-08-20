@@ -47,6 +47,10 @@ CREATE TABLE public.browser_observation_audits (
     -- Persisted so a Core that exits mid-observation can still be reconciled:
     -- without it a crashed observation stays active forever.
     lease_expires_at timestamp with time zone NOT NULL,
+    -- The start command this observation was opened with. Every event the Worker
+    -- sends back must name it, so a late event from a superseded command cannot
+    -- be attributed to the observation running now.
+    command_id uuid NOT NULL,
     -- Frames live in one Core process's memory, so an observation belongs to the
     -- instance that opened it and another instance must refuse rather than serve
     -- a buffer it does not have.

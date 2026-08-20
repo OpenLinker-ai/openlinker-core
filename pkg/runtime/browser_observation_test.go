@@ -248,36 +248,96 @@ func observationFrame(seq int64) BrowserObservationFrame {
 	}
 }
 
+// observationBufferIdentity is the identity every frame in these tests is
+// published under. Frames must name it exactly, so the tests carry it rather
+// than letting a zero value pass by accident.
+func observationBufferIdentity() BrowserObserverIdentity {
+	return BrowserObserverIdentity{
+		RunID:                uuid.New(),
+		AttemptID:            uuid.New(),
+		SessionEpoch:         3,
+		BrowserSessionSHA256: strings.Repeat("a", 64),
+		AttachmentSHA256:     strings.Repeat("b", 64),
+		RuntimeSessionID:     uuid.New(),
+	}
+}
+
 // A frame from a lease that no longer owns the Run belongs to an observation
 // that already ended, so it must not reach the current viewer.
 func TestObservationFrameBufferRejectsStaleLeases(t *testing.T) {
 	t.Parallel()
-	buffer := newObservationFrameBuffer()
-	runID := uuid.New()
+	buffer := newObservationFrameBuffer(4)
+	identity := observationBufferIdentity()
+	runID := identity.RunID
 	current := uuid.New()
-	buffer.open(runID, current)
+	commandID := uuid.New()
+	if !buffer.open(runID, current, commandID, identity) {
+		t.Fatal("the first observation was refused")
+	}
 
-	if err := buffer.publish(runID, current, observationFrame(1)); err != nil {
+	if err := buffer.publish(runID, current, commandID, identity, observationFrame(1)); err != nil {
 		t.Fatalf("current lease frame rejected: %v", err)
 	}
-	if err := buffer.publish(runID, uuid.New(), observationFrame(2)); err == nil {
+	if err := buffer.publish(runID, uuid.New(), commandID, identity, observationFrame(2)); err == nil {
 		t.Fatal("a frame from a superseded lease was accepted")
 	}
+	// The lease alone is not the whole correlation: a Worker still answering a
+	// superseded command, or one that moved to another Attempt, must be refused
+	// even while the lease it names is current.
+	if err := buffer.publish(runID, current, uuid.New(), identity, observationFrame(2)); err == nil {
+		t.Fatal("a frame naming another command was accepted")
+	}
+	drifted := identity
+	drifted.SessionEpoch++
+	if err := buffer.publish(runID, current, commandID, drifted, observationFrame(2)); err == nil {
+		t.Fatal("a frame naming another Attempt identity was accepted")
+	}
 	// A regressing sequence would let a replayed frame overwrite a newer one.
-	if err := buffer.publish(runID, current, observationFrame(1)); err == nil {
+	if err := buffer.publish(runID, current, commandID, identity, observationFrame(1)); err == nil {
 		t.Fatal("a regressing frame sequence was accepted")
 	}
-	if err := buffer.publish(uuid.New(), current, observationFrame(2)); err == nil {
+	if err := buffer.publish(uuid.New(), current, commandID, identity, observationFrame(2)); err == nil {
 		t.Fatal("a frame for an unobserved Run was accepted")
+	}
+}
+
+// The ceiling has to be enforced where the slot is taken. Checking capacity and
+// opening as two steps lets concurrent starts all pass the check first.
+func TestObservationFrameBufferAdmitsWithinItsQuota(t *testing.T) {
+	t.Parallel()
+	buffer := newObservationFrameBuffer(2)
+	identities := []BrowserObserverIdentity{
+		observationBufferIdentity(),
+		observationBufferIdentity(),
+		observationBufferIdentity(),
+	}
+	for index, identity := range identities[:2] {
+		if !buffer.open(identity.RunID, uuid.New(), uuid.New(), identity) {
+			t.Fatalf("observation %d was refused inside the quota", index)
+		}
+	}
+	if buffer.open(identities[2].RunID, uuid.New(), uuid.New(), identities[2]) {
+		t.Fatal("an observation beyond the quota was admitted")
+	}
+	// Replacing a Run already held takes no new slot, so a Run whose buffer
+	// outlived its audit is not stranded at the ceiling.
+	if !buffer.open(identities[0].RunID, uuid.New(), uuid.New(), identities[0]) {
+		t.Fatal("replacing an existing observation was refused")
+	}
+	buffer.close(identities[0].RunID)
+	if !buffer.open(identities[2].RunID, uuid.New(), uuid.New(), identities[2]) {
+		t.Fatal("a released slot was not reused")
 	}
 }
 
 func TestObservationFrameBufferRejectsMalformedFrames(t *testing.T) {
 	t.Parallel()
-	buffer := newObservationFrameBuffer()
-	runID := uuid.New()
+	buffer := newObservationFrameBuffer(4)
+	identity := observationBufferIdentity()
+	runID := identity.RunID
 	leaseID := uuid.New()
-	buffer.open(runID, leaseID)
+	commandID := uuid.New()
+	buffer.open(runID, leaseID, commandID, identity)
 	for name, mutate := range map[string]func(*BrowserObservationFrame){
 		"wrong mime": func(f *BrowserObservationFrame) { f.MIMEType = "image/png" },
 		"no data":    func(f *BrowserObservationFrame) { f.Data = nil },
@@ -290,7 +350,7 @@ func TestObservationFrameBufferRejectsMalformedFrames(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			frame := observationFrame(1)
 			mutate(&frame)
-			if buffer.publish(runID, leaseID, frame) == nil {
+			if buffer.publish(runID, leaseID, commandID, identity, frame) == nil {
 				t.Fatalf("%s frame was accepted", name)
 			}
 		})
@@ -301,10 +361,12 @@ func TestObservationFrameBufferRejectsMalformedFrames(t *testing.T) {
 // woken when the observation closes rather than holding until the timeout.
 func TestObservationFrameBufferWakesWaiters(t *testing.T) {
 	t.Parallel()
-	buffer := newObservationFrameBuffer()
-	runID := uuid.New()
+	buffer := newObservationFrameBuffer(4)
+	identity := observationBufferIdentity()
+	runID := identity.RunID
 	leaseID := uuid.New()
-	buffer.open(runID, leaseID)
+	commandID := uuid.New()
+	buffer.open(runID, leaseID, commandID, identity)
 
 	delivered := make(chan *BrowserObservationFrame, 1)
 	go func() {
@@ -312,7 +374,7 @@ func TestObservationFrameBufferWakesWaiters(t *testing.T) {
 		delivered <- frame
 	}()
 	time.Sleep(20 * time.Millisecond)
-	if err := buffer.publish(runID, leaseID, observationFrame(7)); err != nil {
+	if err := buffer.publish(runID, leaseID, commandID, identity, observationFrame(7)); err != nil {
 		t.Fatal(err)
 	}
 	select {

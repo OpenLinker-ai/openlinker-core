@@ -32,9 +32,14 @@ type BrowserObservationFrame struct {
 
 type observationLiveFrame struct {
 	leaseID uuid.UUID
-	frame   *BrowserObservationFrame
-	notify  chan struct{}
-	count   int64
+	// What this observation was opened with. An event is only accepted when it
+	// names all of it: a Worker that moved to another Attempt, or that is still
+	// answering a superseded command, must not have its frames attributed here.
+	commandID uuid.UUID
+	identity  BrowserObserverIdentity
+	frame     *BrowserObservationFrame
+	notify    chan struct{}
+	count     int64
 	// Identifies the one downstream viewer allowed to poll. A newer poll takes
 	// over from an older one rather than being refused, because a reloaded tab
 	// leaves its previous long poll hanging for the full timeout and refusing
@@ -43,21 +48,44 @@ type observationLiveFrame struct {
 }
 
 type observationFrameBuffer struct {
-	mu   sync.Mutex
-	live map[uuid.UUID]*observationLiveFrame
+	mu    sync.Mutex
+	quota int
+	live  map[uuid.UUID]*observationLiveFrame
 }
 
-func newObservationFrameBuffer() *observationFrameBuffer {
-	return &observationFrameBuffer{live: make(map[uuid.UUID]*observationLiveFrame)}
+func newObservationFrameBuffer(quota int) *observationFrameBuffer {
+	return &observationFrameBuffer{
+		quota: quota,
+		live:  make(map[uuid.UUID]*observationLiveFrame),
+	}
 }
 
-func (buffer *observationFrameBuffer) open(runID, leaseID uuid.UUID) {
+// open reserves the slot and admits the observation in one step. Checking the
+// quota separately and opening afterwards lets concurrent starts all pass the
+// check and then all open, which is how a ceiling of N admits N+k.
+//
+// Replacing an existing entry for the same Run does not consume a new slot: the
+// database unique index is the authority on a second concurrent observation, and
+// refusing here would strand a Run whose buffer outlived its audit.
+func (buffer *observationFrameBuffer) open(
+	runID, leaseID, commandID uuid.UUID,
+	identity BrowserObserverIdentity,
+) bool {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
-	buffer.live[runID] = &observationLiveFrame{
-		leaseID: leaseID,
-		notify:  make(chan struct{}),
+	if _, replacing := buffer.live[runID]; !replacing && len(buffer.live) >= buffer.quota {
+		return false
 	}
+	if previous := buffer.live[runID]; previous != nil {
+		close(previous.notify)
+	}
+	buffer.live[runID] = &observationLiveFrame{
+		leaseID:   leaseID,
+		commandID: commandID,
+		identity:  identity,
+		notify:    make(chan struct{}),
+	}
+	return true
 }
 
 // close wakes every waiter so a viewer polling a finished observation returns
@@ -80,6 +108,8 @@ func (buffer *observationFrameBuffer) close(runID uuid.UUID) int64 {
 func (buffer *observationFrameBuffer) publish(
 	runID uuid.UUID,
 	leaseID uuid.UUID,
+	commandID uuid.UUID,
+	identity BrowserObserverIdentity,
 	frame BrowserObservationFrame,
 ) error {
 	if frame.MIMEType != "image/jpeg" || len(frame.Data) == 0 ||
@@ -92,6 +122,12 @@ func (buffer *observationFrameBuffer) publish(
 	live := buffer.live[runID]
 	if live == nil || live.leaseID != leaseID {
 		return errors.New("browser observation lease is stale")
+	}
+	// The lease alone is not enough. A Worker still answering a superseded
+	// command, or one that has moved to another Attempt, would otherwise have
+	// its frames accepted under a lease that is nominally still current.
+	if live.commandID != commandID || live.identity != identity {
+		return errors.New("browser observation frame does not name its command")
 	}
 	if live.frame != nil && frame.FrameSeq <= live.frame.FrameSeq {
 		return errors.New("browser observation frame sequence regressed")

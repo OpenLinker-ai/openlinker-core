@@ -7,10 +7,21 @@
 
 package runtime
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/google/uuid"
+)
 
 // SetHTTPClient 仅供 _test.go 注入 client（如 httptest.NewTLSServer().Client()）。
 // 生产代码不应调用。
 func (s *Service) SetHTTPClient(c *http.Client) {
 	s.httpClient = c
+}
+
+// DropLocalFramesForTest removes this process's frame buffer for a Run without
+// touching the audit, standing in for a Core that restarted while an
+// observation was still recorded as active.
+func (observation *BrowserObservation) DropLocalFramesForTest(runID uuid.UUID) {
+	observation.frames.close(runID)
 }

@@ -33,7 +33,7 @@ const (
 	CoreReviewedBridgeVersion      int64 = 88
 	CoreLegacyBridgeVersion        int64 = 86
 	CloudVersion                   int64 = 55
-	CoreSchemaDigest                     = "813ea9feb6ccb978b463dd20c3deacee24db11273928f5ef2f9927c6ca811f31"
+	CoreSchemaDigest                     = "e084600f77368364f2ce4e5682606aafc2200a34f4d41583f75cc7ad06209fdc"
 	CoreUpgradeSchemaDigest              = "1b2591b579018b4edd6465e19f36823fca28af01068742358293d1367c1c1ed8"
 	CoreReviewedBridgeSchemaDigest       = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
 	CoreLegacyBridgeSchemaDigest         = "6c22808a8cd658cf827a5828a92d3343f040d7d6ff3302f9fdab691fe90aec5b"

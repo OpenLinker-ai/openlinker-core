@@ -231,9 +231,10 @@ func TestBrowserObservationStartFrameStopRoundTrip(t *testing.T) {
 	require.ErrorIs(t, err, runtime.ErrObservationAlreadyActive)
 
 	captured := time.Now().UTC()
+	commandID := observationStartCommandID(t, pool, state.LeaseID)
 	ack, err := observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
 		AttemptIdentity: identity,
-		CommandID:       uuid.New(),
+		CommandID:       commandID,
 		LeaseID:         state.LeaseID,
 		EventSeq:        2,
 		Kind:            runtime.BrowserObserverFrame,
@@ -259,9 +260,27 @@ func TestBrowserObservationStartFrameStopRoundTrip(t *testing.T) {
 	// A frame from a superseded lease belongs to an observation that has ended.
 	_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
 		AttemptIdentity: identity,
-		CommandID:       uuid.New(),
+		CommandID:       commandID,
 		LeaseID:         uuid.New(),
 		EventSeq:        3,
+		Kind:            runtime.BrowserObserverFrame,
+		CapturedAt:      &captured,
+		Frame: &runtime.BrowserObserverFramePayload{
+			MIMEType: "image/jpeg",
+			Data:     []byte{0xff, 0xd8, 0xff, 0xd9},
+			Width:    1280,
+			Height:   720,
+		},
+	})
+	require.Error(t, err)
+
+	// And a frame naming the right lease but a superseded command is refused:
+	// the lease alone cannot tell the two apart.
+	_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
+		AttemptIdentity: identity,
+		CommandID:       uuid.New(),
+		LeaseID:         state.LeaseID,
+		EventSeq:        4,
 		Kind:            runtime.BrowserObserverFrame,
 		CapturedAt:      &captured,
 		Frame: &runtime.BrowserObserverFramePayload{
@@ -452,4 +471,110 @@ UPDATE browser_observation_audits SET core_instance_id = $2 WHERE lease_id = $1
 		observation.Stop(context.Background(), fixture.identity.RunID, "viewer_stopped"),
 		runtime.ErrObservationChannelUnavailable,
 	)
+}
+
+// A poll for an observation held by another Core instance must say so. Reporting
+// it as ended would send the viewer back to state, which would start the same
+// unservable observation again.
+func TestBrowserObservationFramePathFailsClosedOnAnotherInstance(t *testing.T) {
+	pool, service, fixture, _, ownerID := observationFixture(t)
+	observation := service.BrowserObservation()
+	appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+
+	identity, err := observation.ResolveIdentity(
+		context.Background(), fixture.identity.RunID, ownerID, false,
+	)
+	require.NoError(t, err)
+	state, err := observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+
+	// The audit stays active and moves to another instance, and the local buffer
+	// goes away the way a restart would take it.
+	_, err = pool.Exec(context.Background(), `
+UPDATE browser_observation_audits SET core_instance_id = $2 WHERE lease_id = $1
+`, state.LeaseID, uuid.New())
+	require.NoError(t, err)
+	service.BrowserObservation().DropLocalFramesForTest(fixture.identity.RunID)
+
+	_, err = observation.WaitFrame(context.Background(), fixture.identity.RunID, 0)
+	require.ErrorIs(t, err, runtime.ErrObservationChannelUnavailable)
+
+	// With no active audit at all the same absence means the observation ended.
+	_, err = pool.Exec(context.Background(), `
+UPDATE browser_observation_audits
+SET status = 'closed', ended_at = clock_timestamp(), end_reason = 'test'
+WHERE lease_id = $1
+`, state.LeaseID)
+	require.NoError(t, err)
+	_, err = observation.WaitFrame(context.Background(), fixture.identity.RunID, 0)
+	require.ErrorIs(t, err, runtime.ErrObservationInactive)
+}
+
+// The reconciler is the one path that knows the exact total, and it runs after
+// the audit is already closed. Writing the count through the active-only update
+// dropped it there.
+func TestBrowserObservationReconcileWritesTheFinalCount(t *testing.T) {
+	pool, service, fixture, _, ownerID := observationFixture(t)
+	observation := service.BrowserObservation()
+	appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+
+	identity, err := observation.ResolveIdentity(
+		context.Background(), fixture.identity.RunID, ownerID, false,
+	)
+	require.NoError(t, err)
+	state, err := observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+
+	captured := time.Now().UTC()
+	for sequence := int64(2); sequence <= 4; sequence++ {
+		_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
+			AttemptIdentity: identity,
+			CommandID:       observationStartCommandID(t, pool, state.LeaseID),
+			LeaseID:         state.LeaseID,
+			EventSeq:        sequence,
+			Kind:            runtime.BrowserObserverFrame,
+			CapturedAt:      &captured,
+			Frame: &runtime.BrowserObserverFramePayload{
+				MIMEType: "image/jpeg",
+				Data:     []byte{0xff, 0xd8, 0xff, 0xd9},
+				Width:    1280,
+				Height:   720,
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	_, err = pool.Exec(context.Background(), `
+UPDATE browser_observation_audits
+SET lease_expires_at = clock_timestamp() - interval '1 minute'
+WHERE lease_id = $1
+`, state.LeaseID)
+	require.NoError(t, err)
+	require.NoError(t, observation.ReconcileExpired(context.Background()))
+
+	var count int64
+	var complete bool
+	var status string
+	require.NoError(t, pool.QueryRow(context.Background(), `
+SELECT frame_count, frame_count_complete, status
+FROM browser_observation_audits WHERE lease_id = $1
+`, state.LeaseID).Scan(&count, &complete, &status))
+	require.Equal(t, "closed", status)
+	require.Equal(t, int64(3), count, "the reconciled audit must carry the frames it served")
+	require.True(t, complete)
+}
+
+func observationStartCommandID(t *testing.T, pool *pgxpool.Pool, leaseID uuid.UUID) uuid.UUID {
+	t.Helper()
+	var commandID uuid.UUID
+	require.NoError(t, pool.QueryRow(
+		context.Background(),
+		`SELECT command_id FROM browser_observation_audits WHERE lease_id = $1`,
+		leaseID,
+	).Scan(&commandID))
+	return commandID
 }
