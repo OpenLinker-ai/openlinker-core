@@ -142,7 +142,7 @@ func TestBrowserObserverEventValidationPerKind(t *testing.T) {
 // than opening a record that could never produce a frame.
 func TestBrowserObservationFailsClosedWithoutAChannel(t *testing.T) {
 	t.Parallel()
-	unbound := NewBrowserObservation(nil, nil, uuid.New())
+	unbound := NewBrowserObservation(nil, nil, uuid.New(), 0)
 	_, err := unbound.Start(
 		t.Context(),
 		uuid.New(),
@@ -160,7 +160,7 @@ func TestBrowserObservationFailsClosedWithoutAChannel(t *testing.T) {
 // recorded reason.
 func TestBrowserObservationRequiresAdminReason(t *testing.T) {
 	t.Parallel()
-	observation := NewBrowserObservation(nil, nil, uuid.New())
+	observation := NewBrowserObservation(nil, nil, uuid.New(), 0)
 	observation.BindCommandSender(stubObserverSender{})
 	if _, err := observation.Start(
 		t.Context(), uuid.New(), uuid.New(), true, "", observerIdentity(),

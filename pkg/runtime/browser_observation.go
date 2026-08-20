@@ -35,10 +35,8 @@ const (
 	// push with no reply channel, so the confirmation is the started event and
 	// the wait is what turns "accepted" into "actually observing".
 	observationStartHandshakeTimeout = 15 * time.Second
-	// Concurrent observations one Core instance will hold. Every one of them
-	// pins a frame buffer and a Runtime lease, so the ceiling is explicit rather
-	// than whatever the database happens to allow.
-	observationInstanceQuota = 32
+	// Fallback ceiling when the deployment does not configure one.
+	observationDefaultQuota = 32
 )
 
 // ErrObservationBusy is returned when this instance is already at its
@@ -65,6 +63,10 @@ type BrowserObservation struct {
 	sender   browserObserverCommandSender
 	instance uuid.UUID
 	frames   *observationFrameBuffer
+	// Concurrent observations this instance will hold. A deployment decision,
+	// because each observation pins an in-process frame buffer and a Runtime
+	// lease on the Worker.
+	quota int
 
 	// Pending start handshakes, keyed by lease. A start blocks on its channel
 	// until the Worker's first lifecycle event for that exact lease arrives.
@@ -80,14 +82,19 @@ func NewBrowserObservation(
 	pool *pgxpool.Pool,
 	now func() time.Time,
 	instance uuid.UUID,
+	quota int,
 ) *BrowserObservation {
 	if now == nil {
 		now = time.Now
+	}
+	if quota < 1 {
+		quota = observationDefaultQuota
 	}
 	return &BrowserObservation{
 		pool:       pool,
 		now:        now,
 		instance:   instance,
+		quota:      quota,
 		frames:     newObservationFrameBuffer(),
 		handshakes: make(map[uuid.UUID]chan string),
 	}
@@ -137,7 +144,7 @@ func (observation *BrowserObservation) Start(
 	if isAdmin && reason == "" {
 		return BrowserObservationState{}, errors.New("cross-user browser observation requires a reason")
 	}
-	if observation.frames.count() >= observationInstanceQuota {
+	if observation.frames.count() >= observation.quota {
 		return BrowserObservationState{}, ErrObservationBusy
 	}
 	now := observation.now().UTC()

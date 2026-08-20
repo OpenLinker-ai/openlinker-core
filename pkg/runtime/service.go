@@ -185,7 +185,9 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		httpClient:               endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
 		runtimePrincipalScopeKey: deriveRuntimePrincipalScopeKey(cfg),
 		browserControl:           NewBrowserHumanControl(pool),
-		browserObservation:       NewBrowserObservation(pool, nil, uuid.Nil),
+		browserObservation: NewBrowserObservation(
+			pool, nil, uuid.Nil, cfg.BrowserObservationQuota,
+		),
 	}
 	svc.resultFinalizer = NewResultFinalizer(pool, nil, nil)
 	svc.cancellation = NewRuntimeCancellationCoordinator(pool)
