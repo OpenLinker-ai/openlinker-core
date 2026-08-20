@@ -275,8 +275,26 @@ func TestObservationFrameBufferRejectsStaleLeases(t *testing.T) {
 		t.Fatal("the first observation was refused")
 	}
 
+	if !buffer.admit(runID, current, commandID, identity, 1) {
+		t.Fatal("the first event was not admitted")
+	}
 	if err := buffer.publish(runID, current, commandID, identity, observationFrame(1)); err != nil {
 		t.Fatalf("current lease frame rejected: %v", err)
+	}
+
+	// The Worker numbers every event it sends from one counter, so a sequence
+	// that does not advance is a replay whatever kind it carries.
+	if buffer.admit(runID, current, commandID, identity, 1) {
+		t.Fatal("a replayed event sequence was admitted")
+	}
+	if !buffer.admit(runID, current, commandID, identity, 2) {
+		t.Fatal("an advancing event sequence was refused")
+	}
+	if buffer.admit(runID, current, uuid.New(), identity, 3) {
+		t.Fatal("an event naming another command was admitted")
+	}
+	if buffer.admit(runID, uuid.New(), commandID, identity, 3) {
+		t.Fatal("an event naming another lease was admitted")
 	}
 	if err := buffer.publish(runID, uuid.New(), commandID, identity, observationFrame(2)); err == nil {
 		t.Fatal("a frame from a superseded lease was accepted")

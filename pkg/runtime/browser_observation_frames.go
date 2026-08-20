@@ -40,6 +40,10 @@ type observationLiveFrame struct {
 	frame     *BrowserObservationFrame
 	notify    chan struct{}
 	count     int64
+	// The highest event sequence accepted from the Worker. The Worker numbers
+	// every event it sends from one counter, so this is what makes a replayed or
+	// reordered event -- of any kind, not only a frame -- detectable.
+	lastEventSeq int64
 	// Identifies the one downstream viewer allowed to poll. A newer poll takes
 	// over from an older one rather than being refused, because a reloaded tab
 	// leaves its previous long poll hanging for the full timeout and refusing
@@ -102,22 +106,31 @@ func (buffer *observationFrameBuffer) close(runID uuid.UUID) int64 {
 	return live.count
 }
 
-// owns reports whether an event names the observation this Run is actually
-// running: the same lease, the same start command, and the same Attempt
-// identity. Every event kind is checked, not just frames -- a lifecycle event
-// from a superseded command would otherwise close the observation that replaced
-// it.
-func (buffer *observationFrameBuffer) owns(
+// admit decides whether an event may be acted on, and consumes its sequence in
+// the same step. An event has to name the observation this Run is actually
+// running -- the same lease, the same start command, the same Attempt identity
+// -- and it has to advance the Worker's event sequence.
+//
+// Every kind goes through here, not only frames. A lifecycle event from a
+// superseded command would otherwise close the observation that replaced it, and
+// a replayed one would be acted on twice.
+func (buffer *observationFrameBuffer) admit(
 	runID, leaseID, commandID uuid.UUID,
 	identity BrowserObserverIdentity,
+	eventSeq int64,
 ) bool {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
 	live := buffer.live[runID]
-	return live != nil &&
-		live.leaseID == leaseID &&
-		live.commandID == commandID &&
-		live.identity == identity
+	if live == nil || live.leaseID != leaseID || live.commandID != commandID ||
+		live.identity != identity {
+		return false
+	}
+	if eventSeq <= live.lastEventSeq {
+		return false
+	}
+	live.lastEventSeq = eventSeq
+	return true
 }
 
 // publish accepts a frame only for the lease that currently owns the Run and

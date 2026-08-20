@@ -693,40 +693,52 @@ func TestBrowserObservationLifecycleEventsAreCorrelated(t *testing.T) {
 
 	drifted := identity
 	drifted.SessionEpoch++
-	for name, event := range map[string]runtime.BrowserObserverEventPayload{
-		"stopped from another command": {
+	// A terminal event that names nothing live is settled rather than refused --
+	// an ordinary stop always produces one -- but it must still not act. A
+	// started that names nothing live is refused, because it means the Worker
+	// believes it is observing something this Core has torn down.
+	uncorrelated := map[string]struct {
+		event     runtime.BrowserObserverEventPayload
+		wantError bool
+	}{
+		"stopped from another command": {event: runtime.BrowserObserverEventPayload{
 			AttemptIdentity: identity,
 			CommandID:       uuid.New(),
 			LeaseID:         state.LeaseID,
 			EventSeq:        2,
 			Kind:            runtime.BrowserObserverStopped,
-		},
-		"error from another command": {
+		}},
+		"error from another command": {event: runtime.BrowserObserverEventPayload{
 			AttemptIdentity: identity,
 			CommandID:       uuid.New(),
 			LeaseID:         state.LeaseID,
 			EventSeq:        3,
 			Kind:            runtime.BrowserObserverError,
 			ErrorCode:       "browser_unavailable",
-		},
-		"stopped from another attempt": {
+		}},
+		"stopped from another attempt": {event: runtime.BrowserObserverEventPayload{
 			AttemptIdentity: drifted,
 			CommandID:       commandID,
 			LeaseID:         state.LeaseID,
 			EventSeq:        4,
 			Kind:            runtime.BrowserObserverStopped,
-		},
-		"started from another command": {
+		}},
+		"started from another command": {wantError: true, event: runtime.BrowserObserverEventPayload{
 			AttemptIdentity: identity,
 			CommandID:       uuid.New(),
 			LeaseID:         state.LeaseID,
 			EventSeq:        5,
 			Kind:            runtime.BrowserObserverStarted,
-		},
-	} {
+		}},
+	}
+	for name, testCase := range uncorrelated {
 		t.Run(name, func(t *testing.T) {
-			_, handleErr := observation.HandleEvent(context.Background(), event)
-			require.Error(t, handleErr)
+			_, handleErr := observation.HandleEvent(context.Background(), testCase.event)
+			if testCase.wantError {
+				require.Error(t, handleErr)
+				return
+			}
+			require.NoError(t, handleErr)
 		})
 	}
 
@@ -750,4 +762,122 @@ func TestBrowserObservationLifecycleEventsAreCorrelated(t *testing.T) {
 		ended, stateErr := observation.State(context.Background(), fixture.identity.RunID)
 		return stateErr == nil && !ended.Active
 	}, 5*time.Second, 50*time.Millisecond)
+}
+
+// The stop the viewer asks for closes the observation here and only then reaches
+// the Worker, so the stopped event always comes back after the observation is
+// gone. That must settle quietly: refusing it would make the ordinary end of
+// every observation look like a protocol failure to the Worker.
+func TestBrowserObservationExplicitStopSettlesTheWorkerStopped(t *testing.T) {
+	pool, service, fixture, _, ownerID := observationFixture(t)
+	observation := service.BrowserObservation()
+	appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+
+	identity, err := observation.ResolveIdentity(
+		context.Background(), fixture.identity.RunID, ownerID, false,
+	)
+	require.NoError(t, err)
+	state, err := observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+	commandID := observationStartCommandID(t, pool, state.LeaseID)
+
+	require.NoError(t, observation.Stop(
+		context.Background(), fixture.identity.RunID, "viewer_stopped",
+	))
+
+	// The Worker's stopped arrives after the fact, as it always will.
+	ack, err := observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
+		AttemptIdentity: identity,
+		CommandID:       commandID,
+		LeaseID:         state.LeaseID,
+		EventSeq:        2,
+		Kind:            runtime.BrowserObserverStopped,
+	})
+	require.NoError(t, err, "the Worker's stopped must settle rather than fail")
+	require.Equal(t, int64(2), ack.EventSeq)
+
+	// A late frame is still refused: acknowledging a terminal event is not the
+	// same as accepting page content under an observation that has ended.
+	captured := time.Now().UTC()
+	_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
+		AttemptIdentity: identity,
+		CommandID:       commandID,
+		LeaseID:         state.LeaseID,
+		EventSeq:        3,
+		Kind:            runtime.BrowserObserverFrame,
+		CapturedAt:      &captured,
+		Frame: &runtime.BrowserObserverFramePayload{
+			MIMEType: "image/jpeg",
+			Data:     []byte{0xff, 0xd8, 0xff, 0xd9},
+			Width:    1280,
+			Height:   720,
+		},
+	})
+	require.Error(t, err)
+
+	// And the closed audit keeps the reason the viewer gave, not the Worker's.
+	var endReason string
+	require.NoError(t, pool.QueryRow(context.Background(), `
+SELECT end_reason FROM browser_observation_audits WHERE lease_id = $1
+`, state.LeaseID).Scan(&endReason))
+	require.Equal(t, "viewer_stopped", endReason)
+}
+
+// The Worker numbers every event from one counter, so a replayed event of any
+// kind must not be acted on twice.
+func TestBrowserObservationRejectsReplayedEventSequences(t *testing.T) {
+	pool, service, fixture, _, ownerID := observationFixture(t)
+	observation := service.BrowserObservation()
+	appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+
+	identity, err := observation.ResolveIdentity(
+		context.Background(), fixture.identity.RunID, ownerID, false,
+	)
+	require.NoError(t, err)
+	state, err := observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+	commandID := observationStartCommandID(t, pool, state.LeaseID)
+
+	captured := time.Now().UTC()
+	frame := func(sequence int64) runtime.BrowserObserverEventPayload {
+		return runtime.BrowserObserverEventPayload{
+			AttemptIdentity: identity,
+			CommandID:       commandID,
+			LeaseID:         state.LeaseID,
+			EventSeq:        sequence,
+			Kind:            runtime.BrowserObserverFrame,
+			CapturedAt:      &captured,
+			Frame: &runtime.BrowserObserverFramePayload{
+				MIMEType: "image/jpeg",
+				Data:     []byte{0xff, 0xd8, 0xff, 0xd9},
+				Width:    1280,
+				Height:   720,
+			},
+		}
+	}
+	_, err = observation.HandleEvent(context.Background(), frame(5))
+	require.NoError(t, err)
+	_, err = observation.HandleEvent(context.Background(), frame(5))
+	require.Error(t, err, "a replayed sequence must not be accepted")
+	_, err = observation.HandleEvent(context.Background(), frame(4))
+	require.Error(t, err, "a regressing sequence must not be accepted")
+
+	// A lifecycle event carries no content, which is exactly why its sequence was
+	// never checked before. A stale stopped must not end the live observation.
+	_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
+		AttemptIdentity: identity,
+		CommandID:       commandID,
+		LeaseID:         state.LeaseID,
+		EventSeq:        3,
+		Kind:            runtime.BrowserObserverStopped,
+	})
+	require.NoError(t, err, "a stale terminal event settles rather than fails")
+	live, err := observation.State(context.Background(), fixture.identity.RunID)
+	require.NoError(t, err)
+	require.True(t, live.Active, "a replayed stopped ended the live observation")
+	require.Equal(t, state.LeaseID, live.LeaseID)
 }
