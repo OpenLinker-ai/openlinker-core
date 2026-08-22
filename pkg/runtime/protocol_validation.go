@@ -217,6 +217,9 @@ var runtimeReplyTypes = map[RuntimeMessageType][]RuntimeMessageType{
 	RuntimeMessageResume:             {RuntimeMessageResumeAccepted},
 	RuntimeMessageDrain:              {RuntimeMessageDrain},
 	RuntimeMessageBrowserViewerFrame: {RuntimeMessageBrowserViewerFrameAck},
+	// Every observer event is acknowledged, not only frames: started, stopped and
+	// error all have to settle, or the single-event window would stall on them.
+	RuntimeMessageBrowserObserverEvent: {RuntimeMessageBrowserObserverEventAck},
 }
 
 func runtimeMessageExpectsReply(messageType RuntimeMessageType) bool {
@@ -237,6 +240,7 @@ func runtimeMessageRequiresReplyTo(messageType RuntimeMessageType) bool {
 		RuntimeMessageRunCancelAck,
 		RuntimeMessageResumeAccepted,
 		RuntimeMessageBrowserViewerFrameAck,
+		RuntimeMessageBrowserObserverEventAck,
 		RuntimeMessageError:
 		return true
 	default:
@@ -268,6 +272,9 @@ func knownRuntimeMessageType(messageType RuntimeMessageType) bool {
 		RuntimeMessageBrowserViewerCommand,
 		RuntimeMessageBrowserViewerFrame,
 		RuntimeMessageBrowserViewerFrameAck,
+		RuntimeMessageBrowserObserverCommand,
+		RuntimeMessageBrowserObserverEvent,
+		RuntimeMessageBrowserObserverEventAck,
 		RuntimeMessageError:
 		return true
 	default:
@@ -280,6 +287,12 @@ func knownRuntimeMessageType(messageType RuntimeMessageType) bool {
 // the strict decoders above.
 func ValidateRuntimePayload(payload any) error {
 	switch value := payload.(type) {
+	case BrowserObserverCommandPayload:
+		return value.Validate()
+	case BrowserObserverEventPayload:
+		return value.Validate()
+	case BrowserObserverEventAckPayload:
+		return value.Validate()
 	case RuntimeHelloPayload:
 		return validateRuntimeHello(value)
 	case RuntimeReadyPayload:
@@ -709,11 +722,12 @@ func validateResumeAccepted(value RunResumeAcceptedPayload) error {
 }
 
 type DecodedPendingCommand struct {
-	Type   RuntimeMessageType
-	Cancel *RunCancelPayload
-	Drain  *RuntimeDrainPayload
-	Revoke *RunLeaseRevokedPayload
-	Viewer *BrowserViewerCommandPayload
+	Type     RuntimeMessageType
+	Cancel   *RunCancelPayload
+	Drain    *RuntimeDrainPayload
+	Revoke   *RunLeaseRevokedPayload
+	Viewer   *BrowserViewerCommandPayload
+	Observer *BrowserObserverCommandPayload
 }
 
 // DecodePendingCommand strictly decodes the command union and rejects unknown
@@ -757,6 +771,15 @@ func DecodePendingCommand(command PendingCommand) (DecodedPendingCommand, error)
 			return DecodedPendingCommand{}, err
 		}
 		decoded.Viewer = &payload
+	case RuntimeMessageBrowserObserverCommand:
+		var payload BrowserObserverCommandPayload
+		if err := decodeRuntimeJSON(command.Payload, &payload); err != nil {
+			return DecodedPendingCommand{}, err
+		}
+		if err := ValidateRuntimePayload(payload); err != nil {
+			return DecodedPendingCommand{}, err
+		}
+		decoded.Observer = &payload
 	default:
 		return DecodedPendingCommand{}, runtimeValidationError("unknown runtime command type", nil)
 	}

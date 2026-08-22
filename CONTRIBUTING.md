@@ -67,6 +67,20 @@ make runtime-loadtest
 If a check needs external services or credentials, document what you skipped
 and why.
 
+Integration tests skip themselves when their environment is missing, so a green
+`make test` is not the same as a complete run. `make test-integration` fails
+loudly instead, and needs all four:
+
+```bash
+TEST_DATABASE_URL=postgres://…/openlinker
+RUNTIME_V2_TEST_DATABASE_URL=postgres://…/runtime_v2
+CUTOVER_RETIREMENT_TEST_DATABASE_URL=postgres://…/cutover_retire
+TEST_REDIS_URL=redis://…/0
+```
+
+Each database must be disposable and at the current schema; the last two are
+truncated and rewritten by the tests that use them.
+
 ## Migrations
 
 - Add forward and rollback migrations together.

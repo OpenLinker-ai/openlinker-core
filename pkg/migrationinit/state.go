@@ -16,13 +16,25 @@ import (
 )
 
 const (
-	CoreVersion                    int64 = 91
-	CoreUpgradeVersion             int64 = 90
+	CoreVersion int64 = 92
+	// CoreShapeVersion is the migration version the shape constants below were
+	// measured against. The digest and the object counts come from a live
+	// catalog, so adding a migration cannot update them offline; leaving them
+	// stale would pass every test and then fail the postflight shape check at
+	// deploy time. A test requires these two to match, turning that into a
+	// local failure with an explicit instruction.
+	CoreShapeVersion int64 = 92
+	// CoreUpgradeShapeVersion is the predecessor version CoreUpgradeSchemaDigest
+	// and the upgrade counts were measured against. Raising CoreUpgradeVersion
+	// without remeasuring would make the upgrade path validate a predecessor
+	// against another version's fingerprint.
+	CoreUpgradeShapeVersion        int64 = 91
+	CoreUpgradeVersion             int64 = 91
 	CoreReviewedBridgeVersion      int64 = 88
 	CoreLegacyBridgeVersion        int64 = 86
 	CloudVersion                   int64 = 55
-	CoreSchemaDigest                     = "1b2591b579018b4edd6465e19f36823fca28af01068742358293d1367c1c1ed8"
-	CoreUpgradeSchemaDigest              = "7e47d3b82e06f4be0e2c67680fc088a02945bb7be28811e358435323b2397ebe"
+	CoreSchemaDigest                     = "e084600f77368364f2ce4e5682606aafc2200a34f4d41583f75cc7ad06209fdc"
+	CoreUpgradeSchemaDigest              = "1b2591b579018b4edd6465e19f36823fca28af01068742358293d1367c1c1ed8"
 	CoreReviewedBridgeSchemaDigest       = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
 	CoreLegacyBridgeSchemaDigest         = "6c22808a8cd658cf827a5828a92d3343f040d7d6ff3302f9fdab691fe90aec5b"
 	CloudSchemaDigest                    = "0cf21f9a518d9875e62e66e1b490148e45b67eaaeddf9cab118efd778575abd5"
@@ -44,6 +56,8 @@ var coreTables = []string{
 	"agent_tokens",
 	"agents",
 	"browser_human_control_audits",
+	"browser_observable_attempts",
+	"browser_observation_audits",
 	"browser_run_controls",
 	"core_instance_identity",
 	"delivery_targets",
@@ -243,12 +257,17 @@ func Inspect(ctx context.Context, databaseURL string) (Snapshot, error) {
 		return Snapshot{}, fmt.Errorf("inspect obsolete Cloud relations: %w", err)
 	}
 
+	// Each supported predecessor is short by exactly the tables added after it,
+	// so the deltas are per version rather than shared. Adding a migration
+	// without widening them here makes every predecessor fail to read its seed
+	// shape, which reads as a corrupt install rather than a stale constant.
 	if snapshot.CoreShape.Tables == int64(len(coreTables)) ||
-		((snapshot.Core.Version == CoreUpgradeVersion ||
-			snapshot.Core.Version == CoreReviewedBridgeVersion) &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-1)) ||
+		(snapshot.Core.Version == CoreUpgradeVersion &&
+			snapshot.CoreShape.Tables == int64(len(coreTables)-2)) ||
+		(snapshot.Core.Version == CoreReviewedBridgeVersion &&
+			snapshot.CoreShape.Tables == int64(len(coreTables)-3)) ||
 		(snapshot.Core.Version == CoreLegacyBridgeVersion &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-4)) {
+			snapshot.CoreShape.Tables == int64(len(coreTables)-6)) {
 		if err := inspectCoreSeeds(ctx, conn, &snapshot.CoreShape); err != nil {
 			return Snapshot{}, err
 		}
@@ -654,10 +673,13 @@ func validateMigrationTableState(owner string, state MigrationTableState) error 
 
 func validateCoreShape(shape SchemaShape) error {
 	want := SchemaShape{
-		Digest:            CoreSchemaDigest,
-		Tables:            73,
-		Constraints:       626,
-		Indexes:           267,
+		Digest: CoreSchemaDigest,
+		// 092 adds browser_observable_attempts and browser_observation_audits.
+		// Measured on a clean PostgreSQL 16 with 086..092 applied; the digest is
+		// a catalog fingerprint and cannot be derived from the DDL alone.
+		Tables:            75,
+		Constraints:       641,
+		Indexes:           272,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -684,9 +706,9 @@ func validateCoreShape(shape SchemaShape) error {
 func validateCoreUpgradeShape(shape SchemaShape) error {
 	want := SchemaShape{
 		Digest:            CoreUpgradeSchemaDigest,
-		Tables:            72,
-		Constraints:       616,
-		Indexes:           266,
+		Tables:            73,
+		Constraints:       626,
+		Indexes:           267,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,

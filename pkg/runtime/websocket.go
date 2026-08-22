@@ -165,6 +165,39 @@ func (r *runtimeWSRegistry) sendBrowserViewerCommand(
 	return connections[0].sendBrowserViewerCommand(payload)
 }
 
+// sendBrowserObserverCommand mirrors the Viewer path. It is deliberately not
+// merged with it: observation and takeover are separate capabilities, and a
+// shared send path would make it easy for one to acquire the other's reach.
+func (r *runtimeWSRegistry) sendBrowserObserverCommand(
+	runtimeSessionID uuid.UUID,
+	payload BrowserObserverCommandPayload,
+) error {
+	if r == nil || runtimeSessionID == uuid.Nil {
+		return ErrObservationChannelUnavailable
+	}
+	r.mu.Lock()
+	connections := make([]runtimeWSBrowserObserverConnection, 0, 1)
+	for connection := range r.connections {
+		observer, ok := connection.(runtimeWSBrowserObserverConnection)
+		if ok && observer.browserObserverRuntimeSessionID() == runtimeSessionID {
+			connections = append(connections, observer)
+		}
+	}
+	r.mu.Unlock()
+	// Zero means the Worker is attached to another Core instance; more than one
+	// would mean two connections claim the same Session. Both are unusable, and
+	// both must fail closed rather than pick one.
+	if len(connections) != 1 {
+		return ErrObservationChannelUnavailable
+	}
+	return connections[0].sendBrowserObserverCommand(payload)
+}
+
+type runtimeWSBrowserObserverConnection interface {
+	browserObserverRuntimeSessionID() uuid.UUID
+	sendBrowserObserverCommand(BrowserObserverCommandPayload) error
+}
+
 type runtimeWSBrowserViewerConnection interface {
 	browserViewerRuntimeSessionID() uuid.UUID
 	sendBrowserViewerCommand(BrowserViewerCommandPayload) error
@@ -184,6 +217,26 @@ func (h *RuntimeHTTPController) SendBrowserViewerCommand(
 		return errors.New("Runtime websocket Viewer Session identity mismatch")
 	}
 	return h.webSockets.sendBrowserViewerCommand(runtimeSessionID, payload)
+}
+
+// SendBrowserObserverCommand routes an observation command to the Worker held by
+// this process. Frames and wakeups live in process memory, so a command that
+// cannot be delivered locally must fail closed here rather than appear to start
+// an observation no frame will ever reach.
+func (h *RuntimeHTTPController) SendBrowserObserverCommand(
+	runtimeSessionID uuid.UUID,
+	payload BrowserObserverCommandPayload,
+) error {
+	if h == nil || h.webSockets == nil {
+		return ErrObservationChannelUnavailable
+	}
+	if err := ValidateRuntimePayload(payload); err != nil {
+		return err
+	}
+	if payload.AttemptIdentity.RuntimeSessionID != runtimeSessionID {
+		return errors.New("Runtime websocket observer Session identity mismatch")
+	}
+	return h.webSockets.sendBrowserObserverCommand(runtimeSessionID, payload)
 }
 
 // Shutdown rejects new Runtime WebSockets, interrupts every hijacked
@@ -616,6 +669,8 @@ func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 		err = c.handleDrain(envelope)
 	case RuntimeMessageBrowserViewerFrame:
 		err = c.handleBrowserViewerFrame(envelope)
+	case RuntimeMessageBrowserObserverEvent:
+		err = c.handleBrowserObserverEvent(envelope)
 	default:
 		err = runtimeTransportValidationError()
 	}
@@ -624,6 +679,43 @@ func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 		return false
 	}
 	return c.replyErrorAndMaybeClose(envelope, err, false)
+}
+
+// handleBrowserObserverEvent consumes one Worker event and returns its ack. The
+// Worker window is a single unacknowledged event, so failing to ack here stops
+// the observation rather than dropping one frame.
+func (c *runtimeWSConnection) handleBrowserObserverEvent(
+	envelope RuntimeEnvelope,
+) error {
+	if c.controller.dependencies.BrowserObservation == nil {
+		return runtimeUnavailableError()
+	}
+	payload, err := DecodeRuntimeMessagePayload[BrowserObserverEventPayload](
+		envelope,
+		RuntimeMessageBrowserObserverEvent,
+	)
+	if err != nil {
+		return err
+	}
+	// The Session on the wire must be the one this connection authenticated as,
+	// or a Worker could report frames under another Runtime's identity.
+	if payload.AttemptIdentity.RuntimeSessionID !=
+		c.sessionPrincipal.RuntimeSessionID {
+		return runtimeTransportValidationError()
+	}
+	ack, err := c.controller.dependencies.BrowserObservation.HandleEvent(
+		c.ctx,
+		payload,
+	)
+	if err != nil {
+		return runtimeTransportValidationError()
+	}
+	return sendRuntimeWSReply(
+		c,
+		envelope,
+		RuntimeMessageBrowserObserverEventAck,
+		ack,
+	)
 }
 
 func (c *runtimeWSConnection) handleBrowserViewerFrame(
@@ -679,6 +771,36 @@ func (c *runtimeWSConnection) sendBrowserViewerCommand(
 	}
 	message, _, err := newRuntimeWSTypedMessage(
 		RuntimeMessageBrowserViewerCommand,
+		nil,
+		payload,
+	)
+	if err != nil {
+		return err
+	}
+	return c.writeMessage(message)
+}
+
+func (c *runtimeWSConnection) browserObserverRuntimeSessionID() uuid.UUID {
+	c.lifecycleMu.RLock()
+	defer c.lifecycleMu.RUnlock()
+	if !c.attached {
+		return uuid.Nil
+	}
+	return c.sessionPrincipal.RuntimeSessionID
+}
+
+func (c *runtimeWSConnection) sendBrowserObserverCommand(
+	payload BrowserObserverCommandPayload,
+) error {
+	c.lifecycleMu.RLock()
+	defer c.lifecycleMu.RUnlock()
+	if !c.attached ||
+		c.sessionPrincipal.RuntimeSessionID !=
+			payload.AttemptIdentity.RuntimeSessionID {
+		return ErrObservationChannelUnavailable
+	}
+	message, _, err := newRuntimeWSTypedMessage(
+		RuntimeMessageBrowserObserverCommand,
 		nil,
 		payload,
 	)
@@ -1486,6 +1608,21 @@ func (c *runtimeWSConnection) cleanup() {
 			case <-time.After(runtimeWSCleanupTimeout):
 				log.Warn().Msg("Runtime websocket maintenance did not stop before cleanup")
 			}
+		}
+		// Ends observations before the Session state changes. The Worker is gone
+		// and cannot answer a stop, so its lease will lapse on its own TTL while
+		// the audit here would stay active forever.
+		if c.controller.dependencies.BrowserObservation != nil &&
+			c.sessionPrincipal.RuntimeSessionID != uuid.Nil {
+			observationCtx, observationCancel := context.WithTimeout(
+				context.Background(), runtimeWSCleanupTimeout,
+			)
+			if observationErr := c.controller.dependencies.BrowserObservation.CloseSessionObservations(
+				observationCtx, c.sessionPrincipal.RuntimeSessionID, "session_disconnected",
+			); observationErr != nil {
+				log.Warn().Err(observationErr).Msg("Runtime websocket close browser observations")
+			}
+			observationCancel()
 		}
 		if c.attached {
 			closeCtx, closeCancel := context.WithTimeout(context.Background(), runtimeWSCleanupTimeout)

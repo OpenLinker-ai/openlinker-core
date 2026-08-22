@@ -13,8 +13,8 @@ BEGIN
     FROM pg_catalog.pg_tables
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_tables <> 73 THEN
-        RAISE EXCEPTION 'Core initializer table count is %, expected 73', public_tables;
+    IF public_tables <> 75 THEN
+        RAISE EXCEPTION 'Core initializer table count is %, expected 75', public_tables;
     END IF;
 
     SELECT count(*) INTO public_constraints
@@ -23,16 +23,16 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 626 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 626', public_constraints;
+    IF public_constraints <> 641 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 641', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 267 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 267', public_indexes;
+    IF public_indexes <> 272 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 272', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers
@@ -115,7 +115,10 @@ BEGIN
        OR to_regclass('public.idx_runtime_sessions_credential_lifecycle') IS NULL
        OR to_regclass('public.runtime_agent_execution_profiles_browser_idx') IS NULL
        OR to_regclass('public.browser_run_controls_expiry_idx') IS NULL
-       OR to_regclass('public.browser_human_control_audits_run_created_idx') IS NULL THEN
+       OR to_regclass('public.browser_human_control_audits_run_created_idx') IS NULL
+       OR to_regclass('public.browser_observable_attempts') IS NULL
+       OR to_regclass('public.browser_observation_audits_active_run_idx') IS NULL
+       OR to_regclass('public.browser_observation_audits_reconcile_idx') IS NULL THEN
         RAISE EXCEPTION 'Core initializer is missing a required current index';
     END IF;
 

@@ -91,7 +91,11 @@ type Config struct {
 	SentryDSN string `envconfig:"SENTRY_DSN"`
 
 	// Runtime parameters.
-	RunTimeoutSeconds       int  `envconfig:"RUN_TIMEOUT_SECONDS" default:"60"`
+	RunTimeoutSeconds int `envconfig:"RUN_TIMEOUT_SECONDS" default:"60"`
+	// Concurrent read-only Browser observations one Core instance will hold.
+	// Each one pins an in-process frame buffer and a Runtime lease, so the
+	// ceiling is a deployment decision rather than whatever the database allows.
+	BrowserObservationQuota int  `envconfig:"BROWSER_OBSERVATION_QUOTA" default:"32"`
 	AllowLocalHTTPEndpoints bool `envconfig:"ALLOW_LOCAL_HTTP_ENDPOINTS" default:"false"`
 	// Agent Runtime device traffic uses Agent Token-only HTTPS by default.
 	// Core-terminated mTLS is an explicit high-security mode. In auto mode Core

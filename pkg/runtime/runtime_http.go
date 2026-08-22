@@ -111,6 +111,7 @@ type RuntimeHTTPDependencies struct {
 	AdmissionLimiter     RuntimeAdmissionLimiter
 	Observer             WorkerObserver
 	BrowserControl       *BrowserHumanControl
+	BrowserObservation   *BrowserObservation
 	CoreInstanceID       uuid.UUID
 	WebSocketConcurrency RuntimeWebSocketConcurrencyConfig
 	// AttachOnly is a release-cutover safety mode. It permits authenticated
@@ -176,6 +177,11 @@ func NewRuntimeHTTPController(dependencies RuntimeHTTPDependencies) *RuntimeHTTP
 	}
 	if dependencies.BrowserControl != nil {
 		dependencies.BrowserControl.BindCommandSender(controller)
+	}
+	// Without this the observation service has no way to reach the Worker, and
+	// every start would fail closed as an unavailable channel.
+	if dependencies.BrowserObservation != nil {
+		dependencies.BrowserObservation.BindCommandSender(controller)
 	}
 	return controller
 }

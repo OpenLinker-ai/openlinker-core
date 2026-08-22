@@ -4,12 +4,13 @@
 canonical seed data for a fresh database. The migration runner then applies
 `087_browser_agent_execution_profile.up.sql`,
 `088_browser_human_control.up.sql`, `089_user_jwt_token_version.up.sql`,
-`090_task_callback_owner_index.up.sql`, and
-`091_browser_interaction_policy.up.sql`. The only supported installed-schema
-upgrade is from the exact clean version `090` predecessor to version `091`.
+`090_task_callback_owner_index.up.sql`,
+`091_browser_interaction_policy.up.sql`, and
+`092_browser_observation_audit.up.sql`. The only supported installed-schema
+upgrade is from the exact clean version `091` predecessor to version `092`.
 `086_current_schema_init_verify.sql` is the PostgreSQL 16 current-catalog and
 seed fingerprint used after the complete migration chain. Fresh and predecessor
-paths therefore execute the same `091` DDL and converge on one version `091`
+paths therefore execute the same `092` DDL and converge on one version `092`
 catalog fingerprint without an idempotent duplicate schema definition.
 
 Migration `091` also adds an Owner-only
@@ -22,8 +23,9 @@ constraints keep both declared and classified Browser Agents in Runtime mode;
 standard Sessions, publication and connection-mode changes therefore cannot
 race past the initial policy decision.
 
-The migration command accepts only a truly empty database, the exact clean
-version `090` predecessor, or the exact clean version `091` current schema.
+The migration command accepts only a truly empty database, an exact clean
+supported predecessor (`091`, `088` or `086`), or the exact clean version `092`
+current schema.
 Exactness is enforced with catalog object counts and a SHA-256 fingerprint over
 table, column/default, constraint, index, trigger, and function definitions.
 Legacy, dirty, partial, or malformed databases are rejected before the

@@ -650,6 +650,10 @@ func convertRuntimeCancellationFixtureToCoreHTTP(
 		if _, err := tx.Exec(context.Background(), `
 			UPDATE run_attempts
 			SET executor_type = 'core_http',
+			    -- An attachment belongs to a Runtime Session, and the catalog
+			    -- enforces that. Leaving it behind made this conversion fail and
+			    -- the tests that depend on it skip themselves silently.
+			    runtime_attachment_id = NULL,
 			    runtime_token_id = NULL,
 			    runtime_worker_id = NULL,
 			    runtime_session_id = NULL,

@@ -68,9 +68,10 @@ if [ "$postgres_backend" = docker ]; then
   ready_attempt=0
   while [ "$ready_attempt" -lt 60 ]; do
     if docker exec "$container_name" \
-      pg_isready \
+      psql \
       -U openlinker_browser_volume \
       -d openlinker_browser_volume \
+      -tAc 'SELECT 1' \
       >/dev/null 2>&1; then
       break
     fi
@@ -169,7 +170,8 @@ run_database_test() {
     088_browser_human_control.up.sql \
     089_user_jwt_token_version.up.sql \
     090_task_callback_owner_index.up.sql \
-    091_browser_interaction_policy.up.sql; do
+    091_browser_interaction_policy.up.sql \
+    092_browser_observation_audit.up.sql; do
     apply_schema_file "$repository_root/migrations/$migration_file"
   done
   apply_schema_file "$repository_root/migrations/086_current_schema_init_verify.sql"
@@ -201,7 +203,7 @@ run_database_test() {
   run_database_test \
     "$normal_go_cache" \
     ./pkg/migrationinit \
-    TestBrowserPolicyMigrationConvergesFromFreshReviewedBridgeAndVersion90
+    TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91
   GOCACHE="$normal_go_cache" go clean -cache
 
   run_database_test \
@@ -237,4 +239,4 @@ run_database_test() {
   GOCACHE="$race_go_cache" go clean -cache
 )
 
-echo "Browser PostgreSQL acceptance passed (fresh/v86/v90 migration, Owner-staged first full Session and Run fence, old-Worker rejection, 1 vs 500 action rows, and CallRecord policy evidence)"
+echo "Browser PostgreSQL acceptance passed (fresh/v86/v91 migration, Owner-staged first full Session and Run fence, old-Worker rejection, 1 vs 500 action rows, and CallRecord policy evidence)"
