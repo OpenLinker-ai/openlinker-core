@@ -68,9 +68,10 @@ if [ "$postgres_backend" = docker ]; then
   ready_attempt=0
   while [ "$ready_attempt" -lt 60 ]; do
     if docker exec "$container_name" \
-      pg_isready \
+      psql \
       -U openlinker_browser_volume \
       -d openlinker_browser_volume \
+      -tAc 'SELECT 1' \
       >/dev/null 2>&1; then
       break
     fi
