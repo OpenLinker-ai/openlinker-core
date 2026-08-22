@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -17,6 +18,11 @@ func observerIdentity() BrowserObserverIdentity {
 	return BrowserObserverIdentity{
 		RunID:                uuid.New(),
 		AttemptID:            uuid.New(),
+		RuntimeLeaseID:       uuid.New(),
+		FencingToken:         7,
+		NodeID:               uuid.New(),
+		AgentID:              uuid.New(),
+		WorkerID:             uuid.NewString(),
 		SessionEpoch:         3,
 		BrowserSessionSHA256: strings.Repeat("a", 64),
 		AttachmentSHA256:     strings.Repeat("b", 64),
@@ -26,14 +32,18 @@ func observerIdentity() BrowserObserverIdentity {
 
 func observerCommand(action BrowserObserverAction) BrowserObserverCommandPayload {
 	now := time.Now().UTC()
+	identity := observerIdentity()
 	return BrowserObserverCommandPayload{
-		AttemptIdentity: observerIdentity(),
-		CommandID:       uuid.New(),
-		Action:          action,
-		LeaseID:         uuid.New(),
-		LeaseExpiresAt:  now.Add(time.Minute),
-		DeadlineAt:      now.Add(time.Minute),
-		FrameIntervalMS: observationDefaultFrameIntervalMS,
+		AttemptIdentity:      identity.RuntimeIdentity(),
+		SessionEpoch:         identity.SessionEpoch,
+		BrowserSessionSHA256: identity.BrowserSessionSHA256,
+		AttachmentSHA256:     identity.AttachmentSHA256,
+		CommandID:            uuid.New(),
+		Action:               action,
+		LeaseID:              uuid.New(),
+		LeaseExpiresAt:       now.Add(time.Minute),
+		DeadlineAt:           now.Add(time.Minute),
+		FrameIntervalMS:      observationDefaultFrameIntervalMS,
 	}
 }
 
@@ -58,9 +68,9 @@ func TestBrowserObserverCommandValidation(t *testing.T) {
 		"slow frames":   func(c *BrowserObserverCommandPayload) { c.FrameIntervalMS = BrowserObserverMaxFrameIntervalMS + 1 },
 		"no lease":      func(c *BrowserObserverCommandPayload) { c.LeaseID = uuid.Nil },
 		"bad action":    func(c *BrowserObserverCommandPayload) { c.Action = "observe" },
-		"zero epoch":    func(c *BrowserObserverCommandPayload) { c.AttemptIdentity.SessionEpoch = 0 },
-		"no attachment": func(c *BrowserObserverCommandPayload) { c.AttemptIdentity.AttachmentSHA256 = "" },
-		"bad digest":    func(c *BrowserObserverCommandPayload) { c.AttemptIdentity.BrowserSessionSHA256 = "zz" },
+		"zero epoch":    func(c *BrowserObserverCommandPayload) { c.SessionEpoch = 0 },
+		"no attachment": func(c *BrowserObserverCommandPayload) { c.AttachmentSHA256 = "" },
+		"bad digest":    func(c *BrowserObserverCommandPayload) { c.BrowserSessionSHA256 = "zz" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			command := observerCommand(BrowserObserverStart)
@@ -69,6 +79,31 @@ func TestBrowserObserverCommandValidation(t *testing.T) {
 				t.Fatalf("%s was accepted", name)
 			}
 		})
+	}
+}
+
+// Runtime extensions reserve attempt_identity for the complete SDK Attempt
+// identity. Browser hashes are additional evidence; replacing the reserved
+// field with that custom shape makes the SDK reject the push and disconnect.
+func TestBrowserObserverCommandKeepsRuntimeAttemptIdentityAtReservedField(t *testing.T) {
+	t.Parallel()
+	command := observerCommand(BrowserObserverStart)
+	payload, err := json.Marshal(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &object); err != nil {
+		t.Fatal(err)
+	}
+	var decoded AttemptIdentity
+	decoder := json.NewDecoder(bytes.NewReader(object["attempt_identity"]))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		t.Fatalf("Runtime attempt identity rejected: %v", err)
+	}
+	if decoded != command.AttemptIdentity {
+		t.Fatalf("Runtime attempt identity changed: %#v", decoded)
 	}
 }
 
@@ -81,11 +116,15 @@ func TestBrowserObserverEventValidationPerKind(t *testing.T) {
 		Width:    1280,
 		Height:   720,
 	}
+	identity := observerIdentity()
 	base := BrowserObserverEventPayload{
-		AttemptIdentity: observerIdentity(),
-		CommandID:       uuid.New(),
-		LeaseID:         uuid.New(),
-		EventSeq:        1,
+		AttemptIdentity:      identity.RuntimeIdentity(),
+		SessionEpoch:         identity.SessionEpoch,
+		BrowserSessionSHA256: identity.BrowserSessionSHA256,
+		AttachmentSHA256:     identity.AttachmentSHA256,
+		CommandID:            uuid.New(),
+		LeaseID:              uuid.New(),
+		EventSeq:             1,
 	}
 
 	started := base
@@ -252,14 +291,7 @@ func observationFrame(seq int64) BrowserObservationFrame {
 // published under. Frames must name it exactly, so the tests carry it rather
 // than letting a zero value pass by accident.
 func observationBufferIdentity() BrowserObserverIdentity {
-	return BrowserObserverIdentity{
-		RunID:                uuid.New(),
-		AttemptID:            uuid.New(),
-		SessionEpoch:         3,
-		BrowserSessionSHA256: strings.Repeat("a", 64),
-		AttachmentSHA256:     strings.Repeat("b", 64),
-		RuntimeSessionID:     uuid.New(),
-	}
+	return observerIdentity()
 }
 
 // A frame from a lease that no longer owns the Run belongs to an observation

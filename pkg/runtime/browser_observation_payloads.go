@@ -40,6 +40,11 @@ const (
 type BrowserObserverIdentity struct {
 	RunID                uuid.UUID `json:"run_id"`
 	AttemptID            uuid.UUID `json:"attempt_id"`
+	RuntimeLeaseID       uuid.UUID `json:"runtime_lease_id"`
+	FencingToken         int64     `json:"fencing_token"`
+	NodeID               uuid.UUID `json:"node_id"`
+	AgentID              uuid.UUID `json:"agent_id"`
+	WorkerID             string    `json:"worker_id"`
 	SessionEpoch         int64     `json:"session_epoch"`
 	BrowserSessionSHA256 string    `json:"browser_session_sha256"`
 	AttachmentSHA256     string    `json:"browser_attachment_sha256"`
@@ -47,13 +52,16 @@ type BrowserObserverIdentity struct {
 }
 
 type BrowserObserverCommandPayload struct {
-	AttemptIdentity BrowserObserverIdentity `json:"attempt_identity"`
-	CommandID       uuid.UUID               `json:"command_id"`
-	Action          BrowserObserverAction   `json:"action"`
-	LeaseID         uuid.UUID               `json:"lease_id"`
-	LeaseExpiresAt  time.Time               `json:"lease_expires_at"`
-	DeadlineAt      time.Time               `json:"deadline_at"`
-	FrameIntervalMS int                     `json:"frame_interval_ms"`
+	AttemptIdentity      AttemptIdentity       `json:"attempt_identity"`
+	SessionEpoch         int64                 `json:"session_epoch"`
+	BrowserSessionSHA256 string                `json:"browser_session_sha256"`
+	AttachmentSHA256     string                `json:"browser_attachment_sha256"`
+	CommandID            uuid.UUID             `json:"command_id"`
+	Action               BrowserObserverAction `json:"action"`
+	LeaseID              uuid.UUID             `json:"lease_id"`
+	LeaseExpiresAt       time.Time             `json:"lease_expires_at"`
+	DeadlineAt           time.Time             `json:"deadline_at"`
+	FrameIntervalMS      int                   `json:"frame_interval_ms"`
 }
 
 type BrowserObserverFramePayload struct {
@@ -64,23 +72,84 @@ type BrowserObserverFramePayload struct {
 }
 
 type BrowserObserverEventPayload struct {
-	AttemptIdentity BrowserObserverIdentity      `json:"attempt_identity"`
-	CommandID       uuid.UUID                    `json:"command_id"`
-	LeaseID         uuid.UUID                    `json:"lease_id"`
-	EventSeq        int64                        `json:"event_seq"`
-	Kind            BrowserObserverEventKind     `json:"kind"`
-	CapturedAt      *time.Time                   `json:"captured_at,omitempty"`
-	Frame           *BrowserObserverFramePayload `json:"frame,omitempty"`
-	ErrorCode       string                       `json:"error_code,omitempty"`
+	AttemptIdentity      AttemptIdentity              `json:"attempt_identity"`
+	SessionEpoch         int64                        `json:"session_epoch"`
+	BrowserSessionSHA256 string                       `json:"browser_session_sha256"`
+	AttachmentSHA256     string                       `json:"browser_attachment_sha256"`
+	CommandID            uuid.UUID                    `json:"command_id"`
+	LeaseID              uuid.UUID                    `json:"lease_id"`
+	EventSeq             int64                        `json:"event_seq"`
+	Kind                 BrowserObserverEventKind     `json:"kind"`
+	CapturedAt           *time.Time                   `json:"captured_at,omitempty"`
+	Frame                *BrowserObserverFramePayload `json:"frame,omitempty"`
+	ErrorCode            string                       `json:"error_code,omitempty"`
 }
 
 type BrowserObserverEventAckPayload struct {
-	AttemptIdentity BrowserObserverIdentity `json:"attempt_identity"`
-	LeaseID         uuid.UUID               `json:"lease_id"`
-	EventSeq        int64                   `json:"event_seq"`
+	AttemptIdentity      AttemptIdentity `json:"attempt_identity"`
+	SessionEpoch         int64           `json:"session_epoch"`
+	BrowserSessionSHA256 string          `json:"browser_session_sha256"`
+	AttachmentSHA256     string          `json:"browser_attachment_sha256"`
+	LeaseID              uuid.UUID       `json:"lease_id"`
+	EventSeq             int64           `json:"event_seq"`
+}
+
+func (identity BrowserObserverIdentity) RuntimeIdentity() AttemptIdentity {
+	return AttemptIdentity{
+		RunID:            identity.RunID,
+		AttemptID:        identity.AttemptID,
+		LeaseID:          identity.RuntimeLeaseID,
+		FencingToken:     identity.FencingToken,
+		NodeID:           identity.NodeID,
+		AgentID:          identity.AgentID,
+		WorkerID:         identity.WorkerID,
+		RuntimeSessionID: identity.RuntimeSessionID,
+	}
+}
+
+func browserObserverIdentityFromWire(
+	attempt AttemptIdentity,
+	sessionEpoch int64,
+	browserSessionSHA256 string,
+	attachmentSHA256 string,
+) BrowserObserverIdentity {
+	return BrowserObserverIdentity{
+		RunID:                attempt.RunID,
+		AttemptID:            attempt.AttemptID,
+		RuntimeLeaseID:       attempt.LeaseID,
+		FencingToken:         attempt.FencingToken,
+		NodeID:               attempt.NodeID,
+		AgentID:              attempt.AgentID,
+		WorkerID:             attempt.WorkerID,
+		RuntimeSessionID:     attempt.RuntimeSessionID,
+		SessionEpoch:         sessionEpoch,
+		BrowserSessionSHA256: browserSessionSHA256,
+		AttachmentSHA256:     attachmentSHA256,
+	}
+}
+
+func (payload BrowserObserverCommandPayload) identity() BrowserObserverIdentity {
+	return browserObserverIdentityFromWire(
+		payload.AttemptIdentity,
+		payload.SessionEpoch,
+		payload.BrowserSessionSHA256,
+		payload.AttachmentSHA256,
+	)
+}
+
+func (payload BrowserObserverEventPayload) identity() BrowserObserverIdentity {
+	return browserObserverIdentityFromWire(
+		payload.AttemptIdentity,
+		payload.SessionEpoch,
+		payload.BrowserSessionSHA256,
+		payload.AttachmentSHA256,
+	)
 }
 
 func (identity BrowserObserverIdentity) validate() error {
+	if err := validateAttemptIdentity(identity.RuntimeIdentity()); err != nil {
+		return err
+	}
 	if identity.RunID == uuid.Nil || identity.AttemptID == uuid.Nil ||
 		identity.SessionEpoch < 1 ||
 		!validSHA256Hex(identity.BrowserSessionSHA256) ||
@@ -92,7 +161,7 @@ func (identity BrowserObserverIdentity) validate() error {
 }
 
 func (payload BrowserObserverCommandPayload) Validate() error {
-	if err := payload.AttemptIdentity.validate(); err != nil {
+	if err := payload.identity().validate(); err != nil {
 		return err
 	}
 	if payload.CommandID == uuid.Nil || payload.LeaseID == uuid.Nil {
@@ -116,7 +185,7 @@ func (payload BrowserObserverCommandPayload) Validate() error {
 }
 
 func (payload BrowserObserverEventPayload) Validate() error {
-	if err := payload.AttemptIdentity.validate(); err != nil {
+	if err := payload.identity().validate(); err != nil {
 		return err
 	}
 	if payload.CommandID == uuid.Nil || payload.LeaseID == uuid.Nil || payload.EventSeq < 1 {
@@ -150,7 +219,12 @@ func (payload BrowserObserverEventPayload) Validate() error {
 }
 
 func (payload BrowserObserverEventAckPayload) Validate() error {
-	if err := payload.AttemptIdentity.validate(); err != nil {
+	if err := browserObserverIdentityFromWire(
+		payload.AttemptIdentity,
+		payload.SessionEpoch,
+		payload.BrowserSessionSHA256,
+		payload.AttachmentSHA256,
+	).validate(); err != nil {
 		return err
 	}
 	if payload.LeaseID == uuid.Nil || payload.EventSeq < 1 {
