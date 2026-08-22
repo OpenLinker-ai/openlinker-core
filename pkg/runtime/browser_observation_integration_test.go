@@ -353,6 +353,48 @@ FROM browser_observation_audits WHERE lease_id = $1
 	))
 }
 
+// Cancellation marks the Run terminal before the Runtime's handler exits. The
+// SDK then rejects every further RuntimeContext.Emit call by design, including
+// the Browser provider's deferred lifecycle `closed` event. Core's own durable
+// cancellation evidence must therefore close the observation without waiting
+// for an event the canceled Worker is forbidden to send.
+func TestBrowserObservationRunCancellationClosesWithoutWorkerLifecycleEvent(t *testing.T) {
+	pool, service, fixture, _, ownerID := observationFixture(t)
+	observation := service.BrowserObservation()
+	appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+
+	identity, err := observation.ResolveIdentity(
+		context.Background(), fixture.identity.RunID, ownerID, false,
+	)
+	require.NoError(t, err)
+	state, err := observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+
+	_, err = service.CancelRun(context.Background(), ownerID, fixture.identity.RunID)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		var status string
+		var endReason *string
+		queryErr := pool.QueryRow(context.Background(), `
+SELECT status, end_reason
+FROM browser_observation_audits WHERE lease_id = $1
+`, state.LeaseID).Scan(&status, &endReason)
+		return queryErr == nil && status == "closed" && endReason != nil &&
+			*endReason == "run_browser_closed"
+	}, 2*time.Second, 20*time.Millisecond)
+
+	var closedLifecycleEvents int
+	require.NoError(t, pool.QueryRow(context.Background(), `
+SELECT count(*) FROM run_events
+WHERE run_id = $1 AND event_type = 'run.browser.lifecycle'
+  AND payload->>'phase' IN ('closed', 'failed')
+`, fixture.identity.RunID).Scan(&closedLifecycleEvents))
+	require.Zero(t, closedLifecycleEvents,
+		"the cancellation close must not depend on a post-cancel Worker event")
+}
+
 // A Worker that refuses the start must not leave an active audit behind: the
 // unique index would then block the Run from ever being observed again.
 func TestBrowserObservationUnconfirmedStartClosesItsAudit(t *testing.T) {
