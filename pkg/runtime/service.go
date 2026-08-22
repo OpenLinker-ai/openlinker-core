@@ -2028,7 +2028,7 @@ func (s *Service) cancelRuntime(ctx context.Context, userID, runID uuid.UUID) (*
 	if s.cancellation == nil {
 		return nil, httpx.Internal("取消服务暂不可用")
 	}
-	_, err := s.cancellation.CancelOwnedRun(ctx, userID, runID, "run canceled by user")
+	result, err := s.cancellation.CancelOwnedRun(ctx, userID, runID, "run canceled by user")
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrRuntimeCancellationNotFound):
@@ -2044,6 +2044,19 @@ func (s *Service) cancelRuntime(ctx context.Context, userID, runID uuid.UUID) (*
 				Msg("runtime.CancelRun: durable Runtime cancellation")
 			return nil, httpx.Internal("取消调用失败")
 		}
+	}
+	// Cancellation makes the Run terminal before the Runtime acknowledges that
+	// its handler stopped. RuntimeContext.Emit deliberately rejects events after
+	// cancellation, so a Browser provider cannot publish its deferred `closed`
+	// lifecycle event on this path. Close the observation from Core's durable
+	// cancellation evidence instead; replaying the same cancellation retries the
+	// idempotent close if this process exited after the transaction committed.
+	if s.browserObservation != nil && result.Cancellation.TargetAttemptID != nil {
+		s.browserObservation.closeAttemptAsync(
+			runID,
+			*result.Cancellation.TargetAttemptID,
+			"run_browser_closed",
+		)
 	}
 	return s.GetRun(ctx, userID, runID)
 }
