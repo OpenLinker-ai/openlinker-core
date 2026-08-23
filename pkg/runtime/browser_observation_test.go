@@ -17,6 +17,11 @@ func observerIdentity() BrowserObserverIdentity {
 	return BrowserObserverIdentity{
 		RunID:                uuid.New(),
 		AttemptID:            uuid.New(),
+		LeaseID:              uuid.New(),
+		FencingToken:         7,
+		NodeID:               uuid.New(),
+		AgentID:              uuid.New(),
+		WorkerID:             "observer-worker",
 		SessionEpoch:         3,
 		BrowserSessionSHA256: strings.Repeat("a", 64),
 		AttachmentSHA256:     strings.Repeat("b", 64),
@@ -252,14 +257,7 @@ func observationFrame(seq int64) BrowserObservationFrame {
 // published under. Frames must name it exactly, so the tests carry it rather
 // than letting a zero value pass by accident.
 func observationBufferIdentity() BrowserObserverIdentity {
-	return BrowserObserverIdentity{
-		RunID:                uuid.New(),
-		AttemptID:            uuid.New(),
-		SessionEpoch:         3,
-		BrowserSessionSHA256: strings.Repeat("a", 64),
-		AttachmentSHA256:     strings.Repeat("b", 64),
-		RuntimeSessionID:     uuid.New(),
-	}
+	return observerIdentity()
 }
 
 // A frame from a lease that no longer owns the Run belongs to an observation

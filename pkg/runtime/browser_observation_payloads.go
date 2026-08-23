@@ -40,6 +40,11 @@ const (
 type BrowserObserverIdentity struct {
 	RunID                uuid.UUID `json:"run_id"`
 	AttemptID            uuid.UUID `json:"attempt_id"`
+	LeaseID              uuid.UUID `json:"lease_id"`
+	FencingToken         int64     `json:"fencing_token"`
+	NodeID               uuid.UUID `json:"node_id"`
+	AgentID              uuid.UUID `json:"agent_id"`
+	WorkerID             string    `json:"worker_id"`
 	SessionEpoch         int64     `json:"session_epoch"`
 	BrowserSessionSHA256 string    `json:"browser_session_sha256"`
 	AttachmentSHA256     string    `json:"browser_attachment_sha256"`
@@ -82,6 +87,9 @@ type BrowserObserverEventAckPayload struct {
 
 func (identity BrowserObserverIdentity) validate() error {
 	if identity.RunID == uuid.Nil || identity.AttemptID == uuid.Nil ||
+		identity.LeaseID == uuid.Nil || identity.FencingToken < 1 ||
+		identity.NodeID == uuid.Nil || identity.AgentID == uuid.Nil ||
+		!validRequiredString(identity.WorkerID, 200) ||
 		identity.SessionEpoch < 1 ||
 		!validSHA256Hex(identity.BrowserSessionSHA256) ||
 		!validSHA256Hex(identity.AttachmentSHA256) ||

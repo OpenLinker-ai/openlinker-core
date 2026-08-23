@@ -362,25 +362,29 @@ func (observation *BrowserObservation) Stop(
 		return nil
 	}
 	var leaseID uuid.UUID
-	var sessionID uuid.UUID
-	var attemptID uuid.UUID
-	var epoch int64
-	var sessionDigest string
-	var attachmentDigest string
+	var identity BrowserObserverIdentity
 	// Joined on the Attempt as well as the Run. Joining on run_id alone could
 	// pair an old audit with a Runtime Session that has since been replaced, and
 	// the stop would be addressed to the wrong Session.
 	var owner uuid.UUID
 	err := observation.pool.QueryRow(ctx, `
-SELECT a.lease_id, a.attempt_id, a.session_epoch, a.core_instance_id,
+SELECT a.lease_id, a.attempt_id,
+       r.lease_id, r.fencing_token, r.node_id, r.agent_id, r.runtime_worker_id,
+       a.session_epoch, a.core_instance_id,
        a.attachment_sha256, c.browser_session_sha256, c.runtime_session_id
 FROM browser_observation_audits a
 JOIN browser_observable_attempts c
   ON c.run_id = a.run_id AND c.attempt_id = a.attempt_id
+JOIN run_attempts r
+  ON r.run_id = a.run_id AND r.id = a.attempt_id
 WHERE a.run_id = $1 AND a.status = 'active'
 `, runID).Scan(
-		&leaseID, &attemptID, &epoch, &owner,
-		&attachmentDigest, &sessionDigest, &sessionID,
+		&leaseID, &identity.AttemptID,
+		&identity.LeaseID, &identity.FencingToken, &identity.NodeID,
+		&identity.AgentID, &identity.WorkerID,
+		&identity.SessionEpoch, &owner,
+		&identity.AttachmentSHA256, &identity.BrowserSessionSHA256,
+		&identity.RuntimeSessionID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
@@ -394,20 +398,16 @@ WHERE a.run_id = $1 AND a.status = 'active'
 	if owner != observation.instance {
 		return ErrObservationChannelUnavailable
 	}
-	if observation.sender != nil && sessionID != uuid.Nil {
-		_ = observation.sender.SendBrowserObserverCommand(sessionID, BrowserObserverCommandPayload{
-			AttemptIdentity: BrowserObserverIdentity{
-				RunID:                runID,
-				AttemptID:            attemptID,
-				SessionEpoch:         epoch,
-				BrowserSessionSHA256: sessionDigest,
-				AttachmentSHA256:     attachmentDigest,
-				RuntimeSessionID:     sessionID,
-			},
-			CommandID: uuid.New(),
-			Action:    BrowserObserverStop,
-			LeaseID:   leaseID,
-		})
+	identity.RunID = runID
+	if observation.sender != nil && identity.RuntimeSessionID != uuid.Nil {
+		_ = observation.sender.SendBrowserObserverCommand(
+			identity.RuntimeSessionID,
+			BrowserObserverCommandPayload{
+				AttemptIdentity: identity,
+				CommandID:       uuid.New(),
+				Action:          BrowserObserverStop,
+				LeaseID:         leaseID,
+			})
 	}
 	count := observation.frames.close(runID)
 	_ = observation.RecordFrames(ctx, leaseID, count)
@@ -563,14 +563,21 @@ func (observation *BrowserObservation) stopObservedLease(
 ) error {
 	var identity BrowserObserverIdentity
 	err := observation.pool.QueryRow(ctx, `
-SELECT a.attempt_id, a.session_epoch, a.attachment_sha256,
+SELECT a.attempt_id,
+       r.lease_id, r.fencing_token, r.node_id, r.agent_id, r.runtime_worker_id,
+       a.session_epoch, a.attachment_sha256,
        c.browser_session_sha256, c.runtime_session_id
 FROM browser_observation_audits a
 JOIN browser_observable_attempts c
   ON c.run_id = a.run_id AND c.attempt_id = a.attempt_id
+JOIN run_attempts r
+  ON r.run_id = a.run_id AND r.id = a.attempt_id
 WHERE a.lease_id = $1 AND a.status = 'active'
 `, leaseID).Scan(
-		&identity.AttemptID, &identity.SessionEpoch, &identity.AttachmentSHA256,
+		&identity.AttemptID,
+		&identity.LeaseID, &identity.FencingToken, &identity.NodeID,
+		&identity.AgentID, &identity.WorkerID,
+		&identity.SessionEpoch, &identity.AttachmentSHA256,
 		&identity.BrowserSessionSHA256, &identity.RuntimeSessionID,
 	)
 	if err == nil {
@@ -664,6 +671,11 @@ SELECT r.user_id,
        r.dispatch_state,
        r.active_attempt_id,
        c.attempt_id,
+       a.lease_id,
+       a.fencing_token,
+       a.node_id,
+       a.agent_id,
+       a.runtime_worker_id,
        c.session_epoch,
        c.browser_session_sha256,
        c.browser_attachment_sha256,
@@ -671,6 +683,7 @@ SELECT r.user_id,
        COALESCE(s.features, ARRAY[]::text[])
 FROM runs r
 JOIN browser_observable_attempts c ON c.run_id = r.id
+JOIN run_attempts a ON a.run_id = r.id AND a.id = c.attempt_id
 LEFT JOIN runtime_sessions s ON s.runtime_session_id = c.runtime_session_id
 WHERE r.id = $1
 `, runID).Scan(
@@ -679,6 +692,11 @@ WHERE r.id = $1
 		&dispatchState,
 		&activeAttemptID,
 		&identity.AttemptID,
+		&identity.LeaseID,
+		&identity.FencingToken,
+		&identity.NodeID,
+		&identity.AgentID,
+		&identity.WorkerID,
 		&identity.SessionEpoch,
 		&identity.BrowserSessionSHA256,
 		&identity.AttachmentSHA256,
