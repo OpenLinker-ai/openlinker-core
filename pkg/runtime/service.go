@@ -2045,6 +2045,23 @@ func (s *Service) cancelRuntime(ctx context.Context, userID, runID uuid.UUID) (*
 			return nil, httpx.Internal("取消调用失败")
 		}
 	}
+	if s.browserObservation != nil {
+		// Cancellation commits the public terminal fact before returning. Its
+		// observation teardown must survive a client that disconnects as soon as
+		// that fact is visible, otherwise the canceled Run keeps an active audit
+		// and its in-process frame slot until the lease TTL expires.
+		observationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if observationErr := s.browserObservation.Stop(
+			observationCtx,
+			runID,
+			"run_browser_closed",
+		); observationErr != nil {
+			log.Error().Err(observationErr).Str("run_id", runID.String()).
+				Msg("runtime.CancelRun: close Browser observation")
+			return nil, httpx.Internal("取消调用失败")
+		}
+	}
 	return s.GetRun(ctx, userID, runID)
 }
 

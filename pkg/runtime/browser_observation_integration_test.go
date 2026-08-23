@@ -332,6 +332,38 @@ FROM browser_observation_audits WHERE lease_id = $1
 	))
 }
 
+func TestBrowserObservationRunCancellationClosesTheAudit(t *testing.T) {
+	pool, service, fixture, capture, ownerID := observationFixture(t)
+	observation := service.BrowserObservation()
+	appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+
+	identity, err := observation.ResolveIdentity(
+		context.Background(), fixture.identity.RunID, ownerID, false,
+	)
+	require.NoError(t, err)
+	state, err := observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+
+	run, err := service.CancelRun(context.Background(), ownerID, fixture.identity.RunID)
+	require.NoError(t, err)
+	require.Equal(t, runtime.RuntimeRunCanceled, run.Status)
+	require.Contains(t, capture.actions(), runtime.BrowserObserverStop)
+
+	var status, endReason string
+	var frameCount int64
+	var complete bool
+	require.NoError(t, pool.QueryRow(context.Background(), `
+SELECT status, end_reason, frame_count, frame_count_complete
+FROM browser_observation_audits WHERE lease_id = $1
+`, state.LeaseID).Scan(&status, &endReason, &frameCount, &complete))
+	require.Equal(t, "closed", status)
+	require.Equal(t, "run_browser_closed", endReason)
+	require.Zero(t, frameCount)
+	require.True(t, complete)
+}
+
 // A Worker that refuses the start must not leave an active audit behind: the
 // unique index would then block the Run from ever being observed again.
 func TestBrowserObservationUnconfirmedStartClosesItsAudit(t *testing.T) {
