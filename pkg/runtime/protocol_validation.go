@@ -1075,6 +1075,13 @@ func validateRuntimeRequiredFields(raw json.RawMessage, valueType reflect.Type) 
 		if valueType == runtimeRawMessageType || valueType == runtimeUUIDType {
 			return nil
 		}
+		// encoding/json defines a byte slice as a base64-encoded JSON string.
+		// The strict decoder above has already checked and decoded that wire
+		// representation, so required-field traversal must not reinterpret it as
+		// an ordinary JSON array. Arrays (including UUIDs) keep their own rules.
+		if valueType.Kind() == reflect.Slice && valueType.Elem().Kind() == reflect.Uint8 {
+			return nil
+		}
 		var items []json.RawMessage
 		if err := json.Unmarshal(raw, &items); err != nil {
 			return errors.New("runtime value must be a JSON array")
