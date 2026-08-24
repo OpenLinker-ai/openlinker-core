@@ -162,13 +162,16 @@ func (observation *BrowserObservation) Start(
 	leaseID := uuid.New()
 	expiresAt := now.Add(observationDefaultTTL)
 	command := BrowserObserverCommandPayload{
-		AttemptIdentity: identity,
-		CommandID:       uuid.New(),
-		Action:          BrowserObserverStart,
-		LeaseID:         leaseID,
-		LeaseExpiresAt:  expiresAt,
-		DeadlineAt:      now.Add(observationMaxTTL),
-		FrameIntervalMS: observationDefaultFrameIntervalMS,
+		AttemptIdentity:      identity.RuntimeIdentity(),
+		SessionEpoch:         identity.SessionEpoch,
+		BrowserSessionSHA256: identity.BrowserSessionSHA256,
+		AttachmentSHA256:     identity.AttachmentSHA256,
+		CommandID:            uuid.New(),
+		Action:               BrowserObserverStart,
+		LeaseID:              leaseID,
+		LeaseExpiresAt:       expiresAt,
+		DeadlineAt:           now.Add(observationMaxTTL),
+		FrameIntervalMS:      observationDefaultFrameIntervalMS,
 	}
 	if err := command.Validate(); err != nil {
 		return BrowserObservationState{}, err
@@ -342,10 +345,13 @@ func (observation *BrowserObservation) stopRemote(
 	_ = observation.sender.SendBrowserObserverCommand(
 		identity.RuntimeSessionID,
 		BrowserObserverCommandPayload{
-			AttemptIdentity: identity,
-			CommandID:       uuid.New(),
-			Action:          BrowserObserverStop,
-			LeaseID:         leaseID,
+			AttemptIdentity:      identity.RuntimeIdentity(),
+			SessionEpoch:         identity.SessionEpoch,
+			BrowserSessionSHA256: identity.BrowserSessionSHA256,
+			AttachmentSHA256:     identity.AttachmentSHA256,
+			CommandID:            uuid.New(),
+			Action:               BrowserObserverStop,
+			LeaseID:              leaseID,
 		},
 	)
 }
@@ -369,18 +375,17 @@ func (observation *BrowserObservation) Stop(
 	var owner uuid.UUID
 	err := observation.pool.QueryRow(ctx, `
 SELECT a.lease_id, a.attempt_id,
-       r.lease_id, r.fencing_token, r.node_id, r.agent_id, r.runtime_worker_id,
-       a.session_epoch, a.core_instance_id,
+	   ra.lease_id, ra.fencing_token, ra.node_id, ra.agent_id, ra.runtime_worker_id,
+	   a.session_epoch, a.core_instance_id,
        a.attachment_sha256, c.browser_session_sha256, c.runtime_session_id
 FROM browser_observation_audits a
 JOIN browser_observable_attempts c
   ON c.run_id = a.run_id AND c.attempt_id = a.attempt_id
-JOIN run_attempts r
-  ON r.run_id = a.run_id AND r.id = a.attempt_id
+JOIN run_attempts ra ON ra.run_id = a.run_id AND ra.id = a.attempt_id
 WHERE a.run_id = $1 AND a.status = 'active'
 `, runID).Scan(
 		&leaseID, &identity.AttemptID,
-		&identity.LeaseID, &identity.FencingToken, &identity.NodeID,
+		&identity.RuntimeLeaseID, &identity.FencingToken, &identity.NodeID,
 		&identity.AgentID, &identity.WorkerID,
 		&identity.SessionEpoch, &owner,
 		&identity.AttachmentSHA256, &identity.BrowserSessionSHA256,
@@ -403,11 +408,15 @@ WHERE a.run_id = $1 AND a.status = 'active'
 		_ = observation.sender.SendBrowserObserverCommand(
 			identity.RuntimeSessionID,
 			BrowserObserverCommandPayload{
-				AttemptIdentity: identity,
-				CommandID:       uuid.New(),
-				Action:          BrowserObserverStop,
-				LeaseID:         leaseID,
-			})
+				AttemptIdentity:      identity.RuntimeIdentity(),
+				SessionEpoch:         identity.SessionEpoch,
+				BrowserSessionSHA256: identity.BrowserSessionSHA256,
+				AttachmentSHA256:     identity.AttachmentSHA256,
+				CommandID:            uuid.New(),
+				Action:               BrowserObserverStop,
+				LeaseID:              leaseID,
+			},
+		)
 	}
 	count := observation.frames.close(runID)
 	_ = observation.RecordFrames(ctx, leaseID, count)
@@ -564,18 +573,17 @@ func (observation *BrowserObservation) stopObservedLease(
 	var identity BrowserObserverIdentity
 	err := observation.pool.QueryRow(ctx, `
 SELECT a.attempt_id,
-       r.lease_id, r.fencing_token, r.node_id, r.agent_id, r.runtime_worker_id,
-       a.session_epoch, a.attachment_sha256,
+	   ra.lease_id, ra.fencing_token, ra.node_id, ra.agent_id, ra.runtime_worker_id,
+	   a.session_epoch, a.attachment_sha256,
        c.browser_session_sha256, c.runtime_session_id
 FROM browser_observation_audits a
 JOIN browser_observable_attempts c
   ON c.run_id = a.run_id AND c.attempt_id = a.attempt_id
-JOIN run_attempts r
-  ON r.run_id = a.run_id AND r.id = a.attempt_id
+JOIN run_attempts ra ON ra.run_id = a.run_id AND ra.id = a.attempt_id
 WHERE a.lease_id = $1 AND a.status = 'active'
 `, leaseID).Scan(
 		&identity.AttemptID,
-		&identity.LeaseID, &identity.FencingToken, &identity.NodeID,
+		&identity.RuntimeLeaseID, &identity.FencingToken, &identity.NodeID,
 		&identity.AgentID, &identity.WorkerID,
 		&identity.SessionEpoch, &identity.AttachmentSHA256,
 		&identity.BrowserSessionSHA256, &identity.RuntimeSessionID,
@@ -671,11 +679,11 @@ SELECT r.user_id,
        r.dispatch_state,
        r.active_attempt_id,
        c.attempt_id,
-       a.lease_id,
-       a.fencing_token,
-       a.node_id,
-       a.agent_id,
-       a.runtime_worker_id,
+	   a.lease_id,
+	   a.fencing_token,
+	   a.node_id,
+	   a.agent_id,
+	   a.runtime_worker_id,
        c.session_epoch,
        c.browser_session_sha256,
        c.browser_attachment_sha256,
@@ -683,7 +691,7 @@ SELECT r.user_id,
        COALESCE(s.features, ARRAY[]::text[])
 FROM runs r
 JOIN browser_observable_attempts c ON c.run_id = r.id
-JOIN run_attempts a ON a.run_id = r.id AND a.id = c.attempt_id
+JOIN run_attempts a ON a.id = c.attempt_id AND a.run_id = c.run_id
 LEFT JOIN runtime_sessions s ON s.runtime_session_id = c.runtime_session_id
 WHERE r.id = $1
 `, runID).Scan(
@@ -692,7 +700,7 @@ WHERE r.id = $1
 		&dispatchState,
 		&activeAttemptID,
 		&identity.AttemptID,
-		&identity.LeaseID,
+		&identity.RuntimeLeaseID,
 		&identity.FencingToken,
 		&identity.NodeID,
 		&identity.AgentID,
@@ -797,7 +805,8 @@ func (observation *BrowserObservation) HandleEvent(
 	if err := event.Validate(); err != nil {
 		return BrowserObserverEventAckPayload{}, err
 	}
-	runID := event.AttemptIdentity.RunID
+	identity := event.identity()
+	runID := identity.RunID
 	// Every kind is correlated and sequenced, not only frames. A stopped or error
 	// event from a superseded command names a lease that may still look current,
 	// and acting on it would close the observation that replaced it.
@@ -805,7 +814,7 @@ func (observation *BrowserObservation) HandleEvent(
 		runID,
 		event.LeaseID,
 		event.CommandID,
-		event.AttemptIdentity,
+		identity,
 		event.EventSeq,
 	) {
 		return observation.acknowledgeUnmatchedEvent(event)
@@ -818,7 +827,7 @@ func (observation *BrowserObservation) HandleEvent(
 			runID,
 			event.LeaseID,
 			event.CommandID,
-			event.AttemptIdentity,
+			identity,
 			BrowserObservationFrame{
 				FrameSeq:   event.EventSeq,
 				CapturedAt: event.CapturedAt.UTC(),
@@ -837,7 +846,7 @@ func (observation *BrowserObservation) HandleEvent(
 		}
 	case BrowserObserverStopped:
 		observation.resolveHandshake(event.LeaseID, "stopped")
-		observation.closeLeaseAsync(event.LeaseID, event.AttemptIdentity, "worker_stopped")
+		observation.closeLeaseAsync(event.LeaseID, identity, "worker_stopped")
 	case BrowserObserverError:
 		observation.resolveHandshake(
 			event.LeaseID,
@@ -845,14 +854,17 @@ func (observation *BrowserObservation) HandleEvent(
 		)
 		observation.closeLeaseAsync(
 			event.LeaseID,
-			event.AttemptIdentity,
+			identity,
 			boundedObservationEndReason(event.ErrorCode),
 		)
 	}
 	return BrowserObserverEventAckPayload{
-		AttemptIdentity: event.AttemptIdentity,
-		LeaseID:         event.LeaseID,
-		EventSeq:        event.EventSeq,
+		AttemptIdentity:      event.AttemptIdentity,
+		SessionEpoch:         event.SessionEpoch,
+		BrowserSessionSHA256: event.BrowserSessionSHA256,
+		AttachmentSHA256:     event.AttachmentSHA256,
+		LeaseID:              event.LeaseID,
+		EventSeq:             event.EventSeq,
 	}, nil
 }
 
@@ -881,13 +893,16 @@ func (observation *BrowserObservation) acknowledgeUnmatchedEvent(
 		if observation.frames.settleRetired(
 			event.LeaseID,
 			event.CommandID,
-			event.AttemptIdentity,
+			event.identity(),
 			event.EventSeq,
 		) {
 			return BrowserObserverEventAckPayload{
-				AttemptIdentity: event.AttemptIdentity,
-				LeaseID:         event.LeaseID,
-				EventSeq:        event.EventSeq,
+				AttemptIdentity:      event.AttemptIdentity,
+				SessionEpoch:         event.SessionEpoch,
+				BrowserSessionSHA256: event.BrowserSessionSHA256,
+				AttachmentSHA256:     event.AttachmentSHA256,
+				LeaseID:              event.LeaseID,
+				EventSeq:             event.EventSeq,
 			}, nil
 		}
 	}

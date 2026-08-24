@@ -19,6 +19,7 @@ var (
 	runtimeUUIDType       = reflect.TypeFor[uuid.UUID]()
 	runtimeTimeType       = reflect.TypeFor[time.Time]()
 	runtimeRawMessageType = reflect.TypeFor[json.RawMessage]()
+	runtimeByteSliceType  = reflect.TypeFor[[]byte]()
 )
 
 // DecodeRuntimeEnvelope decodes one complete WebSocket message. It validates
@@ -1033,6 +1034,17 @@ func validateRuntimeRequiredFields(raw json.RawMessage, valueType reflect.Type) 
 		valueType = valueType.Elem()
 	}
 	if valueType == runtimeUUIDType || valueType == runtimeTimeType || valueType == runtimeRawMessageType {
+		return nil
+	}
+	// encoding/json's canonical wire representation for []byte is a base64 JSON
+	// string, not an array. The ordinary decode above has already validated the
+	// base64 payload; keep the presence walker aligned with that representation
+	// without weakening the array requirement for any other slice type.
+	if valueType == runtimeByteSliceType {
+		var encoded string
+		if err := json.Unmarshal(raw, &encoded); err != nil {
+			return errors.New("runtime byte slice must be a base64 JSON string")
+		}
 		return nil
 	}
 	switch valueType.Kind() {

@@ -2028,7 +2028,7 @@ func (s *Service) cancelRuntime(ctx context.Context, userID, runID uuid.UUID) (*
 	if s.cancellation == nil {
 		return nil, httpx.Internal("取消服务暂不可用")
 	}
-	_, err := s.cancellation.CancelOwnedRun(ctx, userID, runID, "run canceled by user")
+	result, err := s.cancellation.CancelOwnedRun(ctx, userID, runID, "run canceled by user")
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrRuntimeCancellationNotFound):
@@ -2045,22 +2045,18 @@ func (s *Service) cancelRuntime(ctx context.Context, userID, runID uuid.UUID) (*
 			return nil, httpx.Internal("取消调用失败")
 		}
 	}
-	if s.browserObservation != nil {
-		// Cancellation commits the public terminal fact before returning. Its
-		// observation teardown must survive a client that disconnects as soon as
-		// that fact is visible, otherwise the canceled Run keeps an active audit
-		// and its in-process frame slot until the lease TTL expires.
-		observationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if observationErr := s.browserObservation.Stop(
-			observationCtx,
+	// Cancellation makes the Run terminal before the Runtime acknowledges that
+	// its handler stopped. RuntimeContext.Emit deliberately rejects events after
+	// cancellation, so a Browser provider cannot publish its deferred `closed`
+	// lifecycle event on this path. Close the observation from Core's durable
+	// cancellation evidence instead; replaying the same cancellation retries the
+	// idempotent close if this process exited after the transaction committed.
+	if s.browserObservation != nil && result.Cancellation.TargetAttemptID != nil {
+		s.browserObservation.closeAttemptAsync(
 			runID,
+			*result.Cancellation.TargetAttemptID,
 			"run_browser_closed",
-		); observationErr != nil {
-			log.Error().Err(observationErr).Str("run_id", runID.String()).
-				Msg("runtime.CancelRun: close Browser observation")
-			return nil, httpx.Internal("取消调用失败")
-		}
+		)
 	}
 	return s.GetRun(ctx, userID, runID)
 }

@@ -94,6 +94,97 @@ func TestDecodeRuntimeBodyStrictPayload(t *testing.T) {
 	}
 }
 
+func TestRuntimeFramePayloadsAcceptCanonicalBase64ByteSlices(t *testing.T) {
+	t.Parallel()
+	captured := time.Now().UTC()
+	observer := observerIdentity()
+	tests := []struct {
+		name        string
+		messageType RuntimeMessageType
+		payload     any
+		decode      func(RuntimeEnvelope) error
+	}{
+		{
+			name:        "authenticated observation",
+			messageType: RuntimeMessageBrowserObserverEvent,
+			payload: BrowserObserverEventPayload{
+				AttemptIdentity:      observer.RuntimeIdentity(),
+				SessionEpoch:         observer.SessionEpoch,
+				BrowserSessionSHA256: observer.BrowserSessionSHA256,
+				AttachmentSHA256:     observer.AttachmentSHA256,
+				CommandID:            uuid.New(),
+				LeaseID:              uuid.New(),
+				EventSeq:             2,
+				Kind:                 BrowserObserverFrame,
+				CapturedAt:           &captured,
+				Frame: &BrowserObserverFramePayload{
+					MIMEType: "image/jpeg",
+					Data:     []byte{0xff, 0xd8, 0xff, 0xd9},
+					Width:    1280,
+					Height:   720,
+				},
+			},
+			decode: func(envelope RuntimeEnvelope) error {
+				_, err := DecodeRuntimeMessagePayload[BrowserObserverEventPayload](
+					envelope,
+					RuntimeMessageBrowserObserverEvent,
+				)
+				return err
+			},
+		},
+		{
+			name:        "human-control Viewer",
+			messageType: RuntimeMessageBrowserViewerFrame,
+			payload: BrowserViewerFramePayload{
+				AttemptIdentity:  runtimeTestAttemptIdentity(),
+				BrowserSessionID: uuid.New(),
+				SessionEpoch:     1,
+				AttachmentID:     uuid.New(),
+				ControlEpoch:     1,
+				FrameSeq:         1,
+				MIMEType:         "image/jpeg",
+				Data:             []byte{0xff, 0xd8, 0xff, 0xd9},
+				Width:            1280,
+				Height:           720,
+			},
+			decode: func(envelope RuntimeEnvelope) error {
+				_, err := DecodeRuntimeMessagePayload[BrowserViewerFramePayload](
+					envelope,
+					RuntimeMessageBrowserViewerFrame,
+				)
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			raw, err := json.Marshal(test.payload)
+			require.NoError(t, err)
+			require.Contains(t, string(raw), `"data":"/9j/2Q=="`)
+			envelope := runtimeTestEnvelope(test.messageType, nil)
+			envelope.Payload = raw
+			require.NoError(t, test.decode(envelope))
+
+			// Arrays are accepted by encoding/json for []byte, but they are not
+			// the canonical Go JSON wire shape and must not become a second
+			// representation that contract clients have to support.
+			envelope.Payload = bytes.Replace(
+				raw,
+				[]byte(`"data":"/9j/2Q=="`),
+				[]byte(`"data":[255,216,255,217]`),
+				1,
+			)
+			requireRuntimeTransportCode(
+				t,
+				test.decode(envelope),
+				RuntimeErrorValidationFailed,
+			)
+		})
+	}
+}
+
 func TestDecodeRuntimeTypedMessageRejectsUnknownPayloadField(t *testing.T) {
 	t.Parallel()
 

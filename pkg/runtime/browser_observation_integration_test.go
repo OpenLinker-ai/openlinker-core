@@ -53,12 +53,15 @@ func (capture *observerCommandCapture) SendBrowserObserverCommand(
 		_, _ = observation.HandleEvent(
 			context.Background(),
 			runtime.BrowserObserverEventPayload{
-				AttemptIdentity: command.AttemptIdentity,
-				CommandID:       command.CommandID,
-				LeaseID:         command.LeaseID,
-				EventSeq:        1,
-				Kind:            reply,
-				ErrorCode:       errorCode,
+				AttemptIdentity:      command.AttemptIdentity,
+				SessionEpoch:         command.SessionEpoch,
+				BrowserSessionSHA256: command.BrowserSessionSHA256,
+				AttachmentSHA256:     command.AttachmentSHA256,
+				CommandID:            command.CommandID,
+				LeaseID:              command.LeaseID,
+				EventSeq:             1,
+				Kind:                 reply,
+				ErrorCode:            errorCode,
 			},
 		)
 	}()
@@ -185,7 +188,13 @@ func TestBrowserObservationProjectsHashedIdentityFromReady(t *testing.T) {
 		context.Background(), fixture.identity.RunID, ownerID, false,
 	)
 	require.NoError(t, err)
+	require.Equal(t, fixture.identity.RunID, identity.RunID)
 	require.Equal(t, fixture.identity.AttemptID, identity.AttemptID)
+	require.Equal(t, fixture.identity.LeaseID, identity.RuntimeLeaseID)
+	require.Equal(t, fixture.identity.FencingToken, identity.FencingToken)
+	require.Equal(t, *fixture.identity.NodeID, identity.NodeID)
+	require.Equal(t, fixture.identity.AgentID, identity.AgentID)
+	require.Equal(t, *fixture.identity.WorkerID, identity.WorkerID)
 	require.Equal(t, int64(3), identity.SessionEpoch)
 	require.Equal(t, observationDigest("session-a"), identity.BrowserSessionSHA256)
 	require.Equal(t, observationDigest("attachment-a"), identity.AttachmentSHA256)
@@ -250,12 +259,15 @@ func TestBrowserObservationStartFrameStopRoundTrip(t *testing.T) {
 	captured := time.Now().UTC()
 	commandID := observationStartCommandID(t, pool, state.LeaseID)
 	ack, err := observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
-		AttemptIdentity: identity,
-		CommandID:       commandID,
-		LeaseID:         state.LeaseID,
-		EventSeq:        2,
-		Kind:            runtime.BrowserObserverFrame,
-		CapturedAt:      &captured,
+		AttemptIdentity:      identity.RuntimeIdentity(),
+		SessionEpoch:         identity.SessionEpoch,
+		BrowserSessionSHA256: identity.BrowserSessionSHA256,
+		AttachmentSHA256:     identity.AttachmentSHA256,
+		CommandID:            commandID,
+		LeaseID:              state.LeaseID,
+		EventSeq:             2,
+		Kind:                 runtime.BrowserObserverFrame,
+		CapturedAt:           &captured,
 		Frame: &runtime.BrowserObserverFramePayload{
 			MIMEType: "image/jpeg",
 			Data:     []byte{0xff, 0xd8, 0xff, 0xd9},
@@ -266,7 +278,10 @@ func TestBrowserObservationStartFrameStopRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, state.LeaseID, ack.LeaseID)
 	require.Equal(t, int64(2), ack.EventSeq)
-	require.Equal(t, identity, ack.AttemptIdentity)
+	require.Equal(t, identity.RuntimeIdentity(), ack.AttemptIdentity)
+	require.Equal(t, identity.SessionEpoch, ack.SessionEpoch)
+	require.Equal(t, identity.BrowserSessionSHA256, ack.BrowserSessionSHA256)
+	require.Equal(t, identity.AttachmentSHA256, ack.AttachmentSHA256)
 
 	frame, err := observation.WaitFrame(context.Background(), fixture.identity.RunID, 0)
 	require.NoError(t, err)
@@ -276,12 +291,15 @@ func TestBrowserObservationStartFrameStopRoundTrip(t *testing.T) {
 
 	// A frame from a superseded lease belongs to an observation that has ended.
 	_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
-		AttemptIdentity: identity,
-		CommandID:       commandID,
-		LeaseID:         uuid.New(),
-		EventSeq:        3,
-		Kind:            runtime.BrowserObserverFrame,
-		CapturedAt:      &captured,
+		AttemptIdentity:      identity.RuntimeIdentity(),
+		SessionEpoch:         identity.SessionEpoch,
+		BrowserSessionSHA256: identity.BrowserSessionSHA256,
+		AttachmentSHA256:     identity.AttachmentSHA256,
+		CommandID:            commandID,
+		LeaseID:              uuid.New(),
+		EventSeq:             3,
+		Kind:                 runtime.BrowserObserverFrame,
+		CapturedAt:           &captured,
 		Frame: &runtime.BrowserObserverFramePayload{
 			MIMEType: "image/jpeg",
 			Data:     []byte{0xff, 0xd8, 0xff, 0xd9},
@@ -294,12 +312,15 @@ func TestBrowserObservationStartFrameStopRoundTrip(t *testing.T) {
 	// And a frame naming the right lease but a superseded command is refused:
 	// the lease alone cannot tell the two apart.
 	_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
-		AttemptIdentity: identity,
-		CommandID:       uuid.New(),
-		LeaseID:         state.LeaseID,
-		EventSeq:        4,
-		Kind:            runtime.BrowserObserverFrame,
-		CapturedAt:      &captured,
+		AttemptIdentity:      identity.RuntimeIdentity(),
+		SessionEpoch:         identity.SessionEpoch,
+		BrowserSessionSHA256: identity.BrowserSessionSHA256,
+		AttachmentSHA256:     identity.AttachmentSHA256,
+		CommandID:            uuid.New(),
+		LeaseID:              state.LeaseID,
+		EventSeq:             4,
+		Kind:                 runtime.BrowserObserverFrame,
+		CapturedAt:           &captured,
 		Frame: &runtime.BrowserObserverFramePayload{
 			MIMEType: "image/jpeg",
 			Data:     []byte{0xff, 0xd8, 0xff, 0xd9},
@@ -332,8 +353,13 @@ FROM browser_observation_audits WHERE lease_id = $1
 	))
 }
 
-func TestBrowserObservationRunCancellationClosesTheAudit(t *testing.T) {
-	pool, service, fixture, capture, ownerID := observationFixture(t)
+// Cancellation marks the Run terminal before the Runtime's handler exits. The
+// SDK then rejects every further RuntimeContext.Emit call by design, including
+// the Browser provider's deferred lifecycle `closed` event. Core's own durable
+// cancellation evidence must therefore close the observation without waiting
+// for an event the canceled Worker is forbidden to send.
+func TestBrowserObservationRunCancellationClosesWithoutWorkerLifecycleEvent(t *testing.T) {
+	pool, service, fixture, _, ownerID := observationFixture(t)
 	observation := service.BrowserObservation()
 	appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
 
@@ -346,22 +372,27 @@ func TestBrowserObservationRunCancellationClosesTheAudit(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	run, err := service.CancelRun(context.Background(), ownerID, fixture.identity.RunID)
+	_, err = service.CancelRun(context.Background(), ownerID, fixture.identity.RunID)
 	require.NoError(t, err)
-	require.Equal(t, runtime.RuntimeRunCanceled, run.Status)
-	require.Contains(t, capture.actions(), runtime.BrowserObserverStop)
-
-	var status, endReason string
-	var frameCount int64
-	var complete bool
-	require.NoError(t, pool.QueryRow(context.Background(), `
-SELECT status, end_reason, frame_count, frame_count_complete
+	require.Eventually(t, func() bool {
+		var status string
+		var endReason *string
+		queryErr := pool.QueryRow(context.Background(), `
+SELECT status, end_reason
 FROM browser_observation_audits WHERE lease_id = $1
-`, state.LeaseID).Scan(&status, &endReason, &frameCount, &complete))
-	require.Equal(t, "closed", status)
-	require.Equal(t, "run_browser_closed", endReason)
-	require.Zero(t, frameCount)
-	require.True(t, complete)
+`, state.LeaseID).Scan(&status, &endReason)
+		return queryErr == nil && status == "closed" && endReason != nil &&
+			*endReason == "run_browser_closed"
+	}, 2*time.Second, 20*time.Millisecond)
+
+	var closedLifecycleEvents int
+	require.NoError(t, pool.QueryRow(context.Background(), `
+SELECT count(*) FROM run_events
+WHERE run_id = $1 AND event_type = 'run.browser.lifecycle'
+  AND payload->>'phase' IN ('closed', 'failed')
+`, fixture.identity.RunID).Scan(&closedLifecycleEvents))
+	require.Zero(t, closedLifecycleEvents,
+		"the cancellation close must not depend on a post-cancel Worker event")
 }
 
 // A Worker that refuses the start must not leave an active audit behind: the
@@ -581,12 +612,15 @@ func TestBrowserObservationReconcileWritesTheFinalCount(t *testing.T) {
 	captured := time.Now().UTC()
 	for sequence := int64(2); sequence <= 4; sequence++ {
 		_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
-			AttemptIdentity: identity,
-			CommandID:       observationStartCommandID(t, pool, state.LeaseID),
-			LeaseID:         state.LeaseID,
-			EventSeq:        sequence,
-			Kind:            runtime.BrowserObserverFrame,
-			CapturedAt:      &captured,
+			AttemptIdentity:      identity.RuntimeIdentity(),
+			SessionEpoch:         identity.SessionEpoch,
+			BrowserSessionSHA256: identity.BrowserSessionSHA256,
+			AttachmentSHA256:     identity.AttachmentSHA256,
+			CommandID:            observationStartCommandID(t, pool, state.LeaseID),
+			LeaseID:              state.LeaseID,
+			EventSeq:             sequence,
+			Kind:                 runtime.BrowserObserverFrame,
+			CapturedAt:           &captured,
 			Frame: &runtime.BrowserObserverFramePayload{
 				MIMEType: "image/jpeg",
 				Data:     []byte{0xff, 0xd8, 0xff, 0xd9},
@@ -738,33 +772,45 @@ func TestBrowserObservationLifecycleEventsAreCorrelated(t *testing.T) {
 		wantError bool
 	}{
 		"stopped from another command": {wantError: true, event: runtime.BrowserObserverEventPayload{
-			AttemptIdentity: identity,
-			CommandID:       uuid.New(),
-			LeaseID:         state.LeaseID,
-			EventSeq:        2,
-			Kind:            runtime.BrowserObserverStopped,
+			AttemptIdentity:      identity.RuntimeIdentity(),
+			SessionEpoch:         identity.SessionEpoch,
+			BrowserSessionSHA256: identity.BrowserSessionSHA256,
+			AttachmentSHA256:     identity.AttachmentSHA256,
+			CommandID:            uuid.New(),
+			LeaseID:              state.LeaseID,
+			EventSeq:             2,
+			Kind:                 runtime.BrowserObserverStopped,
 		}},
 		"error from another command": {wantError: true, event: runtime.BrowserObserverEventPayload{
-			AttemptIdentity: identity,
-			CommandID:       uuid.New(),
-			LeaseID:         state.LeaseID,
-			EventSeq:        3,
-			Kind:            runtime.BrowserObserverError,
-			ErrorCode:       "browser_unavailable",
+			AttemptIdentity:      identity.RuntimeIdentity(),
+			SessionEpoch:         identity.SessionEpoch,
+			BrowserSessionSHA256: identity.BrowserSessionSHA256,
+			AttachmentSHA256:     identity.AttachmentSHA256,
+			CommandID:            uuid.New(),
+			LeaseID:              state.LeaseID,
+			EventSeq:             3,
+			Kind:                 runtime.BrowserObserverError,
+			ErrorCode:            "browser_unavailable",
 		}},
 		"stopped from another attempt": {wantError: true, event: runtime.BrowserObserverEventPayload{
-			AttemptIdentity: drifted,
-			CommandID:       commandID,
-			LeaseID:         state.LeaseID,
-			EventSeq:        4,
-			Kind:            runtime.BrowserObserverStopped,
+			AttemptIdentity:      drifted.RuntimeIdentity(),
+			SessionEpoch:         drifted.SessionEpoch,
+			BrowserSessionSHA256: drifted.BrowserSessionSHA256,
+			AttachmentSHA256:     drifted.AttachmentSHA256,
+			CommandID:            commandID,
+			LeaseID:              state.LeaseID,
+			EventSeq:             4,
+			Kind:                 runtime.BrowserObserverStopped,
 		}},
 		"started from another command": {wantError: true, event: runtime.BrowserObserverEventPayload{
-			AttemptIdentity: identity,
-			CommandID:       uuid.New(),
-			LeaseID:         state.LeaseID,
-			EventSeq:        5,
-			Kind:            runtime.BrowserObserverStarted,
+			AttemptIdentity:      identity.RuntimeIdentity(),
+			SessionEpoch:         identity.SessionEpoch,
+			BrowserSessionSHA256: identity.BrowserSessionSHA256,
+			AttachmentSHA256:     identity.AttachmentSHA256,
+			CommandID:            uuid.New(),
+			LeaseID:              state.LeaseID,
+			EventSeq:             5,
+			Kind:                 runtime.BrowserObserverStarted,
 		}},
 	}
 	for name, testCase := range uncorrelated {
@@ -787,11 +833,14 @@ func TestBrowserObservationLifecycleEventsAreCorrelated(t *testing.T) {
 	// The matching stop still works, so the correlation is not simply refusing
 	// everything.
 	_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
-		AttemptIdentity: identity,
-		CommandID:       commandID,
-		LeaseID:         state.LeaseID,
-		EventSeq:        6,
-		Kind:            runtime.BrowserObserverStopped,
+		AttemptIdentity:      identity.RuntimeIdentity(),
+		SessionEpoch:         identity.SessionEpoch,
+		BrowserSessionSHA256: identity.BrowserSessionSHA256,
+		AttachmentSHA256:     identity.AttachmentSHA256,
+		CommandID:            commandID,
+		LeaseID:              state.LeaseID,
+		EventSeq:             6,
+		Kind:                 runtime.BrowserObserverStopped,
 	})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
@@ -825,11 +874,14 @@ func TestBrowserObservationExplicitStopSettlesTheWorkerStopped(t *testing.T) {
 
 	// The Worker's stopped arrives after the fact, as it always will.
 	ack, err := observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
-		AttemptIdentity: identity,
-		CommandID:       commandID,
-		LeaseID:         state.LeaseID,
-		EventSeq:        2,
-		Kind:            runtime.BrowserObserverStopped,
+		AttemptIdentity:      identity.RuntimeIdentity(),
+		SessionEpoch:         identity.SessionEpoch,
+		BrowserSessionSHA256: identity.BrowserSessionSHA256,
+		AttachmentSHA256:     identity.AttachmentSHA256,
+		CommandID:            commandID,
+		LeaseID:              state.LeaseID,
+		EventSeq:             2,
+		Kind:                 runtime.BrowserObserverStopped,
 	})
 	require.NoError(t, err, "the Worker's stopped must settle rather than fail")
 	require.Equal(t, int64(2), ack.EventSeq)
@@ -837,11 +889,14 @@ func TestBrowserObservationExplicitStopSettlesTheWorkerStopped(t *testing.T) {
 	// A terminal event for a lease this Core never issued is refused even after
 	// the observation ended: the settle is for the race, not for any stopped.
 	_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
-		AttemptIdentity: identity,
-		CommandID:       uuid.New(),
-		LeaseID:         uuid.New(),
-		EventSeq:        7,
-		Kind:            runtime.BrowserObserverStopped,
+		AttemptIdentity:      identity.RuntimeIdentity(),
+		SessionEpoch:         identity.SessionEpoch,
+		BrowserSessionSHA256: identity.BrowserSessionSHA256,
+		AttachmentSHA256:     identity.AttachmentSHA256,
+		CommandID:            uuid.New(),
+		LeaseID:              uuid.New(),
+		EventSeq:             7,
+		Kind:                 runtime.BrowserObserverStopped,
 	})
 	require.Error(t, err)
 
@@ -849,12 +904,15 @@ func TestBrowserObservationExplicitStopSettlesTheWorkerStopped(t *testing.T) {
 	// same as accepting page content under an observation that has ended.
 	captured := time.Now().UTC()
 	_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
-		AttemptIdentity: identity,
-		CommandID:       commandID,
-		LeaseID:         state.LeaseID,
-		EventSeq:        3,
-		Kind:            runtime.BrowserObserverFrame,
-		CapturedAt:      &captured,
+		AttemptIdentity:      identity.RuntimeIdentity(),
+		SessionEpoch:         identity.SessionEpoch,
+		BrowserSessionSHA256: identity.BrowserSessionSHA256,
+		AttachmentSHA256:     identity.AttachmentSHA256,
+		CommandID:            commandID,
+		LeaseID:              state.LeaseID,
+		EventSeq:             3,
+		Kind:                 runtime.BrowserObserverFrame,
+		CapturedAt:           &captured,
 		Frame: &runtime.BrowserObserverFramePayload{
 			MIMEType: "image/jpeg",
 			Data:     []byte{0xff, 0xd8, 0xff, 0xd9},
@@ -892,12 +950,15 @@ func TestBrowserObservationRejectsReplayedEventSequences(t *testing.T) {
 	captured := time.Now().UTC()
 	frame := func(sequence int64) runtime.BrowserObserverEventPayload {
 		return runtime.BrowserObserverEventPayload{
-			AttemptIdentity: identity,
-			CommandID:       commandID,
-			LeaseID:         state.LeaseID,
-			EventSeq:        sequence,
-			Kind:            runtime.BrowserObserverFrame,
-			CapturedAt:      &captured,
+			AttemptIdentity:      identity.RuntimeIdentity(),
+			SessionEpoch:         identity.SessionEpoch,
+			BrowserSessionSHA256: identity.BrowserSessionSHA256,
+			AttachmentSHA256:     identity.AttachmentSHA256,
+			CommandID:            commandID,
+			LeaseID:              state.LeaseID,
+			EventSeq:             sequence,
+			Kind:                 runtime.BrowserObserverFrame,
+			CapturedAt:           &captured,
 			Frame: &runtime.BrowserObserverFramePayload{
 				MIMEType: "image/jpeg",
 				Data:     []byte{0xff, 0xd8, 0xff, 0xd9},
@@ -918,11 +979,14 @@ func TestBrowserObservationRejectsReplayedEventSequences(t *testing.T) {
 	// replay, so it is refused, and above all it must not end that observation.
 	// The settle path is only for a lease that has already been retired here.
 	_, err = observation.HandleEvent(context.Background(), runtime.BrowserObserverEventPayload{
-		AttemptIdentity: identity,
-		CommandID:       commandID,
-		LeaseID:         state.LeaseID,
-		EventSeq:        3,
-		Kind:            runtime.BrowserObserverStopped,
+		AttemptIdentity:      identity.RuntimeIdentity(),
+		SessionEpoch:         identity.SessionEpoch,
+		BrowserSessionSHA256: identity.BrowserSessionSHA256,
+		AttachmentSHA256:     identity.AttachmentSHA256,
+		CommandID:            commandID,
+		LeaseID:              state.LeaseID,
+		EventSeq:             3,
+		Kind:                 runtime.BrowserObserverStopped,
 	})
 	require.Error(t, err, "a replayed terminal event must not be accepted")
 	live, err := observation.State(context.Background(), fixture.identity.RunID)
