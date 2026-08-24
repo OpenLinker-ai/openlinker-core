@@ -177,6 +177,44 @@ func TestBrowserObserverEventValidationPerKind(t *testing.T) {
 	}
 }
 
+func TestBrowserObserverFrameRoundTripsStandardByteEncoding(t *testing.T) {
+	t.Parallel()
+	captured := time.Now().UTC()
+	event := BrowserObserverEventPayload{
+		AttemptIdentity:      observerIdentity().RuntimeIdentity(),
+		SessionEpoch:         3,
+		BrowserSessionSHA256: strings.Repeat("a", 64),
+		AttachmentSHA256:     strings.Repeat("b", 64),
+		CommandID:            uuid.New(),
+		LeaseID:              uuid.New(),
+		EventSeq:             2,
+		Kind:                 BrowserObserverFrame,
+		CapturedAt:           &captured,
+		Frame: &BrowserObserverFramePayload{
+			MIMEType: "image/jpeg",
+			Data:     []byte{0xff, 0xd8, 0xff, 0xd9},
+			Width:    1280,
+			Height:   720,
+		},
+	}
+
+	raw, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal frame event: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"data":"/9j/2Q=="`)) {
+		t.Fatalf("frame bytes did not use the standard base64 wire encoding: %s", raw)
+	}
+
+	decoded, err := DecodeRuntimeBody[BrowserObserverEventPayload](bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode frame event: %v", err)
+	}
+	if !bytes.Equal(decoded.Frame.Data, event.Frame.Data) {
+		t.Fatalf("decoded frame bytes = %v, want %v", decoded.Frame.Data, event.Frame.Data)
+	}
+}
+
 // Observation must fail closed when this process cannot reach the Worker, rather
 // than opening a record that could never produce a frame.
 func TestBrowserObservationFailsClosedWithoutAChannel(t *testing.T) {
