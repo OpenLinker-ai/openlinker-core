@@ -39,3 +39,17 @@ func (observation *BrowserObservation) AgeLastPollForTest(
 		live.lastPolledAt = live.lastPolledAt.Add(-age)
 	}
 }
+
+// ConfigureObservationStartHandshakeForTest shortens the otherwise
+// user-facing handshake so retry behavior can be proven without sleeping for
+// production-scale intervals.
+func (observation *BrowserObservation) ConfigureObservationStartHandshakeForTest(
+	retryInterval time.Duration,
+	timeout time.Duration,
+) {
+	if observation == nil {
+		return
+	}
+	observation.startRetryInterval = retryInterval
+	observation.startHandshakeTimeout = timeout
+}

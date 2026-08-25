@@ -35,6 +35,10 @@ const (
 	// push with no reply channel, so the confirmation is the started event and
 	// the wait is what turns "accepted" into "actually observing".
 	observationStartHandshakeTimeout = 15 * time.Second
+	// A WebSocket write only proves that Core handed the command to the socket.
+	// Retransmitting the identical command makes a transient drop between the
+	// socket and the Attempt handler recoverable without minting another lease.
+	observationStartRetryInterval = 2 * time.Second
 	// Fallback ceiling when the deployment does not configure one.
 	observationDefaultQuota = 32
 	// How long an expired audit owned by another instance is left alone before
@@ -80,7 +84,9 @@ type BrowserObservation struct {
 	// Concurrent observations this instance will hold. A deployment decision,
 	// because each observation pins an in-process frame buffer and a Runtime
 	// lease on the Worker.
-	quota int
+	quota                 int
+	startHandshakeTimeout time.Duration
+	startRetryInterval    time.Duration
 
 	// Pending start handshakes, keyed by lease. A start blocks on its channel
 	// until the Worker's first lifecycle event for that exact lease arrives.
@@ -105,12 +111,14 @@ func NewBrowserObservation(
 		quota = observationDefaultQuota
 	}
 	return &BrowserObservation{
-		pool:       pool,
-		now:        now,
-		instance:   instance,
-		quota:      quota,
-		frames:     newObservationFrameBuffer(quota),
-		handshakes: make(map[uuid.UUID]chan string),
+		pool:                  pool,
+		now:                   now,
+		instance:              instance,
+		quota:                 quota,
+		startHandshakeTimeout: observationStartHandshakeTimeout,
+		startRetryInterval:    observationStartRetryInterval,
+		frames:                newObservationFrameBuffer(quota),
+		handshakes:            make(map[uuid.UUID]chan string),
 	}
 }
 
@@ -218,13 +226,24 @@ RETURNING id
 		_ = observation.close(ctx, leaseID, "channel_unavailable")
 		return BrowserObservationState{}, ErrObservationChannelUnavailable
 	}
-	if failure := observation.awaitStart(ctx, confirmed); failure != nil {
+	if failure := observation.awaitStart(ctx, confirmed, func() error {
+		// Identity, command and lease deliberately remain unchanged. This is
+		// delivery recovery for one handshake, not another observation.
+		return observation.sender.SendBrowserObserverCommand(
+			identity.RuntimeSessionID,
+			command,
+		)
+	}); failure != nil {
 		// The Worker may still be holding the lease -- a timeout cannot tell a
 		// slow Worker from a dead one -- so the remote stop is sent regardless
 		// and only the local teardown is authoritative.
 		observation.frames.closeLease(runID, leaseID)
 		observation.stopRemote(identity, leaseID)
-		_ = observation.close(ctx, leaseID, "start_not_confirmed")
+		endReason := "start_not_confirmed"
+		if errors.Is(failure, ErrObservationChannelUnavailable) {
+			endReason = "channel_unavailable"
+		}
+		_ = observation.close(ctx, leaseID, endReason)
 		return BrowserObservationState{}, failure
 	}
 	return BrowserObservationState{
@@ -291,19 +310,38 @@ WHERE c.runtime_session_id = $1 AND a.status = 'active'
 func (observation *BrowserObservation) awaitStart(
 	ctx context.Context,
 	confirmed <-chan string,
+	retransmit func() error,
 ) error {
-	timeout := time.NewTimer(observationStartHandshakeTimeout)
+	timeoutDuration := observation.startHandshakeTimeout
+	if timeoutDuration <= 0 {
+		timeoutDuration = observationStartHandshakeTimeout
+	}
+	retryDuration := observation.startRetryInterval
+	if retryDuration <= 0 {
+		retryDuration = observationStartRetryInterval
+	}
+	timeout := time.NewTimer(timeoutDuration)
 	defer timeout.Stop()
-	select {
-	case outcome := <-confirmed:
-		if outcome == "" {
-			return nil
+	retry := time.NewTicker(retryDuration)
+	defer retry.Stop()
+	for {
+		select {
+		case outcome := <-confirmed:
+			if outcome == "" {
+				return nil
+			}
+			return fmt.Errorf("%w: %s", ErrObservationNotConfirmed, outcome)
+		case <-retry.C:
+			if retransmit != nil {
+				if err := retransmit(); err != nil {
+					return ErrObservationChannelUnavailable
+				}
+			}
+		case <-timeout.C:
+			return ErrObservationNotConfirmed
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-		return fmt.Errorf("%w: %s", ErrObservationNotConfirmed, outcome)
-	case <-timeout.C:
-		return ErrObservationNotConfirmed
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 

@@ -24,12 +24,13 @@ import (
 // with the lifecycle event the Worker would send. Start blocks on that
 // handshake, so a capture that stays silent is what a stalled Worker looks like.
 type observerCommandCapture struct {
-	mu          sync.Mutex
-	commands    []runtime.BrowserObserverCommandPayload
-	observation *runtime.BrowserObservation
-	reply       runtime.BrowserObserverEventKind
-	errorCode   string
-	sendErr     error
+	mu           sync.Mutex
+	commands     []runtime.BrowserObserverCommandPayload
+	observation  *runtime.BrowserObservation
+	reply        runtime.BrowserObserverEventKind
+	errorCode    string
+	sendErr      error
+	silentStarts int
 }
 
 func (capture *observerCommandCapture) SendBrowserObserverCommand(
@@ -41,6 +42,10 @@ func (capture *observerCommandCapture) SendBrowserObserverCommand(
 	reply := capture.reply
 	errorCode := capture.errorCode
 	sendErr := capture.sendErr
+	if command.Action == runtime.BrowserObserverStart && capture.silentStarts > 0 {
+		capture.silentStarts--
+		reply = ""
+	}
 	observation := capture.observation
 	capture.mu.Unlock()
 	if sendErr != nil {
@@ -66,6 +71,12 @@ func (capture *observerCommandCapture) SendBrowserObserverCommand(
 		)
 	}()
 	return nil
+}
+
+func (capture *observerCommandCapture) snapshot() []runtime.BrowserObserverCommandPayload {
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	return append([]runtime.BrowserObserverCommandPayload(nil), capture.commands...)
 }
 
 func (capture *observerCommandCapture) actions() []runtime.BrowserObserverAction {
@@ -428,6 +439,45 @@ WHERE run_id = $1 AND status = 'active'
 		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
 	)
 	require.NoError(t, err)
+}
+
+// A successful WebSocket write is not an Attempt-level receipt. The same
+// command is retried until the Worker confirms it; minting a fresh command or
+// lease here would create two observations from one user action.
+func TestBrowserObservationRetransmitsTheSameStartUntilConfirmed(t *testing.T) {
+	pool, service, fixture, capture, ownerID := observationFixture(t)
+	observation := service.BrowserObservation()
+	observation.ConfigureObservationStartHandshakeForTest(10*time.Millisecond, time.Second)
+	capture.silentStarts = 1
+	appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+
+	identity, err := observation.ResolveIdentity(
+		context.Background(), fixture.identity.RunID, ownerID, false,
+	)
+	require.NoError(t, err)
+	state, err := observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+	require.True(t, state.Active)
+
+	commands := capture.snapshot()
+	starts := make([]runtime.BrowserObserverCommandPayload, 0, len(commands))
+	for _, command := range commands {
+		if command.Action == runtime.BrowserObserverStart {
+			starts = append(starts, command)
+		}
+	}
+	require.Len(t, starts, 2)
+	require.Equal(t, starts[0], starts[1], "delivery retry must reuse the complete command")
+	require.Equal(t, state.LeaseID, starts[0].LeaseID)
+
+	var active int
+	require.NoError(t, pool.QueryRow(context.Background(), `
+SELECT count(*) FROM browser_observation_audits
+WHERE run_id = $1 AND status = 'active'
+`, fixture.identity.RunID).Scan(&active))
+	require.Equal(t, 1, active, "one user start must create exactly one audit")
 }
 
 // The Browser lifecycle close path must close the audit from the Run and Attempt
