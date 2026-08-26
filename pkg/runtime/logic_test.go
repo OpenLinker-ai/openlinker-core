@@ -827,6 +827,103 @@ func TestConversationContextFromMappingBuildsHistory(t *testing.T) {
 	require.Equal(t, "first answer", conversation.HistoryBeforeCurrent[1].Payload["text"])
 }
 
+func TestValidatePlaygroundLineageShape(t *testing.T) {
+	playground := map[string]interface{}{
+		"source": "playground",
+		"client": "multi_turn_runner",
+	}
+	base := func() *RunA2AContextRequest {
+		return &RunA2AContextRequest{
+			ProtocolContextID: "conversation-1",
+			ProtocolTaskID:    "turn-2",
+			RootContextID:     "conversation-1",
+			Source:            "a2a_protocol",
+		}
+	}
+	assertBadRequest := func(t *testing.T, err error) {
+		t.Helper()
+		var httpErr *httpx.HTTPError
+		require.ErrorAs(t, err, &httpErr)
+		require.Equal(t, http.StatusBadRequest, httpErr.Status)
+		require.Equal(t, playgroundLineageInvalidMessage, httpErr.Message)
+	}
+
+	require.NoError(t, validatePlaygroundLineageShape(
+		map[string]interface{}{"source": "api"},
+		nil,
+	))
+	assertBadRequest(t, validatePlaygroundLineageShape(playground, nil))
+	require.NoError(t, validatePlaygroundLineageShape(playground, base()))
+
+	unequalRoot := base()
+	unequalRoot.RootContextID = "other-conversation"
+	assertBadRequest(t, validatePlaygroundLineageShape(playground, unequalRoot))
+
+	partial := base()
+	partial.ParentTaskID = "turn-1"
+	assertBadRequest(t, validatePlaygroundLineageShape(playground, partial))
+
+	mismatchedReference := base()
+	mismatchedReference.ParentRunID = uuid.NewString()
+	mismatchedReference.ParentTaskID = "turn-1"
+	mismatchedReference.ReferenceTaskIDs = []string{"different-turn"}
+	assertBadRequest(t, validatePlaygroundLineageShape(playground, mismatchedReference))
+
+	valid := base()
+	valid.ParentRunID = uuid.NewString()
+	valid.ParentTaskID = "turn-1"
+	valid.ReferenceTaskIDs = []string{"turn-1"}
+	require.NoError(t, validatePlaygroundLineageShape(playground, valid))
+}
+
+func TestValidatePlaygroundLineageBindsParentToOwnerAgentRootAndTask(t *testing.T) {
+	userID := uuid.New()
+	agentID := uuid.New()
+	parentRunID := uuid.New()
+	now := time.Now().UTC()
+	playground := map[string]interface{}{
+		"source": "playground",
+		"client": "multi_turn_runner",
+	}
+	a2a := &RunA2AContextRequest{
+		ProtocolContextID: "conversation-1",
+		ProtocolTaskID:    "turn-2",
+		RootContextID:     "conversation-1",
+		ParentTaskID:      "turn-1",
+		ParentRunID:       parentRunID.String(),
+		ReferenceTaskIDs:  []string{"turn-1"},
+		Source:            "a2a_protocol",
+	}
+	mappingRow := func(mappingUserID, mappingAgentID uuid.UUID, root, task string) runtimeFakeRow {
+		return runtimeFakeRow{values: []any{
+			uuid.New(), parentRunID, mappingUserID, mappingAgentID,
+			root, task, root, "", "", nil, nil, nil, "", []string{},
+			"a2a_protocol", now, now,
+		}}
+	}
+
+	validDB := &runtimeFakeDBTX{rows: []runtimeFakeRow{
+		mappingRow(userID, agentID, "conversation-1", "turn-1"),
+	}}
+	require.NoError(t, validatePlaygroundLineage(
+		context.Background(), db.New(validDB), playground, a2a,
+		uuid.New(), userID, agentID,
+	))
+	require.Equal(t, [][]interface{}{{parentRunID}}, validDB.queryRowArgs)
+
+	crossOwnerDB := &runtimeFakeDBTX{rows: []runtimeFakeRow{
+		mappingRow(uuid.New(), agentID, "conversation-1", "turn-1"),
+	}}
+	err := validatePlaygroundLineage(
+		context.Background(), db.New(crossOwnerDB), playground, a2a,
+		uuid.New(), userID, agentID,
+	)
+	var httpErr *httpx.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	require.Equal(t, http.StatusBadRequest, httpErr.Status)
+	require.Equal(t, playgroundLineageInvalidMessage, httpErr.Message)
+}
+
 func TestTrustedRunMetadataRejectsCallerOwnedSessionFields(t *testing.T) {
 	original := map[string]interface{}{
 		"tenant":                        "seller-research",
