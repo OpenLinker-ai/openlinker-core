@@ -567,6 +567,71 @@ func conversationMessageFromRunMessage(message db.RunMessage) ConversationMessag
 	}
 }
 
+const playgroundLineageInvalidMessage = "Playground 上一轮任务关系无效"
+
+func isPlaygroundMultiTurnMetadata(metadata map[string]interface{}) bool {
+	if metadata == nil {
+		return false
+	}
+	source, _ := metadata["source"].(string)
+	client, _ := metadata["client"].(string)
+	return strings.TrimSpace(source) == "playground" && strings.TrimSpace(client) == "multi_turn_runner"
+}
+
+func validatePlaygroundLineageShape(metadata map[string]interface{}, a2a *RunA2AContextRequest) error {
+	if !isPlaygroundMultiTurnMetadata(metadata) {
+		return nil
+	}
+	if a2a == nil || strings.TrimSpace(a2a.ProtocolContextID) == "" ||
+		strings.TrimSpace(a2a.RootContextID) == "" ||
+		strings.TrimSpace(a2a.ProtocolContextID) != strings.TrimSpace(a2a.RootContextID) ||
+		strings.TrimSpace(a2a.ProtocolTaskID) == "" || a2a.Source != "a2a_protocol" {
+		return httpx.BadRequest(playgroundLineageInvalidMessage)
+	}
+	parentRunID := strings.TrimSpace(a2a.ParentRunID)
+	parentTaskID := strings.TrimSpace(a2a.ParentTaskID)
+	if parentRunID == "" && parentTaskID == "" && len(a2a.ReferenceTaskIDs) == 0 {
+		return nil
+	}
+	if parentRunID == "" || parentTaskID == "" ||
+		len(a2a.ReferenceTaskIDs) != 1 || a2a.ReferenceTaskIDs[0] != parentTaskID {
+		return httpx.BadRequest(playgroundLineageInvalidMessage)
+	}
+	return nil
+}
+
+func validatePlaygroundLineage(
+	ctx context.Context,
+	queries *db.Queries,
+	metadata map[string]interface{},
+	a2a *RunA2AContextRequest,
+	runID, userID, agentID uuid.UUID,
+) error {
+	if err := validatePlaygroundLineageShape(metadata, a2a); err != nil {
+		return err
+	}
+	if !isPlaygroundMultiTurnMetadata(metadata) || strings.TrimSpace(a2a.ParentRunID) == "" {
+		return nil
+	}
+	parentRunID, err := uuid.Parse(strings.TrimSpace(a2a.ParentRunID))
+	if err != nil || parentRunID == runID {
+		return httpx.BadRequest(playgroundLineageInvalidMessage)
+	}
+	parent, err := queries.GetA2AContextMappingByRun(ctx, parentRunID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return httpx.BadRequest(playgroundLineageInvalidMessage)
+	}
+	if err != nil {
+		return err
+	}
+	if parent.UserID != userID || parent.AgentID != agentID ||
+		strings.TrimSpace(parent.RootContextID) != strings.TrimSpace(a2a.RootContextID) ||
+		strings.TrimSpace(parent.ProtocolTaskID) != strings.TrimSpace(a2a.ParentTaskID) {
+		return httpx.BadRequest(playgroundLineageInvalidMessage)
+	}
+	return nil
+}
+
 func agentA2AContextMap(ctx *AgentA2AContext) map[string]interface{} {
 	if ctx == nil {
 		return nil
@@ -1296,6 +1361,17 @@ func (s *Service) createRunningRun(
 			if authorizeErr := opts.beforeCreate(ctx, tx); authorizeErr != nil {
 				return authorizeErr
 			}
+		}
+		if lineageErr := validatePlaygroundLineage(
+			ctx,
+			q,
+			req.Metadata,
+			runA2AContext,
+			runID,
+			userID,
+			agentID,
+		); lineageErr != nil {
+			return lineageErr
 		}
 		var a2aMappingParams *db.UpsertA2AContextMappingParams
 		createMetadataJSON := metadataJSON

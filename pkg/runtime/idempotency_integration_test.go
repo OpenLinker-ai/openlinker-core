@@ -50,7 +50,8 @@ func TestRunCreationPersistsTrustedA2AMetadataBeforeImmutableInsert(t *testing.T
 		AgentID: agentID.String(),
 		Input:   map[string]any{"task": "remember the nonce"},
 		Metadata: map[string]any{
-			"client":       "native-plugin-test",
+			"source":       "playground",
+			"client":       "multi_turn_runner",
 			"a2a":          map[string]any{"source": "caller"},
 			"conversation": map[string]any{"source": "caller"},
 		},
@@ -71,7 +72,8 @@ func TestRunCreationPersistsTrustedA2AMetadataBeforeImmutableInsert(t *testing.T
 	).Scan(&firstMetadataJSON))
 	var firstMetadata map[string]any
 	require.NoError(t, json.Unmarshal(firstMetadataJSON, &firstMetadata))
-	require.Equal(t, "native-plugin-test", firstMetadata["client"])
+	require.Equal(t, "playground", firstMetadata["source"])
+	require.Equal(t, "multi_turn_runner", firstMetadata["client"])
 	firstA2A := firstMetadata["a2a"].(map[string]any)
 	require.Equal(t, conversationID, firstA2A["protocol_context_id"])
 	firstConversation := firstMetadata["conversation"].(map[string]any)
@@ -94,10 +96,17 @@ func TestRunCreationPersistsTrustedA2AMetadataBeforeImmutableInsert(t *testing.T
 	second, err := svc.Run(context.Background(), userID, &runtime.RunRequest{
 		AgentID: agentID.String(),
 		Input:   map[string]any{"task": "recall the nonce"},
+		Metadata: map[string]any{
+			"source": "playground",
+			"client": "multi_turn_runner",
+		},
 		A2AContext: &runtime.RunA2AContextRequest{
 			ProtocolContextID: conversationID,
 			ProtocolTaskID:    "plugin-turn-2",
 			RootContextID:     conversationID,
+			ParentTaskID:      "plugin-turn-1",
+			ParentRunID:       first.RunID,
+			ReferenceTaskIDs:  []string{"plugin-turn-1"},
 		},
 		IdempotencyKey: "plugin-conversation-turn-2",
 	}, "mcp")
@@ -138,6 +147,34 @@ func TestRunCreationPersistsTrustedA2AMetadataBeforeImmutableInsert(t *testing.T
 	require.Equal(t, firstUserContent, delivered[1].Conversation.HistoryBeforeCurrent[0].Content)
 	require.Equal(t, "first answer", delivered[1].Conversation.HistoryBeforeCurrent[1].Content)
 	require.NotContains(t, delivered[1].Input, "conversation_history")
+	require.NotNil(t, second.A2AContext)
+	require.Equal(t, first.RunID, second.A2AContext.ParentRunID)
+	require.Equal(t, "plugin-turn-1", second.A2AContext.ParentTaskID)
+	require.Equal(t, []string{"plugin-turn-1"}, second.A2AContext.ReferenceTaskIDs)
+
+	_, err = svc.Run(context.Background(), userID, &runtime.RunRequest{
+		AgentID: agentID.String(),
+		Input:   map[string]any{"task": "invalid cross-root continuation"},
+		Metadata: map[string]any{
+			"source": "playground",
+			"client": "multi_turn_runner",
+		},
+		A2AContext: &runtime.RunA2AContextRequest{
+			ProtocolContextID: "plugin-conversation-other",
+			ProtocolTaskID:    "plugin-turn-invalid",
+			RootContextID:     "plugin-conversation-other",
+			ParentTaskID:      "plugin-turn-1",
+			ParentRunID:       first.RunID,
+			ReferenceTaskIDs:  []string{"plugin-turn-1"},
+		},
+		IdempotencyKey: "plugin-conversation-turn-invalid",
+	}, "mcp")
+	require.Error(t, err)
+	var lineageErr *httpx.HTTPError
+	require.ErrorAs(t, err, &lineageErr)
+	require.Equal(t, http.StatusBadRequest, lineageErr.Status)
+	require.Equal(t, "Playground 上一轮任务关系无效", lineageErr.Message)
+	require.Len(t, delivered, 2, "invalid lineage must fail before Agent delivery")
 
 	separate, err := svc.Run(context.Background(), userID, &runtime.RunRequest{
 		AgentID: agentID.String(),
