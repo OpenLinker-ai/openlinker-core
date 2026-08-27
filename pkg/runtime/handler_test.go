@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -371,6 +372,71 @@ func TestGetRun_Handler_NotFound(t *testing.T) {
 	rec, _ := doRequest(t, e, http.MethodGet, "/api/v1/runs/"+uuid.New().String(), nil,
 		map[string]string{"Authorization": tok})
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestGetConversationRuns_Handler_UsesOwnerLineageAndAbsoluteOrdinal(t *testing.T) {
+	e, pool, _ := setupHandlerTest(t)
+	ownerID := insertRuntimeUser(t, pool)
+	foreignID := insertRuntimeUser(t, pool)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "https://example.com/agent", 10, "approved")
+	runIDs := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	root := "conversation-" + uuid.NewString()
+	authority := `{"_openlinker_runtime_authority":{"execution_profile":"browser","browser_interaction_policy":"restricted","browser_interaction_policy_generation":1,"browser_mutation_origins":[],"browser_mutation_origins_sha256":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"}}`
+	for index, runID := range runIDs {
+		_, err := pool.Exec(context.Background(), `
+			INSERT INTO runs (
+				id, user_id, agent_id, input, status, request_metadata,
+				cost_cents, platform_fee_cents, creator_revenue_cents,
+				runtime_contract_id, idempotency_key_hash, idempotency_fingerprint,
+				connection_mode_snapshot, dispatch_state,
+				dispatch_deadline_at, run_deadline_at, started_at
+			) VALUES (
+				$1, $2, $3, '{}'::jsonb, 'running', $4::jsonb,
+				0, 0, 0, 'openlinker.runtime.v2',
+				digest($1::uuid::text || ':key', 'sha256'),
+				digest($1::uuid::text || ':fingerprint', 'sha256'),
+				'runtime', 'executing', clock_timestamp() + interval '10 minutes',
+				clock_timestamp() + interval '1 hour', clock_timestamp() + ($5 * interval '1 second')
+			)`, runID, ownerID, agentID, authority, index)
+		require.NoError(t, err)
+		var parent any
+		if index > 0 {
+			parent = runIDs[index-1]
+		}
+		_, err = pool.Exec(context.Background(), `
+			INSERT INTO a2a_context_mappings (
+				run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
+				root_context_id, parent_context_id, parent_task_id, parent_run_id,
+				trace_id, reference_task_ids, source
+			) VALUES (
+				$1, $2, $3, $4, $5, $4, $6, $7, $8, $9, $10, 'a2a_protocol'
+			)`, runID, ownerID, agentID, root, "task-"+strconv.Itoa(index+1),
+			root, func() string {
+				if index == 0 {
+					return ""
+				}
+				return "task-" + strconv.Itoa(index)
+			}(), parent, "trace-"+root, []string{})
+		require.NoError(t, err)
+	}
+
+	rec, raw := doRequest(t, e, http.MethodGet, "/api/v1/runs/"+runIDs[1].String()+"/conversation-runs", nil,
+		map[string]string{"Authorization": signJWT(t, ownerID)})
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", string(raw))
+	require.Equal(t, "private, no-store", rec.Header().Get("Cache-Control"))
+	var response runtime.ConversationRunListResponse
+	require.NoError(t, json.Unmarshal(raw, &response))
+	require.True(t, response.Linear)
+	require.Len(t, response.Items, 2)
+	require.Equal(t, int32(2), *response.Items[0].ConversationOrdinal)
+	require.Equal(t, int32(3), *response.Items[1].ConversationOrdinal)
+	require.Equal(t, "restricted", response.Items[0].BrowserInteractionPolicy)
+	require.NotContains(t, string(raw), root)
+
+	foreignRec, _ := doRequest(t, e, http.MethodGet, "/api/v1/runs/"+runIDs[1].String()+"/conversation-runs", nil,
+		map[string]string{"Authorization": signJWT(t, foreignID)})
+	require.Equal(t, http.StatusNotFound, foreignRec.Code)
 }
 
 func TestGetRunEvents_Handler_HappyPath(t *testing.T) {

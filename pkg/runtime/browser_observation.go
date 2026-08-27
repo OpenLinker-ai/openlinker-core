@@ -61,6 +61,12 @@ var ErrObservationInactive = errors.New("browser observation is not active for t
 // concurrent-observation ceiling.
 var ErrObservationBusy = errors.New("browser observation capacity is exhausted on this Core instance")
 
+// ErrObservationViewerCapacity is returned when one Run already has the
+// maximum number of concurrent frame long polls. It is distinct from
+// ErrObservationBusy: the observation itself is healthy, and closing another
+// viewer for this Run frees capacity.
+var ErrObservationViewerCapacity = errors.New("browser observation viewer capacity is exhausted for this Run")
+
 // ErrObservationNotConfirmed is returned when the Worker never confirmed a
 // start. The lease is torn down before it surfaces, so the Run is left
 // observable rather than pinned by an observation that never began.
