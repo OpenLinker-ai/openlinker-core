@@ -396,7 +396,7 @@ func TestGetConversationRuns_Handler_UsesOwnerLineageAndAbsoluteOrdinal(t *testi
 				0, 0, 0, 'openlinker.runtime.v2',
 				digest($1::uuid::text || ':key', 'sha256'),
 				digest($1::uuid::text || ':fingerprint', 'sha256'),
-				'runtime', 'executing', clock_timestamp() + interval '10 minutes',
+				'runtime', 'pending', clock_timestamp() + interval '10 minutes',
 				clock_timestamp() + interval '1 hour', clock_timestamp() + ($5 * interval '1 second')
 			)`, runID, ownerID, agentID, authority, index)
 		require.NoError(t, err)
