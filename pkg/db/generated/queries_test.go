@@ -1838,6 +1838,46 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 		t.Fatalf("ListA2AContextMappingsByRoot scan = %#v closed=%v", mappings, mappingRows.closed)
 	}
 
+	finishedConversation := now.Add(2 * time.Minute)
+	forwardRows := &fakeRows{rows: [][]any{{
+		childRunID, userID, agentID, "ctx-root", &parentRunID, "task-child",
+		"a2a_protocol", userID, agentID, "success", []byte(`{"authority":true}`),
+		now, &finishedConversation, int32(1), false,
+	}}}
+	dbtx.queryRows = forwardRows
+	forward, err := q.ListA2AConversationForwardRows(context.Background(), ListA2AConversationForwardRowsParams{
+		RunID: childRunID, MaxDepth: 64, Limit: 65,
+	})
+	if err != nil {
+		t.Fatalf("ListA2AConversationForwardRows error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListA2AConversationForwardRows")
+	if !forwardRows.closed || len(forward) != 1 || forward[0].RunID != childRunID || forward[0].Depth != 1 {
+		t.Fatalf("ListA2AConversationForwardRows scan = %#v closed=%v", forward, forwardRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{childRunID, int32(64), int32(65)}) {
+		t.Fatalf("ListA2AConversationForwardRows args = %#v", dbtx.queryArgs)
+	}
+
+	ancestorRows := &fakeRows{rows: [][]any{{
+		childRunID, userID, agentID, "ctx-root", &parentRunID, "task-child",
+		"a2a_protocol", userID, agentID, int32(0), false,
+	}}}
+	dbtx.queryRows = ancestorRows
+	ancestors, err := q.ListA2AConversationAncestorRows(context.Background(), ListA2AConversationAncestorRowsParams{
+		RunID: childRunID, MaxDepth: 64, Limit: 65,
+	})
+	if err != nil {
+		t.Fatalf("ListA2AConversationAncestorRows error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListA2AConversationAncestorRows")
+	if !ancestorRows.closed || len(ancestors) != 1 || ancestors[0].ParentRunID == nil {
+		t.Fatalf("ListA2AConversationAncestorRows scan = %#v closed=%v", ancestors, ancestorRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{childRunID, int32(64), int32(65)}) {
+		t.Fatalf("ListA2AConversationAncestorRows args = %#v", dbtx.queryArgs)
+	}
+
 	recentMappingRows := &fakeRows{rows: [][]any{
 		a2aContextMappingRow(mappingID, childRunID, userID, agentID, parentRunID, callerAgentID, targetAgentID, now),
 	}}

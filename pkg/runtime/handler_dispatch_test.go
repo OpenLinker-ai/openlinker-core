@@ -18,6 +18,34 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
+func TestGetConversationRunsReturnsPrivateOwnerProjection(t *testing.T) {
+	t.Parallel()
+	userID := uuid.New()
+	runID := uuid.New()
+	svc := &mockRuntimeService{conversationResp: &ConversationRunListResponse{
+		AnchorRunID: runID.String(),
+		Linear:      true,
+		Revision:    strings.Repeat("a", 64),
+		Items: []ConversationRunItem{{
+			RunID: runID.String(), Status: "running", StartedAt: time.Now().UTC(),
+		}},
+	}}
+	e := echo.New()
+	recorder := httptest.NewRecorder()
+	context := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID.String()+"/conversation-runs", nil), recorder)
+	context.SetParamNames("id")
+	context.SetParamValues(runID.String())
+	context.Set(string(httpx.CtxKeyUserID), userID.String())
+	context.Set(string(httpx.CtxKeyAuthMethod), "jwt")
+
+	require.NoError(t, NewHandler(svc).GetConversationRuns(context))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "private, no-store", recorder.Header().Get("Cache-Control"))
+	require.Equal(t, userID, svc.conversationUserID)
+	require.Equal(t, runID, svc.conversationRunID)
+	require.NotContains(t, recorder.Body.String(), "root_context_id")
+}
+
 func TestRetiredRuntimeHeartbeatRouteIsAbsentWithoutCallingService(t *testing.T) {
 	svc := &mockRuntimeService{}
 	e := echo.New()
@@ -763,6 +791,10 @@ type mockRuntimeService struct {
 	getRunID     uuid.UUID
 	getRunResp   *RunResponse
 
+	conversationUserID uuid.UUID
+	conversationRunID  uuid.UUID
+	conversationResp   *ConversationRunListResponse
+
 	replayUserID         uuid.UUID
 	replaySourceRunID    uuid.UUID
 	replayIdempotencyKey string
@@ -818,6 +850,15 @@ func (m *mockRuntimeService) GetRun(_ context.Context, userID, runID uuid.UUID) 
 	m.getRunUserID = userID
 	m.getRunID = runID
 	return m.getRunResp, m.err
+}
+
+func (m *mockRuntimeService) GetConversationRuns(
+	_ context.Context,
+	userID, runID uuid.UUID,
+) (*ConversationRunListResponse, error) {
+	m.conversationUserID = userID
+	m.conversationRunID = runID
+	return m.conversationResp, m.err
 }
 
 func (m *mockRuntimeService) ReplayRun(

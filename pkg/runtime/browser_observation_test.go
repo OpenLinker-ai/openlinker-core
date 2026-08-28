@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -300,6 +301,18 @@ func TestObservationErrorsMapToDistinctStatuses(t *testing.T) {
 	}
 }
 
+func TestObservationViewerCapacityMapsToRunScopedMessage(t *testing.T) {
+	t.Parallel()
+	mapped := browserObservationHTTPError(ErrObservationViewerCapacity)
+	var coreErr *httpx.HTTPError
+	if !errors.As(mapped, &coreErr) {
+		t.Fatalf("capacity error = %T, want *httpx.HTTPError", mapped)
+	}
+	if coreErr.Status != 429 || coreErr.Message != "该 Run 的并发观察入口已达上限" {
+		t.Fatalf("capacity error = status %d message %q", coreErr.Status, coreErr.Message)
+	}
+}
+
 func httpStatusOf(t *testing.T, err error) int {
 	t.Helper()
 	var coreErr *httpx.HTTPError
@@ -488,6 +501,156 @@ func TestObservationFrameBufferWakesWaiters(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("closing the observation left a waiter hanging")
+	}
+}
+
+func TestObservationFrameBufferFansOutToIndependentWaiters(t *testing.T) {
+	t.Parallel()
+	buffer := newObservationFrameBuffer(4)
+	identity := observationBufferIdentity()
+	runID := identity.RunID
+	leaseID := uuid.New()
+	commandID := uuid.New()
+	buffer.open(runID, leaseID, commandID, identity)
+
+	type result struct {
+		frame *BrowserObservationFrame
+		err   error
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			frame, err := buffer.wait(t.Context(), runID, 0)
+			results <- result{frame: frame, err: err}
+		}()
+	}
+	waitForObservationFrameWaiters(t, buffer, runID, 2)
+	if err := buffer.publish(runID, leaseID, commandID, identity, observationFrame(7)); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		select {
+		case got := <-results:
+			if got.err != nil || got.frame == nil || got.frame.FrameSeq != 7 {
+				t.Fatalf("fan-out waiter = frame %#v err %v", got.frame, got.err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("a fan-out waiter did not receive the published frame")
+		}
+	}
+	waitForObservationFrameWaiters(t, buffer, runID, 0)
+}
+
+func TestObservationFrameBufferBoundsAndReusesWaiterCapacity(t *testing.T) {
+	t.Parallel()
+	buffer := newObservationFrameBuffer(4)
+	identity := observationBufferIdentity()
+	runID := identity.RunID
+	buffer.open(runID, uuid.New(), uuid.New(), identity)
+
+	results := make(chan error, observationMaxFrameWaitersPerRun+1)
+	cancels := make([]context.CancelFunc, 0, observationMaxFrameWaitersPerRun+1)
+	startWaiter := func() {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancels = append(cancels, cancel)
+		go func() {
+			_, err := buffer.wait(ctx, runID, 0)
+			results <- err
+		}()
+	}
+	for range observationMaxFrameWaitersPerRun {
+		startWaiter()
+	}
+	waitForObservationFrameWaiters(t, buffer, runID, observationMaxFrameWaitersPerRun)
+	if _, err := buffer.wait(t.Context(), runID, 0); !errors.Is(err, ErrObservationViewerCapacity) {
+		t.Fatalf("ninth waiter error = %v, want viewer capacity", err)
+	}
+
+	cancels[0]()
+	select {
+	case err := <-results:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled waiter error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled waiter did not return")
+	}
+	waitForObservationFrameWaiters(t, buffer, runID, observationMaxFrameWaitersPerRun-1)
+	startWaiter()
+	waitForObservationFrameWaiters(t, buffer, runID, observationMaxFrameWaitersPerRun)
+
+	for _, cancel := range cancels[1:] {
+		cancel()
+	}
+	for range observationMaxFrameWaitersPerRun {
+		select {
+		case err := <-results:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("released waiter error = %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("released waiter did not return")
+		}
+	}
+	waitForObservationFrameWaiters(t, buffer, runID, 0)
+}
+
+func TestObservationFrameBufferWaiterCannotCrossReplacementLease(t *testing.T) {
+	t.Parallel()
+	buffer := newObservationFrameBuffer(4)
+	identity := observationBufferIdentity()
+	runID := identity.RunID
+	buffer.open(runID, uuid.New(), uuid.New(), identity)
+
+	ended := make(chan error, 1)
+	go func() {
+		_, err := buffer.wait(t.Context(), runID, 0)
+		ended <- err
+	}()
+	waitForObservationFrameWaiters(t, buffer, runID, 1)
+
+	successorLease := uuid.New()
+	successorCommand := uuid.New()
+	buffer.open(runID, successorLease, successorCommand, identity)
+	select {
+	case err := <-ended:
+		if !errors.Is(err, ErrObservationInactive) {
+			t.Fatalf("replaced waiter error = %v, want inactive", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("replaced waiter did not leave its old lease")
+	}
+	if err := buffer.publish(runID, successorLease, successorCommand, identity, observationFrame(1)); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := buffer.wait(t.Context(), runID, 0)
+	if err != nil || frame == nil || frame.FrameSeq != 1 {
+		t.Fatalf("replacement frame = %#v err %v", frame, err)
+	}
+}
+
+func waitForObservationFrameWaiters(
+	t *testing.T,
+	buffer *observationFrameBuffer,
+	runID uuid.UUID,
+	want int,
+) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		buffer.mu.Lock()
+		got := 0
+		if live := buffer.live[runID]; live != nil {
+			got = live.waiters
+		}
+		buffer.mu.Unlock()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("frame waiters = %d, want %d", got, want)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

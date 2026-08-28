@@ -86,6 +86,72 @@ WHERE user_id = $1 AND root_context_id = $2
 ORDER BY created_at ASC, run_id ASC
 LIMIT $3;
 
+-- name: ListA2AConversationForwardRows :many
+-- The anchor is authorized before this query. Children are intentionally not
+-- scope-filtered here: the projection layer must see and fail closed on a child
+-- that changes owner, Agent, root, source or backing Run ownership.
+WITH RECURSIVE conversation_forward AS (
+    SELECT m.run_id, m.user_id AS mapping_user_id, m.agent_id AS mapping_agent_id,
+           m.root_context_id, m.parent_run_id, m.protocol_task_id, m.source,
+           m.created_at AS mapping_created_at,
+           r.user_id AS run_user_id, r.agent_id AS run_agent_id, r.status,
+           r.request_metadata, r.started_at, r.finished_at,
+           0::int AS depth, ARRAY[m.run_id]::uuid[] AS path, false AS cycle
+    FROM a2a_context_mappings m
+    JOIN runs r ON r.id = m.run_id
+    WHERE m.run_id = $1
+  UNION ALL
+    SELECT child.run_id, child.user_id, child.agent_id,
+           child.root_context_id, child.parent_run_id, child.protocol_task_id,
+           child.source, child.created_at,
+           r.user_id, r.agent_id, r.status, r.request_metadata,
+           r.started_at, r.finished_at,
+           parent.depth + 1,
+           parent.path || child.run_id,
+           child.run_id = ANY(parent.path)
+    FROM conversation_forward parent
+    JOIN a2a_context_mappings child ON child.parent_run_id = parent.run_id
+    JOIN runs r ON r.id = child.run_id
+    WHERE parent.depth < $2 AND NOT parent.cycle
+)
+SELECT run_id, mapping_user_id, mapping_agent_id, root_context_id,
+       parent_run_id, protocol_task_id, source, run_user_id, run_agent_id,
+       status, request_metadata, started_at, finished_at, depth, cycle
+FROM conversation_forward
+ORDER BY depth ASC, mapping_created_at ASC, run_id ASC
+LIMIT $3;
+
+-- name: ListA2AConversationAncestorRows :many
+-- This walk is used only for the optional absolute display ordinal. A missing,
+-- invalid, cyclic or over-limit ancestor causes the caller to omit the ordinal
+-- without weakening the independently verified forward projection.
+WITH RECURSIVE conversation_ancestors AS (
+    SELECT m.run_id, m.user_id AS mapping_user_id, m.agent_id AS mapping_agent_id,
+           m.root_context_id, m.parent_run_id, m.protocol_task_id, m.source,
+           r.user_id AS run_user_id, r.agent_id AS run_agent_id,
+           0::int AS depth, ARRAY[m.run_id]::uuid[] AS path, false AS cycle
+    FROM a2a_context_mappings m
+    JOIN runs r ON r.id = m.run_id
+    WHERE m.run_id = $1
+  UNION ALL
+    SELECT parent.run_id, parent.user_id, parent.agent_id,
+           parent.root_context_id, parent.parent_run_id, parent.protocol_task_id,
+           parent.source, r.user_id, r.agent_id,
+           child.depth + 1,
+           child.path || parent.run_id,
+           parent.run_id = ANY(child.path)
+    FROM conversation_ancestors child
+    JOIN a2a_context_mappings parent ON parent.run_id = child.parent_run_id
+    JOIN runs r ON r.id = parent.run_id
+    WHERE child.depth < $2 AND NOT child.cycle
+)
+SELECT run_id, mapping_user_id, mapping_agent_id, root_context_id,
+       parent_run_id, protocol_task_id, source, run_user_id, run_agent_id,
+       depth, cycle
+FROM conversation_ancestors
+ORDER BY depth ASC
+LIMIT $3;
+
 -- name: ListRecentA2AContextMappingsByRoot :many
 -- Run creation calls this before inserting the current Run so its immutable
 -- request metadata can include only previously committed conversation history.

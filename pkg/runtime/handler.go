@@ -52,6 +52,10 @@ type runWaitStatusService interface {
 	GetRunWaitStatus(context.Context, uuid.UUID, uuid.UUID) (string, error)
 }
 
+type conversationRunService interface {
+	GetConversationRuns(context.Context, uuid.UUID, uuid.UUID) (*ConversationRunListResponse, error)
+}
+
 // NewHandler 构造 Handler。cfg 可选（测试可省略）。
 func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 	h := &Handler{
@@ -108,6 +112,7 @@ func (h *Handler) RegisterProtected(api *echo.Group, runMw, queryMw echo.Middlew
 	api.POST("/run", h.PostRun, runMw)
 	api.POST("/runs", h.PostRunAsync, runMw)
 	api.GET("/runs/:id", h.GetRun, queryMw)
+	api.GET("/runs/:id/conversation-runs", h.GetConversationRuns, queryMw)
 	api.GET("/runs/:id/events", h.GetRunEvents, queryMw)
 	api.GET("/runs/:id/artifacts", h.GetRunArtifacts, queryMw)
 	api.GET("/runs/:id/messages", h.GetRunMessages, queryMw)
@@ -120,6 +125,30 @@ func (h *Handler) RegisterProtected(api *echo.Group, runMw, queryMw echo.Middlew
 	api.POST("/runs/:id/browser-control/resume", h.ResumeBrowserControl, queryMw)
 	api.POST("/runs/:id/browser-control/input", h.SendBrowserControlInput, queryMw)
 	api.GET("/runs/:id/browser-control/frame", h.GetBrowserControlFrame, queryMw)
+}
+
+func (h *Handler) GetConversationRuns(c echo.Context) error {
+	if err := requireAPIKeyScope(c, "runs:read"); err != nil {
+		return err
+	}
+	userID, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	runID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	service, ok := h.svc.(conversationRunService)
+	if !ok {
+		return httpx.Internal("查询会话运行失败")
+	}
+	response, err := service.GetConversationRuns(c.Request().Context(), userID, runID)
+	if err != nil {
+		return err
+	}
+	c.Response().Header().Set("Cache-Control", "private, no-store")
+	return c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) GetBrowserControl(c echo.Context) error {
@@ -1388,6 +1417,8 @@ func browserObservationHTTPError(err error) error {
 		return httpx.ServiceUnavailable("该 Run 的观察通道不在当前 Core 实例上")
 	case errors.Is(err, ErrObservationAlreadyActive):
 		return httpx.Conflict("该 Run 已有活动的观察")
+	case errors.Is(err, ErrObservationViewerCapacity):
+		return httpx.RateLimited("该 Run 的并发观察入口已达上限")
 	case errors.Is(err, ErrObservationUnsupported):
 		return echo.NewHTTPError(
 			http.StatusNotImplemented,

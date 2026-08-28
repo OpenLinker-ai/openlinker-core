@@ -230,6 +230,154 @@ func (q *Queries) ListA2AContextMappingsByRoot(ctx context.Context, arg ListA2AC
 	return items, rows.Err()
 }
 
+const listA2AConversationForwardRows = `-- name: ListA2AConversationForwardRows :many
+WITH RECURSIVE conversation_forward AS (
+    SELECT m.run_id, m.user_id AS mapping_user_id, m.agent_id AS mapping_agent_id,
+           m.root_context_id, m.parent_run_id, m.protocol_task_id, m.source,
+           m.created_at AS mapping_created_at,
+           r.user_id AS run_user_id, r.agent_id AS run_agent_id, r.status,
+           r.request_metadata, r.started_at, r.finished_at,
+           0::int AS depth, ARRAY[m.run_id]::uuid[] AS path, false AS cycle
+    FROM a2a_context_mappings m
+    JOIN runs r ON r.id = m.run_id
+    WHERE m.run_id = $1
+  UNION ALL
+    SELECT child.run_id, child.user_id, child.agent_id,
+           child.root_context_id, child.parent_run_id, child.protocol_task_id,
+           child.source, child.created_at,
+           r.user_id, r.agent_id, r.status, r.request_metadata,
+           r.started_at, r.finished_at,
+           parent.depth + 1,
+           parent.path || child.run_id,
+           child.run_id = ANY(parent.path)
+    FROM conversation_forward parent
+    JOIN a2a_context_mappings child ON child.parent_run_id = parent.run_id
+    JOIN runs r ON r.id = child.run_id
+    WHERE parent.depth < $2 AND NOT parent.cycle
+)
+SELECT run_id, mapping_user_id, mapping_agent_id, root_context_id,
+       parent_run_id, protocol_task_id, source, run_user_id, run_agent_id,
+       status, request_metadata, started_at, finished_at, depth, cycle
+FROM conversation_forward
+ORDER BY depth ASC, mapping_created_at ASC, run_id ASC
+LIMIT $3`
+
+type ListA2AConversationForwardRowsParams struct {
+	RunID    uuid.UUID `db:"run_id" json:"run_id"`
+	MaxDepth int32     `db:"max_depth" json:"max_depth"`
+	Limit    int32     `db:"limit" json:"limit"`
+}
+
+type ListA2AConversationForwardRowsRow struct {
+	RunID           uuid.UUID  `db:"run_id" json:"run_id"`
+	MappingUserID   uuid.UUID  `db:"mapping_user_id" json:"mapping_user_id"`
+	MappingAgentID  uuid.UUID  `db:"mapping_agent_id" json:"mapping_agent_id"`
+	RootContextID   string     `db:"root_context_id" json:"root_context_id"`
+	ParentRunID     *uuid.UUID `db:"parent_run_id" json:"parent_run_id"`
+	ProtocolTaskID  string     `db:"protocol_task_id" json:"protocol_task_id"`
+	Source          string     `db:"source" json:"source"`
+	RunUserID       uuid.UUID  `db:"run_user_id" json:"run_user_id"`
+	RunAgentID      uuid.UUID  `db:"run_agent_id" json:"run_agent_id"`
+	Status          string     `db:"status" json:"status"`
+	RequestMetadata []byte     `db:"request_metadata" json:"request_metadata"`
+	StartedAt       time.Time  `db:"started_at" json:"started_at"`
+	FinishedAt      *time.Time `db:"finished_at" json:"finished_at"`
+	Depth           int32      `db:"depth" json:"depth"`
+	Cycle           bool       `db:"cycle" json:"cycle"`
+}
+
+func (q *Queries) ListA2AConversationForwardRows(ctx context.Context, arg ListA2AConversationForwardRowsParams) ([]ListA2AConversationForwardRowsRow, error) {
+	rows, err := q.db.Query(ctx, listA2AConversationForwardRows, arg.RunID, arg.MaxDepth, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListA2AConversationForwardRowsRow
+	for rows.Next() {
+		var item ListA2AConversationForwardRowsRow
+		if err := rows.Scan(
+			&item.RunID, &item.MappingUserID, &item.MappingAgentID,
+			&item.RootContextID, &item.ParentRunID, &item.ProtocolTaskID,
+			&item.Source, &item.RunUserID, &item.RunAgentID, &item.Status,
+			&item.RequestMetadata, &item.StartedAt, &item.FinishedAt,
+			&item.Depth, &item.Cycle,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+const listA2AConversationAncestorRows = `-- name: ListA2AConversationAncestorRows :many
+WITH RECURSIVE conversation_ancestors AS (
+    SELECT m.run_id, m.user_id AS mapping_user_id, m.agent_id AS mapping_agent_id,
+           m.root_context_id, m.parent_run_id, m.protocol_task_id, m.source,
+           r.user_id AS run_user_id, r.agent_id AS run_agent_id,
+           0::int AS depth, ARRAY[m.run_id]::uuid[] AS path, false AS cycle
+    FROM a2a_context_mappings m
+    JOIN runs r ON r.id = m.run_id
+    WHERE m.run_id = $1
+  UNION ALL
+    SELECT parent.run_id, parent.user_id, parent.agent_id,
+           parent.root_context_id, parent.parent_run_id, parent.protocol_task_id,
+           parent.source, r.user_id, r.agent_id,
+           child.depth + 1,
+           child.path || parent.run_id,
+           parent.run_id = ANY(child.path)
+    FROM conversation_ancestors child
+    JOIN a2a_context_mappings parent ON parent.run_id = child.parent_run_id
+    JOIN runs r ON r.id = parent.run_id
+    WHERE child.depth < $2 AND NOT child.cycle
+)
+SELECT run_id, mapping_user_id, mapping_agent_id, root_context_id,
+       parent_run_id, protocol_task_id, source, run_user_id, run_agent_id,
+       depth, cycle
+FROM conversation_ancestors
+ORDER BY depth ASC
+LIMIT $3`
+
+type ListA2AConversationAncestorRowsParams struct {
+	RunID    uuid.UUID `db:"run_id" json:"run_id"`
+	MaxDepth int32     `db:"max_depth" json:"max_depth"`
+	Limit    int32     `db:"limit" json:"limit"`
+}
+
+type ListA2AConversationAncestorRowsRow struct {
+	RunID          uuid.UUID  `db:"run_id" json:"run_id"`
+	MappingUserID  uuid.UUID  `db:"mapping_user_id" json:"mapping_user_id"`
+	MappingAgentID uuid.UUID  `db:"mapping_agent_id" json:"mapping_agent_id"`
+	RootContextID  string     `db:"root_context_id" json:"root_context_id"`
+	ParentRunID    *uuid.UUID `db:"parent_run_id" json:"parent_run_id"`
+	ProtocolTaskID string     `db:"protocol_task_id" json:"protocol_task_id"`
+	Source         string     `db:"source" json:"source"`
+	RunUserID      uuid.UUID  `db:"run_user_id" json:"run_user_id"`
+	RunAgentID     uuid.UUID  `db:"run_agent_id" json:"run_agent_id"`
+	Depth          int32      `db:"depth" json:"depth"`
+	Cycle          bool       `db:"cycle" json:"cycle"`
+}
+
+func (q *Queries) ListA2AConversationAncestorRows(ctx context.Context, arg ListA2AConversationAncestorRowsParams) ([]ListA2AConversationAncestorRowsRow, error) {
+	rows, err := q.db.Query(ctx, listA2AConversationAncestorRows, arg.RunID, arg.MaxDepth, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListA2AConversationAncestorRowsRow
+	for rows.Next() {
+		var item ListA2AConversationAncestorRowsRow
+		if err := rows.Scan(
+			&item.RunID, &item.MappingUserID, &item.MappingAgentID,
+			&item.RootContextID, &item.ParentRunID, &item.ProtocolTaskID,
+			&item.Source, &item.RunUserID, &item.RunAgentID, &item.Depth, &item.Cycle,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 const listRecentA2AContextMappingsByRoot = `-- name: ListRecentA2AContextMappingsByRoot :many
 SELECT id, run_id, user_id, agent_id, protocol_context_id, protocol_task_id,
        root_context_id, parent_context_id, parent_task_id, parent_run_id,

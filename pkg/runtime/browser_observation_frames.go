@@ -15,6 +15,11 @@ const (
 	// allowed to have sent yet.
 	observationFrameBytesLimit = 1 << 20
 	observationWaitTimeout     = 30 * time.Second
+	// Each waiter is one authorized HTTP long poll over the same in-memory
+	// latest frame. Bounding them prevents one Run from pinning unbounded
+	// goroutines and response copies while still allowing several read-only
+	// entry points to observe it together.
+	observationMaxFrameWaitersPerRun = 8
 )
 
 // BrowserObservationFrame is the only shape the browser ever receives. It
@@ -48,11 +53,10 @@ type observationLiveFrame struct {
 	// every event it sends from one counter, so this is what makes a replayed or
 	// reordered event -- of any kind, not only a frame -- detectable.
 	lastEventSeq int64
-	// Identifies the one downstream viewer allowed to poll. A newer poll takes
-	// over from an older one rather than being refused, because a reloaded tab
-	// leaves its previous long poll hanging for the full timeout and refusing
-	// would lock the viewer out for that whole window.
-	waiter int64
+	// Number of independent frame long polls currently blocked on this live
+	// lease. The latest frame and notification are shared; no per-viewer frame
+	// history is retained.
+	waiters int
 }
 
 // retiredObservation is what an observation this process opened leaves behind
@@ -344,29 +348,31 @@ func (buffer *observationFrameBuffer) wait(
 		buffer.mu.Unlock()
 		return nil, ErrObservationInactive
 	}
-	live.waiter++
-	live.lastPolledAt = buffer.now()
-	waiter := live.waiter
-	// Wakes the poll being superseded so it returns now instead of holding its
-	// request open until the timeout it can no longer be served by.
-	close(live.notify)
-	live.notify = make(chan struct{})
+	if live.frame != nil && live.frame.FrameSeq > after {
+		live.lastPolledAt = buffer.now()
+		copied := *live.frame
+		copied.Data = append([]byte(nil), live.frame.Data...)
+		buffer.mu.Unlock()
+		return &copied, nil
+	}
+	if live.waiters >= observationMaxFrameWaitersPerRun {
+		buffer.mu.Unlock()
+		return nil, ErrObservationViewerCapacity
+	}
+	admitted := live
+	admitted.waiters++
+	admitted.lastPolledAt = buffer.now()
 	buffer.mu.Unlock()
+	defer buffer.releaseFrameWaiter(admitted)
 	for {
 		buffer.mu.Lock()
 		live = buffer.live[runID]
-		if live == nil {
+		if live == nil || live != admitted {
 			// The observation ended while this poll was waiting. Reported as an
-			// ended observation, not a failure: the viewer's next step is to
-			// re-read state, not to retry the frame.
+			// ended observation, not a failure. Pointer identity also prevents a
+			// waiter from crossing into a replacement lease for the same Run.
 			buffer.mu.Unlock()
 			return nil, ErrObservationInactive
-		}
-		if live.waiter != waiter {
-			// A newer poll took over. Returning empty rather than erroring lets
-			// the superseded request finish as an ordinary idle long poll.
-			buffer.mu.Unlock()
-			return nil, nil
 		}
 		if live.frame != nil && live.frame.FrameSeq > after {
 			copied := *live.frame
@@ -384,6 +390,14 @@ func (buffer *observationFrameBuffer) wait(
 			return nil, nil
 		case <-notify:
 		}
+	}
+}
+
+func (buffer *observationFrameBuffer) releaseFrameWaiter(live *observationLiveFrame) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	if live.waiters > 0 {
+		live.waiters--
 	}
 }
 
