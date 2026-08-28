@@ -24,8 +24,10 @@ func TestConversationProjectionUsesAbsoluteOrdinalAndStableIdentity(t *testing.T
 	first.Depth = 2
 	second.Depth = 1
 
+	authorizedAnchor := anchor
+	authorizedAnchor.RequestMetadata = nil
 	response := buildConversationRunProjection(
-		anchor,
+		authorizedAnchor,
 		[]conversationProjectionRun{anchor, successor},
 		[]conversationProjectionRun{anchor, second, first},
 	)

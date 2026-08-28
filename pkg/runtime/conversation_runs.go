@@ -179,7 +179,10 @@ func buildConversationRunProjection(
 			anchor.RootContextID,
 		),
 		Linear: true,
-		Items:  []ConversationRunItem{conversationRunItem(anchor)},
+		// GetRunByID is the authorization source, but its compact row does not
+		// carry request_metadata. The already validated forward anchor is the
+		// projection source and preserves Browser policy evidence for item zero.
+		Items: []ConversationRunItem{conversationRunItem(forward[0])},
 	}
 	children := make(map[uuid.UUID][]conversationProjectionRun)
 	for index, row := range forward {
