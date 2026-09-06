@@ -110,6 +110,7 @@ type ConversationMessage struct {
 // 失败 / 超时 时 Output 为空、ErrorCode + ErrorMsg 必填，CostCents=0（已退款）。
 // Source: 'web' / 'mcp' / 'api'，由 handler 从鉴权方式推导。
 type RunResponse struct {
+	CanReplay           bool                   `json:"can_replay"`
 	RunID               string                 `json:"run_id"`
 	AgentID             string                 `json:"agent_id,omitempty"`
 	AgentSlug           string                 `json:"agent_slug,omitempty"`

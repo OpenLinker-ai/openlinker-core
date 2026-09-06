@@ -51,9 +51,7 @@ func (s *Service) ReplayRun(
 		// read ordinary Run detail.
 		return nil, httpx.NotFound("调用记录不存在")
 	}
-	if original.RuntimeContractID != RuntimeContractID ||
-		original.Status != "failed" ||
-		original.DispatchState != string(RuntimeDispatchDeadLetter) {
+	if !isReplaySource(original) {
 		return nil, httpx.Conflict("只有进入死信队列的调用可以回放")
 	}
 	if _, err := s.queries.GetRunDeadLetterByRun(ctx, sourceRunID); err != nil {

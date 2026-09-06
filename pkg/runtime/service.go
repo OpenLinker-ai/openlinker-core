@@ -1894,6 +1894,7 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 		return nil, httpx.NotFound("调用记录不存在")
 	}
 	resp := runToResponse(&r)
+	resp.CanReplay = runReplayCapability(ctx, s.queries, userID, r)
 	if agentErr == nil {
 		resp.AgentSlug = agent.Slug
 		resp.AgentName = agent.Name
