@@ -339,6 +339,7 @@ func TestSkillAndBenchmarkRoutesAndRuntimeStatus(t *testing.T) {
 	for _, key := range []string{
 		http.MethodGet + " /api/v1/skills",
 		http.MethodPost + " /api/v1/skills/proposals",
+		http.MethodGet + " /api/v1/creator/agents/:id/skills",
 		http.MethodPatch + " /api/v1/creator/agents/:id/skills",
 		http.MethodGet + " /api/v1/creator/skill-proposals",
 		http.MethodGet + " /api/v1/benchmark/status",

@@ -663,3 +663,44 @@ func requireSkillDispatchHTTPStatus(t *testing.T, err error, want int) {
 		t.Fatalf("HTTP status = %d (%s), want %d", httpErr.Status, httpErr.Message, want)
 	}
 }
+
+func TestSkillOwnerReadIncludesPrivateDeclarations(t *testing.T) {
+	owner, agentID := uuid.New(), uuid.New()
+	for _, visibility := range []string{"private", "public", "unlisted"} {
+		t.Run(visibility, func(t *testing.T) {
+			svc := &mockSkillService{listForAgentResp: []db.Skill{{ID: "data/sql", Name: "SQL"}}}
+			h := NewHandler(svc, nil)
+			h.q = &mockSkillAgentReader{agent: db.Agent{ID: agentID, CreatorID: owner, Visibility: visibility}}
+			c, rec := newSkillDispatchContext(http.MethodGet, "/creator/agents/"+agentID.String()+"/skills", "", owner.String(), map[string]string{"id": agentID.String()})
+			if err := h.ListAgentSkills(c); err != nil {
+				t.Fatal(err)
+			}
+			var body SetSkillsResponse
+			decodeSkillDispatchJSON(t, rec, &body)
+			if rec.Code != 200 || len(body.Items) != 1 || body.Items[0].ID != "data/sql" || svc.listForAgentID != agentID {
+				t.Fatalf("unexpected response: %#v", body)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, user string
+		reader     *mockSkillAgentReader
+		status     int
+	}{
+		{"anonymous", "", &mockSkillAgentReader{agent: db.Agent{ID: agentID, CreatorID: owner}}, 401},
+		{"other owner", uuid.NewString(), &mockSkillAgentReader{agent: db.Agent{ID: agentID, CreatorID: owner}}, 404},
+		{"missing", owner.String(), &mockSkillAgentReader{err: pgx.ErrNoRows}, 404},
+		{"database unavailable", owner.String(), &mockSkillAgentReader{err: errors.New("unavailable")}, 500},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &mockSkillService{}
+			h := NewHandler(svc, nil)
+			h.q = tc.reader
+			c, _ := newSkillDispatchContext(http.MethodGet, "/creator/agents/"+agentID.String()+"/skills", "", tc.user, map[string]string{"id": agentID.String()})
+			requireSkillDispatchHTTPStatus(t, h.ListAgentSkills(c), tc.status)
+			if svc.listForAgentID != uuid.Nil {
+				t.Fatal("read declarations without authorization")
+			}
+		})
+	}
+}
