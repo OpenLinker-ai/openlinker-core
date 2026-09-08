@@ -865,7 +865,7 @@ func (s *Service) DeleteExample(ctx context.Context, agentID, exampleID, creator
 // 流程：
 //  1. 校验 Agent 归属（GetAgentByIDForOwner）
 //  2. 取首条 example.input_json
-//  3. 调 DryRunner（不计费 / 不写 runs）
+//  3. 调 DryRunner（不计费；Runtime 通过持久化 Run 派发）
 //  4. 把结果写到 agent_onboarding_status.dry_run_*
 //  5. 返回 DryRunResponse
 func (s *Service) RunDryRun(ctx context.Context, agentID, creatorID uuid.UUID) (*DryRunResponse, error) {

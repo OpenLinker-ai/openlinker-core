@@ -91,8 +91,8 @@ WHERE user_id = $1
   AND ($3::text = '' OR status = $3);
 
 -- name: CreateWorkflowRun :one
-INSERT INTO workflow_runs (workflow_id, user_id, status, input)
-VALUES ($1, $2, 'running', $3)
+INSERT INTO workflow_runs (workflow_id, user_id, status, input, attempt_count)
+VALUES ($1, $2, 'running', $3, 1)
 RETURNING id, workflow_id, user_id, status, input, output, error_message,
           started_at, finished_at, created_at, updated_at,
           attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error;
