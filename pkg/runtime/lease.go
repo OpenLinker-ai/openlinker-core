@@ -966,7 +966,8 @@ func (s *RuntimeLeaseService) assignmentFromAttempt(
 	}
 	digest := sha256.Sum256(canonicalInput)
 	nodeEnvelope, invocationToken, err := s.issuer.Issue(RuntimeInvocationCapability{
-		RunID: attempt.RunID, AttemptID: attempt.ID, LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
+		Audience: runtimeSessionInvocationAudience(principal.Features),
+		RunID:    attempt.RunID, AttemptID: attempt.ID, LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
 		AgentID: attempt.AgentID, CredentialID: principal.CredentialID, NodeID: principal.NodeID,
 		WorkerID: principal.WorkerID, RuntimeSessionID: principal.RuntimeSessionID, InputSHA256: digest,
 		IssuedAt: attempt.OfferedAt, ExpiresAt: attempt.AttemptDeadlineAt,

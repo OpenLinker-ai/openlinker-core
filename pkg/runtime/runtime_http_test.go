@@ -44,6 +44,7 @@ func TestRuntimeControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 		"POST /api/v1/agent-runtime/runs/:id/cancel-ack",
 		"GET /api/v1/agent-runtime/commands",
 		"POST /api/v1/agent-runtime/call-agent",
+		"POST /api/v1/agent-runtime/delegated-runs/read",
 		"GET /api/v1/agent-runtime/ws",
 	} {
 		require.True(t, routes[route], route)
@@ -75,6 +76,7 @@ func TestRuntimeControllerAttachOnlyRegistersNoExecutionRoutes(t *testing.T) {
 		"POST /api/v1/agent-runtime/runs/resume",
 		"GET /api/v1/agent-runtime/commands",
 		"POST /api/v1/agent-runtime/call-agent",
+		"POST /api/v1/agent-runtime/delegated-runs/read",
 	} {
 		require.False(t, routes[route], route)
 	}

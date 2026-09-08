@@ -27,6 +27,8 @@ const (
 	runtimeInvocationContextDomain     = "openlinker/runtime-v2/node-envelope"
 	runtimeInvocationProofDomain       = "openlinker/runtime-v2/invocation-proof"
 	runtimeInvocationAudience          = "openlinker.runtime.v2/call-agent"
+	runtimeDelegationAudience          = "openlinker.runtime.v2/delegation"
+	RuntimeDelegatedRunReadFeature     = "delegated_run_read.v1"
 	runtimeInvocationMinimumKeyBytes   = 32
 )
 
@@ -39,6 +41,9 @@ var (
 // accepted runtime offer. It intentionally contains only an input digest, not
 // user input or a long-lived Agent token.
 type RuntimeInvocationCapability struct {
+	// Audience is immutable Session-negotiated authority. Empty preserves the
+	// original create-only capability and its canonical bytes.
+	Audience         string
 	RunID            uuid.UUID
 	AttemptID        uuid.UUID
 	LeaseID          uuid.UUID
@@ -254,7 +259,7 @@ func canonicalRuntimeInvocationCapability(capability RuntimeInvocationCapability
 	}
 	return CanonicalizeRFC8785(map[string]any{
 		"agent_id":           capability.AgentID.String(),
-		"audience":           runtimeInvocationAudience,
+		"audience":           runtimeCapabilityAudience(capability),
 		"attempt_id":         capability.AttemptID.String(),
 		"credential_id":      capability.CredentialID.String(),
 		"expires_at":         capability.ExpiresAt.UTC().Format(time.RFC3339Nano),
@@ -271,6 +276,9 @@ func canonicalRuntimeInvocationCapability(capability RuntimeInvocationCapability
 }
 
 func validateRuntimeInvocationCapability(capability RuntimeInvocationCapability) error {
+	if audience := runtimeCapabilityAudience(capability); audience != runtimeInvocationAudience && audience != runtimeDelegationAudience {
+		return ErrInvalidRuntimeInvocation
+	}
 	if capability.RunID == uuid.Nil || capability.AttemptID == uuid.Nil || capability.LeaseID == uuid.Nil ||
 		capability.AgentID == uuid.Nil || capability.CredentialID == uuid.Nil || capability.NodeID == uuid.Nil ||
 		capability.RuntimeSessionID == uuid.Nil || capability.FencingToken < 1 ||
@@ -305,10 +313,13 @@ func decodeRuntimeInvocationCapability(payload []byte) (RuntimeInvocationCapabil
 		return RuntimeInvocationCapability{}, ErrInvalidRuntimeInvocation
 	}
 	if err := rejectTrailingRuntimeInvocationJSON(decoder); err != nil ||
-		wire.Version != runtimeInvocationCapabilityVersion || wire.Audience != runtimeInvocationAudience {
+		wire.Version != runtimeInvocationCapabilityVersion || (wire.Audience != runtimeInvocationAudience && wire.Audience != runtimeDelegationAudience) {
 		return RuntimeInvocationCapability{}, ErrInvalidRuntimeInvocation
 	}
 	capability := RuntimeInvocationCapability{FencingToken: wire.FencingToken, WorkerID: wire.WorkerID}
+	if wire.Audience != runtimeInvocationAudience {
+		capability.Audience = wire.Audience
+	}
 	var err error
 	if capability.RunID, err = uuid.Parse(wire.RunID); err != nil {
 		return RuntimeInvocationCapability{}, ErrInvalidRuntimeInvocation

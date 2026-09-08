@@ -428,8 +428,9 @@ func (s *RuntimeDelegationService) authorizeChildCreation(
 	capability := preliminary
 	var sessionEpoch int64
 	var sessionRuntimeContractDigest string
+	var sessionFeatures []string
 	if err := tx.QueryRow(ctx, `
-SELECT s.session_epoch, s.runtime_contract_digest
+SELECT s.session_epoch, s.runtime_contract_digest, s.features
 FROM runtime_sessions s
 JOIN runtime_wire_contracts wire
   ON wire.runtime_contract_id = s.runtime_contract_id
@@ -451,10 +452,11 @@ FOR UPDATE OF s`,
 		capability.CredentialID,
 		capability.WorkerID,
 		authorization.Device.CertificateSerial,
-	).Scan(&sessionEpoch, &sessionRuntimeContractDigest); err != nil {
+	).Scan(&sessionEpoch, &sessionRuntimeContractDigest, &sessionFeatures); err != nil {
 		return runtimeDelegationPrincipalLockError(err)
 	}
-	if sessionEpoch < 1 || !runtimeWireContractSupported(sessionRuntimeContractDigest) {
+	if sessionEpoch < 1 || !runtimeWireContractSupported(sessionRuntimeContractDigest) ||
+		(runtimeCapabilityAudience(capability) == runtimeDelegationAudience && runtimeSessionInvocationAudience(sessionFeatures) != runtimeDelegationAudience) {
 		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 	}
 
@@ -703,7 +705,7 @@ func verifyRuntimeDelegationCapabilityPair(
 }
 
 func runtimeInvocationCapabilitiesEqual(left, right RuntimeInvocationCapability) bool {
-	return left.RunID == right.RunID && left.AttemptID == right.AttemptID &&
+	return runtimeCapabilityAudience(left) == runtimeCapabilityAudience(right) && left.RunID == right.RunID && left.AttemptID == right.AttemptID &&
 		left.LeaseID == right.LeaseID && left.FencingToken == right.FencingToken &&
 		left.AgentID == right.AgentID && left.CredentialID == right.CredentialID &&
 		left.NodeID == right.NodeID && left.WorkerID == right.WorkerID &&
@@ -713,13 +715,17 @@ func runtimeInvocationCapabilitiesEqual(left, right RuntimeInvocationCapability)
 }
 
 func validRuntimeDelegationAuthorization(value RuntimeDelegationAuthorization) bool {
+	return validRuntimeDelegationAuthorizationForPath(value, runtimeCallAgentPath)
+}
+
+func validRuntimeDelegationAuthorizationForPath(value RuntimeDelegationAuthorization, path string) bool {
 	return value.Device.NodeID != uuid.Nil &&
 		validCertificateSerial(value.Device.CertificateSerial) &&
 		validSHA256Hex(value.Device.CertificateFingerprintSHA256) &&
 		validSHA256Hex(value.Device.PublicKeyThumbprintSHA256) &&
 		value.InvocationContext != "" && value.InvocationToken != "" && value.InvocationProof != "" &&
 		value.ProofRequest.Method == http.MethodPost &&
-		value.ProofRequest.Path == runtimeCallAgentPath &&
+		value.ProofRequest.Path == path &&
 		value.ProofRequest.IdempotencyKey == value.IdempotencyKey &&
 		value.ProofRequest.Context == value.InvocationContext &&
 		len(value.ProofRequest.Body) > 0 && int64(len(value.ProofRequest.Body)) <= MaxRuntimeMessageBytes
