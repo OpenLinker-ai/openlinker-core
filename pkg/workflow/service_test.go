@@ -609,6 +609,7 @@ func TestRerunWorkflowStepReusesUnaffectedStepsAndComparesRuns(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, original.ID, rerun.SourceRunID)
 	require.NotEqual(t, original.ID, rerun.RerunRunID)
+	require.Equal(t, int32(1), rerun.Run.AttemptCount, "synchronous step reruns have started their first attempt")
 	require.Equal(t, "success", rerun.Run.Status)
 	require.Equal(t, []string{"collect"}, rerun.ReusedNodeKeys)
 	require.Equal(t, []string{"analyze", "synthesize"}, rerun.RerunNodeKeys)

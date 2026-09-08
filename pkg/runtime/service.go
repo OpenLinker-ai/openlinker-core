@@ -2608,9 +2608,10 @@ func normalizeMCPResult(result map[string]interface{}) map[string]interface{} {
 
 // DryRun 让创作者侧 endpoint 跑一次「不计费、不写 runs」的探活调用。
 //
-// 用于 Agent 接入流程的 dry-run 步骤：使用给定输入直接命中 endpoint，
-// 返回 endpoint 的输出或错误信息。runID 用随机 UUID 仅为响应头标识，
-// 没有任何 DB 副作用。
+// 用于 Agent 接入和测评，返回给定输入的输出或错误信息。
+// HTTP/MCP 直接命中 endpoint，随机 runID 仅为响应头标识，不写 DB。
+// Runtime Worker 则需要创建持久化 Run，通过正常
+// 调度通道执行并等待终态；调用者取消或诊断超时时取消该 Run。
 //
 // 返回 (output, errMsg)：errMsg 为空字符串时表示成功。
 func (s *Service) DryRun(
@@ -2618,6 +2619,9 @@ func (s *Service) DryRun(
 	agent *db.Agent,
 	input map[string]interface{},
 ) (map[string]interface{}, string) {
+	if agent.ConnectionMode == connectionModeRuntime {
+		return s.dryRunRuntime(ctx, agent, input)
+	}
 	runID := uuid.New()
 	userID := uuid.New()
 	output, _, agentErr, callErr := s.callAgent(ctx, agent, runID, userID, &RunRequest{

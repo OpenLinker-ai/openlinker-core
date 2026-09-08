@@ -20,7 +20,7 @@ import (
 // Handler Skill HTTP 入口。
 type Handler struct {
 	svc       skillService
-	q         skillAgentReader // 仅用于 PATCH 时查 Agent 校验 owner
+	q         skillAgentReader // 读写 Agent Skill 前校验 owner
 	validator *validator.Validate
 }
 
@@ -56,6 +56,7 @@ func (h *Handler) Register(api *echo.Group) {
 
 // RegisterProtected 创作者侧端点（需 JWT）。
 //
+//	GET /creator/agents/:id/skills      读取所有者已声明的 skill，包括私有 Agent
 //	PATCH /creator/agents/:id/skills    覆盖某 Agent 的 skill 列表（最多 5 个）
 //	POST /skills/proposals              提交缺失 Skill / 导入声明提案
 //	GET /creator/skill-proposals        查看当前用户提案
@@ -63,8 +64,43 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	api.POST("/skills/proposals", h.CreateProposal, jwtMiddleware)
 
 	g := api.Group("/creator", jwtMiddleware)
+	g.GET("/agents/:id/skills", h.ListAgentSkills)
 	g.PATCH("/agents/:id/skills", h.SetAgentSkills)
 	g.GET("/skill-proposals", h.ListProposals)
+}
+
+// ListAgentSkills reads declarations through the owner boundary, independently
+// of whether the Agent is visible in the public marketplace.
+func (h *Handler) ListAgentSkills(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	agentID, err := pathID(c)
+	if err != nil {
+		return err
+	}
+	ctx := c.Request().Context()
+	a, err := h.q.GetAgentByID(ctx, agentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return httpx.NotFound("Agent 不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Msg("skill.ListAgentSkills: GetAgentByID")
+		return httpx.Internal("查询 Agent 失败")
+	}
+	if a.CreatorID != uid {
+		return httpx.NotFound("Agent 不存在")
+	}
+	rows, err := h.svc.ListForAgent(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	items := make([]SkillItem, 0, len(rows))
+	for i := range rows {
+		items = append(items, toSkillItem(&rows[i]))
+	}
+	return c.JSON(http.StatusOK, SetSkillsResponse{AgentID: agentID.String(), Items: items})
 }
 
 // ListAll GET /skills?q=&category=&sort=&page=&size=。

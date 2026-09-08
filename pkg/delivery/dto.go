@@ -47,7 +47,7 @@ type DeliverRequest struct {
 type DeliveryItem struct {
 	ID             string  `json:"id"`
 	RunID          string  `json:"run_id"`
-	TargetID       string  `json:"target_id"`
+	TargetID       string  `json:"target_id"` // Empty when the target was deleted; its snapshot remains below.
 	TargetType     string  `json:"target_type"`
 	TargetURL      string  `json:"target_url"`
 	Status         string  `json:"status"`
@@ -109,7 +109,6 @@ func toDeliveryItem(d db.RunDelivery) DeliveryItem {
 	item := DeliveryItem{
 		ID:             d.ID.String(),
 		RunID:          d.RunID.String(),
-		TargetID:       d.TargetID.String(),
 		TargetType:     d.TargetType,
 		TargetURL:      d.TargetURL,
 		Status:         d.Status,
@@ -118,6 +117,9 @@ func toDeliveryItem(d db.RunDelivery) DeliveryItem {
 		AttemptCount:   d.AttemptCount,
 		CreatedAt:      d.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:      d.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	if d.TargetID != nil {
+		item.TargetID = d.TargetID.String()
 	}
 	if d.NextRetryAt != nil {
 		t := d.NextRetryAt.UTC().Format(time.RFC3339)
