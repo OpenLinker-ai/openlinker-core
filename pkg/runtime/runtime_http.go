@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -266,6 +267,7 @@ func (h *RuntimeHTTPController) Register(api *echo.Group) {
 	// call-agent is an assignment-scoped auxiliary HTTP operation used by both
 	// connection modes; it is not a long-poll attachment endpoint.
 	api.POST("/agent-runtime/call-agent", h.CallAgent)
+	api.POST("/agent-runtime/delegated-runs/read", h.ReadDelegatedRun)
 	api.GET("/agent-runtime/ws", h.WebSocket)
 }
 
@@ -793,6 +795,10 @@ func (h *RuntimeHTTPController) AckCancel(c echo.Context) error {
 // credential for this endpoint. Token-only transport resolves the same durable
 // Node/key binding from that signed capability.
 func (h *RuntimeHTTPController) CallAgent(c echo.Context) error {
+	return h.handleDelegation(c, false)
+}
+
+func (h *RuntimeHTTPController) handleDelegation(c echo.Context, read bool) error {
 	if h == nil || h.dependencies.Delegation == nil ||
 		(!h.dependencies.TokenOnlyTransport && h.dependencies.DeviceAuthenticator == nil) {
 		return writeRuntimeError(c, runtimeUnavailableError())
@@ -834,6 +840,23 @@ func (h *RuntimeHTTPController) CallAgent(c echo.Context) error {
 		InvocationProof:   c.Request().Header.Get("OpenLinker-Invocation-Proof"),
 		IdempotencyKey:    c.Request().Header.Get("Idempotency-Key"),
 		ProofRequest:      RuntimeInvocationProofRequestFromHTTP(c.Request(), rawBody),
+	}
+	if read {
+		reader, ok := h.dependencies.Delegation.(interface {
+			ReadDelegatedRun(context.Context, RuntimeDelegationAuthorization) (DelegatedRunView, error)
+		})
+		if !ok {
+			return writeRuntimeError(c, runtimeUnavailableError())
+		}
+		result, readErr := reader.ReadDelegatedRun(c.Request().Context(), authorization)
+		if readErr != nil {
+			return writeRuntimeError(c, mapRuntimeHTTPError(readErr))
+		}
+		raw, marshalErr := json.Marshal(result)
+		if marshalErr != nil || int64(len(raw)) > MaxRuntimeMessageBytes {
+			return writeRuntimeError(c, newRuntimeTransportError(RuntimeErrorInternal, "delegated result exceeds response limit", marshalErr))
+		}
+		return c.JSONBlob(http.StatusOK, raw)
 	}
 	summary, err := h.dependencies.Delegation.CallAgent(c.Request().Context(), authorization)
 	if err != nil {

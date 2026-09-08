@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openlinker.ai/contracts/delegated-run-read.v1",
+  "title": "Optional delegated_run_read.v1 HTTP capability",
+  "description": "POST /api/v1/agent-runtime/delegated-runs/read. Requires the openlinker.runtime.v2/delegation signed audience, exact request proof, an active parent Attempt and a direct child relation. The immutable base Runtime wire contract remains unchanged.",
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "required": ["run_id"],
+      "additionalProperties": false,
+      "properties": { "run_id": { "type": "string", "format": "uuid" } }
+    },
+    "Response": {
+      "type": "object",
+      "required": ["run_id", "status", "dispatch_state"],
+      "additionalProperties": false,
+      "properties": {
+        "run_id": { "type": "string", "format": "uuid" },
+        "status": { "enum": ["running", "success", "failed", "timeout", "canceled"] },
+        "dispatch_state": { "enum": ["pending", "offered", "executing", "retry_wait", "terminal", "dead_letter"] },
+        "output": { "type": ["object", "null"] },
+        "error_code": { "type": "string" },
+        "error_message": { "type": "string" }
+      }
+    }
+  }
+}
