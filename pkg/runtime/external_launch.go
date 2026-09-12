@@ -154,10 +154,6 @@ func (s *Service) runWithOptions(
 		return resp, nil
 	}
 	if s.isQueuedRuntime(invocation) {
-		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
-			"connection_mode": invocation.agent.ConnectionMode,
-			"agent_id":        invocation.agent.ID.String(),
-		})
 		return resp, nil
 	}
 	return s.executeRun(ctx, invocation), nil

@@ -97,13 +97,19 @@ func WorkflowHash(input Workflow) (string, error) {
 			"agent_contract_hash": strings.TrimSpace(node.AgentContractHash),
 		})
 	}
-	return hash(map[string]interface{}{
+	contract := map[string]interface{}{
 		"contract_schema": "hct:v1",
 		"target_type":     "workflow",
 		"target_id":       strings.TrimSpace(input.ID),
 		"edges":           edges,
 		"nodes":           canonicalNodes,
-	})
+	}
+	if len(edges) == 0 && len(nodes) > 1 {
+		// Older Core versions executed [] as a chain. Fence their external
+		// execution snapshots before applying independent-root semantics.
+		contract["edge_semantics"] = "independent_roots"
+	}
+	return hash(contract)
 }
 
 func hash(value interface{}) (string, error) {

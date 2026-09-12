@@ -1909,7 +1909,21 @@ func normalizeWorkflowEdgesFromRequest(nodes []WorkflowNodeRequest, rawEdges []m
 	for _, node := range nodes {
 		nodeKeys = append(nodeKeys, strings.TrimSpace(node.Key))
 	}
+	// Omitted/null edges retain the legacy sequential default. Persist it as
+	// explicit edges so an intentional [] remains an independent graph after
+	// saving, loading, validation and external execution contract hashing.
+	if rawEdges == nil {
+		rawEdges = sequentialWorkflowEdges(nodeKeys)
+	}
 	return normalizeWorkflowEdges(nodeKeys, rawEdges)
+}
+
+func sequentialWorkflowEdges(nodeKeys []string) []map[string]interface{} {
+	edges := make([]map[string]interface{}, 0)
+	for i := 1; i < len(nodeKeys); i++ {
+		edges = append(edges, map[string]interface{}{"from": nodeKeys[i-1], "to": nodeKeys[i]})
+	}
+	return edges
 }
 
 func validateWorkflowGraphFromRequest(nodes []WorkflowNodeRequest, edges []map[string]interface{}) error {
@@ -1998,15 +2012,6 @@ func buildWorkflowGraph(nodes []db.WorkflowNode, edges []map[string]interface{})
 	for i, node := range nodes {
 		index[node.NodeKey] = i
 		byKey[node.NodeKey] = node
-	}
-	if len(edges) == 0 && len(nodes) > 1 {
-		edges = make([]map[string]interface{}, 0, len(nodes)-1)
-		for i := 1; i < len(nodes); i++ {
-			edges = append(edges, map[string]interface{}{
-				"from": nodes[i-1].NodeKey,
-				"to":   nodes[i].NodeKey,
-			})
-		}
 	}
 	parents := map[string][]string{}
 	children := map[string][]string{}
