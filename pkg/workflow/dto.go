@@ -2,12 +2,13 @@ package workflow
 
 import "github.com/google/uuid"
 
-// CreateWorkflowRequest creates a sequential workflow made of Agent nodes.
+// CreateWorkflowRequest creates a DAG of Agent nodes. Omitted/null edges use
+// the sequential default; an explicit empty array makes all nodes independent.
 type CreateWorkflowRequest struct {
 	Name        string                   `json:"name" validate:"required,min=1,max=120"`
 	Description string                   `json:"description,omitempty" validate:"omitempty,max=500"`
 	Nodes       []WorkflowNodeRequest    `json:"nodes" validate:"required,min=1,max=10,dive"`
-	Edges       []map[string]interface{} `json:"edges,omitempty" validate:"omitempty,max=20"`
+	Edges       []map[string]interface{} `json:"edges" validate:"omitempty,max=20"`
 }
 
 type WorkflowNodeRequest struct {

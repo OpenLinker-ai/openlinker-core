@@ -7,6 +7,18 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+### Fixed
+
+- Explicit workflow `edges: []` now runs independent nodes in parallel, including
+  saved definitions. Omitted/null request edges retain the sequential default,
+  persisted as explicit edges. Existing empty-edge multi-node definitions also
+  adopt parallel semantics: add explicit links if a sequential chain is wanted.
+  Their external execution contract hashes change so old service snapshots must
+  be revalidated before dispatch, rather than silently changing an ordered job.
+- Initial Runtime dispatch events now commit atomically with Run creation and
+  the signal outbox, preventing post-notification event row locks from making
+  `SKIP LOCKED` discovery miss a new Run until the recovery scan.
+
 ### Added
 
 - Added an Owner-controlled Browser interaction policy for private Runtime

@@ -1079,10 +1079,6 @@ func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, so
 		return resp, nil
 	}
 	if s.isQueuedRuntime(invocation) {
-		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
-			"connection_mode": invocation.agent.ConnectionMode,
-			"agent_id":        invocation.agent.ID.String(),
-		})
 		return resp, nil
 	}
 	return s.executeRun(ctx, invocation), nil
@@ -1110,20 +1106,8 @@ func (s *Service) startRunWithOptions(
 		return resp, nil
 	}
 	if s.isQueuedRuntime(invocation) {
-		if invocation.runtimeAvailable {
-			s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
-				"connection_mode": invocation.agent.ConnectionMode,
-				"agent_id":        invocation.agent.ID.String(),
-			})
-		} else {
+		if !invocation.runtimeAvailable {
 			resp.NextAction = queuedRuntimeWaitingNextAction(resp.RunID, invocation.agent.ID)
-			s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.waiting_runtime", map[string]interface{}{
-				"connection_mode":    invocation.agent.ConnectionMode,
-				"agent_id":           invocation.agent.ID.String(),
-				"reason":             "runtime_offline",
-				"recommended_action": "start_worker",
-				"next_action":        resp.NextAction,
-			})
 		}
 		return resp, nil
 	}
@@ -1307,6 +1291,7 @@ func (s *Service) createRunningRun(
 	created := false
 	replayed := false
 	var createdRun db.Run
+	var dispatchEvent *db.RunEvent
 	var taskCallbackResp *RunTaskCallbackResponse
 	err = pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{
 		IsoLevel:   pgx.ReadCommitted,
@@ -1547,6 +1532,24 @@ func (s *Service) createRunningRun(
 		if messageErr := createRunMessage(ctx, q, runID, nil, "user", messageContentFromMap(req.Input), req.Input); messageErr != nil {
 			return messageErr
 		}
+		if isQueuedRuntimeMode(agent.ConnectionMode) {
+			// Event append locks the Run row. Finish all initial events before
+			// committing run.available; otherwise SKIP LOCKED can consume that
+			// wake as an empty queue while a post-commit append holds the row.
+			eventType := "run.dispatch.pending"
+			payload := map[string]interface{}{"connection_mode": agent.ConnectionMode, "agent_id": agent.ID.String()}
+			if !runtimeAvailable && opts.allowOfflineQueuedRuntime {
+				eventType = "run.dispatch.waiting_runtime"
+				payload["reason"] = "runtime_offline"
+				payload["recommended_action"] = "start_worker"
+				payload["next_action"] = queuedRuntimeWaitingNextAction(runID.String(), agent.ID)
+			}
+			event, eventErr := createRunEventRecord(ctx, q, runID, nil, eventType, payload)
+			if eventErr != nil {
+				return eventErr
+			}
+			dispatchEvent = &event
+		}
 		return nil
 	})
 	if err != nil {
@@ -1570,6 +1573,9 @@ func (s *Service) createRunningRun(
 	}
 	if !created {
 		return nil, nil, httpx.Internal("创建调用记录失败")
+	}
+	if dispatchEvent != nil {
+		s.triggerTaskCallbackEvent(dispatchEvent)
 	}
 
 	invocation := &runInvocation{

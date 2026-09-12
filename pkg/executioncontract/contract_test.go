@@ -1,6 +1,9 @@
 package executioncontract
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestAgentHashIsCanonicalAndCoversExecutionContract(t *testing.T) {
 	base := Agent{
@@ -117,5 +120,30 @@ func TestWorkflowHashNormalizesOrderAndCoversDependencies(t *testing.T) {
 	positionChanged, _ := WorkflowHash(changed)
 	if positionChanged == first {
 		t.Fatal("workflow node position must change hash")
+	}
+}
+
+func TestIndependentWorkflowFencesLegacyImplicitChainContract(t *testing.T) {
+	input := Workflow{ID: "workflow-1", Edges: []map[string]interface{}{}, Nodes: []WorkflowNode{
+		{ID: "node-a", Key: "a", Type: "agent", AgentID: "agent-1", Position: 0, AgentContractHash: Prefix + strings.Repeat("0", 64)},
+		{ID: "node-b", Key: "b", Type: "agent", AgentID: "agent-1", Position: 1, AgentContractHash: Prefix + strings.Repeat("0", 64)},
+	}}
+	independent, err := WorkflowHash(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := hash(map[string]interface{}{
+		"contract_schema": "hct:v1", "target_type": "workflow", "target_id": "workflow-1",
+		"edges": []map[string]interface{}(nil),
+		"nodes": []map[string]interface{}{
+			{"id": "node-a", "key": "a", "type": "agent", "agent_id": "agent-1", "config": map[string]interface{}{}, "position": 0, "agent_contract_hash": Prefix + strings.Repeat("0", 64)},
+			{"id": "node-b", "key": "b", "type": "agent", "agent_id": "agent-1", "config": map[string]interface{}{}, "position": 1, "agent_contract_hash": Prefix + strings.Repeat("0", 64)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if independent == legacy {
+		t.Fatal("parallel graph must not accept an old implicit-chain service contract")
 	}
 }

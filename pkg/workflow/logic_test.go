@@ -74,7 +74,7 @@ func TestWorkflowGraphAndEdgeHelpers(t *testing.T) {
 		{NodeKey: "summarize", Position: 1},
 		{NodeKey: "publish", Position: 2},
 	}
-	graph, err := buildWorkflowGraph(nodes, nil)
+	graph, err := buildWorkflowGraph(nodes, sequentialWorkflowEdges([]string{"extract", "summarize", "publish"}))
 	if err != nil {
 		t.Fatalf("buildWorkflowGraph sequential: %v", err)
 	}

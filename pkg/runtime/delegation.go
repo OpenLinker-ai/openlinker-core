@@ -246,15 +246,8 @@ func (s *RuntimeDelegationService) CallAgent(
 			RuntimeErrorInternal, runtimeErrorDefaultMessage(RuntimeErrorInternal), err,
 		)
 	}
-	if invocation != nil {
-		if s.runtime.isQueuedRuntime(invocation) {
-			s.runtime.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
-				"connection_mode": invocation.agent.ConnectionMode,
-				"agent_id":        invocation.agent.ID.String(),
-			})
-		} else {
-			s.runtime.executeRunAsync(invocation)
-		}
+	if invocation != nil && !s.runtime.isQueuedRuntime(invocation) {
+		s.runtime.executeRunAsync(invocation)
 	}
 	return s.runSummary(ctx, runID)
 }
