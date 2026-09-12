@@ -144,6 +144,7 @@ func TestRuntimeSignalSubscriberReconnectBroadcastsRecoveryWake(t *testing.T) {
 	dispatch := hub.WaitDispatch(agentID)
 	control := hub.WaitControl(agentID)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -160,7 +161,9 @@ func TestRuntimeSignalSubscriberReconnectBroadcastsRecoveryWake(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("subscriber reconnect did not recover control waiters")
 	}
-	require.GreaterOrEqual(t, bus.subscribeCalls(), 2)
+	require.Eventually(t, func() bool {
+		return bus.subscribeCalls() >= 2
+	}, time.Second, time.Millisecond, "subscriber must retry after the recovery wake")
 	cancel()
 	select {
 	case <-done:
