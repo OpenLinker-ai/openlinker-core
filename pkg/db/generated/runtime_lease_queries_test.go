@@ -185,7 +185,7 @@ func TestRuntimeOfferAndLeaseQueriesAreFencedAndDatabaseTimed(t *testing.T) {
 		"r.attempt_count < r.max_attempts",
 		"r.dispatch_deadline_at > clock_timestamp()",
 		"r.run_deadline_at > clock_timestamp()",
-		"FOR UPDATE OF r SKIP LOCKED",
+		"FOR NO KEY UPDATE OF r SKIP LOCKED",
 	} {
 		if !strings.Contains(lockNextClaimableRuntimeRunForAgent, fragment) {
 			t.Fatalf("claim query missing %q", fragment)

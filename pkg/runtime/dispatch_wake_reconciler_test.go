@@ -20,13 +20,42 @@ func TestRuntimeDispatchWakeReconcilerWakesOnlyRegisteredPendingAgents(t *testin
 
 	result, err := reconciler.ReconcileOnce(context.Background(), 32)
 	require.NoError(t, err)
-	require.Equal(t, RuntimeDispatchWakeReconcileResult{Scanned: 2, Woken: 1}, result)
+	require.Equal(t, RuntimeDispatchWakeReconcileResult{Scanned: 2, Woken: 1, Queued: 1, AgentIDs: []string{localAgentID.String()}}, result)
 	select {
 	case <-dispatch:
 	default:
 		t.Fatal("pending local Agent was not woken")
 	}
 	require.Len(t, hub.channels, 1, "remote backlog must not allocate a local wake entry")
+}
+
+func TestRuntimeDispatchWakeReconcilerBoundsAgentEvidenceAndReportsCoalescing(t *testing.T) {
+	agents := make([]uuid.UUID, maxRuntimeDispatchWakeLogAgentIDs+3)
+	hub := NewRuntimeWakeHub()
+	for i := range agents {
+		agents[i] = uuid.New()
+		hub.WaitDispatch(agents[i])
+		if i%2 == 0 {
+			hub.WakeDispatch(agents[i])
+		}
+	}
+	repository := &runtimeDispatchWakeRepositoryFake{pages: [][]uuid.UUID{agents}}
+	result, err := newRuntimeDispatchWakeReconciler(repository, hub).ReconcileOnce(context.Background(), 100)
+	require.NoError(t, err)
+	require.Equal(t, len(agents), result.Woken)
+	require.Equal(t, len(agents)/2, result.Queued)
+	require.Equal(t, (len(agents)+1)/2, result.Coalesced)
+	require.Len(t, result.AgentIDs, maxRuntimeDispatchWakeLogAgentIDs)
+	for i, id := range result.AgentIDs {
+		require.Equal(t, agents[i].String(), id)
+	}
+	for _, agent := range agents {
+		select {
+		case <-hub.WaitDispatch(agent):
+		default:
+			t.Fatal("all registered Agents still receive a token beyond the logging limit")
+		}
+	}
 }
 
 func TestRuntimeDispatchWakeReconcilerAdvancesAndWrapsBoundedCursor(t *testing.T) {

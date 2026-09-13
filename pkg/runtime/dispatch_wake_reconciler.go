@@ -16,6 +16,7 @@ const (
 	defaultRuntimeDispatchWakeReconcileInterval = time.Minute
 	defaultRuntimeDispatchWakeReconcileBatch    = 512
 	maxRuntimeDispatchWakeReconcileBatch        = 1000
+	maxRuntimeDispatchWakeLogAgentIDs           = 32
 )
 
 var ErrRuntimeDispatchWakeReconcilerNotConfigured = errors.New("Runtime dispatch wake reconciler is not configured")
@@ -30,6 +31,11 @@ type RuntimeDispatchWakeReconcileResult struct {
 	Scanned int  `json:"scanned"`
 	Woken   int  `json:"woken"`
 	Wrapped bool `json:"wrapped"`
+	// Counts refer to Agent queues, not Run assignments. AgentIDs is bounded
+	// independently of the scan batch; payloads and credentials never appear.
+	Queued    int      `json:"queued"`
+	Coalesced int      `json:"coalesced"`
+	AgentIDs  []string `json:"agent_ids,omitempty"`
 }
 
 type runtimeDispatchWakeRepository interface {
@@ -108,8 +114,16 @@ func (r *RuntimeDispatchWakeReconciler) ReconcileOnce(
 	}
 	result.Scanned = len(agentIDs)
 	for _, agentID := range agentIDs {
-		if r.hub.WakeDispatchIfRegistered(agentID) {
+		if registered, queued := r.hub.wakeDispatchIfRegistered(agentID); registered {
 			result.Woken++
+			if queued {
+				result.Queued++
+			} else {
+				result.Coalesced++
+			}
+			if len(result.AgentIDs) < maxRuntimeDispatchWakeLogAgentIDs {
+				result.AgentIDs = append(result.AgentIDs, agentID.String())
+			}
 		}
 	}
 	if len(agentIDs) == limit {
@@ -138,6 +152,9 @@ func StartRuntimeDispatchWakeReconciler(
 		}
 		if result.Woken > 0 {
 			log.Warn().Int("scanned", result.Scanned).Int("woken", result.Woken).
+				Int("queued", result.Queued).Int("coalesced", result.Coalesced).
+				Strs("agent_ids", result.AgentIDs).
+				Bool("agent_ids_truncated", result.Woken > len(result.AgentIDs)).
 				Bool("cursor_wrapped", result.Wrapped).
 				Msg("Runtime dispatch wake reconciliation recovered pending work")
 		} else if result.Scanned > 0 {
