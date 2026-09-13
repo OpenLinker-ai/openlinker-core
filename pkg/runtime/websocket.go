@@ -1078,11 +1078,34 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 	var retry runtimeCancellationRetry
 	defer retry.stop()
 	var controlRetry <-chan time.Time
+	var contentionCount uint64
+	var lastContentionLog time.Time
+	logContention := func(state string) {
+		if contentionCount == 0 {
+			return
+		}
+		log.Info().Str("category", "runtime.websocket.command_retry").
+			Str("reason", "contention").Str("state", state).
+			Str("runtime_session_id", c.sessionPrincipal.RuntimeSessionID.String()).
+			Uint64("retry_count", contentionCount).
+			Msg("Runtime websocket cancellation contention")
+	}
+	defer func() { logContention("connection_closed") }()
 	sendControl := func() {
 		retry.stop()
 		if c.commandPendingAndSend() {
 			controlRetry = retry.wait()
+			contentionCount++
+			observeWorker(c.controller.dependencies.Observer, "runtime.websocket.command_retry", "contention", 1)
+			// Production does not install the test observer. Report the first
+			// retry, then at most once per five seconds while contention persists.
+			if contentionCount == 1 || time.Since(lastContentionLog) >= 5*time.Second {
+				logContention("retrying")
+				lastContentionLog = time.Now()
+			}
 		} else {
+			logContention("retry_stopped")
+			contentionCount = 0
 			retry.reset()
 			controlRetry = nil
 		}

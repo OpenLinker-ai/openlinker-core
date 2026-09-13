@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,9 +22,13 @@ func TestRuntimeWebSocketCancellationRetryStopsWithQueueOrConnection(t *testing.
 			controller.dependencies.TransportPolicy = CurrentRuntimeTransportPolicy
 			loopReady := make(chan struct{})
 			var once sync.Once
+			var contentionRetries atomic.Int64
 			controller.dependencies.Observer = WorkerObserverFunc(func(o WorkerObservation) {
 				if o.Category == "runtime.websocket.policy_check" {
 					once.Do(func() { close(loopReady) })
+				}
+				if o.Category == "runtime.websocket.command_retry" && o.Reason == "contention" {
+					contentionRetries.Add(int64(o.BatchSize))
 				}
 			})
 			e := echo.New()
@@ -59,6 +64,11 @@ func TestRuntimeWebSocketCancellationRetryStopsWithQueueOrConnection(t *testing.
 			calls := fixture.cancellations.nextCallCount()
 			require.Less(t, calls, 12, "contention must back off, not spin")
 			require.Never(t, func() bool { return fixture.cancellations.nextCallCount() != calls }, 350*time.Millisecond, 10*time.Millisecond)
+			wantRetries := calls
+			if stopWith == "empty_queue" {
+				wantRetries-- // The final empty result schedules no retry.
+			}
+			require.EqualValues(t, wantRetries, contentionRetries.Load(), "count each contended retry, not empty queries")
 		})
 	}
 }
