@@ -9,6 +9,12 @@ runtime protocol, and migration contract are declared stable.
 
 ### Fixed
 
+- Runtime cancellation delivery now retries confirmed Run lock contention in
+  WebSocket and HTTP long polling. A skipped row no longer consumes the only
+  control wake; retries release transaction locks, back off and stop when the
+  candidate disappears/expires or the transport exits. Empty queues still wait
+  for signals. PostgreSQL regressions cover system event writers and stop ACKs
+  without a second wake or cancellation reaper.
 - Runtime claims no longer skip newly created Runs merely because a concurrent
   Workflow/message attachment holds a foreign-key reference lock. Claim locks
   still exclude competing claims and writers. PostgreSQL/WebSocket regressions

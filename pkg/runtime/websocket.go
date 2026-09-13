@@ -1075,6 +1075,18 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 	// Ready completes attachment without a per-Session database probe. New work
 	// arrives through a typed dispatch token; work that predates attachment is
 	// recovered by the bounded process-level PostgreSQL reconciliation pass.
+	var retry runtimeCancellationRetry
+	defer retry.stop()
+	var controlRetry <-chan time.Time
+	sendControl := func() {
+		retry.stop()
+		if c.commandPendingAndSend() {
+			controlRetry = retry.wait()
+		} else {
+			retry.reset()
+			controlRetry = nil
+		}
+	}
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -1097,11 +1109,13 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 				controlWake = c.controller.dependencies.WakeHub.WaitControl(c.sessionPrincipal.AgentID)
 			}
 			c.controlPending.Store(true)
-			c.commandPendingAndSend()
+			sendControl()
 		case <-c.dispatchContinue:
 			c.drainDispatchDemand()
 		case <-c.controlContinue:
-			c.commandPendingAndSend()
+			sendControl()
+		case <-controlRetry:
+			sendControl()
 		case <-nodeDispatchWake:
 			if c.controller.dependencies.WakeHub != nil {
 				nodeDispatchWake = c.controller.dependencies.WakeHub.WaitNodeDispatch(c.sessionPrincipal.NodeID)
@@ -1153,51 +1167,56 @@ func (c *runtimeWSConnection) refreshMaintenanceSession() bool {
 	return true
 }
 
-func (c *runtimeWSConnection) commandPendingAndSend() {
+// commandPendingAndSend reports whether a contended queue needs a timed retry.
+func (c *runtimeWSConnection) commandPendingAndSend() bool {
 	if !c.controlPending.Load() {
-		return
+		return false
 	}
 	c.lifecycleMu.RLock()
 	defer c.lifecycleMu.RUnlock()
 	c.controlMu.Lock()
 	defer c.controlMu.Unlock()
 	if !c.controlPending.Load() {
-		return
+		return false
 	}
 	command, _, err := c.controller.dependencies.Cancellations.NextCommand(c.ctx, c.sessionPrincipal)
+	if errors.Is(err, errRuntimeCancellationContended) {
+		return true
+	}
 	if err != nil {
 		mapped := mapRuntimeHTTPError(err)
 		if _, fatal := RuntimeWebSocketCloseCode(mapped.Body.Code); fatal {
 			c.closeForError(mapped)
 		}
-		return
+		return false
 	}
 	if command == nil {
 		c.controlPending.Store(false)
-		return
+		return false
 	}
 	decoded, err := DecodePendingCommand(*command)
 	if err != nil {
 		c.closeForError(runtimeWSOutboundError(err))
-		return
+		return false
 	}
 	if decoded.Type != RuntimeMessageRunCancel || decoded.Cancel == nil {
 		c.closeForError(runtimeWSOutboundError(errors.New("unexpected Runtime websocket command type")))
-		return
+		return false
 	}
 	if c.cancellationAlreadySent(*decoded.Cancel) {
-		return
+		return false
 	}
 	message, envelope, err := newRuntimeWSTypedMessage(RuntimeMessageRunCancel, nil, *decoded.Cancel)
 	if err != nil {
 		c.closeForError(runtimeWSOutboundError(err))
-		return
+		return false
 	}
 	c.recordCancellation(envelope, *decoded.Cancel)
 	if err = c.writeMessage(message); err != nil {
 		c.removeCancellationMessage(envelope.MessageID)
 		c.cancel()
 	}
+	return false
 }
 
 type runtimeDispatchClaimOutcome uint8

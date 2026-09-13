@@ -552,6 +552,10 @@ func (f *runtimeCancellationTransactionFake) LockNextRuntimeCancellationCommandR
 	}, nil
 }
 
+func (f *runtimeCancellationTransactionFake) HasPendingRuntimeCancellationCommand(_ context.Context, _ db.HasPendingRuntimeCancellationCommandParams) (bool, error) {
+	return false, nil
+}
+
 func (f *runtimeCancellationTransactionFake) FindNextDueRuntimeCancellation(_ context.Context, commandDeadlineMS int64) (db.FindNextDueRuntimeCancellationRow, error) {
 	f.call("find_due")
 	state := RuntimeCancelState(f.cancellation.State)

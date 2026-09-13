@@ -1015,10 +1015,12 @@ func (h *RuntimeHTTPController) pollCommandsWithWait(
 	principal RuntimeSessionPrincipal,
 	wait time.Duration,
 ) (RuntimeCommandsResponse, error) {
-	// Cancellation signals use the same wake path. A request deadline remains
-	// the bounded fallback without a 200ms PostgreSQL loop.
+	// Empty queues wait for a signal. Only confirmed lock contention arms a
+	// retry, bounded by both command eligibility and the request wait/deadline.
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
+	var retry runtimeCancellationRetry
+	defer retry.stop()
 	reason := "entry"
 	for {
 		var wake <-chan struct{}
@@ -1027,8 +1029,18 @@ func (h *RuntimeHTTPController) pollCommandsWithWait(
 		}
 		observeWorker(h.dependencies.Observer, "runtime.http.command_query", reason, 1)
 		response, err := h.dependencies.Cancellations.PollCommands(ctx, principal)
-		if err != nil || len(response.Commands) > 0 || wait == 0 {
+		contended := errors.Is(err, errRuntimeCancellationContended)
+		if err != nil && !contended {
 			return response, err
+		}
+		if len(response.Commands) > 0 || wait == 0 {
+			return response, nil
+		}
+		var retryWake <-chan time.Time
+		if contended {
+			retryWake = retry.wait()
+		} else {
+			retry.reset()
 		}
 		select {
 		case <-ctx.Done():
@@ -1036,8 +1048,11 @@ func (h *RuntimeHTTPController) pollCommandsWithWait(
 		case <-deadline.C:
 			return response, nil
 		case <-wake:
+			reason = "wake"
+		case <-retryWake:
+			reason = "contention"
 		}
-		reason = "wake"
+		retry.stop()
 	}
 }
 

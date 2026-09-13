@@ -130,6 +130,46 @@ func (q *Queries) LockNextRuntimeCancellationCommandRun(ctx context.Context, arg
 	return i, err
 }
 
+const hasPendingRuntimeCancellationCommand = `-- name: HasPendingRuntimeCancellationCommand :one
+SELECT EXISTS (
+    SELECT 1
+    FROM runs r
+    JOIN run_cancellations c
+      ON c.run_id = r.id
+     AND c.id = r.cancel_request_id
+    JOIN run_attempts a
+      ON a.run_id = r.id
+     AND a.id = c.target_attempt_id
+    WHERE r.runtime_contract_id = 'openlinker.runtime.v2'
+      AND r.status = 'canceled'
+      AND r.dispatch_state = 'terminal'
+      AND r.cancel_state = c.state
+      AND c.state IN ('requested', 'delivered', 'stopping')
+      AND a.executor_type = 'runtime'
+      AND a.finished_at IS NULL
+      AND a.run_id = r.id
+      AND a.agent_id = $1
+      AND a.node_id = $2
+      AND a.runtime_token_id = $3
+      AND a.runtime_worker_id = $4
+      AND a.runtime_session_id = $5
+      AND c.requested_at
+          + ($6::bigint * INTERVAL '1 millisecond')
+          > clock_timestamp()
+) AS pending`
+
+// The lock and presence probe accept the same authenticated candidate scope.
+type HasPendingRuntimeCancellationCommandParams = LockNextRuntimeCancellationCommandRunParams
+
+func (q *Queries) HasPendingRuntimeCancellationCommand(ctx context.Context, arg HasPendingRuntimeCancellationCommandParams) (bool, error) {
+	var pending bool
+	err := q.db.QueryRow(ctx, hasPendingRuntimeCancellationCommand,
+		arg.AgentID, arg.NodeID, arg.CredentialID, arg.WorkerID,
+		arg.RuntimeSessionID, arg.CommandDeadlineMs,
+	).Scan(&pending)
+	return pending, err
+}
+
 const findNextDueRuntimeCancellation = `-- name: FindNextDueRuntimeCancellation :one
 SELECT r.id AS run_id,
        r.agent_id,

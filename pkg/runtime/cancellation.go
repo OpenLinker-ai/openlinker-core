@@ -29,7 +29,9 @@ var (
 	ErrRuntimeCancellationRunEnded = errors.New("Runtime Run is already terminal")
 	ErrRuntimeCancellationInvalid  = errors.New("invalid runtime cancellation request")
 	errRuntimeCancellationNotReady = errors.New("runtime cancellation coordinator is not configured")
-	runtimeCancellationIDNamespace = uuid.MustParse("f6fcac0b-d253-5ad0-9290-07bf4ec2ac12")
+	// Internal scheduling signal, consumed by both transports; never a wire error.
+	errRuntimeCancellationContended = errors.New("pending runtime cancellation is contended")
+	runtimeCancellationIDNamespace  = uuid.MustParse("f6fcac0b-d253-5ad0-9290-07bf4ec2ac12")
 )
 
 // RuntimeCancellationResult is the durable owner-facing result. Replayed is
@@ -202,7 +204,8 @@ func (c *RuntimeCancellationCoordinator) CancelOwnedRun(
 }
 
 // NextCommand returns one at-least-once durable cancellation command for the
-// authenticated Session. A nil command is a normal empty poll.
+// authenticated Session. A nil command with no error is a normal empty poll.
+// Contention is distinct from an empty queue so transports retain the wake.
 func (c *RuntimeCancellationCoordinator) NextCommand(
 	ctx context.Context,
 	principal RuntimeSessionPrincipal,
@@ -224,15 +227,23 @@ func (c *RuntimeCancellationCoordinator) NextCommand(
 		}
 		databaseNow = lockedPrincipal.session.DatabaseNow
 
-		candidate, candidateErr := tx.LockNextRuntimeCancellationCommandRun(ctx, db.LockNextRuntimeCancellationCommandRunParams{
+		params := db.LockNextRuntimeCancellationCommandRunParams{
 			AgentID:           principal.AgentID,
 			NodeID:            principal.NodeID,
 			CredentialID:      principal.CredentialID,
 			WorkerID:          principal.WorkerID,
 			RuntimeSessionID:  principal.RuntimeSessionID,
 			CommandDeadlineMs: c.commandDeadline.Milliseconds(),
-		})
+		}
+		candidate, candidateErr := tx.LockNextRuntimeCancellationCommandRun(ctx, params)
 		if errors.Is(candidateErr, pgx.ErrNoRows) {
+			pending, err := tx.HasPendingRuntimeCancellationCommand(ctx, params)
+			if err != nil {
+				return err
+			}
+			if pending {
+				return errRuntimeCancellationContended
+			}
 			return nil
 		}
 		if candidateErr != nil {
@@ -299,7 +310,7 @@ func (c *RuntimeCancellationCoordinator) NextCommand(
 		return nil
 	})
 	if err != nil {
-		return nil, time.Time{}, err
+		return nil, databaseNow, err
 	}
 	return command, databaseNow, nil
 }
@@ -309,14 +320,14 @@ func (c *RuntimeCancellationCoordinator) PollCommands(
 	principal RuntimeSessionPrincipal,
 ) (RuntimeCommandsResponse, error) {
 	command, databaseNow, err := c.NextCommand(ctx, principal)
-	if err != nil {
+	if err != nil && !errors.Is(err, errRuntimeCancellationContended) {
 		return RuntimeCommandsResponse{}, err
 	}
 	commands := make([]PendingCommand, 0, 1)
 	if command != nil {
 		commands = append(commands, *command)
 	}
-	return RuntimeCommandsResponse{Commands: commands, DatabaseTime: databaseNow}, nil
+	return RuntimeCommandsResponse{Commands: commands, DatabaseTime: databaseNow}, err
 }
 
 // AckCancel advances stop evidence. Only a terminal stop ACK ends the target
@@ -1153,6 +1164,7 @@ type runtimeCancellationTransaction interface {
 	GetRunCancellationByRun(context.Context, uuid.UUID) (db.RunCancellation, error)
 	CreateRunCancellation(context.Context, db.CreateRunCancellationParams) (db.RunCancellation, error)
 	LockNextRuntimeCancellationCommandRun(context.Context, db.LockNextRuntimeCancellationCommandRunParams) (db.LockNextRuntimeCancellationCommandRunRow, error)
+	HasPendingRuntimeCancellationCommand(context.Context, db.HasPendingRuntimeCancellationCommandParams) (bool, error)
 	FindNextDueRuntimeCancellation(context.Context, int64) (db.FindNextDueRuntimeCancellationRow, error)
 	FindNextDueRuntimeCoreCancellation(context.Context, int64) (db.FindNextDueRuntimeCoreCancellationRow, error)
 	LockRuntimeSessionForCancellationReap(context.Context, uuid.UUID) (uuid.UUID, error)
@@ -1233,6 +1245,9 @@ func (t *postgresRuntimeCancellationTransaction) CreateRunCancellation(ctx conte
 }
 func (t *postgresRuntimeCancellationTransaction) LockNextRuntimeCancellationCommandRun(ctx context.Context, params db.LockNextRuntimeCancellationCommandRunParams) (db.LockNextRuntimeCancellationCommandRunRow, error) {
 	return t.queries.LockNextRuntimeCancellationCommandRun(ctx, params)
+}
+func (t *postgresRuntimeCancellationTransaction) HasPendingRuntimeCancellationCommand(ctx context.Context, params db.HasPendingRuntimeCancellationCommandParams) (bool, error) {
+	return t.queries.HasPendingRuntimeCancellationCommand(ctx, params)
 }
 func (t *postgresRuntimeCancellationTransaction) FindNextDueRuntimeCancellation(ctx context.Context, commandDeadlineMS int64) (db.FindNextDueRuntimeCancellationRow, error) {
 	return t.queries.FindNextDueRuntimeCancellation(ctx, commandDeadlineMS)
