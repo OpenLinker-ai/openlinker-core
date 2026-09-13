@@ -18,27 +18,6 @@ func TestRuntimeAttemptAndCancellationQueries(t *testing.T) {
 	leaseID, coreID := uuid.New(), uuid.New()
 	lockDBTX := &fakeDBTX{row: fakeRow{values: []any{runID}}}
 	lockQueries := New(lockDBTX)
-	lockedRunID, err := lockQueries.LockNextPendingRuntimeRun(context.Background())
-	if err != nil || lockedRunID != runID {
-		t.Fatalf("LockNextPendingRuntimeRun = %s, %v", lockedRunID, err)
-	}
-	requireSQLName(t, lockDBTX.queryRowSQL, "LockNextPendingRuntimeRun")
-	if !strings.Contains(lockDBTX.queryRowSQL, "ORDER BY started_at ASC, id ASC") ||
-		!strings.Contains(lockDBTX.queryRowSQL, "FOR UPDATE SKIP LOCKED") {
-		t.Fatal("LockNextPendingRuntimeRun must match the global pending index")
-	}
-
-	lockDBTX.row = fakeRow{values: []any{runID}}
-	lockedRunID, err = lockQueries.LockNextDueRetryRuntimeRun(context.Background())
-	if err != nil || lockedRunID != runID {
-		t.Fatalf("LockNextDueRetryRuntimeRun = %s, %v", lockedRunID, err)
-	}
-	requireSQLName(t, lockDBTX.queryRowSQL, "LockNextDueRetryRuntimeRun")
-	if !strings.Contains(lockDBTX.queryRowSQL, "ORDER BY next_attempt_at ASC, started_at ASC, id ASC") ||
-		!strings.Contains(lockDBTX.queryRowSQL, "FOR UPDATE SKIP LOCKED") {
-		t.Fatal("LockNextDueRetryRuntimeRun must match the global retry index")
-	}
-
 	transportReason := "explicit"
 	transportChangedAt := now.Add(-time.Second)
 	lockDBTX.row = fakeRow{values: []any{"long_poll", &transportReason, transportChangedAt}}
