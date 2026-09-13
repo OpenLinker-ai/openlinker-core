@@ -41,8 +41,6 @@ const maxAgentResponseEvents = 50
 const maxAgentResponseBodyBytes = 4 << 20
 const taskCallbackSecretByteLen = 32
 const maxRunMessageContentLen = 10000
-const runtimeBestEffortWriteTimeout = 10 * time.Second
-const runtimeBestEffortWriteConcurrency = 32
 const maxA2AContextIDLen = 200
 const maxConversationHistoryRuns int32 = 50
 const maxConversationHistoryMessages = 120
@@ -86,7 +84,6 @@ type Service struct {
 	coreInstanceID     uuid.UUID
 	coreExecutions     *coreAttemptRegistry
 	effectWorker       *RunEffectWorker
-	bestEffortDBSem    chan struct{}
 	browserControl     *BrowserHumanControl
 	browserObservation *BrowserObservation
 	// Derived once from Config.EffectiveRuntimeMasterSecret. The root secret is
@@ -173,15 +170,11 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 	}
 	queries := db.New(pool)
 	svc := &Service{
-		queries:      queries,
-		requirements: queries,
-		pool:         pool,
-		cfg:          cfg,
-		eventStore:   NewEventStore(pool),
-		bestEffortDBSem: make(
-			chan struct{},
-			runtimeBestEffortWriteConcurrency,
-		),
+		queries:                  queries,
+		requirements:             queries,
+		pool:                     pool,
+		cfg:                      cfg,
+		eventStore:               NewEventStore(pool),
 		httpClient:               endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
 		runtimePrincipalScopeKey: deriveRuntimePrincipalScopeKey(cfg),
 		browserControl:           NewBrowserHumanControl(pool),
@@ -3627,35 +3620,6 @@ func createRunMessage(ctx context.Context, q *db.Queries, runID uuid.UUID, event
 		Payload:       payloadJSON,
 	})
 	return err
-}
-
-func (s *Service) recordRunEventBestEffort(ctx context.Context, runID uuid.UUID, eventType string, payload map[string]interface{}) *db.RunEvent {
-	if _, terminal := coreOwnedRuntimeEventTypes[eventType]; terminal {
-		log.Error().Str("run_id", runID.String()).Str("event_type", eventType).
-			Msg("runtime: terminal Event rejected outside Runtime finalizer")
-		return nil
-	}
-	event, err := createRunEventRecord(ctx, s.queries, runID, nil, eventType, payload)
-	if err != nil {
-		log.Error().Err(err).Str("run_id", runID.String()).Str("event_type", eventType).
-			Msg("runtime.recordRunEventBestEffort")
-		return nil
-	}
-	s.triggerTaskCallbackEvent(&event)
-	return &event
-}
-
-func (s *Service) runBestEffortDBAsync(ctx context.Context, timeout time.Duration, fn func(context.Context)) {
-	bgCtx := context.WithoutCancel(ctx)
-	go func() {
-		if s != nil && s.bestEffortDBSem != nil {
-			s.bestEffortDBSem <- struct{}{}
-			defer func() { <-s.bestEffortDBSem }()
-		}
-		opCtx, cancel := context.WithTimeout(bgCtx, timeout)
-		defer cancel()
-		fn(opCtx)
-	}()
 }
 
 func (s *Service) recordRunMessageBestEffort(ctx context.Context, runID uuid.UUID, eventSequence *int32, role, content string, payload map[string]interface{}) {

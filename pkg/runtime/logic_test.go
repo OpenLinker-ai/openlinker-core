@@ -1170,7 +1170,6 @@ func TestRuntimePersistenceHelperEdges(t *testing.T) {
 	require.Error(t, createRunMessage(ctx, errorDB, runID, nil, "agent", "ok", map[string]interface{}{}))
 
 	svc := &Service{queries: db.New(&runtimeFakeDBTX{rows: []runtimeFakeRow{{err: errors.New("event insert failed")}}})}
-	require.Nil(t, svc.recordRunEventBestEffort(ctx, runID, "run.completed", map[string]interface{}{"status": "success"}))
 	svc.recordRunMessageBestEffort(ctx, runID, nil, "", "", map[string]interface{}{"bad": func() {}})
 }
 
