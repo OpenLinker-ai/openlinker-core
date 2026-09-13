@@ -311,20 +311,28 @@ func (h *RuntimeWakeHub) WakeDispatch(agentID uuid.UUID) {
 // waiter. Recovery scans use this form so a durable backlog owned by another
 // Core cannot grow this process's in-memory wake map.
 func (h *RuntimeWakeHub) WakeDispatchIfRegistered(agentID uuid.UUID) bool {
+	registered, _ := h.wakeDispatchIfRegistered(agentID)
+	return registered
+}
+
+// The second result distinguishes a new hint from one coalesced into an
+// already-pending token. Neither result proves a Run was claimed.
+func (h *RuntimeWakeHub) wakeDispatchIfRegistered(agentID uuid.UUID) (registered, queued bool) {
 	if h == nil || agentID == uuid.Nil {
-		return false
+		return false, false
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	channels := h.channels[agentID]
 	if channels == nil {
-		return false
+		return false, false
 	}
 	select {
 	case channels.dispatch <- struct{}{}:
+		return true, true
 	default:
+		return true, false
 	}
-	return true
 }
 
 func (h *RuntimeWakeHub) WakeControl(agentID uuid.UUID) {

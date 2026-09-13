@@ -182,6 +182,10 @@ WHERE r.active_attempt_id = a.id
   AND r.run_deadline_at > clock_timestamp()
 FOR UPDATE OF a;
 
+-- A queued Run may be referenced by a Workflow step/message concurrently.
+-- KEY SHARE from that FK must not make the Run look absent to SKIP LOCKED.
+-- We never mutate the referenced (id, agent_id) key; NO KEY UPDATE still
+-- excludes competing claims, cancellations and all other Run writers.
 -- name: LockNextClaimableRuntimeRunForAgent :one
 SELECT r.id, r.user_id, r.agent_id, r.input, r.request_metadata,
        r.connection_mode_snapshot, r.dispatch_state, r.offer_count,
@@ -237,7 +241,7 @@ ORDER BY
     r.started_at ASC,
     r.id ASC
 LIMIT 1
-FOR UPDATE OF r SKIP LOCKED;
+FOR NO KEY UPDATE OF r SKIP LOCKED;
 
 -- name: CreateRuntimeRunOffer :one
 WITH database_clock AS MATERIALIZED (

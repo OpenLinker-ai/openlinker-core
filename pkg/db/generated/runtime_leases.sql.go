@@ -702,7 +702,7 @@ ORDER BY
     r.started_at ASC,
     r.id ASC
 LIMIT 1
-FOR UPDATE OF r SKIP LOCKED
+FOR NO KEY UPDATE OF r SKIP LOCKED
 `
 
 type LockNextClaimableRuntimeRunForAgentParams struct {

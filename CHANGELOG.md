@@ -9,6 +9,11 @@ runtime protocol, and migration contract are declared stable.
 
 ### Fixed
 
+- Runtime claims no longer skip newly created Runs merely because a concurrent
+  Workflow/message attachment holds a foreign-key reference lock. Claim locks
+  still exclude competing claims and writers. PostgreSQL/WebSocket regressions
+  cover concurrent Agents sharing a Node, capacity release and reference locks
+  without starting the compensating dispatch scan.
 - Explicit workflow `edges: []` now runs independent nodes in parallel, including
   saved definitions. Omitted/null request edges retain the sequential default,
   persisted as explicit edges. Existing empty-edge multi-node definitions also
@@ -21,6 +26,9 @@ runtime protocol, and migration contract are declared stable.
 
 ### Added
 
+- Dispatch compensation logs include up to 32 Agent IDs and distinguish queued
+  from coalesced wake hints. Counts refer to Agent queues, not dispatched Runs;
+  truncated evidence is explicitly marked and includes no payloads or credentials.
 - Added an Owner-controlled Browser interaction policy for private Runtime
   Agents. `full` policy is bound to an exact canonical HTTPS mutation-origin
   scope; `restricted` remains read-only.
