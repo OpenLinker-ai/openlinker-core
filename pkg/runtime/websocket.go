@@ -1075,6 +1075,41 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 	// Ready completes attachment without a per-Session database probe. New work
 	// arrives through a typed dispatch token; work that predates attachment is
 	// recovered by the bounded process-level PostgreSQL reconciliation pass.
+	var retry runtimeCancellationRetry
+	defer retry.stop()
+	var controlRetry <-chan time.Time
+	var contentionCount uint64
+	var lastContentionLog time.Time
+	logContention := func(state string) {
+		if contentionCount == 0 {
+			return
+		}
+		log.Info().Str("category", "runtime.websocket.command_retry").
+			Str("reason", "contention").Str("state", state).
+			Str("runtime_session_id", c.sessionPrincipal.RuntimeSessionID.String()).
+			Uint64("retry_count", contentionCount).
+			Msg("Runtime websocket cancellation contention")
+	}
+	defer func() { logContention("connection_closed") }()
+	sendControl := func() {
+		retry.stop()
+		if c.commandPendingAndSend() {
+			controlRetry = retry.wait()
+			contentionCount++
+			observeWorker(c.controller.dependencies.Observer, "runtime.websocket.command_retry", "contention", 1)
+			// Production does not install the test observer. Report the first
+			// retry, then at most once per five seconds while contention persists.
+			if contentionCount == 1 || time.Since(lastContentionLog) >= 5*time.Second {
+				logContention("retrying")
+				lastContentionLog = time.Now()
+			}
+		} else {
+			logContention("retry_stopped")
+			contentionCount = 0
+			retry.reset()
+			controlRetry = nil
+		}
+	}
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -1097,11 +1132,13 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 				controlWake = c.controller.dependencies.WakeHub.WaitControl(c.sessionPrincipal.AgentID)
 			}
 			c.controlPending.Store(true)
-			c.commandPendingAndSend()
+			sendControl()
 		case <-c.dispatchContinue:
 			c.drainDispatchDemand()
 		case <-c.controlContinue:
-			c.commandPendingAndSend()
+			sendControl()
+		case <-controlRetry:
+			sendControl()
 		case <-nodeDispatchWake:
 			if c.controller.dependencies.WakeHub != nil {
 				nodeDispatchWake = c.controller.dependencies.WakeHub.WaitNodeDispatch(c.sessionPrincipal.NodeID)
@@ -1153,51 +1190,56 @@ func (c *runtimeWSConnection) refreshMaintenanceSession() bool {
 	return true
 }
 
-func (c *runtimeWSConnection) commandPendingAndSend() {
+// commandPendingAndSend reports whether a contended queue needs a timed retry.
+func (c *runtimeWSConnection) commandPendingAndSend() bool {
 	if !c.controlPending.Load() {
-		return
+		return false
 	}
 	c.lifecycleMu.RLock()
 	defer c.lifecycleMu.RUnlock()
 	c.controlMu.Lock()
 	defer c.controlMu.Unlock()
 	if !c.controlPending.Load() {
-		return
+		return false
 	}
 	command, _, err := c.controller.dependencies.Cancellations.NextCommand(c.ctx, c.sessionPrincipal)
+	if errors.Is(err, errRuntimeCancellationContended) {
+		return true
+	}
 	if err != nil {
 		mapped := mapRuntimeHTTPError(err)
 		if _, fatal := RuntimeWebSocketCloseCode(mapped.Body.Code); fatal {
 			c.closeForError(mapped)
 		}
-		return
+		return false
 	}
 	if command == nil {
 		c.controlPending.Store(false)
-		return
+		return false
 	}
 	decoded, err := DecodePendingCommand(*command)
 	if err != nil {
 		c.closeForError(runtimeWSOutboundError(err))
-		return
+		return false
 	}
 	if decoded.Type != RuntimeMessageRunCancel || decoded.Cancel == nil {
 		c.closeForError(runtimeWSOutboundError(errors.New("unexpected Runtime websocket command type")))
-		return
+		return false
 	}
 	if c.cancellationAlreadySent(*decoded.Cancel) {
-		return
+		return false
 	}
 	message, envelope, err := newRuntimeWSTypedMessage(RuntimeMessageRunCancel, nil, *decoded.Cancel)
 	if err != nil {
 		c.closeForError(runtimeWSOutboundError(err))
-		return
+		return false
 	}
 	c.recordCancellation(envelope, *decoded.Cancel)
 	if err = c.writeMessage(message); err != nil {
 		c.removeCancellationMessage(envelope.MessageID)
 		c.cancel()
 	}
+	return false
 }
 
 type runtimeDispatchClaimOutcome uint8

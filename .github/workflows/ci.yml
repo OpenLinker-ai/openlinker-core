@@ -85,3 +85,16 @@ jobs:
           fi
           grep -q -- '--- PASS: TestConcurrentRuntimeDispatchWithoutCompensation' /tmp/runtime-dispatch.log
           grep -q -- '--- PASS: TestRuntimeClaimReferenceLockCompatibilityAndExclusion' /tmp/runtime-dispatch.log
+      - name: Prove cancellation survives Run lock contention
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race -v ./pkg/runtime -run 'TestRuntimeCancellation|TestRuntimeWebSocketCancellationRetry|TestRuntimePullCancellationContention' -count=3 -timeout=3m | tee /tmp/runtime-cancellation.log
+          if grep -q -- '--- SKIP:' /tmp/runtime-cancellation.log; then
+            echo "Runtime cancellation regressions must not skip" >&2
+            exit 1
+          fi
+          grep -q -- '--- PASS: TestRuntimeCancellationContentionRetriesWithoutCompensation' /tmp/runtime-cancellation.log
+          grep -q -- '--- PASS: TestRuntimeCancellationHTTPContentionRetriesWithoutWake' /tmp/runtime-cancellation.log
+          grep -q -- '--- PASS: TestRuntimeCancellationNormalAppendSerializesOnSession' /tmp/runtime-cancellation.log
+          grep -q -- '--- PASS: TestRuntimeCancellationPresenceUsesSessionAndDeadline' /tmp/runtime-cancellation.log

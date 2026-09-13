@@ -80,6 +80,36 @@ ORDER BY c.updated_at ASC, c.id ASC
 LIMIT 1
 FOR UPDATE OF r SKIP LOCKED;
 
+-- name: HasPendingRuntimeCancellationCommand :one
+-- Only used after SKIP LOCKED returned empty; retain the same Session and
+-- deadline predicates so an empty/foreign/expired queue never starts retries.
+SELECT EXISTS (
+    SELECT 1
+    FROM runs r
+    JOIN run_cancellations c
+      ON c.run_id = r.id
+     AND c.id = r.cancel_request_id
+    JOIN run_attempts a
+      ON a.run_id = r.id
+     AND a.id = c.target_attempt_id
+    WHERE r.runtime_contract_id = 'openlinker.runtime.v2'
+      AND r.status = 'canceled'
+      AND r.dispatch_state = 'terminal'
+      AND r.cancel_state = c.state
+      AND c.state IN ('requested', 'delivered', 'stopping')
+      AND a.executor_type = 'runtime'
+      AND a.finished_at IS NULL
+      AND a.run_id = r.id
+      AND a.agent_id = sqlc.arg(agent_id)
+      AND a.node_id = sqlc.arg(node_id)
+      AND a.runtime_token_id = sqlc.arg(credential_id)
+      AND a.runtime_worker_id = sqlc.arg(worker_id)
+      AND a.runtime_session_id = sqlc.arg(runtime_session_id)
+      AND c.requested_at
+          + (sqlc.arg(command_deadline_ms)::bigint * INTERVAL '1 millisecond')
+          > clock_timestamp()
+) AS pending;
+
 -- name: FindNextDueRuntimeCancellation :one
 SELECT r.id AS run_id,
        r.agent_id,

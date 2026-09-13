@@ -5,25 +5,6 @@
 -- transaction; event sequence updates must also insert the run_event before
 -- commit. The deferred v2 invariants intentionally reject partial commits.
 
--- name: LockNextPendingRuntimeRun :one
-SELECT id
-FROM runs
-WHERE status = 'running'
-  AND dispatch_state = 'pending'
-ORDER BY started_at ASC, id ASC
-LIMIT 1
-FOR UPDATE SKIP LOCKED;
-
--- name: LockNextDueRetryRuntimeRun :one
-SELECT id
-FROM runs
-WHERE status = 'running'
-  AND dispatch_state = 'retry_wait'
-  AND next_attempt_at <= clock_timestamp()
-ORDER BY next_attempt_at ASC, started_at ASC, id ASC
-LIMIT 1
-FOR UPDATE SKIP LOCKED;
-
 -- name: CreateRunAttempt :one
 INSERT INTO run_attempts (
     id, run_id, agent_id, offer_no, executor_type, lease_id, fencing_token,

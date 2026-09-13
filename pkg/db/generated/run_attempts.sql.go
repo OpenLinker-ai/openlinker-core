@@ -25,39 +25,6 @@ func scanRunAttempt(row interface{ Scan(dest ...any) error }, a *RunAttempt) err
 	)
 }
 
-const lockNextPendingRuntimeRun = `-- name: LockNextPendingRuntimeRun :one
-SELECT id
-FROM runs
-WHERE status = 'running'
-  AND dispatch_state = 'pending'
-ORDER BY started_at ASC, id ASC
-LIMIT 1
-FOR UPDATE SKIP LOCKED`
-
-func (q *Queries) LockNextPendingRuntimeRun(ctx context.Context) (uuid.UUID, error) {
-	row := q.db.QueryRow(ctx, lockNextPendingRuntimeRun)
-	var id uuid.UUID
-	err := row.Scan(&id)
-	return id, err
-}
-
-const lockNextDueRetryRuntimeRun = `-- name: LockNextDueRetryRuntimeRun :one
-SELECT id
-FROM runs
-WHERE status = 'running'
-  AND dispatch_state = 'retry_wait'
-  AND next_attempt_at <= clock_timestamp()
-ORDER BY next_attempt_at ASC, started_at ASC, id ASC
-LIMIT 1
-FOR UPDATE SKIP LOCKED`
-
-func (q *Queries) LockNextDueRetryRuntimeRun(ctx context.Context) (uuid.UUID, error) {
-	row := q.db.QueryRow(ctx, lockNextDueRetryRuntimeRun)
-	var id uuid.UUID
-	err := row.Scan(&id)
-	return id, err
-}
-
 const createRunAttempt = `-- name: CreateRunAttempt :one
 INSERT INTO run_attempts (
     id, run_id, agent_id, offer_no, executor_type, lease_id, fencing_token,

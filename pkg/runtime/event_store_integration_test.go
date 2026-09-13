@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -389,6 +390,8 @@ func insertEventStoreExecutingAttempt(
 		"session_drain",
 	}
 	features = append(features, extraFeatures...)
+	// Match real Session creation, which stores features in canonical order.
+	sort.Strings(features)
 	keyHash := sha256.Sum256([]byte("event-store-key/" + runID.String()))
 	fingerprint := sha256.Sum256([]byte("event-store-fingerprint/" + runID.String()))
 	prefix := "ol_agent_" + strings.ReplaceAll(credentialID.String(), "-", "")[:12]
