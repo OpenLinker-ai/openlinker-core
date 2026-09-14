@@ -7,6 +7,10 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+- Pin the verified Go SDK module at `63fc87d73406`, adopting the gRPC
+  1.83.2 and protobuf dependency updates while retaining the SDK Go 1.25 baseline.
+  Command, credential, session and persistent-state contracts are unchanged.
+
 ### Fixed
 
 - Runtime cancellation delivery now retries confirmed Run lock contention in
