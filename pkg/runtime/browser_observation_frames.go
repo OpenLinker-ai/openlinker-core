@@ -84,6 +84,41 @@ const (
 	observationRetiredTTL = 2 * time.Minute
 )
 
+// retainedFinalFrame is the frame a round ended on, kept so a viewer can read it
+// after the Run reaches its terminal state and the live poll has stopped.
+//
+// It is written the moment the Worker delivers the capture it marks as final --
+// not when the observation closes. The Worker makes that capture while the
+// attachment is still open, waits for Core's acknowledgement, and only then
+// closes the attachment and reports the Run's result. So by the time the Run is
+// terminal the retention already exists, whatever order the observation's own
+// ending arrives in: an error from the Engine being torn down, the viewer's stop,
+// the browser's closed event. Nothing here depends on how the observation ends.
+//
+// It stays in this process's memory with its own expiry: a bounded handoff, not
+// a stored history, and nothing here survives a restart or reaches another
+// instance.
+type retainedFinalFrame struct {
+	// The Attempt whose round this frame ended. A retry re-runs the whole round,
+	// so a read answers only with the retention of the Run's latest Attempt.
+	attemptID  uuid.UUID
+	frame      BrowserObservationFrame
+	retainedAt time.Time
+}
+
+const (
+	// How long a final frame stays readable. Long enough that a viewer reading
+	// the Run it just watched finish gets the picture, short enough that page
+	// content is not held for a session somebody reopens much later.
+	observationFinalFrameTTL = 10 * time.Minute
+	// How many Runs keep a final frame, and the total bytes they may hold between
+	// them. Each frame is already capped at observationFrameBytesLimit, so both
+	// bounds are needed: the count keeps the map small and the byte ceiling is
+	// what actually bounds the memory.
+	observationFinalFrameLimit      = 32
+	observationFinalFrameBytesLimit = 32 << 20
+)
+
 type observationFrameBuffer struct {
 	mu    sync.Mutex
 	quota int
@@ -92,14 +127,21 @@ type observationFrameBuffer struct {
 	live         map[uuid.UUID]*observationLiveFrame
 	retired      map[uuid.UUID]retiredObservation
 	retiredOrder []uuid.UUID
+	// Final frames keyed by Run, because that is what a viewer asks with.
+	// Insertion order is kept separately so the oldest is the one evicted when
+	// either bound is reached.
+	finalFrames map[uuid.UUID]retainedFinalFrame
+	finalOrder  []uuid.UUID
+	finalBytes  int
 }
 
 func newObservationFrameBuffer(quota int) *observationFrameBuffer {
 	return &observationFrameBuffer{
-		quota:   quota,
-		now:     time.Now,
-		live:    make(map[uuid.UUID]*observationLiveFrame),
-		retired: make(map[uuid.UUID]retiredObservation),
+		quota:       quota,
+		now:         time.Now,
+		live:        make(map[uuid.UUID]*observationLiveFrame),
+		retired:     make(map[uuid.UUID]retiredObservation),
+		finalFrames: make(map[uuid.UUID]retainedFinalFrame),
 	}
 }
 
@@ -293,6 +335,7 @@ func (buffer *observationFrameBuffer) publish(
 	commandID uuid.UUID,
 	identity BrowserObserverIdentity,
 	frame BrowserObservationFrame,
+	roundFinal bool,
 ) error {
 	if frame.MIMEType != "image/jpeg" || len(frame.Data) == 0 ||
 		len(frame.Data) > observationFrameBytesLimit ||
@@ -318,9 +361,111 @@ func (buffer *observationFrameBuffer) publish(
 	copied.Data = append([]byte(nil), frame.Data...)
 	live.frame = &copied
 	live.count++
+	// Retained here, on receipt, under the same lock and with the same identity
+	// checks the live frame just passed. Deferring it to the close is what made
+	// the final frame depend on the order the observation's ending arrived in.
+	if roundFinal {
+		buffer.retainFinalLocked(runID, identity.AttemptID, copied)
+	}
 	close(live.notify)
 	live.notify = make(chan struct{})
 	return nil
+}
+
+// retainFinalLocked keeps a round's final frame, replacing whatever the Run held.
+// Callers hold the lock.
+func (buffer *observationFrameBuffer) retainFinalLocked(
+	runID, attemptID uuid.UUID,
+	frame BrowserObservationFrame,
+) {
+	buffer.expireFinalFramesLocked()
+	buffer.dropFinalLocked(runID)
+	retained := retainedFinalFrame{
+		attemptID:  attemptID,
+		frame:      frame,
+		retainedAt: buffer.now(),
+	}
+	retained.frame.Data = append([]byte(nil), frame.Data...)
+	buffer.finalFrames[runID] = retained
+	buffer.finalOrder = append(buffer.finalOrder, runID)
+	buffer.finalBytes += len(retained.frame.Data)
+	// Evicting the oldest keeps the most recently finished Runs readable, which
+	// are the ones a viewer is looking at.
+	for len(buffer.finalOrder) > 0 &&
+		(len(buffer.finalOrder) > observationFinalFrameLimit ||
+			buffer.finalBytes > observationFinalFrameBytesLimit) {
+		buffer.dropFinalLocked(buffer.finalOrder[0])
+	}
+}
+
+// expireFinalFramesLocked drops every retention past its window. Callers hold
+// the lock.
+func (buffer *observationFrameBuffer) expireFinalFramesLocked() {
+	cutoff := buffer.now().Add(-observationFinalFrameTTL)
+	for _, runID := range append([]uuid.UUID(nil), buffer.finalOrder...) {
+		retained, known := buffer.finalFrames[runID]
+		if !known || retained.retainedAt.After(cutoff) {
+			continue
+		}
+		buffer.dropFinalLocked(runID)
+	}
+}
+
+// dropFinalLocked forgets one retention and its bytes. Callers hold the lock.
+func (buffer *observationFrameBuffer) dropFinalLocked(runID uuid.UUID) {
+	retained, known := buffer.finalFrames[runID]
+	if !known {
+		return
+	}
+	buffer.finalBytes -= len(retained.frame.Data)
+	if buffer.finalBytes < 0 {
+		buffer.finalBytes = 0
+	}
+	delete(buffer.finalFrames, runID)
+	for index, candidate := range buffer.finalOrder {
+		if candidate == runID {
+			buffer.finalOrder = append(
+				buffer.finalOrder[:index],
+				buffer.finalOrder[index+1:]...,
+			)
+			break
+		}
+	}
+}
+
+// observationFinalFrameRead is one retention as a reader sees it.
+type observationFinalFrameRead struct {
+	frame         *BrowserObservationFrame
+	attemptID     uuid.UUID
+	retainedUntil time.Time
+}
+
+// finalFrame returns the Run's retention, if any, with a copy of its bytes.
+func (buffer *observationFrameBuffer) finalFrame(
+	runID uuid.UUID,
+) observationFinalFrameRead {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	buffer.expireFinalFramesLocked()
+	retained, known := buffer.finalFrames[runID]
+	if !known {
+		return observationFinalFrameRead{}
+	}
+	copied := retained.frame
+	copied.Data = append([]byte(nil), retained.frame.Data...)
+	return observationFinalFrameRead{
+		frame:         &copied,
+		attemptID:     retained.attemptID,
+		retainedUntil: retained.retainedAt.Add(observationFinalFrameTTL),
+	}
+}
+
+// expireFinalFrames is the periodic sweep. Retention is also checked on every
+// read, so this only stops an idle Core from holding a frame nobody asks for.
+func (buffer *observationFrameBuffer) expireFinalFrames() {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	buffer.expireFinalFramesLocked()
 }
 
 func (buffer *observationFrameBuffer) frameCount(runID uuid.UUID) int64 {
