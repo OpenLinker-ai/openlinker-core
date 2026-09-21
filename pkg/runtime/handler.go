@@ -302,6 +302,15 @@ func (h *Handler) RegisterObservation(api *echo.Group, jwtMw echo.MiddlewareFunc
 	api.POST("/runs/:id/observation/start", h.StartBrowserObservation, jwtMw)
 	api.POST("/runs/:id/observation/stop", h.StopBrowserObservation, jwtMw)
 	api.GET("/runs/:id/observation/frame", h.GetBrowserObservationFrame, jwtMw)
+	// Separate from the live frame poll on purpose. A viewer stops polling the
+	// moment the Run reaches a terminal state, and the picture the round ended on
+	// is delivered after that; reading it here is what makes the last frame
+	// recoverable instead of whatever the page happened to hold in memory.
+	api.GET(
+		"/runs/:id/observation/final-frame",
+		h.GetBrowserObservationFinalFrame,
+		jwtMw,
+	)
 }
 
 func (h *Handler) RegisterAdmin(api *echo.Group, jwtMw, adminMw echo.MiddlewareFunc) {
@@ -320,6 +329,12 @@ func (h *Handler) RegisterAdmin(api *echo.Group, jwtMw, adminMw echo.MiddlewareF
 	api.GET(
 		"/admin/runs/:id/observation/frame",
 		h.GetAdminBrowserObservationFrame,
+		jwtMw,
+		adminMw,
+	)
+	api.GET(
+		"/admin/runs/:id/observation/final-frame",
+		h.GetAdminBrowserObservationFinalFrame,
 		jwtMw,
 		adminMw,
 	)
@@ -1478,6 +1493,23 @@ func (h *Handler) GetBrowserObservationFrame(c echo.Context) error {
 	return c.JSON(http.StatusOK, frame)
 }
 
+func (h *Handler) GetBrowserObservationFinalFrame(c echo.Context) error {
+	userID, runID, err := h.browserObservationIdentity(c)
+	if err != nil {
+		return err
+	}
+	// The retained snapshot is page content just like the live frame, so it
+	// carries the same owner check rather than relying on an earlier one.
+	if err := h.browserObservation.AuthorizeOwner(
+		c.Request().Context(),
+		runID,
+		userID,
+	); err != nil {
+		return browserObservationHTTPError(err)
+	}
+	return h.respondBrowserObservationFinalFrame(c, runID)
+}
+
 // The admin variants skip the owner check because the admin permission on the
 // route is the authorization. They are otherwise identical, so the owner and
 // admin paths cannot drift in what they return.
@@ -1508,6 +1540,48 @@ func (h *Handler) GetAdminBrowserObservationFrame(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	return c.JSON(http.StatusOK, frame)
+}
+
+func (h *Handler) GetAdminBrowserObservationFinalFrame(c echo.Context) error {
+	_, runID, err := h.browserObservationIdentity(c)
+	if err != nil {
+		return err
+	}
+	return h.respondBrowserObservationFinalFrame(c, runID)
+}
+
+// respondBrowserObservationFinalFrame answers the owner and admin reads
+// identically, so what a snapshot means cannot drift between the two.
+//
+// 204 is the honest answer for "nothing was retained": the observation produced
+// no frame, or its window elapsed. A viewer must not render that as a picture,
+// and it is not an error either.
+func (h *Handler) respondBrowserObservationFinalFrame(
+	c echo.Context,
+	runID uuid.UUID,
+) error {
+	final, err := h.browserObservation.FinalFrame(c.Request().Context(), runID)
+	if errors.Is(err, ErrObservationFinalFrameUnsettled) {
+		// 425 rather than 204: the observation has not closed here yet, so whether
+		// this round leaves a picture is still open. A viewer must retry instead of
+		// recording "no picture" from an answer that was never settled.
+		c.Response().Header().Set("Cache-Control", "private, no-store")
+		return echo.NewHTTPError(
+			http.StatusTooEarly,
+			"该 Run 的最终画面尚未确定，请稍后重试",
+		)
+	}
+	if errors.Is(err, ErrObservationNoFinalFrame) {
+		c.Response().Header().Set("Cache-Control", "private, no-store")
+		return c.NoContent(http.StatusNoContent)
+	}
+	if err != nil {
+		return browserObservationHTTPError(err)
+	}
+	// A retained frame is still live page content, even though the observation
+	// has ended: same no-store rules as the live poll.
+	c.Response().Header().Set("Cache-Control", "private, no-store")
+	return c.JSON(http.StatusOK, final)
 }
 
 func (h *Handler) StopAdminBrowserObservation(c echo.Context) error {

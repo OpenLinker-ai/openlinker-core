@@ -53,3 +53,45 @@ func (observation *BrowserObservation) ConfigureObservationStartHandshakeForTest
 	observation.startRetryInterval = retryInterval
 	observation.startHandshakeTimeout = timeout
 }
+
+// RetainFinalFrameForTest seeds a retained final frame for a Run and Attempt by
+// the ordinary path -- open, and one frame the Worker marks as final -- so a test
+// can start from a round that has already ended and kept its last picture.
+func (observation *BrowserObservation) RetainFinalFrameForTest(
+	runID, attemptID uuid.UUID,
+) {
+	identity := BrowserObserverIdentity{
+		RunID:        runID,
+		AttemptID:    attemptID,
+		SessionEpoch: 1,
+	}
+	leaseID, commandID := uuid.New(), uuid.New()
+	if !observation.frames.open(runID, leaseID, commandID, identity) {
+		return
+	}
+	defer observation.frames.close(runID)
+	if !observation.frames.admit(runID, leaseID, commandID, identity, 1) {
+		return
+	}
+	_ = observation.frames.publish(
+		runID,
+		leaseID,
+		commandID,
+		identity,
+		BrowserObservationFrame{
+			FrameSeq:   1,
+			CapturedAt: observation.now().UTC(),
+			MIMEType:   "image/jpeg",
+			Data:       []byte{0xff, 0xd8, 0xff, 0xd9},
+			Width:      1280,
+			Height:     720,
+		},
+		true,
+	)
+}
+
+// HoldsFinalFrameForTest reports whether this instance holds a retained final
+// frame for the Run.
+func (observation *BrowserObservation) HoldsFinalFrameForTest(runID uuid.UUID) bool {
+	return observation.frames.finalFrame(runID).frame != nil
+}

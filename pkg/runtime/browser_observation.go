@@ -67,6 +67,16 @@ var ErrObservationBusy = errors.New("browser observation capacity is exhausted o
 // viewer for this Run frees capacity.
 var ErrObservationViewerCapacity = errors.New("browser observation viewer capacity is exhausted for this Run")
 
+// ErrObservationNoFinalFrame is returned when no final frame is retained for a
+// Run's latest Attempt on this instance. It is a plain answer, not a failure: a
+// Run whose Agent never used the browser is the ordinary case.
+var ErrObservationNoFinalFrame = errors.New("browser observation retained no final frame for this Run")
+
+// ErrObservationFinalFrameUnsettled is returned while the Run is still running.
+// Its final frame does not exist yet, and answering "no picture" would settle a
+// question that is still open.
+var ErrObservationFinalFrameUnsettled = errors.New("browser observation has not settled a final frame for this Run yet")
+
 // ErrObservationNotConfirmed is returned when the Worker never confirmed a
 // start. The lease is torn down before it surfaces, so the Run is left
 // observable rather than pinned by an observation that never began.
@@ -94,6 +104,11 @@ type BrowserObservation struct {
 	startHandshakeTimeout time.Duration
 	startRetryInterval    time.Duration
 
+	// What the Run itself says about the round: whether it has ended and which
+	// Attempt is its latest. Injected so the rules that read it are testable
+	// without a database; the production value is readRoundStatus.
+	roundStatusFn func(context.Context, uuid.UUID) (observationRoundStatus, error)
+
 	// Pending start handshakes, keyed by lease. A start blocks on its channel
 	// until the Worker's first lifecycle event for that exact lease arrives.
 	handshakeMu sync.Mutex
@@ -116,7 +131,7 @@ func NewBrowserObservation(
 	if quota < 1 {
 		quota = observationDefaultQuota
 	}
-	return &BrowserObservation{
+	observation := &BrowserObservation{
 		pool:                  pool,
 		now:                   now,
 		instance:              instance,
@@ -126,6 +141,8 @@ func NewBrowserObservation(
 		frames:                newObservationFrameBuffer(quota),
 		handshakes:            make(map[uuid.UUID]chan string),
 	}
+	observation.roundStatusFn = observation.readRoundStatus
+	return observation
 }
 
 // BindInstance records which Core process owns observations started here. It is
@@ -186,6 +203,11 @@ func (observation *BrowserObservation) Start(
 		LeaseExpiresAt:       expiresAt,
 		DeadlineAt:           now.Add(observationMaxTTL),
 		FrameIntervalMS:      observationDefaultFrameIntervalMS,
+		// This Core decodes final_frame. Declared rather than assumed: event
+		// decoding rejects unknown fields, and on the Runtime WebSocket that
+		// closes the connection, so a Worker only marks frames for a Core that
+		// said it can read the marker.
+		AcceptsFinalFrame: true,
 	}
 	if err := command.Validate(); err != nil {
 		return BrowserObservationState{}, err
@@ -687,6 +709,9 @@ func (observation *BrowserObservation) reconcile(ctx context.Context) {
 	_ = observation.ReconcileExpired(ctx)
 	_ = observation.ReconcileForeignExpired(ctx)
 	observation.ReconcileAbandoned(ctx)
+	// Retained final frames expire on their own window, not with the audit rows:
+	// an idle Core must still let go of page content nobody is reading.
+	observation.frames.expireFinalFrames()
 }
 
 // ErrObservationUnsupported is returned when the Runtime holding this Run never
@@ -880,6 +905,7 @@ func (observation *BrowserObservation) HandleEvent(
 				Width:      event.Frame.Width,
 				Height:     event.Frame.Height,
 			},
+			event.FinalFrame,
 		); err != nil {
 			return BrowserObserverEventAckPayload{}, err
 		}
@@ -1077,6 +1103,168 @@ func (observation *BrowserObservation) WaitFrame(
 	// this one can never serve it. Only this path touches the database, so a
 	// normal poll stays in memory.
 	return nil, observation.absentFrameReason(ctx, runID)
+}
+
+// BrowserObservationFinalFrame is the picture a round ended on. It is answered
+// on its own surface rather than through the live poll, so a viewer can never
+// mistake "still watching" for "this is what it finished on".
+type BrowserObservationFinalFrame struct {
+	RunID         uuid.UUID               `json:"run_id"`
+	Final         bool                    `json:"final"`
+	RetainedUntil time.Time               `json:"retained_until"`
+	Frame         BrowserObservationFrame `json:"frame"`
+}
+
+// observationRoundStatus is what the Run itself says: whether it has ended, and
+// which Attempt is its latest.
+type observationRoundStatus struct {
+	known     bool
+	terminal  bool
+	attemptID uuid.UUID
+}
+
+// finalFrameVerdict is what a retention plus the Run's own state support.
+type finalFrameVerdict int
+
+const (
+	finalFrameServe finalFrameVerdict = iota
+	// The Run is still running, so its final frame does not exist yet. Never
+	// answered as "no picture".
+	finalFrameUnsettled
+	// Nothing retained for this round; the audit says whether another instance
+	// could have held it.
+	finalFrameAbsent
+)
+
+// finalFrameVerdictFor holds the rules, with no I/O of its own.
+//
+// "Terminal" is decisive because of an ordering the Worker guarantees: it
+// delivers the marked capture and waits for Core's acknowledgement before it
+// closes the attachment and reports the result. A terminal Run with no retention
+// for its latest Attempt therefore did not produce a final frame -- the answer is
+// settled, not pending.
+func finalFrameVerdictFor(
+	read observationFinalFrameRead,
+	round observationRoundStatus,
+) finalFrameVerdict {
+	if round.known && !round.terminal {
+		return finalFrameUnsettled
+	}
+	if read.frame == nil || !round.known {
+		return finalFrameAbsent
+	}
+	// A retry re-runs the whole round. The previous Attempt's page is not this
+	// round's final picture, whatever it was for the Attempt that produced it.
+	if round.attemptID != uuid.Nil && read.attemptID != round.attemptID {
+		return finalFrameAbsent
+	}
+	return finalFrameServe
+}
+
+// FinalFrame returns the frame the Run's latest Attempt ended on.
+func (observation *BrowserObservation) FinalFrame(
+	ctx context.Context,
+	runID uuid.UUID,
+) (*BrowserObservationFinalFrame, error) {
+	if observation == nil {
+		return nil, ErrObservationChannelUnavailable
+	}
+	read := observation.frames.finalFrame(runID)
+	round, err := observation.roundStatus(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	switch finalFrameVerdictFor(read, round) {
+	case finalFrameServe:
+		return &BrowserObservationFinalFrame{
+			RunID:         runID,
+			Final:         true,
+			RetainedUntil: read.retainedUntil.UTC(),
+			Frame:         *read.frame,
+		}, nil
+	case finalFrameUnsettled:
+		return nil, ErrObservationFinalFrameUnsettled
+	}
+	return nil, observation.absentFinalFrameReason(ctx, runID)
+}
+
+func (observation *BrowserObservation) roundStatus(
+	ctx context.Context,
+	runID uuid.UUID,
+) (observationRoundStatus, error) {
+	if observation.roundStatusFn == nil {
+		return observationRoundStatus{}, nil
+	}
+	return observation.roundStatusFn(ctx, runID)
+}
+
+// readRoundStatus reads the Run's state and its latest Attempt. The latest
+// Attempt is taken from run_attempts rather than runs.active_attempt_id, which
+// is cleared once the Run is terminal -- exactly when a final frame is read.
+func (observation *BrowserObservation) readRoundStatus(
+	ctx context.Context,
+	runID uuid.UUID,
+) (observationRoundStatus, error) {
+	if observation.pool == nil {
+		return observationRoundStatus{}, nil
+	}
+	var status string
+	var attemptID *uuid.UUID
+	err := observation.pool.QueryRow(ctx, `
+SELECT r.status,
+       (SELECT ra.id FROM run_attempts ra
+         WHERE ra.run_id = r.id
+         ORDER BY ra.attempt_no DESC NULLS LAST, ra.offer_no DESC
+         LIMIT 1)
+FROM runs r
+WHERE r.id = $1
+`, runID).Scan(&status, &attemptID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return observationRoundStatus{}, nil
+	}
+	if err != nil {
+		return observationRoundStatus{}, err
+	}
+	round := observationRoundStatus{known: true, terminal: isTerminalRunStatus(status)}
+	if attemptID != nil {
+		round.attemptID = *attemptID
+	}
+	return round, nil
+}
+
+// absentFinalFrameReason separates "this round kept no picture" from "another
+// instance watched it". Only the second is a routing answer: the retention lives
+// in one process's memory, so only that process could ever have served it.
+func (observation *BrowserObservation) absentFinalFrameReason(
+	ctx context.Context,
+	runID uuid.UUID,
+) error {
+	if observation.pool == nil {
+		return ErrObservationNoFinalFrame
+	}
+	var owner uuid.UUID
+	err := observation.pool.QueryRow(ctx, `
+SELECT core_instance_id FROM browser_observation_audits
+WHERE run_id = $1
+ORDER BY started_at DESC
+LIMIT 1
+`, runID).Scan(&owner)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrObservationNoFinalFrame
+	}
+	if err != nil {
+		return err
+	}
+	return finalFrameAbsence(owner, observation.instance)
+}
+
+// finalFrameAbsence is the routing decision, separate from the query so it is
+// testable on its own.
+func finalFrameAbsence(owner, instance uuid.UUID) error {
+	if owner != instance {
+		return ErrObservationChannelUnavailable
+	}
+	return ErrObservationNoFinalFrame
 }
 
 func (observation *BrowserObservation) absentFrameReason(

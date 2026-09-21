@@ -1197,3 +1197,150 @@ func setupObservationHandlerTest(t *testing.T) (*echo.Echo, *pgxpool.Pool, *runt
 	})
 	return e, pool, service
 }
+
+// End to end, for each way the observation ordinarily ends as a round finishes.
+// Teardown cuts the stream by closing the attachment it watches, so the marked
+// frame is followed by an Engine error; or the viewer, seeing the Run end, stops
+// watching. Either ending can precede the Run's terminal state. The frame is kept
+// on receipt, so neither ending decides anything.
+func TestBrowserObservationKeepsTheMarkedFinalFrameThroughItsEnding(t *testing.T) {
+	for name, end := range map[string]func(
+		*testing.T,
+		*runtime.BrowserObservation,
+		runtime.BrowserObserverEventPayload,
+		uuid.UUID,
+	){
+		"engine error after teardown": func(
+			t *testing.T,
+			observation *runtime.BrowserObservation,
+			event runtime.BrowserObserverEventPayload,
+			_ uuid.UUID,
+		) {
+			failure := event
+			failure.EventSeq = 3
+			failure.Kind = runtime.BrowserObserverError
+			failure.CapturedAt = nil
+			failure.Frame = nil
+			failure.FinalFrame = false
+			failure.ErrorCode = "BROWSER_RUNTIME_UNAVAILABLE"
+			_, err := observation.HandleEvent(context.Background(), failure)
+			require.NoError(t, err)
+		},
+		"viewer stops watching": func(
+			t *testing.T,
+			observation *runtime.BrowserObservation,
+			event runtime.BrowserObserverEventPayload,
+			runID uuid.UUID,
+		) {
+			require.NoError(t, observation.Stop(context.Background(), runID, "observer_stopped"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pool, service, fixture, _, ownerID := observationFixture(t)
+			observation := service.BrowserObservation()
+			appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+
+			identity, err := observation.ResolveIdentity(
+				context.Background(), fixture.identity.RunID, ownerID, false,
+			)
+			require.NoError(t, err)
+			state, err := observation.Start(
+				context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+			)
+			require.NoError(t, err)
+			captured := time.Now().UTC()
+			event := runtime.BrowserObserverEventPayload{
+				AttemptIdentity:      identity.RuntimeIdentity(),
+				SessionEpoch:         identity.SessionEpoch,
+				BrowserSessionSHA256: identity.BrowserSessionSHA256,
+				AttachmentSHA256:     identity.AttachmentSHA256,
+				CommandID:            observationStartCommandID(t, pool, state.LeaseID),
+				LeaseID:              state.LeaseID,
+				EventSeq:             2,
+				Kind:                 runtime.BrowserObserverFrame,
+				CapturedAt:           &captured,
+				Frame: &runtime.BrowserObserverFramePayload{
+					MIMEType: "image/jpeg",
+					Data:     []byte{0xff, 0xd8, 0xff, 0xd9},
+					Width:    1280,
+					Height:   720,
+				},
+				// The capture the Worker makes while the attachment is still open.
+				FinalFrame: true,
+			}
+			_, err = observation.HandleEvent(context.Background(), event)
+			require.NoError(t, err)
+
+			// While the Run is still running the final frame is not answered yet.
+			_, err = observation.FinalFrame(context.Background(), fixture.identity.RunID)
+			require.ErrorIs(t, err, runtime.ErrObservationFinalFrameUnsettled)
+
+			end(t, observation, event, fixture.identity.RunID)
+			require.Eventually(t, func() bool {
+				var status string
+				return pool.QueryRow(context.Background(), `
+SELECT status FROM browser_observation_audits WHERE lease_id = $1
+`, state.LeaseID).Scan(&status) == nil && status == "closed"
+			}, 5*time.Second, 20*time.Millisecond)
+
+			// Only now does the Run become terminal, the order the viewer sees.
+			_, err = service.CancelRun(context.Background(), ownerID, fixture.identity.RunID)
+			require.NoError(t, err)
+
+			final, err := observation.FinalFrame(context.Background(), fixture.identity.RunID)
+			require.NoError(t, err, "the frame the Worker marked as final was lost to the observation's ending")
+			require.True(t, final.Final)
+			require.Equal(t, int64(2), final.Frame.FrameSeq)
+		})
+	}
+}
+
+// The Worker may only mark a frame when the start it answers says this Core
+// accepts the marker: event decoding rejects unknown fields, and on the Runtime
+// WebSocket that closes the connection.
+func TestBrowserObservationStartDeclaresTheFinalFrameMarker(t *testing.T) {
+	_, service, fixture, capture, ownerID := observationFixture(t)
+	observation := service.BrowserObservation()
+	appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+	identity, err := observation.ResolveIdentity(
+		context.Background(), fixture.identity.RunID, ownerID, false,
+	)
+	require.NoError(t, err)
+	_, err = observation.Start(
+		context.Background(), fixture.identity.RunID, ownerID, false, "", identity,
+	)
+	require.NoError(t, err)
+
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	var starts int
+	for _, command := range capture.commands {
+		if command.Action != runtime.BrowserObserverStart {
+			continue
+		}
+		starts++
+		require.True(t, command.AcceptsFinalFrame,
+			"a start that does not declare the marker leaves the Worker unable to mark the final frame")
+	}
+	require.NotZero(t, starts, "no start command was sent")
+}
+
+// A ready event is projected on replays too. Nothing on that path may touch a
+// retained final frame: the frame belongs to the round that produced it, and the
+// read already answers only for the Run's latest Attempt.
+func TestBrowserObservationReadyReplayLeavesTheFinalFrameAlone(t *testing.T) {
+	_, service, fixture, _, ownerID := observationFixture(t)
+	observation := service.BrowserObservation()
+	ack := appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+	require.True(t, ack.Inserted)
+
+	_, err := service.CancelRun(context.Background(), ownerID, fixture.identity.RunID)
+	require.NoError(t, err)
+	observation.RetainFinalFrameForTest(fixture.identity.RunID, uuid.New())
+	require.True(t, observation.HoldsFinalFrameForTest(fixture.identity.RunID))
+
+	replay := appendBrowserLifecycle(t, service, fixture, 1, browserReadyPayload(3, "session-a", "attachment-a"))
+	require.False(t, replay.Inserted, "the replay must not append a second event")
+	require.True(t, observation.HoldsFinalFrameForTest(fixture.identity.RunID),
+		"a replayed ready event deleted a retained final frame")
+}

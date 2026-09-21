@@ -62,6 +62,18 @@ type BrowserObserverCommandPayload struct {
 	LeaseExpiresAt       time.Time             `json:"lease_expires_at"`
 	DeadlineAt           time.Time             `json:"deadline_at"`
 	FrameIntervalMS      int                   `json:"frame_interval_ms"`
+	// Declares that this Core accepts final_frame on the events this observation
+	// sends back. The Worker may only mark a frame when the start it is answering
+	// said so.
+	//
+	// The declaration has to travel this way round. Event decoding here rejects
+	// unknown fields as a validation failure, and a validation failure on the
+	// Runtime WebSocket closes the whole connection -- so a Worker that marked a
+	// frame for a Core that predates the field would drop the Runtime session at
+	// the end of every observed round, just as it is about to report the result.
+	// A command field, by contrast, is decoded leniently by the Worker, so a Core
+	// that sends it to an older Worker costs nothing.
+	AcceptsFinalFrame bool `json:"accepts_final_frame,omitempty"`
 }
 
 type BrowserObserverFramePayload struct {
@@ -82,7 +94,15 @@ type BrowserObserverEventPayload struct {
 	Kind                 BrowserObserverEventKind     `json:"kind"`
 	CapturedAt           *time.Time                   `json:"captured_at,omitempty"`
 	Frame                *BrowserObserverFramePayload `json:"frame,omitempty"`
-	ErrorCode            string                       `json:"error_code,omitempty"`
+	// Set by the Worker on the capture it makes as the round's attachment closes.
+	//
+	// Only the producer can tell that frame from a mid-round one: the observation
+	// stream is cut by the same close it is watching, so the last frame of a round
+	// can arrive under an error or a stop and before the Run is terminal. Core
+	// records the claim and keeps that frame; it does not try to infer it from the
+	// order events happen to arrive in.
+	FinalFrame bool   `json:"final_frame,omitempty"`
+	ErrorCode  string `json:"error_code,omitempty"`
 }
 
 type BrowserObserverEventAckPayload struct {
@@ -190,6 +210,11 @@ func (payload BrowserObserverEventPayload) Validate() error {
 	}
 	if payload.CommandID == uuid.Nil || payload.LeaseID == uuid.Nil || payload.EventSeq < 1 {
 		return runtimeValidationError("browser observer event identity is invalid", nil)
+	}
+	if payload.FinalFrame && payload.Kind != BrowserObserverFrame {
+		return runtimeValidationError(
+			"browser observer final-frame marker requires a frame", nil,
+		)
 	}
 	switch payload.Kind {
 	case BrowserObserverStarted, BrowserObserverStopped:
