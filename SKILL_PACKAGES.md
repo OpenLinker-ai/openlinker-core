@@ -122,6 +122,10 @@ snapshot has `bundles: []`. Caller-supplied reserved metadata is discarded. The
 host validates identifiers, digest, paths and provider compatibility before
 using content. The registry API's privacy boundary does not sandbox an Agent's
 tools or guarantee that a model will never reproduce instructions in its output.
+Both Web apps describe packages as not listed publicly. Binding a public or
+unlisted Agent shows that callers may obtain SKILL.md and supporting files through
+model output; owners must not associate content that must remain secret from those
+callers. The notice also appears on existing bindings and follows visibility changes.
 
 ## Load evidence
 
@@ -163,5 +167,9 @@ through its actual Codex/Claude process adapters using deterministic fake client
 processes, version session isolation, concurrent materialization and failure paths.
 The offline queue tests cover unknown history and compatible/incompatible offline
 and closed Sessions through production Run creation and assignment queries.
-Plugin Provider images and the official launcher currently advertise no package
-features and reject package execution; native support does not imply image support.
+The current Node/Plugin source supports native Codex/Claude and correctly
+provisioned Plugin Provider images. Shared image caches must pass both permission
+and actual-write probes before capability advertisement. Prerequisite lookup uses
+the Provider environment/identity and applicable native tool read roots; it does
+not install or execute dependencies. Runtime/image releases and real-model
+acceptance must be recorded separately from these source-level tests.
