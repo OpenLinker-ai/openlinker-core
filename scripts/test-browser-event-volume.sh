@@ -171,7 +171,8 @@ run_database_test() {
     089_user_jwt_token_version.up.sql \
     090_task_callback_owner_index.up.sql \
     091_browser_interaction_policy.up.sql \
-    092_browser_observation_audit.up.sql; do
+    092_browser_observation_audit.up.sql \
+    093_skill_packages.up.sql; do
     apply_schema_file "$repository_root/migrations/$migration_file"
   done
   apply_schema_file "$repository_root/migrations/086_current_schema_init_verify.sql"
