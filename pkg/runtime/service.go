@@ -30,6 +30,7 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/endpointurl"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/skillpackage"
 )
 
 // errMsgMaxLen 错误消息截断长度，避免巨大 body 灌进 DB / 响应。
@@ -843,6 +844,7 @@ func trustedRunMetadata(input map[string]interface{}) map[string]interface{} {
 	delete(out, "a2a")
 	delete(out, "conversation")
 	delete(out, "_openlinker_runtime_authority")
+	delete(out, skillpackage.MetadataKey)
 	return out
 }
 
@@ -856,6 +858,7 @@ func trustedRunMetadata(input map[string]interface{}) map[string]interface{} {
 // metadata verbatim from stored records, so the outbound projection is what
 // actually guarantees they never leave the platform.
 var thirdPartyDeniedMetadataKeys = map[string]struct{}{
+	skillpackage.MetadataKey:        {},
 	"_openlinker_runtime_authority": {},
 	"actor_user_id":                 {},
 	"buyer_user_id":                 {},
@@ -1419,6 +1422,11 @@ func (s *Service) createRunningRun(
 		}
 		if createErr != nil {
 			return createErr
+		}
+		if agent.ConnectionMode == connectionModeRuntime {
+			if err := skillpackage.Snapshot(ctx, tx, run.ID, agentID); err != nil {
+				return err
+			}
 		}
 		created = true
 		createdRun = run

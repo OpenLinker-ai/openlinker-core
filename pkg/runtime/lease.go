@@ -17,6 +17,7 @@ import (
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/browserpolicy"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/skillpackage"
 )
 
 const (
@@ -201,6 +202,7 @@ func (s *RuntimeLeaseService) ClaimOffer(
 				AgentID:                 principal.AgentID,
 				BrowserExecutionProfile: runtimeSessionUsesBrowserProfile(principal.Features),
 				FullBrowserInteraction:  runtimeSessionUsesFullBrowserInteraction(principal.Features),
+				SkillPackageProviders:   skillpackage.CompatibleProviders(principal.Features),
 			},
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -963,6 +965,9 @@ func (s *RuntimeLeaseService) assignmentFromAttempt(
 		principal.Features,
 	); err != nil {
 		return RunAssignedPayload{}, err
+	}
+	if err := skillpackage.ValidateAssignment(metadata[skillpackage.MetadataKey], principal.Features); err != nil {
+		return RunAssignedPayload{}, newRuntimeLeaseError(RuntimeLeaseErrorValidationFailed, err)
 	}
 	digest := sha256.Sum256(canonicalInput)
 	nodeEnvelope, invocationToken, err := s.issuer.Issue(RuntimeInvocationCapability{

@@ -33,6 +33,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtimepki"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/skill"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/skillpackage"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/task"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/userdash"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/usertoken"
@@ -197,6 +198,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	skillHandler := skill.NewHandler(skillSvc, pool)
 	skillHandler.Register(api)
 	skillHandler.RegisterProtected(api, jwtMiddleware)
+	skillpackage.NewHandler(pool).Register(api, jwtMiddleware)
 
 	runtimeSvc := runtime.NewService(pool, cfg)
 	if cfg.RuntimeMTLSEnabled && opts.RuntimePKI != nil {

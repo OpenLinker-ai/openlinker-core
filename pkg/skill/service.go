@@ -42,15 +42,28 @@ func NewService(pool *pgxpool.Pool) *Service {
 
 // ListAll 返回平台内置 skill（公开，给 /publish 表单与发现页用）。
 func (s *Service) ListAll(ctx context.Context) ([]db.Skill, error) {
-	items, err := s.q.ListSkills(ctx, db.ListSkillsParams{
-		Sort:  "order",
-		Limit: 200,
-	})
+	items, err := s.listCatalogRows(ctx, "", "order")
 	if err != nil {
 		log.Error().Err(err).Msg("skill.ListAll: ListSkills")
 		return nil, httpx.Internal("查询 skill 列表失败")
 	}
 	return items, nil
+}
+
+// listCatalogRows reads all pages for consumers that must filter before pagination.
+func (s *Service) listCatalogRows(ctx context.Context, category, order string) ([]db.Skill, error) {
+	const batch = int32(200)
+	items := []db.Skill{}
+	for offset := int32(0); ; offset += batch {
+		rows, err := s.q.ListSkills(ctx, db.ListSkillsParams{Category: category, Sort: order, Limit: batch, Offset: offset})
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, rows...)
+		if len(rows) < int(batch) {
+			return items, nil
+		}
+	}
 }
 
 // ListPage 返回公开 Skill 目录分页结果。
@@ -106,11 +119,7 @@ func (s *Service) listEnglishPage(ctx context.Context, query, category, listSort
 	if listSort == "name_asc" || listSort == "name_desc" {
 		dbSort = "order"
 	}
-	rows, err := s.q.ListSkills(ctx, db.ListSkillsParams{
-		Category: category,
-		Sort:     dbSort,
-		Limit:    200,
-	})
+	rows, err := s.listCatalogRows(ctx, category, dbSort)
 	if err != nil {
 		log.Error().Err(err).Msg("skill.ListPage: ListSkills English catalog")
 		return nil, httpx.Internal("查询 skill 列表失败")

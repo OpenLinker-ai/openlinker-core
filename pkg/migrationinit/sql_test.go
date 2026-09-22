@@ -21,6 +21,7 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 		"090_task_callback_owner_index.up.sql":       true,
 		"091_browser_interaction_policy.up.sql":      true,
 		"092_browser_observation_audit.up.sql":       true,
+		"093_skill_packages.up.sql":                  true,
 	}
 	if len(paths) != len(want) {
 		t.Fatalf("migration SQL files = %v, want only current initializer and verifier", paths)
@@ -219,9 +220,9 @@ func TestCoreFoundationalInitializerContainsPredecessorContracts(t *testing.T) {
 func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	verify := readInitializer(t, "../../migrations/086_current_schema_init_verify.sql")
 	for _, fragment := range []string{
-		"public_tables <> 75",
-		"public_constraints <> 641",
-		"public_indexes <> 272",
+		"public_tables <> 79",
+		"public_constraints <> 664",
+		"public_indexes <> 281",
 		"public_triggers <> 70",
 		"public_functions <> 65",
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",

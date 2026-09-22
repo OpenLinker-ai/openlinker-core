@@ -5,13 +5,20 @@ canonical seed data for a fresh database. The migration runner then applies
 `087_browser_agent_execution_profile.up.sql`,
 `088_browser_human_control.up.sql`, `089_user_jwt_token_version.up.sql`,
 `090_task_callback_owner_index.up.sql`,
-`091_browser_interaction_policy.up.sql`, and
-`092_browser_observation_audit.up.sql`. The only supported installed-schema
-upgrade is from the exact clean version `091` predecessor to version `092`.
+`091_browser_interaction_policy.up.sql`,
+`092_browser_observation_audit.up.sql`, and
+`093_skill_packages.up.sql`. Supported exact clean predecessors are `092`,
+`091`, `088` and `086`; the current version is `093`.
 `086_current_schema_init_verify.sql` is the PostgreSQL 16 current-catalog and
 seed fingerprint used after the complete migration chain. Fresh and predecessor
-paths therefore execute the same `092` DDL and converge on one version `092`
+paths therefore execute the same `093` DDL and converge on one version `093`
 catalog fingerprint without an idempotent duplicate schema definition.
+
+Migration `093` adds private skill packages, immutable versions, Agent bindings
+and per-Run references to pinned versions. Payloads are joined only for authenticated
+assignment delivery; foreign keys prevent deleting referenced versions, with a
+`(package_id, version_id)` snapshot index for those reference checks. This
+source migration has not been released or deployed.
 
 Migration `091` also adds an Owner-only
 `runtime_agent_browser_policy_intents` staging row for a private Runtime Agent
@@ -24,7 +31,7 @@ standard Sessions, publication and connection-mode changes therefore cannot
 race past the initial policy decision.
 
 The migration command accepts only a truly empty database, an exact clean
-supported predecessor (`091`, `088` or `086`), or the exact clean version `092`
+supported predecessor (`092`, `091`, `088` or `086`), or the exact clean version `093`
 current schema.
 Exactness is enforced with catalog object counts and a SHA-256 fingerprint over
 table, column/default, constraint, index, trigger, and function definitions.
