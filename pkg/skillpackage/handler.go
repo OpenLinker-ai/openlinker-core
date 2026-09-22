@@ -311,7 +311,7 @@ func (h *Handler) Bind(c echo.Context) error {
 		var features []string
 		if err = tx.QueryRow(ctx, `SELECT features FROM runtime_sessions WHERE agent_id=$1 AND status NOT IN ('revoked','closed') ORDER BY created_at DESC LIMIT 1`, agentID).Scan(&features); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return packageError("HOST_INCOMPATIBLE", "connect a compatible Plugin host before binding packages")
+				return packageError("HOST_INCOMPATIBLE", "connect a compatible execution host before binding packages")
 			}
 			return err
 		}
