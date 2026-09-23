@@ -389,6 +389,7 @@ Important rules:
 - `/api/v1/a2a/*`
 - `/api/v1/mcp`
 - `/api/v1/skills`
+- `/api/v1/creator/skill-packages` and Agent associations ([private package contract](SKILL_PACKAGES.md))
 - `/api/v1/tasks`
 - `/api/v1/workflows`
 - `/api/v1/delivery/*`

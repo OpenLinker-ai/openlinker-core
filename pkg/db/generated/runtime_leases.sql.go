@@ -468,7 +468,7 @@ SELECT a.id AS attempt_id, a.run_id, a.agent_id, a.offer_no, a.lease_id,
        a.runtime_session_id, a.node_id, a.offered_by_core_instance_id,
        a.attached_core_instance_id, a.offered_at, a.offer_expires_at,
        a.lease_expires_at, a.attempt_deadline_at,
-       r.input, r.request_metadata, r.connection_mode_snapshot,
+       r.input, (r.request_metadata - '_openlinker_skill_packages') || jsonb_build_object('_openlinker_skill_packages', COALESCE((SELECT jsonb_build_object('schema_version',1,'bundles',jsonb_agg(jsonb_build_object('binding_id',sp.binding_id,'package_id',sp.package_id,'version_id',sp.version_id,'version',v.version,'digest',sp.digest,'payload',v.payload) ORDER BY sp.package_id)) FROM run_skill_package_snapshots sp JOIN skill_package_versions v ON v.id=sp.version_id WHERE sp.run_id=r.id HAVING count(*)>0), '{"schema_version":1,"bundles":[]}'::jsonb)) AS request_metadata, r.connection_mode_snapshot,
        r.dispatch_state, r.offer_count, r.max_offer_count,
        r.attempt_count, r.max_attempts, r.dispatch_deadline_at,
        r.run_deadline_at, clock_timestamp() AS database_now
@@ -648,7 +648,7 @@ func (q *Queries) LockRuntimeRunAttemptForLeaseMutation(ctx context.Context, arg
 }
 
 const lockNextClaimableRuntimeRunForAgent = `-- name: LockNextClaimableRuntimeRunForAgent :one
-SELECT r.id, r.user_id, r.agent_id, r.input, r.request_metadata,
+SELECT r.id, r.user_id, r.agent_id, r.input, (r.request_metadata - '_openlinker_skill_packages') || jsonb_build_object('_openlinker_skill_packages', COALESCE((SELECT jsonb_build_object('schema_version',1,'bundles',jsonb_agg(jsonb_build_object('binding_id',sp.binding_id,'package_id',sp.package_id,'version_id',sp.version_id,'version',v.version,'digest',sp.digest,'payload',v.payload) ORDER BY sp.package_id)) FROM run_skill_package_snapshots sp JOIN skill_package_versions v ON v.id=sp.version_id WHERE sp.run_id=r.id HAVING count(*)>0), '{"schema_version":1,"bundles":[]}'::jsonb)) AS request_metadata,
        r.connection_mode_snapshot, r.dispatch_state, r.offer_count,
        r.max_offer_count, r.attempt_count, r.max_attempts,
        r.next_attempt_at, r.dispatch_deadline_at, r.run_deadline_at,
@@ -682,6 +682,8 @@ WHERE r.agent_id = $1
             AND a.creator_id = r.user_id
       )
   )
+  AND NOT EXISTS (SELECT 1 FROM run_skill_package_snapshots sp JOIN skill_package_versions sv ON sv.id=sp.version_id
+    WHERE sp.run_id=r.id AND NOT (sv.providers && COALESCE($4::text[], '{}'::text[])))
   AND r.status = 'running'
   AND r.runtime_contract_id = 'openlinker.runtime.v2'
   AND r.connection_mode_snapshot = 'runtime'
@@ -706,6 +708,7 @@ FOR NO KEY UPDATE OF r SKIP LOCKED
 `
 
 type LockNextClaimableRuntimeRunForAgentParams struct {
+	SkillPackageProviders   []string  `db:"skill_package_providers" json:"skill_package_providers"`
 	AgentID                 uuid.UUID `db:"agent_id" json:"agent_id"`
 	BrowserExecutionProfile bool      `db:"browser_execution_profile" json:"browser_execution_profile"`
 	FullBrowserInteraction  bool      `db:"full_browser_interaction" json:"full_browser_interaction"`
@@ -738,6 +741,7 @@ func (q *Queries) LockNextClaimableRuntimeRunForAgent(ctx context.Context, arg L
 		arg.AgentID,
 		arg.BrowserExecutionProfile,
 		arg.FullBrowserInteraction,
+		arg.SkillPackageProviders,
 	)
 	var i LockNextClaimableRuntimeRunForAgentRow
 	err := row.Scan(

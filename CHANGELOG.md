@@ -7,6 +7,12 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+- Add private, immutable skill package versions and owner-managed Agent bindings
+  in schema 093. Runs retain version references; compatible Runtime hosts receive
+  private contents through authenticated assignment delivery. Offline queuing is
+  preserved, and incompatible hosts return a generic service-unavailable error.
+- Add exact public capability detail lookup independently of catalog pagination.
+
 - Pin the verified Go SDK module at `63fc87d73406`, adopting the gRPC
   1.83.2 and protobuf dependency updates while retaining the SDK Go 1.25 baseline.
   Command, credential, session and persistent-state contracts are unchanged.

@@ -429,12 +429,13 @@ func TestLockNextClaimableRuntimeRunForAgentCarriesBrowserOwnershipFence(t *test
 			AgentID:                 agentID,
 			BrowserExecutionProfile: true,
 			FullBrowserInteraction:  true,
+			SkillPackageProviders:   []string{"codex"},
 		},
 	)
 	if err != nil || row.ID != runID {
 		t.Fatalf("LockNextClaimableRuntimeRunForAgent = %#v, %v", row, err)
 	}
-	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, true, true}) {
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, true, true, []string{"codex"}}) {
 		t.Fatalf("claim args = %#v", dbtx.queryRowArgs)
 	}
 	for _, guard := range []string{

@@ -19,7 +19,10 @@ import (
 
 // Handler Skill HTTP 入口。
 type Handler struct {
-	svc       skillService
+	svc     skillService
+	catalog interface {
+		GetSkill(context.Context, string) (db.Skill, error)
+	}
 	q         skillAgentReader // 读写 Agent Skill 前校验 owner
 	validator *validator.Validate
 }
@@ -43,6 +46,7 @@ func NewHandler(svc skillService, pool *pgxpool.Pool) *Handler {
 	return &Handler{
 		svc:       svc,
 		q:         db.New(pool),
+		catalog:   db.New(pool),
 		validator: validator.New(validator.WithRequiredStructEnabled()),
 	}
 }
@@ -52,6 +56,20 @@ func NewHandler(svc skillService, pool *pgxpool.Pool) *Handler {
 //	GET /skills    列出全部内置 skill（/publish 表单与发现页用）
 func (h *Handler) Register(api *echo.Group) {
 	api.GET("/skills", h.ListAll)
+	api.GET("/skills/:id", h.Detail)
+	api.GET("/skills/:category/:name", h.Detail)
+}
+
+// Detail uses an exact catalog identifier; it is independent of list pagination.
+func (h *Handler) Detail(c echo.Context) error {
+	item, err := h.catalog.GetSkill(c.Request().Context(), skillIDFromPath(c))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return httpx.NotFound("capability not found")
+	}
+	if err != nil {
+		return httpx.Internal("could not read capability")
+	}
+	return c.JSON(http.StatusOK, toSkillItem(&item))
 }
 
 // RegisterProtected 创作者侧端点（需 JWT）。

@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/skillpackage"
 )
 
 // Runtime event errors are transport-neutral. HTTP, WebSocket, gRPC, and MCP
@@ -356,6 +357,12 @@ func (s *EventStore) Append(
 			FencingToken:       identity.FencingToken,
 		})
 		if err != nil {
+			return err
+		}
+
+		// Invalid optional receipts are retained as raw events but never treated as
+		// loading evidence. ACK them so the SDK's ordered spool can continue.
+		if err := skillpackage.RecordReceipt(ctx, tx, identity.RunID, principal.AgentID, request.EventType, payload); err != nil && !errors.Is(err, skillpackage.ErrInvalidReceipt) {
 			return err
 		}
 
