@@ -16,18 +16,20 @@ import (
 )
 
 const (
-	CoreVersion int64 = 94
+	CoreVersion int64 = 95
 	// CoreShapeVersion is the migration version the shape constants below were
 	// measured against. The digest and the object counts come from a live
 	// catalog, so adding a migration cannot update them offline; leaving them
 	// stale would pass every test and then fail the postflight shape check at
 	// deploy time. A test requires these two to match, turning that into a
 	// local failure with an explicit instruction.
-	CoreShapeVersion int64 = 94
+	CoreShapeVersion int64 = 95
 	// CoreUpgradeShapeVersion is the predecessor version CoreUpgradeSchemaDigest
 	// and the upgrade counts were measured against. Raising CoreUpgradeVersion
 	// without remeasuring would make the upgrade path validate a predecessor
 	// against another version's fingerprint.
+	CoreNodeUpgradePredecessorVersion  int64 = 94
+	CoreNodeUpgradePredecessorDigest         = "8f0c9af06f21b01ce80e36b817faa83dea4cd416d37037f5d366714e65332438"
 	CoreCLILoginPredecessorVersion     int64 = 93
 	CoreCLILoginPredecessorDigest            = "d2a27f128b926d7e06f1a25baa5b4f1d2c0d166764a3de074f2e11c0bd632842"
 	CoreSkillPackagePredecessorVersion int64 = 92
@@ -37,7 +39,7 @@ const (
 	CoreReviewedBridgeVersion          int64 = 88
 	CoreLegacyBridgeVersion            int64 = 86
 	CloudVersion                       int64 = 55
-	CoreSchemaDigest                         = "8f0c9af06f21b01ce80e36b817faa83dea4cd416d37037f5d366714e65332438"
+	CoreSchemaDigest                         = "f9f50c587f496bcc49be97b8cc76a3efa637563c7b2ca08705cb9e6fff5195ae"
 	CoreUpgradeSchemaDigest                  = "1b2591b579018b4edd6465e19f36823fca28af01068742358293d1367c1c1ed8"
 	CoreReviewedBridgeSchemaDigest           = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
 	CoreLegacyBridgeSchemaDigest             = "6c22808a8cd658cf827a5828a92d3343f040d7d6ff3302f9fdab691fe90aec5b"
@@ -45,6 +47,7 @@ const (
 )
 
 var coreTables = []string{
+	"runtime_node_upgrade_state", "runtime_node_upgrade_operations", "runtime_node_upgrade_admissions",
 	"cli_login_requests", "cli_login_rate_limits",
 	"skill_packages", "skill_package_versions", "agent_skill_package_bindings", "run_skill_package_snapshots",
 	"a2a_context_mappings",
@@ -268,15 +271,16 @@ func Inspect(ctx context.Context, databaseURL string) (Snapshot, error) {
 	// without widening them here makes every predecessor fail to read its seed
 	// shape, which reads as a corrupt install rather than a stale constant.
 	if snapshot.CoreShape.Tables == int64(len(coreTables)) ||
-		(snapshot.Core.Version == CoreCLILoginPredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-2)) ||
-		(snapshot.Core.Version == CoreSkillPackagePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-6)) ||
+		(snapshot.Core.Version == CoreNodeUpgradePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-3)) ||
+		(snapshot.Core.Version == CoreCLILoginPredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-5)) ||
+		(snapshot.Core.Version == CoreSkillPackagePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-9)) ||
 		(snapshot.Core.Version == CoreUpgradeVersion &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-8)) ||
+			snapshot.CoreShape.Tables == int64(len(coreTables)-11)) ||
 		(snapshot.Core.Version == CoreReviewedBridgeVersion &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-9)) ||
+			snapshot.CoreShape.Tables == int64(len(coreTables)-12)) ||
 		(snapshot.Core.Version == CoreLegacyBridgeVersion &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-12)) {
-		if err := inspectCoreSeeds(ctx, conn, &snapshot.CoreShape); err != nil {
+			snapshot.CoreShape.Tables == int64(len(coreTables)-15)) {
+		if err := inspectCoreSeeds(ctx, conn, &snapshot.CoreShape, snapshot.Core.Version); err != nil {
 			return Snapshot{}, err
 		}
 	}
@@ -481,7 +485,11 @@ func inspectSchemaDigest(ctx context.Context, conn *pgx.Conn, tables []string, c
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func inspectCoreSeeds(ctx context.Context, conn *pgx.Conn, shape *SchemaShape) error {
+func inspectCoreSeeds(ctx context.Context, conn *pgx.Conn, shape *SchemaShape, version int64) error {
+	schemaVersion, migrationName := 95, "095_runtime_node_upgrade"
+	if version > 0 && version < 95 {
+		schemaVersion, migrationName = 80, "080_runtime_attempt_transport_evidence"
+	}
 	queries := []struct {
 		label string
 		query string
@@ -491,7 +499,7 @@ func inspectCoreSeeds(ctx context.Context, conn *pgx.Conn, shape *SchemaShape) e
 		{"Core instance identity", `SELECT count(*) FROM public.core_instance_identity WHERE singleton`, nil, &shape.CoreIdentities},
 		{"Runtime cluster control", `SELECT count(*) FROM public.runtime_cluster_control WHERE singleton_id = 1`, nil, &shape.RuntimeControls},
 		{"Runtime schema contracts", `SELECT count(*) FROM public.runtime_schema_contracts`, nil, &shape.RuntimeSchemas},
-		{"current Runtime schema", `SELECT count(*) FROM public.runtime_schema_contracts WHERE schema_version = 80 AND migration_name = '080_runtime_attempt_transport_evidence' AND runtime_contract_id = 'openlinker.runtime.v2' AND runtime_contract_digest = '4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481' AND is_current`, nil, &shape.CurrentRuntime},
+		{"current Runtime schema", `SELECT count(*) FROM public.runtime_schema_contracts WHERE schema_version = $1 AND migration_name = $2 AND runtime_contract_id = 'openlinker.runtime.v2' AND runtime_contract_digest = '4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481' AND is_current`, []any{schemaVersion, migrationName}, &shape.CurrentRuntime},
 		{"Runtime wire contracts", `SELECT count(*) FROM public.runtime_wire_contracts`, nil, &shape.RuntimeWires},
 		{"current Runtime wire", `SELECT count(*) FROM public.runtime_wire_contracts WHERE runtime_contract_id = 'openlinker.runtime.v2' AND runtime_contract_digest = '4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481' AND support_tier = 'current'`, nil, &shape.CurrentWire},
 		{"previous Runtime wire", `SELECT count(*) FROM public.runtime_wire_contracts WHERE runtime_contract_id = 'openlinker.runtime.v2' AND runtime_contract_digest = '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9' AND support_tier = 'previous'`, nil, &shape.PreviousWire},
@@ -538,9 +546,9 @@ func (s Snapshot) ValidateCoreUp() (bool, error) {
 			return false, err
 		}
 		return true, nil
-	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion:
-		if s.Core.Version == CoreCLILoginPredecessorVersion && (!s.CallbackOwnerIndexValid || s.UnclassifiedBrowserAgents != 0) {
-			return false, errors.New("Core 093 predecessor has invalid callback index or incomplete Browser profile backfill")
+	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion:
+		if s.Core.Version >= CoreCLILoginPredecessorVersion && (!s.CallbackOwnerIndexValid || s.UnclassifiedBrowserAgents != 0) {
+			return false, errors.New("Core predecessor has invalid callback index or incomplete Browser profile backfill")
 		}
 		if err := validateCorePredecessorShape(s.CoreShape, s.Core.Version); err != nil {
 			return false, err
@@ -594,9 +602,9 @@ func (s Snapshot) ValidateCloudUp() (bool, error) {
 				s.UnclassifiedBrowserAgents,
 			)
 		}
-	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion:
-		if s.Core.Version == CoreCLILoginPredecessorVersion && (!s.CallbackOwnerIndexValid || s.UnclassifiedBrowserAgents != 0) {
-			return false, errors.New("Core 093 predecessor has invalid callback index or incomplete Browser profile backfill")
+	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion:
+		if s.Core.Version >= CoreCLILoginPredecessorVersion && (!s.CallbackOwnerIndexValid || s.UnclassifiedBrowserAgents != 0) {
+			return false, errors.New("Core predecessor has invalid callback index or incomplete Browser profile backfill")
 		}
 		if err := validateCorePredecessorShape(s.CoreShape, s.Core.Version); err != nil {
 			return false, fmt.Errorf(
@@ -688,6 +696,38 @@ func validateMigrationTableState(owner string, state MigrationTableState) error 
 func validateCoreShape(shape SchemaShape) error {
 	want := SchemaShape{
 		Digest: CoreSchemaDigest,
+		// 095 adds controlled Node operations, revisions and successor admissions.
+		// Measured on a clean PostgreSQL 16 with 086..095 applied; the digest is
+		// a catalog fingerprint and cannot be derived from the DDL alone.
+		Tables:            84,
+		Constraints:       691,
+		Indexes:           290,
+		Triggers:          75,
+		CoreIdentities:    1,
+		RuntimeControls:   1,
+		RuntimeSchemas:    11,
+		CurrentRuntime:    1,
+		RuntimeWires:      5,
+		CurrentWire:       1,
+		PreviousWire:      1,
+		BuiltInSkills:     30,
+		BuiltInSkillCases: 15,
+	}
+	if shape.Digest != want.Digest || shape.Tables != want.Tables || shape.Constraints != want.Constraints ||
+		shape.Indexes != want.Indexes || shape.Triggers != want.Triggers ||
+		shape.CoreIdentities != want.CoreIdentities || shape.RuntimeControls != want.RuntimeControls ||
+		shape.RuntimeSchemas != want.RuntimeSchemas || shape.CurrentRuntime != want.CurrentRuntime ||
+		shape.RuntimeWires != want.RuntimeWires || shape.CurrentWire != want.CurrentWire ||
+		shape.PreviousWire != want.PreviousWire || shape.BuiltInSkills != want.BuiltInSkills ||
+		shape.BuiltInSkillCases < want.BuiltInSkillCases {
+		return fmt.Errorf("Core schema fingerprint mismatch: %s", formatShape(shape))
+	}
+	return nil
+}
+
+func validateCoreNodeUpgradePredecessorShape(shape SchemaShape) error {
+	want := SchemaShape{
+		Digest: CoreNodeUpgradePredecessorDigest,
 		// 094 adds expiring CLI authorization grants and shared rate counters.
 		// Measured on a clean PostgreSQL 16 with 086..094 applied; the digest is
 		// a catalog fingerprint and cannot be derived from the DDL alone.
@@ -782,6 +822,9 @@ func validateCorePackagePredecessorShape(shape SchemaShape) error {
 }
 
 func validateCorePredecessorShape(shape SchemaShape, version int64) error {
+	if version == CoreNodeUpgradePredecessorVersion {
+		return validateCoreNodeUpgradePredecessorShape(shape)
+	}
 	if version == CoreCLILoginPredecessorVersion {
 		return validateCoreLoginPredecessorShape(shape)
 	}

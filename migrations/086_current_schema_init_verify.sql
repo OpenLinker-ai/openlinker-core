@@ -13,8 +13,8 @@ BEGIN
     FROM pg_catalog.pg_tables
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_tables <> 81 THEN
-        RAISE EXCEPTION 'Core initializer table count is %, expected 81', public_tables;
+    IF public_tables <> 84 THEN
+        RAISE EXCEPTION 'Core initializer table count is %, expected 84', public_tables;
     END IF;
 
     SELECT count(*) INTO public_constraints
@@ -23,16 +23,16 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 670 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 670', public_constraints;
+    IF public_constraints <> 691 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 691', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 286 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 286', public_indexes;
+    IF public_indexes <> 290 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 290', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers
@@ -42,16 +42,16 @@ BEGIN
     WHERE n.nspname = 'public'
       AND c.relname NOT IN ('schema_migrations', 'schema_migrations_cloud')
       AND NOT t.tgisinternal;
-    IF public_triggers <> 70 THEN
-        RAISE EXCEPTION 'Core initializer trigger count is %, expected 70', public_triggers;
+    IF public_triggers <> 75 THEN
+        RAISE EXCEPTION 'Core initializer trigger count is %, expected 75', public_triggers;
     END IF;
 
     SELECT count(*) INTO public_functions
     FROM pg_catalog.pg_proc p
     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public';
-    IF public_functions <> 65 THEN
-        RAISE EXCEPTION 'Core initializer function count is %, expected 65', public_functions;
+    IF public_functions <> 68 THEN
+        RAISE EXCEPTION 'Core initializer function count is %, expected 68', public_functions;
     END IF;
 
     IF (SELECT count(*) FROM skills WHERE id IN (
@@ -81,12 +81,12 @@ BEGIN
         RAISE EXCEPTION 'Core singleton initialization is incomplete';
     END IF;
 
-    IF (SELECT count(*) FROM runtime_schema_contracts) <> 10
+    IF (SELECT count(*) FROM runtime_schema_contracts) <> 11
        OR (SELECT count(*) FROM runtime_schema_contracts WHERE is_current) <> 1
        OR NOT EXISTS (
             SELECT 1 FROM runtime_schema_contracts
-            WHERE schema_version = 80
-              AND migration_name = '080_runtime_attempt_transport_evidence'
+            WHERE schema_version = 95
+              AND migration_name = '095_runtime_node_upgrade'
               AND runtime_contract_id = 'openlinker.runtime.v2'
               AND runtime_contract_digest = '4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481'
               AND is_current

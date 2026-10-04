@@ -7,18 +7,18 @@ canonical seed data for a fresh database. The migration runner then applies
 `090_task_callback_owner_index.up.sql`,
 `091_browser_interaction_policy.up.sql`,
 `092_browser_observation_audit.up.sql`, and
-`093_skill_packages.up.sql` and `094_cli_login.up.sql`. Supported exact clean predecessors are `093`, `092`,
-`091`, `088` and `086`; the current version is `094`.
+`093_skill_packages.up.sql`, `094_cli_login.up.sql` and `095_runtime_node_upgrade.up.sql`. Supported exact clean predecessors are `094`, `093`, `092`,
+`091`, `088` and `086`; the current version is `095`.
 `086_current_schema_init_verify.sql` is the PostgreSQL 16 current-catalog and
 seed fingerprint used after the complete migration chain. Fresh and predecessor
-paths therefore execute the same `094` DDL and converge on one version `094`
+paths therefore execute the same `095` DDL and converge on one version `095`
 catalog fingerprint without an idempotent duplicate schema definition.
 
 Migration `093` adds private skill packages, immutable versions, Agent bindings
 and per-Run references to pinned versions. Payloads are joined only for authenticated
 assignment delivery; foreign keys prevent deleting referenced versions, with a
 `(package_id, version_id)` snapshot index for those reference checks. This
-source migration has not been released or deployed.
+migration was included in the v0.2.0 baseline.
 
 Migration `091` also adds an Owner-only
 `runtime_agent_browser_policy_intents` staging row for a private Runtime Agent
@@ -31,7 +31,7 @@ standard Sessions, publication and connection-mode changes therefore cannot
 race past the initial policy decision.
 
 The migration command accepts only a truly empty database, an exact clean
-supported predecessor (`093`, `092`, `091`, `088` or `086`), or the exact clean version `094`
+supported predecessor (`094`, `093`, `092`, `091`, `088` or `086`), or the exact clean version `095`
 current schema.
 Exactness is enforced with catalog object counts and a SHA-256 fingerprint over
 table, column/default, constraint, index, trigger, and function definitions.
@@ -66,7 +66,14 @@ enabling the new Core read path.
 
 Migration `094` adds expiring CLI authorization grants and shared rate counters.
 It stores hashes of device codes, user codes and browser authorization codes;
-User Token plaintext is returned only once at redemption. The PostgreSQL 16
-current shape is 81 tables, 670 constraints, 286 indexes and 70 triggers, with
-digest `8f0c9af06f21b01ce80e36b817faa83dea4cd416d37037f5d366714e65332438`.
-The exact `093` predecessor retains its prior fingerprint.
+User Token plaintext is returned only once at redemption. Exact `094` and `093`
+predecessors retain their prior fingerprints.
+
+Migration `095` adds immutable Node upgrade operations, revision state and
+successor admissions with database enforcement. It changes Runtime schema
+readiness identity and is forward-only. Use coordinated Core maintenance; see
+[controlled Node upgrades](../docs/runtime-node-upgrade.md) before upgrading.
+
+After the full chain through `095`, the PostgreSQL 16 current shape is 84 tables,
+691 constraints, 290 indexes and 75 triggers, with digest
+`f9f50c587f496bcc49be97b8cc76a3efa637563c7b2ca08705cb9e6fff5195ae`.

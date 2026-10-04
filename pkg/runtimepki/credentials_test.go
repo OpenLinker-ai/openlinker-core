@@ -159,6 +159,19 @@ SELECT count(*) FROM runtime_node_certificates WHERE node_id = $1`, nodeID).Scan
 		t.Fatalf("renewal inserted %d certificate rows, want 2", certificateCount)
 	}
 
+	// Credential renewal must not silently change an enrolled Node's version.
+	changedVersion := request
+	changedVersion.NodeVersion = "credential-replay-v2"
+	_, err = service.issueOrReplayCredential(ctx, token, nodeID, changedVersion, csr)
+	var versionErr *httpx.HTTPError
+	if !errors.As(err, &versionErr) || versionErr.Code != "RUNTIME_NODE_UPDATE_REJECTED" {
+		t.Fatalf("uncontrolled renewal version change = %v, want RUNTIME_NODE_UPDATE_REJECTED", err)
+	}
+	var persistedVersion string
+	if err = pool.QueryRow(ctx, "SELECT node_version FROM runtime_nodes WHERE node_id=$1", nodeID).Scan(&persistedVersion); err != nil || persistedVersion != request.NodeVersion {
+		t.Fatalf("rejected renewal changed version: %s / %v", persistedVersion, err)
+	}
+
 	// Hold only the token lock: renewal reaches its authoritative credential
 	// recheck after locking the enrolled Node, then times out in PostgreSQL.
 	blocker, err := pool.Begin(ctx)

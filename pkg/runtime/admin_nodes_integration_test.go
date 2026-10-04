@@ -285,6 +285,14 @@ TRUNCATE runtime_signal_outbox, runtime_session_attachments,
 }
 
 func insertRuntimeNodeAdminFixture(t *testing.T, pool *pgxpool.Pool) runtimeNodeAdminFixture {
+	return insertRuntimeNodeAdminFixtureVersion(t, pool, "node-admin-v2")
+}
+
+func insertRuntimeNodeAdminFixtureVersion(t *testing.T, pool *pgxpool.Pool, version string) runtimeNodeAdminFixture {
+	return insertRuntimeNodeAdminFixtureDevice(t, pool, version, strings.Repeat("b", 64))
+}
+
+func insertRuntimeNodeAdminFixtureDevice(t *testing.T, pool *pgxpool.Pool, version, thumbprint string) runtimeNodeAdminFixture {
 	t.Helper()
 	creatorID := insertCreator(t, pool)
 	agentID := insertAgent(t, pool, creatorID, "https://example.com/runtime", 0, "approved")
@@ -322,12 +330,12 @@ INSERT INTO runtime_nodes (
     device_public_key_thumbprint, node_version, protocol_version,
     runtime_contract_id, runtime_contract_digest, features,
     capacity, inflight, status, last_seen_at
-) VALUES ($1, 'Node admin fixture', $2, $3, 'node-admin-v2', 2,
+) VALUES ($1, 'Node admin fixture', $2, $3, $7, 2,
           $4, $5, $6, 4, 1, 'active',
           clock_timestamp() - INTERVAL '30 seconds')`,
-			fixture.nodeID, serial, strings.Repeat("b", 64),
+			fixture.nodeID, serial, thumbprint,
 			runtime.RuntimeContractID, runtime.RuntimeContractDigest,
-			features); err != nil {
+			features, version); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(context.Background(), `
@@ -337,13 +345,13 @@ INSERT INTO runtime_sessions (
     protocol_version, runtime_contract_id, runtime_contract_digest,
     features, capacity, inflight, status, attached_core_instance_id,
     heartbeat_at
-) VALUES ($1, $2, $3, $4, 'admin-worker', 1, $5, 'node-admin-v2',
+) VALUES ($1, $2, $3, $4, 'admin-worker', 1, $5, $10,
           2, $6, $7, $8, 2, 1, 'active', $9,
           clock_timestamp() - INTERVAL '30 seconds')`,
 			fixture.sessionID, fixture.nodeID, fixture.agentID,
 			fixture.credentialID, serial, runtime.RuntimeContractID,
 			runtime.RuntimeContractDigest, features,
-			fixture.coreInstanceID); err != nil {
+			fixture.coreInstanceID, version); err != nil {
 			return err
 		}
 		_, err := tx.Exec(context.Background(), `

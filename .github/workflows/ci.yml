@@ -112,3 +112,56 @@ jobs:
           grep -q -- '--- PASS: TestRuntimeCancellationHTTPContentionRetriesWithoutWake' /tmp/runtime-cancellation.log
           grep -q -- '--- PASS: TestRuntimeCancellationNormalAppendSerializesOnSession' /tmp/runtime-cancellation.log
           grep -q -- '--- PASS: TestRuntimeCancellationPresenceUsesSessionAndDeadline' /tmp/runtime-cancellation.log
+
+
+  node-upgrade:
+    name: Controlled Node migration, lifecycle and capacity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: openlinker_test
+          POSTGRES_PASSWORD: openlinker_test
+          POSTGRES_DB: openlinker_upgrade
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openlinker_test -d openlinker_upgrade"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      DATABASE_URL: postgres://openlinker_test:openlinker_test@localhost:5432/openlinker_upgrade?sslmode=disable
+      TEST_DATABASE_URL: postgres://openlinker_test:openlinker_test@localhost:5432/openlinker_upgrade?sslmode=disable
+      JWT_SECRET: runtime-upgrade-integration-only-secret
+      MIGRATIONS_DIR: ./migrations
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Initialize disposable current schema
+        run: go run ./cmd/api migrate up
+      - name: Prove controlled Node operations and renewal fences
+        shell: bash
+        env:
+          RUNTIME_NODE_UPGRADE_CAPACITY: "1"
+        run: |
+          set -euo pipefail
+          go test -p 1 -race -v ./pkg/runtime ./pkg/runtimepki -run '^TestRuntimeNodeControlled|^TestCredentialIssuanceReplaysCommittedLeafWithinMinimumInterval$' -count=1 -timeout=8m | tee /tmp/node-upgrade.log
+          if grep -q -- '--- SKIP:' /tmp/node-upgrade.log; then exit 1; fi
+          grep -q -- '--- PASS: TestRuntimeNodeControlledUpgradeTotalBudget' /tmp/node-upgrade.log
+          grep -q -- '--- PASS: TestRuntimeNodeControlledUpgradeScopeChangeRetries' /tmp/node-upgrade.log
+          grep -q -- '--- PASS: TestRuntimeNodeControlledUpgradeCapacity' /tmp/node-upgrade.log
+      - name: Measure upgrade and normal Run latency under database delay and load
+        shell: bash
+        env:
+          RUNTIME_NODE_UPGRADE_CAPACITY: "1"
+          RUNTIME_NODE_UPGRADE_CAPACITY_LOAD: "1"
+        run: |
+          set -euo pipefail
+          go test -v ./pkg/runtime -run '^TestRuntimeNodeControlledUpgrade(Capacity|SupersededHistory)$' -count=1 -timeout=8m | tee /tmp/node-upgrade-load.log
+          if grep -q -- '--- SKIP:' /tmp/node-upgrade-load.log; then exit 1; fi
+          grep -q -- '--- PASS: TestRuntimeNodeControlledUpgradeCapacity' /tmp/node-upgrade-load.log
+          grep -q -- '--- PASS: TestRuntimeNodeControlledUpgradeSupersededHistory' /tmp/node-upgrade-load.log

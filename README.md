@@ -441,3 +441,7 @@ Apache-2.0. See [LICENSE](./LICENSE).
 Core owns CLI consent, one-time PKCE/device-code exchange and User Token self-revocation.
 See [CLI authentication contract](CLI_AUTH.md) for migration 094, routes and rollout requirements.
 Core 负责 CLI 浏览器授权、一次性凭据兑换和自撤销；自托管无需 Cloud。
+
+## Controlled Node upgrades
+
+Schema 095 provides administrator-controlled Node version changes and restart after drain. See [the migration and operator guide](docs/runtime-node-upgrade.md) for the coordinated Core maintenance requirement, credential-renewal compatibility change, tested-state limits and release gates.

@@ -349,6 +349,8 @@ func (h *Handler) RegisterAdmin(api *echo.Group, jwtMw, adminMw echo.MiddlewareF
 	api.POST("/admin/runtime/nodes/:id/drain", h.DrainRuntimeNode, jwtMw, adminMw)
 	api.POST("/admin/runtime/nodes/:id/activate", h.ActivateRuntimeNode, jwtMw, adminMw)
 	api.POST("/admin/runtime/nodes/:id/revoke", h.RevokeRuntimeNode, jwtMw, adminMw)
+	api.GET("/admin/runtime/nodes/:id/upgrade", h.CheckRuntimeNodeUpgrade, jwtMw, adminMw)
+	api.POST("/admin/runtime/nodes/:id/upgrade", h.UpgradeRuntimeNode, jwtMw, adminMw)
 }
 
 // CancelRun cancels an owned, cancellable run. The concrete Service already
