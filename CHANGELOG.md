@@ -7,6 +7,33 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+## 0.3.0 - 2026-10-05
+
+### Added
+
+- Administrator-only controlled Runtime Node version changes and restart after
+  drain, with revision CAS, immutable operation receipts, expiring per-Worker
+  successor admissions and database enforcement. Original Node/Worker/credential
+  and DataDir remain authoritative; closed Session IDs never revive.
+- Fail-closed PostgreSQL migration, authorization, lifecycle, contention and
+  capacity gates, including normal Run execution under database delay/load.
+
+### Compatibility
+
+- Schema 095 advances the Runtime schema identity from 80 to 95 without changing
+  the wire contract. Upgrade Core in a coordinated maintenance window. Mixed
+  Core releases and rollback of this durable migration are unsupported.
+- Replacing an enrolled Node binary without an authorized version operation is
+  unsupported. Credential renewal can no longer silently change `node_version`;
+  it returns `RUNTIME_NODE_UPDATE_REJECTED`. The target must keep the same
+  protocol, contract and advertised feature set. See the
+  [operator guide](docs/runtime-node-upgrade.md) and exact binary/state matrix.
+- The upgrade scope supports at most 10000 live/latest candidate Session rows.
+  Closed epochs and superseded offline generations stay preserved outside the
+  lock/fence scope; the existing monotonic-generation check prevents their reuse.
+  Whole-Node quiescence still includes all historical inflight/Attempt/attachment
+  evidence. The larger-history capacity gate uses 100 Workers and 100000 epochs.
+
 ## 0.2.1 - 2026-10-04
 
 ### Fixed

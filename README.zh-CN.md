@@ -397,3 +397,7 @@ Apache-2.0。详见 [LICENSE](./LICENSE)。
 Core owns CLI consent, one-time PKCE/device-code exchange and User Token self-revocation.
 See [CLI authentication contract](CLI_AUTH.md) for migration 094, routes and rollout requirements.
 Core 负责 CLI 浏览器授权、一次性凭据兑换和自撤销；自托管无需 Cloud。
+
+## Node 受控升级
+
+Schema 095 增加管理员授权的 Node 版本变更及 drain 停机后的恢复。Core 需要协调维护升级，不能滚动混跑新旧 schema。已登记 Node 的续证不再允许改变版本；须按[迁移与操作指南](docs/runtime-node-upgrade.md)排空、授权变更、保留原身份与数据目录启动并激活。二进制与 Provider 状态的支持范围以发布验收矩阵为准。

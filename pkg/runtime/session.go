@@ -2036,8 +2036,8 @@ func (t *postgresRuntimeSessionTransaction) LockRuntimeLifecycleSessions(
 	rows, err := t.tx.Query(ctx, `
 SELECT runtime_session_id
 FROM runtime_sessions
-WHERE status IN ('active', 'draining', 'offline')
-  AND (runtime_session_id = $1 OR credential_id = $2)
+WHERE runtime_session_id = $1
+   OR (status IN ('active', 'draining', 'offline') AND credential_id = $2)
 ORDER BY runtime_session_id ASC
 FOR UPDATE`, targetSessionID, credentialID)
 	if err != nil {
@@ -2095,10 +2095,16 @@ func (t *postgresRuntimeSessionTransaction) CreateDrainingRuntimeSessionSuccesso
 	ctx context.Context,
 	params db.CreateDrainingRuntimeSessionSuccessorParams,
 ) (db.RuntimeSession, error) {
+	if session, controlled, err := t.createControlledRuntimeSessionSuccessor(ctx, params); controlled || err != nil {
+		return session, err
+	}
 	return t.queries.CreateDrainingRuntimeSessionSuccessor(ctx, params)
 }
 
 func (t *postgresRuntimeSessionTransaction) ClaimRuntimeSessionForCore(ctx context.Context, params db.ClaimRuntimeSessionForCoreParams) (db.RuntimeSession, error) {
+	if err := t.authorizeControlledSessionClaim(ctx, params); err != nil {
+		return db.RuntimeSession{}, err
+	}
 	return t.queries.ClaimRuntimeSessionForCore(ctx, params)
 }
 

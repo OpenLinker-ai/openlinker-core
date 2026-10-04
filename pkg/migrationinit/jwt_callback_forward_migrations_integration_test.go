@@ -23,7 +23,7 @@ func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91
 	if baseURL == "" {
 		t.Skip("TEST_DATABASE_URL is required")
 	}
-	for _, mode := range []string{"fresh", "version-86", "version-88", "version-91", "version-92", "version-93"} {
+	for _, mode := range []string{"fresh", "version-86", "version-88", "version-91", "version-92", "version-93", "version-94"} {
 		t.Run(mode, func(t *testing.T) {
 			databaseURL := createMigrationTestDatabase(t, baseURL)
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -33,7 +33,7 @@ func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91
 				if err != nil {
 					t.Fatal(err)
 				}
-				version := map[string]int64{"version-86": 86, "version-88": 88, "version-91": 91, "version-92": 92, "version-93": 93}[mode]
+				version := map[string]int64{"version-86": 86, "version-88": 88, "version-91": 91, "version-92": 92, "version-93": 93, "version-94": 94}[mode]
 				for _, migration := range []struct {
 					version int64
 					file    string
@@ -41,7 +41,7 @@ func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91
 					{86, "086_current_schema_init.up.sql"}, {87, "087_browser_agent_execution_profile.up.sql"},
 					{88, "088_browser_human_control.up.sql"}, {89, "089_user_jwt_token_version.up.sql"},
 					{90, "090_task_callback_owner_index.up.sql"}, {91, "091_browser_interaction_policy.up.sql"},
-					{92, "092_browser_observation_audit.up.sql"}, {93, "093_skill_packages.up.sql"},
+					{92, "092_browser_observation_audit.up.sql"}, {93, "093_skill_packages.up.sql"}, {94, "094_cli_login.up.sql"},
 				} {
 					if migration.version <= version {
 						applyMigrationFile(t, ctx, conn, migration.file)
@@ -180,6 +180,10 @@ WHERE n.nspname = 'public'
 }
 
 func migrateTestDatabaseToCurrent(t *testing.T, databaseURL string) {
+	migrateTestDatabaseToVersion(t, databaseURL, uint(CoreVersion))
+}
+
+func migrateTestDatabaseToVersion(t *testing.T, databaseURL string, version uint) {
 	t.Helper()
 	migrationDir, err := filepath.Abs(filepath.Join("..", "..", "migrations"))
 	if err != nil {
@@ -189,7 +193,7 @@ func migrateTestDatabaseToCurrent(t *testing.T, databaseURL string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrator.Up(); err != nil {
+	if err := migrator.Migrate(version); err != nil {
 		_, _ = migrator.Close()
 		t.Fatal(err)
 	}
@@ -252,7 +256,7 @@ func TestCLILoginRollbackAndReapplyIntegration(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL is required")
 	}
 	databaseURL := createMigrationTestDatabase(t, base)
-	migrateTestDatabaseToCurrent(t, databaseURL)
+	migrateTestDatabaseToVersion(t, databaseURL, 94)
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {

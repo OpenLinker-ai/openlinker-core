@@ -26,8 +26,8 @@ func TestRuntimeSchemaChecksumMatchesCurrentContractTuple(t *testing.T) {
 	}
 }
 
-func TestRuntimeSchemaIdentityTracksAttemptTransportEvidenceMigration(t *testing.T) {
-	if RuntimeSchemaVersion != 80 || RuntimeSchemaMigrationName != "080_runtime_attempt_transport_evidence" {
+func TestRuntimeSchemaIdentityTracksControlledNodeUpgradeMigration(t *testing.T) {
+	if RuntimeSchemaVersion != 95 || RuntimeSchemaMigrationName != "095_runtime_node_upgrade" {
 		t.Fatalf("runtime schema identity = %d:%s", RuntimeSchemaVersion, RuntimeSchemaMigrationName)
 	}
 }
