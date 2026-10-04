@@ -44,7 +44,7 @@ func JWTMiddlewareWithUserStatus(secret string, users UserStatusChecker) echo.Mi
 			if err := users.EnsureJWTUserVersion(c.Request().Context(), uid, claims.TokenVersion); err != nil {
 				return err
 			}
-			SetPrincipal(c, &AuthPrincipal{UserID: uid, AuthMethod: AuthMethodJWT, Grants: []Grant{}})
+			SetPrincipal(c, &AuthPrincipal{UserID: uid, AuthMethod: AuthMethodJWT, Grants: []Grant{}, JWTTokenVersion: &claims.TokenVersion})
 			return next(c)
 		}
 	}

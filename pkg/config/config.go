@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/kelseyhightower/envconfig"
@@ -48,10 +49,13 @@ type Config struct {
 	GithubClientSecret string `envconfig:"GITHUB_OAUTH_CLIENT_SECRET"`
 
 	// 前端 URL
-	FrontendURL                 string `envconfig:"FRONTEND_URL"`
-	APIURL                      string `envconfig:"API_URL" default:"http://localhost:8080"`
-	OAuthCallbackBaseURL        string `envconfig:"OAUTH_CALLBACK_BASE_URL"`
-	OAuthAllowedFrontendOrigins string `envconfig:"OAUTH_ALLOWED_FRONTEND_ORIGINS"`
+	FrontendURL string `envconfig:"FRONTEND_URL"`
+	// Only these proxy networks may supply client IPs for CLI login rate limits.
+	// Empty means the direct peer; no private or loopback ranges are implicit.
+	CLIAuthTrustedProxyCIDRs    []string `envconfig:"CLI_AUTH_TRUSTED_PROXY_CIDRS"`
+	APIURL                      string   `envconfig:"API_URL" default:"http://localhost:8080"`
+	OAuthCallbackBaseURL        string   `envconfig:"OAUTH_CALLBACK_BASE_URL"`
+	OAuthAllowedFrontendOrigins string   `envconfig:"OAUTH_ALLOWED_FRONTEND_ORIGINS"`
 	// InternalToken 保护 /internal/user-tokens/introspect，并可复用于 Core
 	// 与受信任私有服务（如 LLM 代理）的内部鉴权。不使用内部接口可留空。
 	InternalToken string `envconfig:"OPENLINKER_INTERNAL_TOKEN"`
@@ -166,7 +170,22 @@ func Load() (*Config, error) {
 	if err := validateRuntimeWebSocketConfig(&cfg); err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
+	if _, err := cfg.CLIAuthProxyRanges(); err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
 	return &cfg, nil
+}
+
+func (cfg *Config) CLIAuthProxyRanges() ([]*net.IPNet, error) {
+	var ranges []*net.IPNet
+	for _, raw := range cfg.CLIAuthTrustedProxyCIDRs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, fmt.Errorf("CLI_AUTH_TRUSTED_PROXY_CIDRS must contain only CIDRs")
+		}
+		ranges = append(ranges, network)
+	}
+	return ranges, nil
 }
 
 func validateRuntimeWebSocketConfig(cfg *Config) error {

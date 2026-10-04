@@ -895,11 +895,11 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 func currentCoreMigrationSnapshot() migrationinit.Snapshot {
 	return migrationinit.Snapshot{
 		Core:                    migrationinit.MigrationTableState{Exists: true, Rows: 1, Version: migrationinit.CoreVersion},
-		NonBookkeepingObjects:   79,
+		NonBookkeepingObjects:   81,
 		CallbackOwnerIndexValid: true,
 		CoreShape: migrationinit.SchemaShape{
 			Digest: migrationinit.CoreSchemaDigest,
-			Tables: 79, Constraints: 664, Indexes: 281, Triggers: 70,
+			Tables: 81, Constraints: 670, Indexes: 286, Triggers: 70,
 			CoreIdentities: 1, RuntimeControls: 1, RuntimeSchemas: 10,
 			CurrentRuntime: 1, RuntimeWires: 5, CurrentWire: 1, PreviousWire: 1,
 			BuiltInSkills: 30, BuiltInSkillCases: 15,

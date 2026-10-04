@@ -33,6 +33,7 @@ type AuthPrincipal struct {
 	IssuerInstanceID   string     `json:"issuer_instance_id,omitempty"`
 	Grants             []Grant    `json:"grants"`
 	UserStatusVerified bool       `json:"-"`
+	JWTTokenVersion    *int64     `json:"-"` // Verified JWT claim, never a User Token claim.
 }
 
 func (p *AuthPrincipal) Permissions() []string {

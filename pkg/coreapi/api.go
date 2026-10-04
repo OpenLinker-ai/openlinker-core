@@ -149,6 +149,11 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	authHandler.RegisterProtected(api, jwtMiddleware)
 	userTokenSvc := usertoken.NewService(pool)
 	usertoken.NewHandler(userTokenSvc).Register(api, jwtMiddleware)
+	cliProxyRanges, err := cfg.CLIAuthProxyRanges()
+	if err != nil {
+		panic(err) // Config.Load rejects invalid ranges before server startup.
+	}
+	usertoken.NewCLILoginHandler(userTokenSvc, cfg.FrontendURL, cliProxyRanges...).Register(api, jwtMiddleware)
 	usertoken.NewIntrospectionHandler(userTokenSvc, cfg.InternalToken).Register(e)
 	// ol_user_* is always issued, verified, and revoked by this Core.
 	hybridMw := auth.HybridAuthMiddlewareWithUserStatus(cfg.JWTSecret, userTokenSvc, userStatusChecker)

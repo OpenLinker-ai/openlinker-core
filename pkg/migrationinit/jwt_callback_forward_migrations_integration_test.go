@@ -16,34 +16,38 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// The supported predecessors move with every migration. 092 makes 091 the
-// upgrade version, so the forward path is proven from there rather than from
-// the version that used to be current.
+// Prove every supported predecessor against its own immutable fingerprint,
+// then run the production migrator and verify the current PostgreSQL catalog.
 func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91(t *testing.T) {
 	baseURL := os.Getenv("TEST_DATABASE_URL")
 	if baseURL == "" {
 		t.Skip("TEST_DATABASE_URL is required")
 	}
-	for _, mode := range []string{"fresh", "version-86", "version-91"} {
+	for _, mode := range []string{"fresh", "version-86", "version-88", "version-91", "version-92", "version-93"} {
 		t.Run(mode, func(t *testing.T) {
 			databaseURL := createMigrationTestDatabase(t, baseURL)
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
-			if mode == "version-86" || mode == "version-91" {
+			if mode != "fresh" {
 				conn, err := pgx.Connect(ctx, databaseURL)
 				if err != nil {
 					t.Fatal(err)
 				}
-				applyMigrationFile(t, ctx, conn, "086_current_schema_init.up.sql")
-				version := int64(86)
-				if mode == "version-91" {
-					applyMigrationFile(t, ctx, conn, "087_browser_agent_execution_profile.up.sql")
-					applyMigrationFile(t, ctx, conn, "088_browser_human_control.up.sql")
-					applyMigrationFile(t, ctx, conn, "089_user_jwt_token_version.up.sql")
-					applyMigrationFile(t, ctx, conn, "090_task_callback_owner_index.up.sql")
-					applyMigrationFile(t, ctx, conn, "091_browser_interaction_policy.up.sql")
-					version = 91
+				version := map[string]int64{"version-86": 86, "version-88": 88, "version-91": 91, "version-92": 92, "version-93": 93}[mode]
+				for _, migration := range []struct {
+					version int64
+					file    string
+				}{
+					{86, "086_current_schema_init.up.sql"}, {87, "087_browser_agent_execution_profile.up.sql"},
+					{88, "088_browser_human_control.up.sql"}, {89, "089_user_jwt_token_version.up.sql"},
+					{90, "090_task_callback_owner_index.up.sql"}, {91, "091_browser_interaction_policy.up.sql"},
+					{92, "092_browser_observation_audit.up.sql"}, {93, "093_skill_packages.up.sql"},
+				} {
+					if migration.version <= version {
+						applyMigrationFile(t, ctx, conn, migration.file)
+					}
 				}
+
 				if _, err := conn.Exec(ctx, `CREATE TABLE public.schema_migrations (version bigint NOT NULL, dirty boolean NOT NULL)`); err != nil {
 					conn.Close(context.Background())
 					t.Fatal(err)
@@ -239,5 +243,39 @@ func applyMigrationFile(t *testing.T, ctx context.Context, conn *pgx.Conn, name 
 	}
 	if _, err := conn.Exec(ctx, string(raw)); err != nil {
 		t.Fatalf("apply %s: %v", name, err)
+	}
+}
+
+func TestCLILoginRollbackAndReapplyIntegration(t *testing.T) {
+	base := os.Getenv("TEST_DATABASE_URL")
+	if base == "" {
+		t.Skip("TEST_DATABASE_URL is required")
+	}
+	databaseURL := createMigrationTestDatabase(t, base)
+	migrateTestDatabaseToCurrent(t, databaseURL)
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyMigrationFile(t, ctx, conn, "094_cli_login.down.sql")
+	if _, err := conn.Exec(ctx, `UPDATE schema_migrations SET version=93,dirty=false`); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close(ctx)
+	snapshot, err := Inspect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noop, err := snapshot.ValidateCoreUp(); err != nil || noop {
+		t.Fatalf("exact rollback fingerprint: noop=%t err=%v", noop, err)
+	}
+	migrateTestDatabaseToCurrent(t, databaseURL)
+	snapshot, err = Inspect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noop, err := snapshot.ValidateCoreUp(); err != nil || !noop {
+		t.Fatalf("reapply fingerprint: noop=%t err=%v", noop, err)
 	}
 }

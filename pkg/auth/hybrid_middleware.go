@@ -77,7 +77,7 @@ func HybridAuthMiddlewareWithUserStatus(jwtSecret string, verifier ApiKeyVerifie
 				if err := users.EnsureJWTUserVersion(c.Request().Context(), parsed, claims.TokenVersion); err != nil {
 					return err
 				}
-				principal = &AuthPrincipal{UserID: parsed, AuthMethod: AuthMethodJWT, Grants: []Grant{}, UserStatusVerified: true}
+				principal = &AuthPrincipal{UserID: parsed, AuthMethod: AuthMethodJWT, Grants: []Grant{}, UserStatusVerified: true, JWTTokenVersion: &claims.TokenVersion}
 			}
 			if principal == nil {
 				return httpx.Unauthorized("认证失败")
