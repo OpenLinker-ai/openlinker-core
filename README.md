@@ -435,3 +435,9 @@ when changing public behavior.
 ## License
 
 Apache-2.0. See [LICENSE](./LICENSE).
+
+## CLI browser authorization / CLI 浏览器授权
+
+Core owns CLI consent, one-time PKCE/device-code exchange and User Token self-revocation.
+See [CLI authentication contract](CLI_AUTH.md) for migration 094, routes and rollout requirements.
+Core 负责 CLI 浏览器授权、一次性凭据兑换和自撤销；自托管无需 Cloud。

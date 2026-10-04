@@ -74,6 +74,20 @@ jobs:
           cache: true
       - name: Initialize disposable current schema
         run: go run ./cmd/api migrate up
+      - name: Prove current and predecessor schema fingerprints
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -v ./pkg/migrationinit -count=1 | tee /tmp/migrationinit.log
+          if grep -q -- '--- SKIP:' /tmp/migrationinit.log; then exit 1; fi
+          grep -q -- '--- PASS: TestCLILoginRollbackAndReapplyIntegration' /tmp/migrationinit.log
+      - name: Prove CLI authorization against PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race -v ./pkg/usertoken -run 'TestCLILogin|TestServiceCreateVerify' -count=1 | tee /tmp/cli-login.log
+          if grep -q -- '--- SKIP:' /tmp/cli-login.log; then exit 1; fi
+          grep -q -- '--- PASS: TestCLILoginConcurrentExchangeMintsOnceIntegration' /tmp/cli-login.log
       - name: Prove dispatch without a compensation worker
         shell: bash
         run: |

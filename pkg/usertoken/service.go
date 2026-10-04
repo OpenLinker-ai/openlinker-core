@@ -68,6 +68,27 @@ func NewService(pool *pgxpool.Pool) *Service {
 }
 
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, req *CreateRequest) (*TokenResponse, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, httpx.Internal("数据库事务失败")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	resp, err := s.createInTx(ctx, tx, userID, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, httpx.Internal("提交 User Token 失败")
+	}
+	return resp, nil
+}
+
+// createInTx keeps CLI grant consumption and normal User Token issuance atomic.
+// All issuers share the same grants, ownership, and per-user quota checks.
+func (s *Service) createInTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, req *CreateRequest) (*TokenResponse, error) {
+	transactional := *s
+	transactional.queries = s.queries.WithTx(tx)
+	s = &transactional
 	if req == nil {
 		return nil, httpx.BadRequest("请求体不能为空")
 	}
@@ -94,11 +115,6 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req *CreateReque
 	if err != nil {
 		return nil, httpx.Internal("生成 User Token 失败")
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return nil, httpx.Internal("数据库事务失败")
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	q := s.queries.WithTx(tx)
 	// Serialize creation per user so concurrent requests cannot both observe
 	// nine active tokens and create an eleventh one.
@@ -127,9 +143,6 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req *CreateReque
 	if err != nil {
 		log.Error().Err(err).Str("token_id", token.ID.String()).Msg("usertoken.Create: grants")
 		return nil, httpx.Internal("保存 User Token 权限失败")
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, httpx.Internal("提交 User Token 失败")
 	}
 	resp := tokenResponse(token, createdGrants, issuer)
 	resp.PlaintextToken = plaintext

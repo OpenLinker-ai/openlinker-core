@@ -6,6 +6,26 @@ import (
 	"testing"
 )
 
+func TestCLIAuthTrustedProxyConfiguration(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test@localhost/test")
+	t.Setenv("JWT_SECRET", "test-only")
+	for _, value := range []string{"", "127.0.0.1/32,10.2.3.0/24,::1/128"} {
+		t.Setenv("CLI_AUTH_TRUSTED_PROXY_CIDRS", value)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ranges, err := cfg.CLIAuthProxyRanges()
+		if err != nil || (value == "" && len(ranges) != 0) || (value != "" && len(ranges) != 3) {
+			t.Fatal("wrong proxy ranges", err)
+		}
+	}
+	t.Setenv("CLI_AUTH_TRUSTED_PROXY_CIDRS", "127.0.0.1/32,untrusted-hostname")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CLI_AUTH_TRUSTED_PROXY_CIDRS") {
+		t.Fatal("invalid proxy configuration accepted")
+	}
+}
+
 func unsetEnv(t *testing.T, key string) {
 	t.Helper()
 	original, ok := os.LookupEnv(key)

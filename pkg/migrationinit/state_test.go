@@ -55,7 +55,7 @@ func TestValidateCloudUp(t *testing.T) {
 	current := fresh
 	current.Cloud = MigrationTableState{Exists: true, Rows: 1, Version: CloudVersion}
 	current.CloudShape = currentCloudShape()
-	current.NonBookkeepingObjects = 86
+	current.NonBookkeepingObjects = 88
 
 	tests := []struct {
 		name      string
@@ -105,7 +105,7 @@ func currentCoreSnapshot() Snapshot {
 	return Snapshot{
 		Core:                    MigrationTableState{Exists: true, Rows: 1, Version: CoreVersion},
 		CoreShape:               currentCoreShape(),
-		NonBookkeepingObjects:   79,
+		NonBookkeepingObjects:   81,
 		CallbackOwnerIndexValid: true,
 	}
 }
@@ -113,9 +113,9 @@ func currentCoreSnapshot() Snapshot {
 func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
-		Tables:            79,
-		Constraints:       664,
-		Indexes:           281,
+		Tables:            81,
+		Constraints:       670,
+		Indexes:           286,
 		Triggers:          70,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
