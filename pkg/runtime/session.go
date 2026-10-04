@@ -113,6 +113,9 @@ func (v *DBRuntimeNodeCredentialVerifier) VerifyRuntimeNodeCredential(
 		DevicePublicKeyThumbprint: presented.PublicKeyThumbprintSHA256,
 	})
 	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return RuntimeDeviceIdentity{}, NewRuntimeAuthenticationUnavailableError(err)
+		}
 		return RuntimeDeviceIdentity{}, newRuntimeSessionError(RuntimeSessionErrorAuthenticationFailed, err)
 	}
 	if (node.Status != "active" && node.Status != "draining") || node.NodeID == uuid.Nil ||
@@ -122,7 +125,7 @@ func (v *DBRuntimeNodeCredentialVerifier) VerifyRuntimeNodeCredential(
 
 	var databaseNow time.Time
 	if err = v.clock.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&databaseNow); err != nil {
-		return RuntimeDeviceIdentity{}, newRuntimeSessionError(RuntimeSessionErrorAuthenticationFailed, err)
+		return RuntimeDeviceIdentity{}, NewRuntimeAuthenticationUnavailableError(err)
 	}
 	if databaseNow.Before(presented.NotBefore) || !databaseNow.Before(presented.NotAfter) {
 		return RuntimeDeviceIdentity{}, newRuntimeSessionError(RuntimeSessionErrorAuthenticationFailed, nil)
@@ -174,6 +177,9 @@ func (a *MTLSRuntimeDeviceAuthenticator) AuthenticateHTTP(
 	presented := runtimePresentedCertificate(leaf)
 	identity, err := a.verifier.VerifyRuntimeNodeCredential(ctx, presented)
 	if err != nil {
+		if mapped := runtimeAuthenticationError(err); mapped.Body.Code == RuntimeErrorServiceUnavailable {
+			return RuntimeDeviceIdentity{}, mapped
+		}
 		return RuntimeDeviceIdentity{}, newRuntimeSessionError(RuntimeSessionErrorAuthenticationFailed, err)
 	}
 	presentedSerial := identity.PresentedCertificateSerial

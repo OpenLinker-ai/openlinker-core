@@ -7,6 +7,24 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+## 0.2.1 - 2026-10-04
+
+### Fixed
+
+- Core shutdown closes the HTTP server that actually owns the listener and
+  rejects new Runtime authentication before draining WebSockets. Existing HTTP
+  requests finish before attach-only Sessions are detached for handoff.
+  Long polls and event streams inherit the process cancellation context.
+- Runtime authentication lookup failures return retryable `SERVICE_UNAVAILABLE`
+  instead of permanent `UNAUTHORIZED`, preserving Worker process Sessions across
+  temporary database failures. Missing, revoked, expired and mismatched
+  credentials remain rejected; SDK authentication behavior is unchanged.
+
+## 0.2.0 - 2026-10-04
+
+The following accumulated changes were already included in the `v0.2.0`
+baseline. Version 0.2.1 adds no database migration or Runtime contract change.
+
 - Add private, immutable skill package versions and owner-managed Agent bindings
   in schema 093. Runs retain version references; compatible Runtime hosts receive
   private contents through authenticated assignment delivery. Offline queuing is

@@ -6,6 +6,8 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"errors"
+	"net/http"
 	"os"
 	"reflect"
 	"sort"
@@ -17,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	coreruntime "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
@@ -154,5 +157,35 @@ SELECT count(*) FROM runtime_node_certificates WHERE node_id = $1`, nodeID).Scan
 	}
 	if certificateCount != 2 {
 		t.Fatalf("renewal inserted %d certificate rows, want 2", certificateCount)
+	}
+
+	// Hold only the token lock: renewal reaches its authoritative credential
+	// recheck after locking the enrolled Node, then times out in PostgreSQL.
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(context.Background())
+	if _, err = blocker.Exec(ctx, "SELECT id FROM agent_tokens WHERE id=$1 FOR UPDATE", credentialID); err != nil {
+		t.Fatal(err)
+	}
+	timed, stop := context.WithTimeout(ctx, 250*time.Millisecond)
+	_, err = service.issueOrReplayCredential(timed, token, nodeID, request, csr)
+	stop()
+	var transportErr *coreruntime.RuntimeTransportError
+	if !errors.As(err, &transportErr) || transportErr.Body.Code != coreruntime.RuntimeErrorServiceUnavailable || !transportErr.Body.Retryable {
+		t.Fatalf("canceled authoritative token recheck = %v, want retryable 503", err)
+	}
+	if err = blocker.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A real revocation is still permanent after the database becomes available.
+	if _, err = pool.Exec(ctx, "UPDATE agent_tokens SET status='revoked', revocation_kind='manual', revoked_at=clock_timestamp() WHERE id=$1", credentialID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.issueOrReplayCredential(ctx, token, nodeID, request, csr)
+	var authErr *httpx.HTTPError
+	if !errors.As(err, &authErr) || authErr.Status != http.StatusUnauthorized {
+		t.Fatalf("revoked credential = %v, want 401", err)
 	}
 }

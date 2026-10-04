@@ -2249,12 +2249,14 @@ func (s *Service) verifyRuntimeTokenAny(ctx context.Context, plaintext string, a
 		!credential.ValidLengthForPrefix(plaintext, credential.AgentTokenPrefix) {
 		return db.AgentRuntimeToken{}, httpx.Unauthorized("Agent Token 无效或已撤销")
 	}
+	// Issued Agent Tokens contain a hex-encoded random secret. Validate before
+	// slicing the SQL lookup prefix, which must never contain a split UTF-8 byte.
+	if _, err := hex.DecodeString(strings.TrimPrefix(plaintext, credential.AgentTokenPrefix)); err != nil {
+		return db.AgentRuntimeToken{}, httpx.Unauthorized("Agent Token 无效或已撤销")
+	}
 	tokens, err := s.queries.ListActiveAgentRuntimeTokensByPrefix(ctx, plaintext[:runtimeTokenPrefixLen])
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return db.AgentRuntimeToken{}, ctxErr
-		}
-		return db.AgentRuntimeToken{}, httpx.Unauthorized("Agent Token 无效或已撤销")
+		return db.AgentRuntimeToken{}, NewRuntimeAuthenticationUnavailableError(err)
 	}
 	for _, token := range tokens {
 		if credential.VerifyTokenHash(token.TokenHash, plaintext) && hasAnyRuntimeScope(token.Scopes, acceptedScopes...) {

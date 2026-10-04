@@ -239,10 +239,15 @@ func (h *RuntimeHTTPController) SendBrowserObserverCommand(
 	return h.webSockets.sendBrowserObserverCommand(runtimeSessionID, payload)
 }
 
-// Shutdown rejects new Runtime WebSockets, interrupts every hijacked
-// connection, and waits until each handler has completed durable cleanup.
+// Shutdown rejects new Runtime HTTP and WebSocket authentication, interrupts
+// every hijacked connection, and waits for its durable cleanup. The owning HTTP
+// servers must then drain admitted HTTP requests before detaching Sessions.
 func (h *RuntimeHTTPController) Shutdown(ctx context.Context) error {
-	if h == nil || h.webSockets == nil {
+	if h == nil {
+		return nil
+	}
+	h.stopping.Store(true)
+	if h.webSockets == nil {
 		return nil
 	}
 	return h.webSockets.shutdown(ctx)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -124,6 +125,7 @@ type RuntimeHTTPDependencies struct {
 // RuntimeHTTPController is the strict HTTP transport adapter for the durable
 // Runtime state machine.
 type RuntimeHTTPController struct {
+	stopping           atomic.Bool
 	dependencies       RuntimeHTTPDependencies
 	webSockets         *runtimeWSRegistry
 	webSocketConfig    RuntimeWebSocketConcurrencyConfig
@@ -799,7 +801,7 @@ func (h *RuntimeHTTPController) CallAgent(c echo.Context) error {
 }
 
 func (h *RuntimeHTTPController) handleDelegation(c echo.Context, read bool) error {
-	if h == nil || h.dependencies.Delegation == nil ||
+	if h == nil || h.stopping.Load() || h.dependencies.Delegation == nil ||
 		(!h.dependencies.TokenOnlyTransport && h.dependencies.DeviceAuthenticator == nil) {
 		return writeRuntimeError(c, runtimeUnavailableError())
 	}
@@ -820,7 +822,7 @@ func (h *RuntimeHTTPController) handleDelegation(c echo.Context, read bool) erro
 		)
 	}
 	if err != nil {
-		return writeRuntimeError(c, runtimeUnauthorizedError(err))
+		return writeRuntimeError(c, runtimeAuthenticationError(err))
 	}
 	if h.dependencies.AdmissionLimiter != nil &&
 		!h.dependencies.AdmissionLimiter.AllowHTTP(runtimeAdmissionIdentityFromDevice(device)) {
@@ -870,7 +872,7 @@ func (h *RuntimeHTTPController) handleDelegation(c echo.Context, read bool) erro
 }
 
 func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRuntimePrincipal, *RuntimeTransportError) {
-	if h == nil || h.dependencies.TokenValidator == nil ||
+	if h == nil || h.stopping.Load() || h.dependencies.TokenValidator == nil ||
 		(!h.dependencies.TokenOnlyTransport && h.dependencies.DeviceAuthenticator == nil) {
 		return AuthenticatedRuntimePrincipal{}, runtimeUnavailableError()
 	}
@@ -885,7 +887,7 @@ func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRunti
 	}
 	token, err := h.dependencies.TokenValidator.ValidateRuntimeToken(c.Request().Context(), rawToken, runtimeTokenScope)
 	if err != nil {
-		return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
+		return AuthenticatedRuntimePrincipal{}, runtimeAuthenticationError(err)
 	}
 	var device RuntimeDeviceIdentity
 	if h.dependencies.TokenOnlyTransport {
@@ -903,11 +905,11 @@ func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRunti
 		device, err = h.dependencies.DeviceAuthenticator.AuthenticateHTTP(c.Request().Context(), c.Request())
 	}
 	if err != nil {
-		return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
+		return AuthenticatedRuntimePrincipal{}, runtimeAuthenticationError(err)
 	}
 	if !h.dependencies.TokenOnlyTransport && h.dependencies.PrincipalBinder != nil {
 		if err = h.dependencies.PrincipalBinder.VerifyRuntimePrincipalBinding(c.Request().Context(), token.ID, device); err != nil {
-			return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
+			return AuthenticatedRuntimePrincipal{}, runtimeAuthenticationError(err)
 		}
 	}
 	principal := AuthenticatedRuntimePrincipal{AgentID: token.AgentID, CredentialID: token.ID, Device: device}
@@ -1323,6 +1325,18 @@ func runtimeTransportValidationError() *RuntimeTransportError {
 
 func runtimeUnauthorizedError(cause error) *RuntimeTransportError {
 	return newRuntimeTransportError(RuntimeErrorUnauthorized, runtimeErrorDefaultMessage(RuntimeErrorUnauthorized), cause)
+}
+
+// Authentication failures are permanent, but an unavailable credential store
+// has not made a credential decision. Preserve that distinction so Workers
+// reconnect without discarding their current process Session.
+func runtimeAuthenticationError(cause error) *RuntimeTransportError {
+	var transportErr *RuntimeTransportError
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) ||
+		(errors.As(cause, &transportErr) && transportErr.Body.Code == RuntimeErrorServiceUnavailable) {
+		return NewRuntimeAuthenticationUnavailableError(cause)
+	}
+	return runtimeUnauthorizedError(cause)
 }
 
 func runtimeTransportForbiddenError() *RuntimeTransportError {

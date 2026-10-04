@@ -26,7 +26,7 @@ const (
 
 type runtimeListenerContextKey struct{}
 
-func startRuntimeMTLSListener(cfg *config.Config, application http.Handler, automatic ...*tls.Config) (*http.Server, net.Listener, error) {
+func startRuntimeMTLSListener(ctx context.Context, cfg *config.Config, application http.Handler, automatic ...*tls.Config) (*http.Server, net.Listener, error) {
 	if cfg == nil || !cfg.RuntimeMTLSEnabled {
 		return nil, nil, nil
 	}
@@ -43,7 +43,7 @@ func startRuntimeMTLSListener(cfg *config.Config, application http.Handler, auto
 			Int("max_connections", cfg.RuntimeMTLSMaxConnections).
 			Msg("agent runtime mTLS connection limit reached")
 	})
-	server := newHTTPServer(cfg.RuntimeMTLSPort)
+	server := newHTTPServer(ctx, cfg.RuntimeMTLSPort)
 	server.Handler = runtimeOnlyHandler(application)
 	return server, tls.NewListener(listener, tlsConfig), nil
 }

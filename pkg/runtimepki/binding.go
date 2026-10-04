@@ -65,6 +65,9 @@ WHERE binding.credential_id = $1`, credentialID).Scan(
 		if errors.Is(err, pgx.ErrNoRows) {
 			return coreruntime.RuntimeDeviceIdentity{}, errRuntimeCredentialNotEnrolled
 		}
+		if err != nil {
+			return coreruntime.RuntimeDeviceIdentity{}, coreruntime.NewRuntimeAuthenticationUnavailableError(err)
+		}
 		return coreruntime.RuntimeDeviceIdentity{}, errRuntimeCredentialInvalid
 	}
 	identity.AuthenticationMode = coreruntime.RuntimeAuthenticationMTLS
@@ -125,7 +128,7 @@ WHERE binding.credential_id = $1`, credentialID).Scan(
 		return identity, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return coreruntime.RuntimeDeviceIdentity{}, errRuntimeCredentialInvalid
+		return coreruntime.RuntimeDeviceIdentity{}, coreruntime.NewRuntimeAuthenticationUnavailableError(err)
 	}
 
 	err = v.pool.QueryRow(ctx, `
@@ -154,12 +157,15 @@ WHERE node.node_id = $2
 		return identity, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return coreruntime.RuntimeDeviceIdentity{}, errRuntimeCredentialInvalid
+		return coreruntime.RuntimeDeviceIdentity{}, coreruntime.NewRuntimeAuthenticationUnavailableError(err)
 	}
 
 	var occupied bool
 	if err = v.pool.QueryRow(ctx, `
-SELECT EXISTS (SELECT 1 FROM runtime_nodes WHERE node_id = $1)`, nodeID).Scan(&occupied); err != nil || occupied {
+SELECT EXISTS (SELECT 1 FROM runtime_nodes WHERE node_id = $1)`, nodeID).Scan(&occupied); err != nil {
+		return coreruntime.RuntimeDeviceIdentity{}, coreruntime.NewRuntimeAuthenticationUnavailableError(err)
+	}
+	if occupied {
 		return coreruntime.RuntimeDeviceIdentity{}, errRuntimeCredentialInvalid
 	}
 	return pendingTokenOnlyRuntimeDeviceIdentity(credentialID, nodeID), nil
@@ -204,7 +210,10 @@ SELECT EXISTS (
       AND node.device_public_key_thumbprint = $4
       AND node.status IN ('active', 'draining')
 )`, credentialID, device.NodeID, device.CertificateSerial, device.PublicKeyThumbprintSHA256).Scan(&related)
-	if err != nil || !related {
+	if err != nil {
+		return coreruntime.NewRuntimeAuthenticationUnavailableError(err)
+	}
+	if !related {
 		return errors.New("Agent Token has no historical Session with the presented Runtime Node key")
 	}
 	return nil

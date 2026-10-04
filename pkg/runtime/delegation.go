@@ -120,6 +120,9 @@ WHERE binding.credential_id = $1`, capability.CredentialID).Scan(
 		&status,
 		&bindingMode,
 	)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return RuntimeDeviceIdentity{}, runtimeDatabaseUnavailable(err)
+	}
 	if err != nil || device.NodeID != capability.NodeID || agentID != capability.AgentID ||
 		(status != "active" && status != "draining") ||
 		(bindingMode != "token_only" && bindingMode != "mtls") ||

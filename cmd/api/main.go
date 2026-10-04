@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -245,7 +246,7 @@ func main() {
 			log.Fatal().Err(err).Msg("configure automatic runtime mTLS failed")
 		}
 	}
-	runtimeMTLSServer, runtimeMTLSListener, err := startRuntimeMTLSListener(cfg, e, automaticRuntimeTLS)
+	runtimeMTLSServer, runtimeMTLSListener, err := startRuntimeMTLSListener(rootCtx, cfg, e, automaticRuntimeTLS)
 	if err != nil {
 		log.Fatal().Err(err).Msg("start runtime mTLS listener failed")
 	}
@@ -259,7 +260,7 @@ func main() {
 		log.Info().Int("port", cfg.RuntimeMTLSPort).Msg("agent runtime mTLS listener active")
 	}
 
-	srv := newHTTPServer(cfg.Port)
+	srv := newHTTPServer(rootCtx, cfg.Port)
 	go func() {
 		if err := e.StartServer(srv); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErrors <- fmt.Errorf("HTTP server failed: %w", err)
@@ -277,12 +278,7 @@ func main() {
 	log.Info().Msg("shutting down")
 	cancel()
 
-	shutdownPlan := coreShutdownPlan{
-		PhaseTimeout:        defaultCoreShutdownPhaseTimeout,
-		RuntimeAttachOnly:   runtimeAttachOnly,
-		ShutdownHTTP:        e.Shutdown,
-		CloseRuntimeCluster: cluster.Close,
-	}
+	shutdownPlan := newCoreShutdownPlan(srv, runtimeAttachOnly, cluster.Close)
 	if services != nil && services.RuntimeController != nil {
 		shutdownPlan.ShutdownRuntimeController = services.RuntimeController.Shutdown
 	}
@@ -482,8 +478,11 @@ func newRedisClient(rawURL string) (*redis.Client, error) {
 	return redis.NewClient(options), nil
 }
 
-func newHTTPServer(port int) *http.Server {
+func newHTTPServer(ctx context.Context, port int) *http.Server {
 	return &http.Server{
+		// Cancel long polls along with process shutdown so they cannot outlive
+		// the bounded HTTP drain or continue querying a closing database pool.
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 		Addr:              fmt.Sprintf(":%d", port),
 		ReadTimeout:       15 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
