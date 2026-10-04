@@ -104,6 +104,16 @@ func newRuntimeTransportError(code RuntimeErrorCode, message string, cause error
 	return err
 }
 
+// NewRuntimeAuthenticationUnavailableError reports that a credential store
+// could not be consulted. It fails closed without treating an infrastructure
+// failure as permanent credential revocation, and never exposes the cause on
+// the wire. Missing, revoked, expired and mismatched credentials must not use it.
+func NewRuntimeAuthenticationUnavailableError(cause error) *RuntimeTransportError {
+	err := newRuntimeTransportError(RuntimeErrorServiceUnavailable, runtimeErrorDefaultMessage(RuntimeErrorServiceUnavailable), cause)
+	err.Body.Retryable = true
+	return err
+}
+
 // MapRuntimeTransportError converts EventStore and ResultFinalizer errors into
 // the shared transport vocabulary. Unknown causes are intentionally hidden.
 func MapRuntimeTransportError(err error) *RuntimeTransportError {

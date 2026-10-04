@@ -319,7 +319,7 @@ func TestHTTPRateLimitConfigUsesCustomValuesAndFallbacks(t *testing.T) {
 }
 
 func TestNewHTTPServerSetsConnectionTimeouts(t *testing.T) {
-	srv := newHTTPServer(9090)
+	srv := newHTTPServer(context.Background(), 9090)
 	if srv.ReadTimeout != 15*time.Second ||
 		srv.ReadHeaderTimeout != 10*time.Second ||
 		srv.WriteTimeout != 120*time.Second ||
@@ -562,7 +562,7 @@ func TestNewRedisClientBuildsPrimaryOnlyClientWithoutReachability(t *testing.T) 
 }
 
 func TestNewHTTPServer(t *testing.T) {
-	srv := newHTTPServer(18080)
+	srv := newHTTPServer(context.Background(), 18080)
 	if srv.Addr != ":18080" {
 		t.Fatalf("server addr = %q", srv.Addr)
 	}

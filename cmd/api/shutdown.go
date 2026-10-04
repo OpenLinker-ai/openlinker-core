@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 )
@@ -27,6 +28,20 @@ type coreShutdownPlan struct {
 type coreShutdownResult struct {
 	DetachedSessions int64
 	DetachCompleted  bool
+}
+
+func newCoreShutdownPlan(server *http.Server, attachOnly bool, closeCluster coreShutdownFunc) coreShutdownPlan {
+	plan := coreShutdownPlan{
+		PhaseTimeout:        defaultCoreShutdownPhaseTimeout,
+		RuntimeAttachOnly:   attachOnly,
+		CloseRuntimeCluster: closeCluster,
+	}
+	// Echo.StartServer serves the supplied server; Echo.Shutdown only drains
+	// Echo's own default servers. The plan must own the actual listener.
+	if server != nil {
+		plan.ShutdownHTTP = server.Shutdown
+	}
+	return plan
 }
 
 // waitForCoreStop gives an already-reported fatal serve error priority over a

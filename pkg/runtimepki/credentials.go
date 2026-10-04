@@ -100,7 +100,7 @@ func (s *CredentialService) issue(c echo.Context) error {
 	}
 	token, err := s.tokens.ValidateRuntimeToken(c.Request().Context(), rawToken, runtimeCredentialScope)
 	if err != nil {
-		return err
+		return writeCredentialServiceError(c, err)
 	}
 	var request CredentialRequest
 	if err = c.Bind(&request); err != nil {
@@ -112,9 +112,22 @@ func (s *CredentialService) issue(c echo.Context) error {
 	}
 	response, err := s.issueOrReplayCredential(c.Request().Context(), token, nodeID, request, csr)
 	if err != nil {
-		return err
+		return writeCredentialServiceError(c, err)
 	}
 	return c.JSON(http.StatusOK, response)
+}
+
+func writeCredentialServiceError(c echo.Context, err error) error {
+	// Shutdown can cancel a transaction at any stage, including a statement
+	// whose ordinary constraint failure is a permanent credential conflict.
+	if ctxErr := c.Request().Context().Err(); ctxErr != nil {
+		err = coreruntime.NewRuntimeAuthenticationUnavailableError(ctxErr)
+	}
+	var transportErr *coreruntime.RuntimeTransportError
+	if errors.As(err, &transportErr) && transportErr.Body.Code == coreruntime.RuntimeErrorServiceUnavailable {
+		return c.JSON(http.StatusServiceUnavailable, transportErr.Envelope())
+	}
+	return err
 }
 
 func (s *CredentialService) issueOrReplayCredential(
@@ -189,6 +202,9 @@ WHERE id = $1
   AND scopes @> ARRAY['agent:pull']::text[]
   AND (expires_at IS NULL OR expires_at > clock_timestamp())
 FOR UPDATE`, token.ID, token.AgentID).Scan(&lockedAgentID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return CredentialResponse{}, coreruntime.NewRuntimeAuthenticationUnavailableError(err)
+	}
 	if err != nil || lockedAgentID != token.AgentID {
 		return CredentialResponse{}, httpx.Unauthorized("Agent Token 无效、已撤销或已过期")
 	}
