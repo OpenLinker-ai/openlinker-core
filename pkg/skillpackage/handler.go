@@ -23,9 +23,13 @@ func (h *Handler) Register(api *echo.Group, auth echo.MiddlewareFunc) {
 	g := api.Group("/creator", auth)
 	g.GET("/skill-packages", h.List)
 	g.POST("/skill-packages", h.Import)
+	g.POST("/skill-packages/imports", h.ImportPublished)
 	g.GET("/skill-packages/:id", h.Detail)
+	g.PATCH("/skill-packages/:id", h.SetVisibility)
 	g.POST("/skill-packages/:id/versions", h.Import)
 	g.GET("/skill-packages/:id/versions/:versionId", h.Version)
+	g.PUT("/skill-packages/:id/versions/:versionId/publication", h.Publish)
+	g.DELETE("/skill-packages/:id/versions/:versionId/publication", h.Withdraw)
 	g.GET("/agents/:id/skill-packages", h.Bindings)
 	g.PUT("/agents/:id/skill-packages/:packageId", h.Bind)
 	g.DELETE("/agents/:id/skill-packages/:packageId", h.Unbind)
@@ -85,8 +89,10 @@ func databaseError(err error) error {
 }
 
 const packageJSON = `jsonb_build_object('id',p.id,'name',p.name,'description',p.description,'created_at',p.created_at,'updated_at',p.updated_at,
+ 'visibility',p.visibility,'source_package_id',p.source_package_id,
  'versions',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',v.id,'version',v.version,'digest',v.digest,
- 'capability_ids',v.capability_ids,'providers',v.providers,'created_at',v.created_at) ORDER BY v.created_at DESC,v.id)
+ 'capability_ids',v.capability_ids,'providers',v.providers,'created_at',v.created_at,'published_at',v.published_at,
+ 'source_version_id',v.source_version_id) ORDER BY v.created_at DESC,v.id)
  FROM skill_package_versions v WHERE v.package_id=p.id),'[]'::jsonb))`
 
 func (h *Handler) List(c echo.Context) error {
@@ -122,8 +128,12 @@ func (h *Handler) Detail(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	return h.ownedDetail(c, id, uid)
+}
+
+func (h *Handler) ownedDetail(c echo.Context, id, uid uuid.UUID) error {
 	var raw json.RawMessage
-	err = h.pool.QueryRow(c.Request().Context(), `SELECT `+packageJSON+` FROM skill_packages p WHERE p.id=$1 AND p.owner_user_id=$2`, id, uid).Scan(&raw)
+	err := h.pool.QueryRow(c.Request().Context(), `SELECT `+packageJSON+` FROM skill_packages p WHERE p.id=$1 AND p.owner_user_id=$2`, id, uid).Scan(&raw)
 	if err != nil {
 		return databaseError(err)
 	}

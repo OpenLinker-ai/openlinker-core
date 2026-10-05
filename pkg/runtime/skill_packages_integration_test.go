@@ -1,9 +1,13 @@
 package runtime_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -291,4 +295,275 @@ func TestSkillPackageOfflineQueue(t *testing.T) {
 			require.Equal(t, run.RunID, candidate.ID.String())
 		})
 	}
+}
+
+// Publication, public reads and private-copy import through the real handlers,
+// followed by the production Run -> assignment -> receipt path on the copy.
+func TestSkillPackagePublicationAndImport(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute, skillpackage.Feature, "skill_packages.codex.v1")
+	agentID := fixture.identity.AgentID
+	var importer uuid.UUID
+	require.NoError(t, pool.QueryRow(ctx, `SELECT creator_id FROM agents WHERE id=$1`, agentID).Scan(&importer))
+	_, err := pool.Exec(ctx, `UPDATE agents SET connection_mode='runtime',endpoint_url='openlinker-runtime://' || id::text WHERE id=$1`, agentID)
+	require.NoError(t, err)
+	publisher, outsider := insertRuntimeUser(t, pool), insertRuntimeUser(t, pool)
+	actor := publisher
+	e := echo.New()
+	e.HTTPErrorHandler = func(err error, c echo.Context) { _ = httpx.SendError(c, err) }
+	handler := skillpackage.NewHandler(pool)
+	handler.Register(e.Group("/api/v1"), func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error { c.Set(string(httpx.CtxKeyUserID), actor.String()); return next(c) }
+	})
+	handler.RegisterPublic(e.Group("/api/v1"))
+	serve := func(method, path string, body any, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		var reader *bytes.Reader
+		if body == nil {
+			reader = bytes.NewReader(nil)
+		} else {
+			raw, _ := json.Marshal(body)
+			reader = bytes.NewReader(raw)
+		}
+		req := httptest.NewRequest(method, "/api/v1"+path, reader)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		require.Equal(t, want, rec.Code, "%s %s: %s", method, path, rec.Body.String())
+		return rec
+	}
+	public := func(path string, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := serve(http.MethodGet, "/skill-packages"+path, nil, want)
+		require.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+		return rec
+	}
+	request := skillpackage.ImportRequest{Version: "1.0.0", Providers: []string{"codex"}, CapabilityIDs: []string{"data/analysis"}, RequiredCommands: []string{"git"}, Files: map[string]string{
+		"SKILL.md":            "---\nname: release-notes\ndescription: Prepare release notes from changes.\n---\nPUBLISHED-INSTRUCTION-CONTENT\n",
+		"references/style.md": "Group entries by feature.\n",
+	}}
+	var source struct {
+		ID        uuid.UUID `json:"id"`
+		VersionID uuid.UUID `json:"version_id"`
+		Digest    string    `json:"digest"`
+	}
+	require.NoError(t, json.Unmarshal(serve(http.MethodPost, "/creator/skill-packages", request, 201).Body.Bytes(), &source))
+	pkgPath, versionPath := "/"+source.ID.String(), "/"+source.ID.String()+"/versions/"+source.VersionID.String()
+	ownerPath := "/creator/skill-packages/" + source.ID.String()
+	publication := ownerPath + "/versions/" + source.VersionID.String() + "/publication"
+	var owned struct {
+		Visibility      string     `json:"visibility"`
+		SourcePackageID *uuid.UUID `json:"source_package_id"`
+		Versions        []struct {
+			ID              uuid.UUID  `json:"id"`
+			PublishedAt     *time.Time `json:"published_at"`
+			SourceVersionID *uuid.UUID `json:"source_version_id"`
+		} `json:"versions"`
+	}
+	require.NoError(t, json.Unmarshal(serve(http.MethodGet, ownerPath, nil, 200).Body.Bytes(), &owned))
+	require.Equal(t, "private", owned.Visibility)
+	require.Nil(t, owned.SourcePackageID)
+	require.Nil(t, owned.Versions[0].PublishedAt)
+
+	// Private by default: no public read and no import, even of a published version.
+	public(pkgPath, 404)
+	public(versionPath, 404)
+	public(versionPath+"/bundle.json", 404)
+	serve(http.MethodPut, publication, map[string]any{}, 200)
+	for _, path := range []string{pkgPath, versionPath, versionPath + "/bundle.json", versionPath + "/archive.zip", versionPath + "/files/SKILL.md"} {
+		public(path, 404)
+	}
+	require.Contains(t, serve(http.MethodPatch, ownerPath, map[string]any{"visibility": "listed"}, 400).Body.String(), "SKILL_PACKAGE_VISIBILITY_INVALID")
+	actor = outsider
+	serve(http.MethodPatch, ownerPath, map[string]any{"visibility": "public"}, 404)
+	serve(http.MethodDelete, publication, nil, 404)
+	actor = publisher
+
+	// Unlisted: readable by link, absent from the public list.
+	serve(http.MethodPatch, ownerPath, map[string]any{"visibility": "unlisted"}, 200)
+	var listed struct {
+		Items []struct {
+			ID   uuid.UUID `json:"id"`
+			Name string    `json:"name"`
+		} `json:"items"`
+		Total int `json:"total"`
+		Page  int `json:"page"`
+		Size  int `json:"size"`
+	}
+	require.NoError(t, json.Unmarshal(public("", 200).Body.Bytes(), &listed))
+	require.Zero(t, listed.Total)
+	require.Contains(t, public(pkgPath, 200).Body.String(), `"visibility": "unlisted"`)
+	var version struct {
+		ID          uuid.UUID           `json:"id"`
+		PackageID   uuid.UUID           `json:"package_id"`
+		Digest      string              `json:"digest"`
+		PublishedAt *time.Time          `json:"published_at"`
+		Visibility  string              `json:"visibility"`
+		Contents    skillpackage.Bundle `json:"contents"`
+	}
+	require.NoError(t, json.Unmarshal(public(versionPath, 200).Body.Bytes(), &version))
+	require.Equal(t, source.Digest, version.Digest)
+	require.NotNil(t, version.PublishedAt)
+	require.Equal(t, "release-notes", version.Contents.Name)
+	require.Equal(t, request.Files, version.Contents.Files)
+
+	// bundle.json is the exact stored payload, so its SHA-256 is the digest.
+	bundle := public(versionPath+"/bundle.json", 200)
+	sum := sha256.Sum256(bundle.Body.Bytes())
+	require.Equal(t, source.Digest, hex.EncodeToString(sum[:]))
+	require.Contains(t, bundle.Header().Get("Content-Disposition"), "attachment;")
+	var stored string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT payload FROM skill_package_versions WHERE id=$1`, source.VersionID).Scan(&stored))
+	require.Equal(t, stored, bundle.Body.String())
+	file := public(versionPath+"/files/references/style.md", 200)
+	require.Equal(t, "text/plain; charset=utf-8", file.Header().Get("Content-Type"))
+	require.Equal(t, "nosniff", file.Header().Get("X-Content-Type-Options"))
+	require.Equal(t, request.Files["references/style.md"], file.Body.String())
+	require.Equal(t, request.Files["SKILL.md"], public(versionPath+"/files/SKILL.md", 200).Body.String())
+	public(versionPath+"/files/references%2Fstyle.md", 200)
+	for _, missing := range []string{"/files/missing.md", "/files/references", "/files/references/../SKILL.md", "/files/./SKILL.md", "/files/"} {
+		public(versionPath+missing, 404)
+	}
+
+	// Deterministic archive: identical bytes, package files only, under the skill name.
+	first, second := public(versionPath+"/archive.zip", 200), public(versionPath+"/archive.zip", 200)
+	require.Equal(t, first.Body.Bytes(), second.Body.Bytes())
+	require.Equal(t, "application/zip", first.Header().Get("Content-Type"))
+	require.Contains(t, first.Header().Get("Content-Disposition"), `filename="release-notes-1.0.0.zip"`)
+	archive, err := zip.NewReader(bytes.NewReader(first.Body.Bytes()), int64(first.Body.Len()))
+	require.NoError(t, err)
+	entries := map[string]string{}
+	for _, entry := range archive.File {
+		reader, err := entry.Open()
+		require.NoError(t, err)
+		raw, err := io.ReadAll(reader)
+		require.NoError(t, err)
+		entries[entry.Name] = string(raw)
+	}
+	require.Equal(t, map[string]string{"release-notes/SKILL.md": request.Files["SKILL.md"], "release-notes/references/style.md": request.Files["references/style.md"]}, entries)
+
+	// A private draft renames the package row but never changes the public view.
+	draft := request
+	draft.Version = "2.0.0"
+	draft.Files = map[string]string{"SKILL.md": "---\nname: PRIVATE-DRAFT-NAME\ndescription: PRIVATE-DRAFT-DESCRIPTION\n---\nPRIVATE-DRAFT-CONTENT\n"}
+	var drafted struct {
+		VersionID uuid.UUID `json:"version_id"`
+	}
+	require.NoError(t, json.Unmarshal(serve(http.MethodPost, ownerPath+"/versions", draft, 201).Body.Bytes(), &drafted))
+	draftPath := pkgPath + "/versions/" + drafted.VersionID.String()
+	serve(http.MethodPatch, ownerPath, map[string]any{"visibility": "public"}, 200)
+	detail := public(pkgPath, 200).Body.String()
+	require.Contains(t, detail, `"name": "release-notes"`)
+	require.NotContains(t, detail, "PRIVATE-DRAFT")
+	require.NotContains(t, detail, drafted.VersionID.String())
+	for _, path := range []string{draftPath, draftPath + "/bundle.json", draftPath + "/archive.zip", draftPath + "/files/SKILL.md"} {
+		public(path, 404)
+	}
+	require.NoError(t, json.Unmarshal(public("?q=release&size=1", 200).Body.Bytes(), &listed))
+	require.Equal(t, 1, listed.Total)
+	require.Equal(t, 1, listed.Size)
+	require.Equal(t, "release-notes", listed.Items[0].Name)
+	require.NoError(t, json.Unmarshal(public("?q=PRIVATE-DRAFT", 200).Body.Bytes(), &listed))
+	require.Zero(t, listed.Total)
+	require.NoError(t, json.Unmarshal(public("?q=100%25", 200).Body.Bytes(), &listed))
+	require.Zero(t, listed.Total)
+
+	// Import creates the caller's private copy of the exact published bytes.
+	actor = importer
+	importBody := map[string]any{"source_package_id": source.ID, "source_version_id": source.VersionID, "expected_digest": strings.Repeat("0", 64)}
+	require.Contains(t, serve(http.MethodPost, "/creator/skill-packages/imports", importBody, 409).Body.String(), "SKILL_PACKAGE_DIGEST_MISMATCH")
+	serve(http.MethodPost, "/creator/skill-packages/imports", map[string]any{"source_package_id": source.ID, "source_version_id": drafted.VersionID, "expected_digest": source.Digest}, 404)
+	importBody["expected_digest"] = source.Digest
+	var copied struct {
+		ID        uuid.UUID `json:"id"`
+		VersionID uuid.UUID `json:"version_id"`
+		Digest    string    `json:"digest"`
+	}
+	require.NoError(t, json.Unmarshal(serve(http.MethodPost, "/creator/skill-packages/imports", importBody, 201).Body.Bytes(), &copied))
+	require.Equal(t, source.Digest, copied.Digest)
+	require.NotEqual(t, source.ID, copied.ID)
+	retry := serve(http.MethodPost, "/creator/skill-packages/imports", importBody, 200)
+	require.JSONEq(t, `{"id":"`+copied.ID.String()+`","version_id":"`+copied.VersionID.String()+`","digest":"`+source.Digest+`"}`, retry.Body.String())
+	var copiedPayload string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT payload FROM skill_package_versions WHERE id=$1`, copied.VersionID).Scan(&copiedPayload))
+	require.Equal(t, stored, copiedPayload)
+	require.NoError(t, json.Unmarshal(serve(http.MethodGet, "/creator/skill-packages/"+copied.ID.String(), nil, 200).Body.Bytes(), &owned))
+	require.Equal(t, "private", owned.Visibility)
+	require.Equal(t, source.ID, *owned.SourcePackageID)
+	require.Equal(t, source.VersionID, *owned.Versions[0].SourceVersionID)
+	require.Nil(t, owned.Versions[0].PublishedAt)
+	public("/"+copied.ID.String(), 404)
+	// Publication does not open cross-owner bindings: only the copy can be bound.
+	serve(http.MethodPut, "/creator/agents/"+agentID.String()+"/skill-packages/"+source.ID.String(), map[string]any{"version_id": source.VersionID}, 404)
+	serve(http.MethodPut, "/creator/agents/"+agentID.String()+"/skill-packages/"+copied.ID.String(), map[string]any{"version_id": copied.VersionID}, 200)
+
+	// Withdrawal blocks new imports but leaves existing copies usable.
+	actor = publisher
+	serve(http.MethodDelete, publication, nil, 200)
+	public(versionPath, 404)
+	public(pkgPath, 404)
+	actor = outsider
+	serve(http.MethodPost, "/creator/skill-packages/imports", importBody, 404)
+	actor = importer
+	serve(http.MethodGet, "/creator/skill-packages/"+copied.ID.String()+"/versions/"+copied.VersionID.String(), nil, 200)
+
+	svc := newTestService(t, pool)
+	run, err := svc.Run(ctx, insertRuntimeUser(t, pool), makeRunReq(agentID, map[string]any{"text": "copy"}), "api")
+	require.NoError(t, err)
+	var snapshotVersion uuid.UUID
+	require.NoError(t, pool.QueryRow(ctx, `SELECT version_id FROM run_skill_package_snapshots WHERE run_id=$1`, run.RunID).Scan(&snapshotVersion))
+	require.Equal(t, copied.VersionID, snapshotVersion)
+	candidate, err := db.New(pool).LockNextClaimableRuntimeRunForAgent(ctx, db.LockNextClaimableRuntimeRunForAgentParams{AgentID: agentID, SkillPackageProviders: []string{"codex"}})
+	require.NoError(t, err)
+	require.Contains(t, string(candidate.RequestMetadata), "PUBLISHED-INSTRUCTION-CONTENT")
+	require.Contains(t, string(candidate.RequestMetadata), source.Digest)
+	var bindingID uuid.UUID
+	require.NoError(t, pool.QueryRow(ctx, `SELECT binding_id FROM agent_skill_package_bindings WHERE agent_id=$1 AND package_id=$2`, agentID, copied.ID).Scan(&bindingID))
+	require.NoError(t, pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return skillpackage.Snapshot(ctx, tx, fixture.identity.RunID, agentID) }))
+	_, err = runtime.NewEventStore(pool).Append(ctx, fixture.principal, fixture.identity, runtime.RuntimeEventRequest{ClientEventID: uuid.New(), ClientEventSeq: 1, EventType: "run.skill_packages.loaded",
+		Payload: map[string]any{"bindings": []map[string]any{{"binding_id": bindingID.String(), "version_id": copied.VersionID.String(), "digest": copied.Digest}}}})
+	require.NoError(t, err)
+	var status string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT status FROM agent_skill_package_bindings WHERE binding_id=$1`, bindingID).Scan(&status))
+	require.Equal(t, "loaded", status)
+
+	// Republishing restores reads; a disabled owner hides everything again.
+	actor = publisher
+	serve(http.MethodPut, publication, nil, 200)
+	public(versionPath, 200)
+	_, err = pool.Exec(ctx, `UPDATE users SET disabled_at=now() WHERE id=$1`, publisher)
+	require.NoError(t, err)
+	public(pkgPath, 404)
+	public(versionPath+"/bundle.json", 404)
+	require.NoError(t, json.Unmarshal(public("", 200).Body.Bytes(), &listed))
+	require.Zero(t, listed.Total)
+	_, err = pool.Exec(ctx, `UPDATE users SET disabled_at=NULL WHERE id=$1`, publisher)
+	require.NoError(t, err)
+
+	// A withdrawal holding the version lock linearizes with a concurrent import.
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `UPDATE skill_package_versions SET published_at=NULL WHERE id=$1`, source.VersionID)
+	require.NoError(t, err)
+	actor = outsider
+	done := make(chan int, 1)
+	go func() {
+		raw, _ := json.Marshal(importBody)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/creator/skill-packages/imports", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		done <- rec.Code
+	}()
+	select {
+	case code := <-done:
+		t.Fatalf("import did not wait for the withdrawal lock: %d", code)
+	case <-time.After(300 * time.Millisecond):
+	}
+	require.NoError(t, tx.Commit(ctx))
+	require.Equal(t, http.StatusNotFound, <-done)
+	var outsiderCopies int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM skill_packages WHERE owner_user_id=$1`, outsider).Scan(&outsiderCopies))
+	require.Zero(t, outsiderCopies)
 }

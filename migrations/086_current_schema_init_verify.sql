@@ -23,16 +23,16 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 691 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 691', public_constraints;
+    IF public_constraints <> 692 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 692', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 290 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 290', public_indexes;
+    IF public_indexes <> 293 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 293', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers
@@ -140,6 +140,34 @@ BEGIN
           AND index_metadata.indisvalid
     ) THEN
         RAISE EXCEPTION 'idx_task_callback_subscriptions_owner is missing or invalid';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'skill_packages'
+          AND column_name = 'visibility'
+          AND is_nullable = 'NO'
+          AND column_default = '''private''::text'
+    ) OR (
+        SELECT count(*) FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND ((table_name = 'skill_packages' AND column_name = 'source_package_id')
+            OR (table_name = 'skill_package_versions' AND column_name IN ('published_at', 'source_version_id')))
+          AND is_nullable = 'YES'
+    ) <> 3 OR NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint constraint_row
+        JOIN pg_catalog.pg_class relation ON relation.oid = constraint_row.conrelid
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relname = 'skill_packages'
+          AND constraint_row.conname = 'skill_packages_visibility_valid'
+          AND constraint_row.contype = 'c'
+    ) OR to_regclass('public.skill_packages_public_listing') IS NULL
+       OR to_regclass('public.skill_package_versions_published') IS NULL
+       OR to_regclass('public.skill_packages_owner_source') IS NULL THEN
+        RAISE EXCEPTION 'Core initializer is missing the skill package publication contract';
     END IF;
 
     IF NOT EXISTS (

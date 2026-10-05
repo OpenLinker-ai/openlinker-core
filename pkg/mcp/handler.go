@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
@@ -28,6 +29,7 @@ const mcpProtocolVersion = "2025-06-18"
 type Handler struct {
 	svc       service
 	validator *validator.Validate
+	scopes    agentScopeResolver
 }
 
 type service interface {
@@ -65,6 +67,8 @@ func NewHandler(svc service) *Handler {
 //	POST /mcp/list_run_artifacts 查询调用产物
 //	POST /mcp/cancel_run      取消调用
 //	POST /mcp/create_task     自然语言 → 推荐 Agent
+//	GET  /mcp/agents/:agentId  单 Agent 入口说明；SSE 返回 405
+//	POST /mcp/agents/:agentId  单 Agent JSON-RPC（固定六个工具）
 func (h *Handler) Register(api *echo.Group, mw echo.MiddlewareFunc) {
 	g := api.Group("/mcp", mw)
 	g.GET("", h.GetEndpointInfo)
@@ -79,6 +83,8 @@ func (h *Handler) Register(api *echo.Group, mw echo.MiddlewareFunc) {
 	g.POST("/list_run_artifacts", h.PostListRunArtifacts)
 	g.POST("/cancel_run", h.PostCancelRun)
 	g.POST("/create_task", h.PostCreateTask)
+	g.GET("/agents/:agentId", h.GetAgentEndpointInfo)
+	g.POST("/agents/:agentId", h.PostAgentRPC)
 }
 
 // GetEndpointInfo 让浏览器打开 /api/v1/mcp 时能看到真实用法。
@@ -104,6 +110,13 @@ func (h *Handler) GetEndpointInfo(c echo.Context) error {
 // It implements the core JSON-RPC methods MCP clients need for tool discovery
 // and invocation. Responses use application/json rather than SSE streaming.
 func (h *Handler) PostRPC(c echo.Context) error {
+	return h.serveRPC(c, nil)
+}
+
+// serveRPC is shared by the platform and Agent-scoped endpoints. A scoped call
+// authenticates the User Token and resolves the visible Agent before any
+// method, including notifications and tools/list.
+func (h *Handler) serveRPC(c echo.Context, agentID *uuid.UUID) error {
 	raw, err := readJSONRPCBody(c)
 	if err != nil {
 		return writeRPCError(c, nil, http.StatusBadRequest, -32700, "Parse error")
@@ -115,6 +128,15 @@ func (h *Handler) PostRPC(c echo.Context) error {
 	var req rpcRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return writeRPCError(c, nil, http.StatusOK, -32600, "Invalid Request")
+	}
+	var scope *ScopedAgent
+	if agentID != nil {
+		if err := assertAPIKeyAuth(c); err != nil {
+			return writeRPCHTTPError(c, req.ID, err)
+		}
+		if scope, err = h.resolveScope(c, *agentID); err != nil {
+			return writeRPCHTTPError(c, req.ID, err)
+		}
 	}
 	if req.Method == "" || len(req.ID) == 0 {
 		return c.NoContent(http.StatusAccepted)
@@ -128,7 +150,7 @@ func (h *Handler) PostRPC(c echo.Context) error {
 
 	switch req.Method {
 	case "initialize":
-		return writeRPCResult(c, req.ID, map[string]interface{}{
+		result := map[string]interface{}{
 			"protocolVersion": mcpProtocolVersion,
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{
@@ -139,13 +161,21 @@ func (h *Handler) PostRPC(c echo.Context) error {
 				"name":    "openlinker",
 				"version": "0.1.0",
 			},
-		})
+		}
+		if scope != nil {
+			result["instructions"] = scopedInstructions(scope)
+		}
+		return writeRPCResult(c, req.ID, result)
 	case "tools/list":
+		tools := h.tools()
+		if scope != nil {
+			tools = scopedTools(scope)
+		}
 		return writeRPCResult(c, req.ID, map[string]interface{}{
-			"tools": toMCPTools(h.tools()),
+			"tools": toMCPTools(tools),
 		})
 	case "tools/call":
-		return h.postRPCToolCall(c, req.ID, req.Params)
+		return h.postRPCToolCall(c, req.ID, req.Params, scope)
 	default:
 		return writeRPCError(c, req.ID, http.StatusOK, -32601, "Method not found: "+req.Method)
 	}
@@ -159,7 +189,7 @@ func (h *Handler) GetTools(c echo.Context) error {
 	return c.JSON(http.StatusOK, ToolsResponse{Tools: h.tools()})
 }
 
-func (h *Handler) postRPCToolCall(c echo.Context, id json.RawMessage, params json.RawMessage) error {
+func (h *Handler) postRPCToolCall(c echo.Context, id json.RawMessage, params json.RawMessage, scope *ScopedAgent) error {
 	var req rpcToolCallParams
 	if len(bytes.TrimSpace(params)) == 0 {
 		return writeRPCError(c, id, http.StatusOK, -32602, "tools/call requires params")
@@ -171,14 +201,17 @@ func (h *Handler) postRPCToolCall(c echo.Context, id json.RawMessage, params jso
 		return writeRPCError(c, id, http.StatusOK, -32602, "tools/call params.name is required")
 	}
 
-	result, rpcErr := h.callTool(c, req.Name, req.Arguments)
+	result, rpcErr := h.callTool(c, req.Name, req.Arguments, scope)
 	if rpcErr != nil {
 		return writeRPCError(c, id, http.StatusOK, rpcErr.Code, rpcErr.Message)
 	}
 	return writeRPCResult(c, id, result)
 }
 
-func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage) (mcpToolResult, *rpcError) {
+func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage, scope *ScopedAgent) (mcpToolResult, *rpcError) {
+	if scope != nil && !slices.Contains(scopedToolNames, name) {
+		return mcpToolResult{}, &rpcError{Code: -32602, Message: "Unknown tool: " + name}
+	}
 	switch name {
 	case "search_agents":
 		if err := requireAPIKeyScope(c, "agents:read"); err != nil {
@@ -215,6 +248,9 @@ func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage) (m
 		if err := decodeToolArguments(args, &req); err != nil {
 			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
 		}
+		if rpcErr := bindScopedAgent(&req, scope); rpcErr != nil {
+			return mcpToolResult{}, rpcErr
+		}
 		if err := h.validator.Struct(&req); err != nil {
 			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
 		}
@@ -235,6 +271,9 @@ func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage) (m
 		var req RunAgentRequest
 		if err := decodeToolArguments(args, &req); err != nil {
 			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		if rpcErr := bindScopedAgent(&req, scope); rpcErr != nil {
+			return mcpToolResult{}, rpcErr
 		}
 		if err := h.validator.Struct(&req); err != nil {
 			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
@@ -268,6 +307,9 @@ func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage) (m
 			return toolError(err), nil
 		}
 		resp, err := h.svc.GetRun(c.Request().Context(), uid, runID)
+		if err == nil && scope != nil && (resp == nil || resp.AgentID != scope.ID.String()) {
+			return toolError(httpx.NotFound("调用记录不存在")), nil
+		}
 		return toolResult(resp, err), nil
 	case "list_run_events":
 		if err := auth.RequireAnyPermission(c, "runs:read", "run"); err != nil {
@@ -286,6 +328,9 @@ func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage) (m
 		}
 		runID, _ := uuid.Parse(req.RunID)
 		if err := requireAPIKeyScope(c, "runs:read", &runID); err != nil {
+			return toolError(err), nil
+		}
+		if err := h.requireRunInScope(c, uid, runID, scope); err != nil {
 			return toolError(err), nil
 		}
 		resp, err := h.svc.ListRunEvents(c.Request().Context(), uid, runID, req.AfterSequence, req.Limit)
@@ -309,8 +354,21 @@ func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage) (m
 		if err := requireAPIKeyScope(c, "runs:read", &runID); err != nil {
 			return toolError(err), nil
 		}
+		if err := h.requireRunInScope(c, uid, runID, scope); err != nil {
+			return toolError(err), nil
+		}
 		resp, err := h.svc.ListRunArtifacts(c.Request().Context(), uid, runID)
-		return toolResult(resp, err), nil
+		result := toolResult(resp, err)
+		if !result.IsError {
+			// MCP structuredContent must be an object. Keep the existing text
+			// and REST array representations for compatibility.
+			items := resp
+			if items == nil {
+				items = []runtime.RunArtifactResponse{}
+			}
+			result.StructuredContent = map[string]interface{}{"items": items}
+		}
+		return result, nil
 	case "cancel_run":
 		if err := auth.RequireAnyPermission(c, "runs:cancel", "run"); err != nil {
 			return toolError(err), nil
@@ -328,6 +386,9 @@ func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage) (m
 		}
 		runID, _ := uuid.Parse(req.RunID)
 		if err := requireAPIKeyScope(c, "runs:cancel", &runID); err != nil {
+			return toolError(err), nil
+		}
+		if err := h.requireRunInScope(c, uid, runID, scope); err != nil {
 			return toolError(err), nil
 		}
 		resp, err := h.svc.CancelRun(c.Request().Context(), uid, runID)

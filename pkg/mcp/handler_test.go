@@ -818,6 +818,41 @@ func TestGetToolsReturnsRESTToolDescriptors(t *testing.T) {
 	require.Equal(t, "input_schema", jsonFieldNameForToolDescriptorInput(t, resp.Tools[0]))
 }
 
+func TestArtifactToolStructuredContentIsObject(t *testing.T) {
+	runID := uuid.NewString()
+	for name, items := range map[string][]runtime.RunArtifactResponse{
+		"nil":       nil,
+		"empty":     {},
+		"populated": {{ID: uuid.NewString(), RunID: runID, ArtifactType: "json", Content: map[string]interface{}{"answer": "synthetic"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc := newFakeMCPService()
+			svc.artifactsResp = items
+			rec := httptest.NewRecorder()
+			c := newRPCContext(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_run_artifacts","arguments":{"run_id":"`+runID+`"}}}`, rec)
+			c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
+			c.Set(string(httpx.CtxKeyAuthScopes), []string{"runs:read"})
+			c.Set(string(httpx.CtxKeyUserID), uuid.NewString())
+			require.NoError(t, NewHandler(svc).PostRPC(c))
+			require.Equal(t, http.StatusOK, rec.Code)
+			var response struct {
+				Result mcpToolResult `json:"result"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+			require.False(t, response.Result.IsError)
+			object, ok := response.Result.StructuredContent.(map[string]interface{})
+			require.True(t, ok, "strict MCP clients require an object")
+			array, ok := object["items"].([]interface{})
+			require.True(t, ok, "empty items must be [] rather than null")
+			require.Len(t, array, len(items))
+			// Existing clients parsing the text array retain their representation.
+			expected, err := json.Marshal(items)
+			require.NoError(t, err)
+			require.JSONEq(t, string(expected), response.Result.Content[0].Text)
+		})
+	}
+}
+
 func TestMCPHelpersNormalizeToolSchemasArgumentsAndErrors(t *testing.T) {
 	tools := toMCPTools([]ToolDescriptor{{Name: "empty"}, {Name: "custom", InputSchema: map[string]interface{}{"type": "array"}}})
 	require.Len(t, tools, 2)

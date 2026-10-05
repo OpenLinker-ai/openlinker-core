@@ -16,6 +16,11 @@ func TestValidateCoreUp(t *testing.T) {
 		{name: "current", snapshot: currentCoreSnapshot(), wantNoop: true},
 		{name: "supported predecessor", snapshot: upgradeableCoreSnapshot()},
 		{name: "reviewed bridge predecessor", snapshot: reviewedBridgeCoreSnapshot()},
+		{name: "package publication predecessor", snapshot: publicationPredecessorCoreSnapshot()},
+		{name: "package publication predecessor definition drift", snapshot: withCoreDigest(publicationPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
+		{name: "package publication predecessor with current digest", snapshot: withCoreShape(publicationPredecessorCoreSnapshot(), currentCoreShape()), wantError: "fingerprint mismatch"},
+		{name: "current version with predecessor digest", snapshot: withCoreShape(currentCoreSnapshot(), publicationPredecessorCoreSnapshot().CoreShape), wantError: "fingerprint mismatch"},
+		{name: "package publication predecessor callback index invalid", snapshot: withCallbackOwnerIndexValidity(publicationPredecessorCoreSnapshot(), false), wantError: "invalid callback index"},
 		{name: "reviewed legacy bridge predecessor", snapshot: legacyBridgeCoreSnapshot()},
 		{name: "nonempty without bookkeeping", snapshot: Snapshot{NonBookkeepingObjects: 1}, wantError: "requires an empty database"},
 		{name: "Cloud bookkeeping before Core", snapshot: Snapshot{Cloud: MigrationTableState{Exists: true, Rows: 1, Version: CloudVersion}}, wantError: "Cloud migration bookkeeping"},
@@ -114,8 +119,8 @@ func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
 		Tables:            84,
-		Constraints:       691,
-		Indexes:           290,
+		Constraints:       692,
+		Indexes:           293,
 		Triggers:          75,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -126,6 +131,19 @@ func currentCoreShape() SchemaShape {
 		PreviousWire:      1,
 		BuiltInSkills:     30,
 		BuiltInSkillCases: 15,
+	}
+}
+
+func publicationPredecessorCoreSnapshot() Snapshot {
+	shape := currentCoreShape()
+	shape.Digest = CorePackagePublicationPredecessorDigest
+	shape.Constraints = 691
+	shape.Indexes = 290
+	return Snapshot{
+		Core:                    MigrationTableState{Exists: true, Rows: 1, Version: CorePackagePublicationPredecessorVersion},
+		CoreShape:               shape,
+		NonBookkeepingObjects:   84,
+		CallbackOwnerIndexValid: true,
 	}
 }
 
