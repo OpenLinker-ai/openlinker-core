@@ -320,7 +320,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	mcpDirectory := mcp.NewDirectory(pool)
 	mcpHandler.SetAgentScopeResolver(mcpDirectory)
 	mcpHandler.Register(api, hybridMw)
-	mcp.NewCatalogHandler(mcpDirectory).Register(api)
+	mcpCatalog := mcp.NewCatalogHandler(mcpDirectory)
+	mcpCatalog.Register(api)
+	mcpCatalog.RegisterProtected(api, jwtMiddleware)
 
 	deliverySvc := delivery.NewService(pool, cfg)
 	deliveryHandler := delivery.NewHandler(deliverySvc)

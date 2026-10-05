@@ -175,7 +175,8 @@ run_database_test() {
     093_skill_packages.up.sql \
     094_cli_login.up.sql \
     095_runtime_node_upgrade.up.sql \
-    096_skill_package_publication.up.sql; do
+    096_skill_package_publication.up.sql \
+    097_resource_metadata.up.sql; do
     apply_schema_file "$repository_root/migrations/$migration_file"
   done
   apply_schema_file "$repository_root/migrations/086_current_schema_init_verify.sql"

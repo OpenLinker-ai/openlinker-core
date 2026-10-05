@@ -2,7 +2,9 @@ package skillpackage
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/resourcemetadata"
 	"io"
 	"net/http"
 	"regexp"
@@ -44,18 +46,29 @@ func (h *Handler) SetVisibility(c echo.Context) error {
 	return h.ownedDetail(c, id, uid)
 }
 
-// readEmptyObject accepts no body or `{}` so publication stays an explicit,
-// parameterless state transition.
-func readEmptyObject(c echo.Context) error {
-	raw, err := io.ReadAll(http.MaxBytesReader(c.Response(), c.Request().Body, 1024))
+// Empty body and {} retain the legacy explicit publish transition.
+func readPublication(c echo.Context) (*resourcemetadata.Metadata, error) {
+	raw, err := io.ReadAll(http.MaxBytesReader(c.Response(), c.Request().Body, resourcemetadata.MaxBytes))
 	if err != nil {
-		return packageError("REQUEST_INVALID", "invalid or oversized request")
+		return nil, packageError("REQUEST_INVALID", "invalid or oversized request")
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return nil
+		return nil, nil
 	}
-	c.Request().Body = io.NopCloser(bytes.NewReader(raw))
-	return readRequest(c, &struct{}{})
+	var req struct {
+		Metadata json.RawMessage `json:"metadata"`
+	}
+	if err := resourcemetadata.DecodeObject(raw, &req); err != nil {
+		return nil, packageError("REQUEST_INVALID", "expected publication object")
+	}
+	if len(req.Metadata) == 0 {
+		return nil, nil
+	}
+	data, err := resourcemetadata.Parse(req.Metadata)
+	if err != nil {
+		return nil, packageError("METADATA_INVALID", err.Error())
+	}
+	return &data, nil
 }
 
 func (h *Handler) Publish(c echo.Context) error {
@@ -79,16 +92,18 @@ func (h *Handler) setPublication(c echo.Context, publish bool) error {
 	if err != nil {
 		return err
 	}
+	var metadata *resourcemetadata.Metadata
 	if publish {
-		if err = readEmptyObject(c); err != nil {
+		if metadata, err = readPublication(c); err != nil {
 			return err
 		}
 	}
 	ctx := c.Request().Context()
 	err = pgx.BeginFunc(ctx, h.pool, func(tx pgx.Tx) error {
 		var version, payload, digest string
-		if err := tx.QueryRow(ctx, `SELECT v.version,v.payload,v.digest FROM skill_package_versions v JOIN skill_packages p ON p.id=v.package_id
- WHERE p.id=$1 AND p.owner_user_id=$2 AND v.id=$3 FOR UPDATE OF v`, id, uid, versionID).Scan(&version, &payload, &digest); err != nil {
+		var frozen []byte
+		if err := tx.QueryRow(ctx, `SELECT v.version,v.payload,v.digest,v.publication_metadata FROM skill_package_versions v JOIN skill_packages p ON p.id=v.package_id
+ WHERE p.id=$1 AND p.owner_user_id=$2 AND v.id=$3 FOR UPDATE OF v`, id, uid, versionID).Scan(&version, &payload, &digest, &frozen); err != nil {
 			return err
 		}
 		if !publish {
@@ -100,7 +115,20 @@ func (h *Handler) setPublication(c echo.Context, publish bool) error {
 		if _, err := verifyStoredVersion(version, payload, digest); err != nil {
 			return packageError("SOURCE_INVALID", "this version failed integrity verification", http.StatusConflict)
 		}
-		_, err := tx.Exec(ctx, `UPDATE skill_package_versions SET published_at=COALESCE(published_at,now()) WHERE id=$1`, versionID)
+		if frozen != nil && metadata != nil {
+			var existing resourcemetadata.Metadata
+			if json.Unmarshal(frozen, &existing) != nil {
+				return packageError("SOURCE_INVALID", "invalid publication metadata", http.StatusConflict)
+			}
+			if existing != *metadata {
+				return packageError("METADATA_FROZEN", "publication metadata is frozen; create a new version", http.StatusConflict)
+			}
+		}
+		if metadata == nil {
+			metadata = &resourcemetadata.Metadata{}
+		}
+		encoded, _ := json.Marshal(metadata)
+		_, err := tx.Exec(ctx, `UPDATE skill_package_versions SET published_at=COALESCE(published_at,now()),publication_metadata=COALESCE(publication_metadata,$2::jsonb) WHERE id=$1`, versionID, encoded)
 		return err
 	})
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/resourcemetadata"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
@@ -36,11 +37,11 @@ const publicVersionsJSON = `COALESCE((SELECT jsonb_agg(jsonb_build_object('id',v
  FROM skill_package_versions v WHERE v.package_id=p.id AND v.published_at IS NOT NULL),'[]'::jsonb)`
 
 // The newest published version supplies the public title and description.
-const publicPackageFrom = ` FROM skill_packages p CROSS JOIN LATERAL (SELECT v.payload::jsonb AS manifest,v.created_at FROM skill_package_versions v
+const publicPackageFrom = ` FROM skill_packages p CROSS JOIN LATERAL (SELECT v.payload::jsonb AS manifest,v.created_at,v.providers,v.capability_ids,v.publication_metadata FROM skill_package_versions v
  WHERE v.package_id=p.id AND v.published_at IS NOT NULL ORDER BY v.created_at DESC,v.id DESC LIMIT 1) latest WHERE ` + publicPackagePredicate
 
 const publicPackageJSON = `jsonb_build_object('id',p.id,'name',latest.manifest->>'name','description',latest.manifest->>'description',
- 'visibility',p.visibility,'versions',` + publicVersionsJSON + `)`
+ 'visibility',p.visibility,'metadata',latest.publication_metadata - 'release_notes','versions',` + publicVersionsJSON + `)`
 
 const maxPublicQueryRunes = 200
 
@@ -91,15 +92,23 @@ func (h *Handler) PublicList(c echo.Context) error {
 	if utf8.RuneCountInString(q) > maxPublicQueryRunes {
 		return packageError("REQUEST_INVALID", "search text is too long")
 	}
+	filters, err := resourcemetadata.ParseFilters(c.QueryParams(), false)
+	if err != nil {
+		return packageError("REQUEST_INVALID", err.Error())
+	}
 	page := positiveQuery(c.QueryParam("page"), 1, 10000)
 	size := positiveQuery(c.QueryParam("size"), 12, 50)
 	ctx := c.Request().Context()
-	filter := publicPackageFrom + ` AND p.visibility='public' AND ($1='' OR latest.manifest->>'name' ILIKE $2 ESCAPE '\' OR latest.manifest->>'description' ILIKE $2 ESCAPE '\')`
+	filter := publicPackageFrom + ` AND p.visibility='public' AND ($1='' OR latest.manifest->>'name' ILIKE $2 ESCAPE '\' OR latest.manifest->>'description' ILIKE $2 ESCAPE '\') AND ($3='' OR $3=ANY(latest.providers)) AND ($4='' OR $4=ANY(latest.capability_ids))`
 	var total int
-	if err := h.pool.QueryRow(ctx, `SELECT count(*)`+filter, q, likePattern(q)).Scan(&total); err != nil {
+	if err := h.pool.QueryRow(ctx, `SELECT count(*)`+filter, q, likePattern(q), filters.Provider, filters.Capability).Scan(&total); err != nil {
 		return databaseError(err)
 	}
-	rows, err := h.pool.Query(ctx, `SELECT `+publicPackageJSON+filter+` ORDER BY latest.created_at DESC,p.id LIMIT $3 OFFSET $4`, q, likePattern(q), size, (page-1)*size)
+	order := "latest.created_at DESC,p.id"
+	if filters.Sort == "name" {
+		order = "latest.manifest->>'name',p.id"
+	}
+	rows, err := h.pool.Query(ctx, `SELECT `+publicPackageJSON+filter+` ORDER BY `+order+` LIMIT $5 OFFSET $6`, q, likePattern(q), filters.Provider, filters.Capability, size, (page-1)*size)
 	if err != nil {
 		return databaseError(err)
 	}
@@ -131,16 +140,17 @@ func (h *Handler) PublicDetail(c echo.Context) error {
 }
 
 type publicVersion struct {
-	ID            uuid.UUID  `json:"id"`
-	PackageID     uuid.UUID  `json:"package_id"`
-	Version       string     `json:"version"`
-	Digest        string     `json:"digest"`
-	CapabilityIDs []string   `json:"capability_ids"`
-	Providers     []string   `json:"providers"`
-	CreatedAt     time.Time  `json:"created_at"`
-	PublishedAt   *time.Time `json:"published_at"`
-	Visibility    string     `json:"visibility"`
-	payload       string
+	PublicationMetadata json.RawMessage `json:"publication_metadata"`
+	ID                  uuid.UUID       `json:"id"`
+	PackageID           uuid.UUID       `json:"package_id"`
+	Version             string          `json:"version"`
+	Digest              string          `json:"digest"`
+	CapabilityIDs       []string        `json:"capability_ids"`
+	Providers           []string        `json:"providers"`
+	CreatedAt           time.Time       `json:"created_at"`
+	PublishedAt         *time.Time      `json:"published_at"`
+	Visibility          string          `json:"visibility"`
+	payload             string
 }
 
 type rowQuerier interface {
@@ -151,9 +161,9 @@ type rowQuerier interface {
 // clause so withdrawal and visibility changes linearize with the copy.
 func loadPublicVersion(ctx context.Context, db rowQuerier, packageID, versionID uuid.UUID, lock string) (publicVersion, error) {
 	var v publicVersion
-	err := db.QueryRow(ctx, `SELECT v.id,v.package_id,v.version,v.digest,v.capability_ids,v.providers,v.created_at,v.published_at,p.visibility,v.payload
+	err := db.QueryRow(ctx, `SELECT v.id,v.package_id,v.version,v.digest,v.capability_ids,v.providers,v.created_at,v.published_at,p.visibility,v.payload,v.publication_metadata
  FROM skill_package_versions v JOIN skill_packages p ON p.id=v.package_id WHERE p.id=$1 AND v.id=$2 AND `+publicVersionPredicate+lock, packageID, versionID).
-		Scan(&v.ID, &v.PackageID, &v.Version, &v.Digest, &v.CapabilityIDs, &v.Providers, &v.CreatedAt, &v.PublishedAt, &v.Visibility, &v.payload)
+		Scan(&v.ID, &v.PackageID, &v.Version, &v.Digest, &v.CapabilityIDs, &v.Providers, &v.CreatedAt, &v.PublishedAt, &v.Visibility, &v.payload, &v.PublicationMetadata)
 	return v, err
 }
 

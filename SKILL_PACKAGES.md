@@ -242,3 +242,37 @@ and actual-write probes before capability advertisement. Prerequisite lookup use
 the Provider environment/identity and applicable native tool read roots; it does
 not install or execute dependencies. Runtime/image releases and real-model
 acceptance must be recorded separately from these source-level tests.
+
+## Publisher declarations (schema 097)
+
+`PUT /api/v1/creator/skill-packages/:id/versions/:versionId/publication`
+continues to accept no body or `{}`. An optional `metadata` object accepts
+`publisher_name` (80 Unicode characters), `repository_url` (2048, HTTPS without
+userinfo/query/fragment/whitespace), `license` (128) and `release_notes` (4000 plain text).
+Requests and stored declarations are bounded to 64 KiB; unknown fields, null
+metadata, non-string values and trailing JSON are rejected. Publisher names,
+licenses and repository URLs reject invisible Unicode format characters.
+Strings are trimmed and empty fields omitted. These are unverified publisher declarations.
+
+The first publication freezes normalized metadata, default `{}`, atomically
+with publication. Withdrawal preserves it. Republish without metadata or with
+identical normalized metadata is idempotent; different explicit metadata returns
+409 `SKILL_PACKAGE_METADATA_FROZEN`. Editing declarations requires a new version.
+Legacy versions published during 097 migration freeze `{}`. A legacy withdrawn
+version has no historical publication marker and freezes on its next publication.
+Old clients publishing `{}` against new Core intentionally freeze empty metadata;
+ship the frontends with Core to minimize this transition window.
+
+Public list/detail adds `metadata` from the newest published version without
+notes. The version endpoint adds complete `publication_metadata`; public version
+arrays do not duplicate declarations. Owner list omits notes, owner package
+detail includes them. Bundle/file/archive bytes, digests, imports, bindings,
+leases and runtime snapshots never include the new declarations. Imports retain
+provenance IDs, but do not inherit publisher claims.
+
+Public list filters: optional `provider=codex|claude`, exact `capability` ID,
+`sort=newest|name`. Defaults preserve newest-published ordering. Both filters
+apply to the same newest published version before pagination and count, never a
+private draft or any older version. Name ordering has a stable package-ID tie
+breaker. Valid unknown capability IDs yield empty results. Duplicate filter or
+pagination parameters and invalid enums return 400.

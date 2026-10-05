@@ -17,6 +17,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/inputschema"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/resourcemetadata"
 )
 
 // Agent-scoped MCP: POST /api/v1/mcp/agents/:agentId serves the same JSON-RPC
@@ -95,16 +96,20 @@ type ServiceListResponse struct {
 // Filtering happens in SQL before pagination, with the market's hidden-tag rule.
 const serviceCatalogFilter = ` FROM agents a WHERE a.visibility='public' AND a.lifecycle_status='active' AND a.connection_mode='mcp_server'
  AND NOT EXISTS (SELECT 1 FROM unnest(a.tags) AS tag WHERE lower(tag) IN ('internal','test','testing','validation') OR tag IN ('内部','测试','验收'))
- AND ($1='' OR a.slug ILIKE $2 ESCAPE '\' OR a.name ILIKE $2 ESCAPE '\' OR a.description ILIKE $2 ESCAPE '\')`
+ AND ($1='' OR a.slug ILIKE $2 ESCAPE '\' OR a.name ILIKE $2 ESCAPE '\' OR a.description ILIKE $2 ESCAPE '\') AND ($3='' OR EXISTS (SELECT 1 FROM agent_skills s WHERE s.agent_id=a.id AND s.skill_id=$3)) AND ($4='' OR $4=ANY(a.tags))`
 
-func (d *Directory) ListServices(ctx context.Context, q string, page, size int) (*ServiceListResponse, error) {
+func (d *Directory) ListServices(ctx context.Context, q string, page, size int, filters resourcemetadata.Filters) (*ServiceListResponse, error) {
 	pattern := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q) + "%"
 	resp := &ServiceListResponse{Items: []ServiceListItem{}, Page: page, Size: size}
-	if err := d.pool.QueryRow(ctx, `SELECT count(*)`+serviceCatalogFilter, q, pattern).Scan(&resp.Total); err != nil {
+	if err := d.pool.QueryRow(ctx, `SELECT count(*)`+serviceCatalogFilter, q, pattern, filters.Capability, filters.Tag).Scan(&resp.Total); err != nil {
 		return nil, httpx.Internal("查询 MCP 服务失败")
 	}
+	order := "a.created_at DESC,a.id"
+	if filters.Sort == "name" {
+		order = "a.name,a.id"
+	}
 	rows, err := d.pool.Query(ctx, `SELECT a.id::text,a.slug,a.name,a.description,a.connection_mode,COALESCE(a.mcp_tool_name,'')`+serviceCatalogFilter+
-		` ORDER BY a.created_at DESC,a.id LIMIT $3 OFFSET $4`, q, pattern, size, (page-1)*size)
+		` ORDER BY `+order+` LIMIT $5 OFFSET $6`, q, pattern, filters.Capability, filters.Tag, size, (page-1)*size)
 	if err != nil {
 		return nil, httpx.Internal("查询 MCP 服务失败")
 	}
@@ -131,6 +136,7 @@ func NewCatalogHandler(directory *Directory) *CatalogHandler {
 
 func (h *CatalogHandler) Register(api *echo.Group) {
 	api.GET("/mcp-services", h.List)
+	api.GET("/mcp-services/:slug/metadata", h.PublicMetadata)
 }
 
 func (h *CatalogHandler) List(c echo.Context) error {
@@ -141,7 +147,11 @@ func (h *CatalogHandler) List(c echo.Context) error {
 	}
 	page := boundedQueryInt(c.QueryParam("page"), 1, 10000)
 	size := boundedQueryInt(c.QueryParam("size"), 12, 50)
-	resp, err := h.directory.ListServices(c.Request().Context(), q, page, size)
+	filters, err := resourcemetadata.ParseFilters(c.QueryParams(), true)
+	if err != nil {
+		return httpx.BadRequest(err.Error())
+	}
+	resp, err := h.directory.ListServices(c.Request().Context(), q, page, size, filters)
 	if err != nil {
 		return err
 	}

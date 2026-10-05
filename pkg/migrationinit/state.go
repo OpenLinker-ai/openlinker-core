@@ -16,18 +16,20 @@ import (
 )
 
 const (
-	CoreVersion int64 = 96
+	CoreVersion int64 = 97
 	// CoreShapeVersion is the migration version the shape constants below were
 	// measured against. The digest and the object counts come from a live
 	// catalog, so adding a migration cannot update them offline; leaving them
 	// stale would pass every test and then fail the postflight shape check at
 	// deploy time. A test requires these two to match, turning that into a
 	// local failure with an explicit instruction.
-	CoreShapeVersion int64 = 96
+	CoreShapeVersion int64 = 97
 	// CoreUpgradeShapeVersion is the predecessor version CoreUpgradeSchemaDigest
 	// and the upgrade counts were measured against. Raising CoreUpgradeVersion
 	// without remeasuring would make the upgrade path validate a predecessor
 	// against another version's fingerprint.
+	CoreResourceMetadataPredecessorVersion   int64 = 96
+	CoreResourceMetadataPredecessorDigest          = "2b590df0df297136ce8a8f9949dd23fb86cc9e2f8e87d41c2f15148b48a39720"
 	CorePackagePublicationPredecessorVersion int64 = 95
 	CorePackagePublicationPredecessorDigest        = "f9f50c587f496bcc49be97b8cc76a3efa637563c7b2ca08705cb9e6fff5195ae"
 	CoreNodeUpgradePredecessorVersion        int64 = 94
@@ -41,7 +43,7 @@ const (
 	CoreReviewedBridgeVersion                int64 = 88
 	CoreLegacyBridgeVersion                  int64 = 86
 	CloudVersion                             int64 = 55
-	CoreSchemaDigest                               = "2b590df0df297136ce8a8f9949dd23fb86cc9e2f8e87d41c2f15148b48a39720"
+	CoreSchemaDigest                               = "29615da16e86f5b0ab50dbc798ef008862184300431a339b620e40476d30d033"
 	CoreUpgradeSchemaDigest                        = "1b2591b579018b4edd6465e19f36823fca28af01068742358293d1367c1c1ed8"
 	CoreReviewedBridgeSchemaDigest                 = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
 	CoreLegacyBridgeSchemaDigest                   = "6c22808a8cd658cf827a5828a92d3343f040d7d6ff3302f9fdab691fe90aec5b"
@@ -49,6 +51,7 @@ const (
 )
 
 var coreTables = []string{
+	"mcp_service_metadata",
 	"runtime_node_upgrade_state", "runtime_node_upgrade_operations", "runtime_node_upgrade_admissions",
 	"cli_login_requests", "cli_login_rate_limits",
 	"skill_packages", "skill_package_versions", "agent_skill_package_bindings", "run_skill_package_snapshots",
@@ -272,18 +275,19 @@ func Inspect(ctx context.Context, databaseURL string) (Snapshot, error) {
 	// so the deltas are per version rather than shared. Adding a migration
 	// without widening them here makes every predecessor fail to read its seed
 	// shape, which reads as a corrupt install rather than a stale constant.
-	// 096 adds columns, a constraint and indexes but no tables, so version 095
-	// shares the current table count and is distinguished by its fingerprint.
+	// 097 adds one table. Both 096 and 095 are one table short; older
+	// predecessors retain their measured absolute counts and fingerprints.
 	if snapshot.CoreShape.Tables == int64(len(coreTables)) ||
-		(snapshot.Core.Version == CoreNodeUpgradePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-3)) ||
-		(snapshot.Core.Version == CoreCLILoginPredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-5)) ||
-		(snapshot.Core.Version == CoreSkillPackagePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-9)) ||
+		((snapshot.Core.Version == CoreResourceMetadataPredecessorVersion || snapshot.Core.Version == CorePackagePublicationPredecessorVersion) && snapshot.CoreShape.Tables == int64(len(coreTables)-1)) ||
+		(snapshot.Core.Version == CoreNodeUpgradePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-4)) ||
+		(snapshot.Core.Version == CoreCLILoginPredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-6)) ||
+		(snapshot.Core.Version == CoreSkillPackagePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-10)) ||
 		(snapshot.Core.Version == CoreUpgradeVersion &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-11)) ||
-		(snapshot.Core.Version == CoreReviewedBridgeVersion &&
 			snapshot.CoreShape.Tables == int64(len(coreTables)-12)) ||
+		(snapshot.Core.Version == CoreReviewedBridgeVersion &&
+			snapshot.CoreShape.Tables == int64(len(coreTables)-13)) ||
 		(snapshot.Core.Version == CoreLegacyBridgeVersion &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-15)) {
+			snapshot.CoreShape.Tables == int64(len(coreTables)-16)) {
 		if err := inspectCoreSeeds(ctx, conn, &snapshot.CoreShape, snapshot.Core.Version); err != nil {
 			return Snapshot{}, err
 		}
@@ -550,7 +554,7 @@ func (s Snapshot) ValidateCoreUp() (bool, error) {
 			return false, err
 		}
 		return true, nil
-	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion, CorePackagePublicationPredecessorVersion:
+	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion, CorePackagePublicationPredecessorVersion, CoreResourceMetadataPredecessorVersion:
 		if s.Core.Version >= CoreCLILoginPredecessorVersion && (!s.CallbackOwnerIndexValid || s.UnclassifiedBrowserAgents != 0) {
 			return false, errors.New("Core predecessor has invalid callback index or incomplete Browser profile backfill")
 		}
@@ -606,7 +610,7 @@ func (s Snapshot) ValidateCloudUp() (bool, error) {
 				s.UnclassifiedBrowserAgents,
 			)
 		}
-	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion, CorePackagePublicationPredecessorVersion:
+	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion, CorePackagePublicationPredecessorVersion, CoreResourceMetadataPredecessorVersion:
 		if s.Core.Version >= CoreCLILoginPredecessorVersion && (!s.CallbackOwnerIndexValid || s.UnclassifiedBrowserAgents != 0) {
 			return false, errors.New("Core predecessor has invalid callback index or incomplete Browser profile backfill")
 		}
@@ -700,6 +704,38 @@ func validateMigrationTableState(owner string, state MigrationTableState) error 
 func validateCoreShape(shape SchemaShape) error {
 	want := SchemaShape{
 		Digest: CoreSchemaDigest,
+		// 097 adds display metadata only; Runtime seeds and execution contracts stay fixed.
+		// Measured on a clean PostgreSQL 16 with 086..097 applied; the digest is
+		// a catalog fingerprint and cannot be derived from the DDL alone.
+		Tables:            85,
+		Constraints:       698,
+		Indexes:           294,
+		Triggers:          75,
+		CoreIdentities:    1,
+		RuntimeControls:   1,
+		RuntimeSchemas:    11,
+		CurrentRuntime:    1,
+		RuntimeWires:      5,
+		CurrentWire:       1,
+		PreviousWire:      1,
+		BuiltInSkills:     30,
+		BuiltInSkillCases: 15,
+	}
+	if shape.Digest != want.Digest || shape.Tables != want.Tables || shape.Constraints != want.Constraints ||
+		shape.Indexes != want.Indexes || shape.Triggers != want.Triggers ||
+		shape.CoreIdentities != want.CoreIdentities || shape.RuntimeControls != want.RuntimeControls ||
+		shape.RuntimeSchemas != want.RuntimeSchemas || shape.CurrentRuntime != want.CurrentRuntime ||
+		shape.RuntimeWires != want.RuntimeWires || shape.CurrentWire != want.CurrentWire ||
+		shape.PreviousWire != want.PreviousWire || shape.BuiltInSkills != want.BuiltInSkills ||
+		shape.BuiltInSkillCases < want.BuiltInSkillCases {
+		return fmt.Errorf("Core schema fingerprint mismatch: %s", formatShape(shape))
+	}
+	return nil
+}
+
+func validateCoreResourceMetadataPredecessorShape(shape SchemaShape) error {
+	want := SchemaShape{
+		Digest: CoreResourceMetadataPredecessorDigest,
 		// 096 adds package visibility, version publication and import provenance.
 		// Measured on a clean PostgreSQL 16 with 086..096 applied; the digest is
 		// a catalog fingerprint and cannot be derived from the DDL alone.
@@ -858,6 +894,9 @@ func validateCorePackagePredecessorShape(shape SchemaShape) error {
 }
 
 func validateCorePredecessorShape(shape SchemaShape, version int64) error {
+	if version == CoreResourceMetadataPredecessorVersion {
+		return validateCoreResourceMetadataPredecessorShape(shape)
+	}
 	if version == CorePackagePublicationPredecessorVersion {
 		return validateCorePublicationPredecessorShape(shape)
 	}

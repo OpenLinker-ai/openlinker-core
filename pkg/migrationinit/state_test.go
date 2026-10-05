@@ -16,6 +16,9 @@ func TestValidateCoreUp(t *testing.T) {
 		{name: "current", snapshot: currentCoreSnapshot(), wantNoop: true},
 		{name: "supported predecessor", snapshot: upgradeableCoreSnapshot()},
 		{name: "reviewed bridge predecessor", snapshot: reviewedBridgeCoreSnapshot()},
+		{name: "resource metadata predecessor", snapshot: metadataPredecessorCoreSnapshot()},
+		{name: "resource metadata predecessor drift", snapshot: withCoreDigest(metadataPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
+		{name: "resource metadata predecessor callback invalid", snapshot: withCallbackOwnerIndexValidity(metadataPredecessorCoreSnapshot(), false), wantError: "invalid callback index"},
 		{name: "package publication predecessor", snapshot: publicationPredecessorCoreSnapshot()},
 		{name: "package publication predecessor definition drift", snapshot: withCoreDigest(publicationPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
 		{name: "package publication predecessor with current digest", snapshot: withCoreShape(publicationPredecessorCoreSnapshot(), currentCoreShape()), wantError: "fingerprint mismatch"},
@@ -60,7 +63,7 @@ func TestValidateCloudUp(t *testing.T) {
 	current := fresh
 	current.Cloud = MigrationTableState{Exists: true, Rows: 1, Version: CloudVersion}
 	current.CloudShape = currentCloudShape()
-	current.NonBookkeepingObjects = 91
+	current.NonBookkeepingObjects = 92
 
 	tests := []struct {
 		name      string
@@ -110,7 +113,7 @@ func currentCoreSnapshot() Snapshot {
 	return Snapshot{
 		Core:                    MigrationTableState{Exists: true, Rows: 1, Version: CoreVersion},
 		CoreShape:               currentCoreShape(),
-		NonBookkeepingObjects:   84,
+		NonBookkeepingObjects:   85,
 		CallbackOwnerIndexValid: true,
 	}
 }
@@ -118,9 +121,9 @@ func currentCoreSnapshot() Snapshot {
 func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
-		Tables:            84,
-		Constraints:       692,
-		Indexes:           293,
+		Tables:            85,
+		Constraints:       698,
+		Indexes:           294,
 		Triggers:          75,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -137,6 +140,7 @@ func currentCoreShape() SchemaShape {
 func publicationPredecessorCoreSnapshot() Snapshot {
 	shape := currentCoreShape()
 	shape.Digest = CorePackagePublicationPredecessorDigest
+	shape.Tables = 84
 	shape.Constraints = 691
 	shape.Indexes = 290
 	return Snapshot{
@@ -325,4 +329,15 @@ func withObsoleteCloud(snapshot Snapshot, count int64) Snapshot {
 func withUnclassifiedBrowserAgents(snapshot Snapshot, count int64) Snapshot {
 	snapshot.UnclassifiedBrowserAgents = count
 	return snapshot
+}
+
+func metadataPredecessorCoreSnapshot() Snapshot {
+	s := currentCoreSnapshot()
+	s.Core.Version = CoreResourceMetadataPredecessorVersion
+	s.CoreShape.Digest = CoreResourceMetadataPredecessorDigest
+	s.CoreShape.Tables = 84
+	s.CoreShape.Constraints = 692
+	s.CoreShape.Indexes = 293
+	s.NonBookkeepingObjects = 84
+	return s
 }

@@ -13,6 +13,8 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 		t.Fatal(err)
 	}
 	want := map[string]bool{
+		"097_resource_metadata.up.sql":               true,
+		"097_resource_metadata.down.sql":             true,
 		"096_skill_package_publication.up.sql":       true,
 		"096_skill_package_publication.down.sql":     true,
 		"095_runtime_node_upgrade.up.sql":            true,
@@ -226,9 +228,9 @@ func TestCoreFoundationalInitializerContainsPredecessorContracts(t *testing.T) {
 func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	verify := readInitializer(t, "../../migrations/086_current_schema_init_verify.sql")
 	for _, fragment := range []string{
-		"public_tables <> 84",
-		"public_constraints <> 692",
-		"public_indexes <> 293",
+		"public_tables <> 85",
+		"public_constraints <> 698",
+		"public_indexes <> 294",
 		"public_triggers <> 75",
 		"public_functions <> 68",
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",

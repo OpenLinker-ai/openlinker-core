@@ -78,3 +78,29 @@ middleware, MCP handler, runtime Service, PostgreSQL and a synthetic upstream
 `mcp_server`. It covers JWT rejection, private schema hiding, narrowed tokens,
 `agent_id` mismatch, cross-Agent run reads/cancel, run-restricted tokens,
 platform regression, endpoint redaction and catalog filtering.
+
+## MCP service display metadata (schema 097)
+
+Core owns publisher-supplied display information, separately from MCP execution.
+JWT owner GET/PUT `/api/v1/creator/agents/:id/mcp-metadata` requires an owned
+`mcp_server` Agent. GET returns `{metadata,revision,updated_at}` (revision 0 when
+absent). PUT requires `{expected_revision,metadata}`. Metadata fields and limits
+are the same as [Skill publication declarations](SKILL_PACKAGES.md#publisher-declarations-schema-097).
+The explicit update replaces the whole metadata object; `{}` clears it. A stale
+revision returns 409 `RESOURCE_METADATA_CONFLICT`. Failed owner reads never imply
+revision 0. Concurrent creation is serialized by INSERT ON CONFLICT, updates by
+revision CAS, with an Agent FOR SHARE lock stabilizing mode and ownership without
+blocking the KEY SHARE lock used for run foreign keys.
+
+Anonymous GET `/api/v1/mcp-services/:slug/metadata` uses the existing active,
+public/unlisted MCP Agent visibility contract. It returns `{metadata,updated_at}`,
+never revision, credentials or endpoint URL. Missing information returns an empty
+object; a hidden or non-MCP resource returns 404. All responses are no-store.
+Metadata is self-declared, not an account identity, audited license or protocol
+version. It never enters scoped tools/instructions, runs or runtime payloads.
+
+The directory accepts exact `capability` and `tag` filters plus
+`sort=newest|name`. Count and pagination use identical filters before LIMIT;
+private/unlisted/inactive/internal-test-tag Agents remain excluded. Defaults keep
+creation-time order. Unknown valid capability IDs yield no results; duplicate
+query parameters and invalid sort/ID values return 400.

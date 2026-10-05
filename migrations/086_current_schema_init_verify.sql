@@ -13,8 +13,8 @@ BEGIN
     FROM pg_catalog.pg_tables
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_tables <> 84 THEN
-        RAISE EXCEPTION 'Core initializer table count is %, expected 84', public_tables;
+    IF public_tables <> 85 THEN
+        RAISE EXCEPTION 'Core initializer table count is %, expected 85', public_tables;
     END IF;
 
     SELECT count(*) INTO public_constraints
@@ -23,16 +23,16 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 692 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 692', public_constraints;
+    IF public_constraints <> 698 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 698', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 293 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 293', public_indexes;
+    IF public_indexes <> 294 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 294', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers
