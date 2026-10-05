@@ -177,6 +177,9 @@ make bootstrap-admin
 - `ALLOW_LOCAL_HTTP_ENDPOINTS` — 本地开发请设为 `true`
 - `RUNTIME_ENDPOINT_RUN_*` — run 超时 worker 参数
 
+Google OAuth 每次登录都会通过 `prompt=select_account` 请求显示账号选择器，
+由用户主动选择 Google 账号，不自动沿用浏览器的默认账号。
+
 ### LLM 配置（可选，用于任务路由和 benchmark）
 
 未配置 LLM 时，任务路由自动降级到关键词匹配。如需开启 LLM 辅助路由和 skill benchmark：
