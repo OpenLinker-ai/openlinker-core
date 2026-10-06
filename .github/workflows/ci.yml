@@ -92,12 +92,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go test -race -v ./pkg/runtime -run '^(TestSkillPackagePublicationAndImport|TestAgentScopedMCPEndpoint|TestResourceMetadataPublicationPrivacyAndDirectory)$' -count=1 | tee /tmp/resource-contracts.log
+          go test -race -v ./pkg/runtime -run '^(TestSkillPackageLifecycle|TestSkillPackagePublicationAndImport|TestAgentScopedMCPEndpoint|TestResourceMetadataPublicationPrivacyAndDirectory)$' -count=1 | tee /tmp/resource-contracts.log
           if grep -q -- '--- SKIP:' /tmp/resource-contracts.log; then
             echo "Skill and MCP PostgreSQL contracts must not skip" >&2
             exit 1
           fi
-          for name in TestSkillPackagePublicationAndImport TestAgentScopedMCPEndpoint TestResourceMetadataPublicationPrivacyAndDirectory; do
+          for name in TestSkillPackageLifecycle TestSkillPackagePublicationAndImport TestAgentScopedMCPEndpoint TestResourceMetadataPublicationPrivacyAndDirectory; do
             grep -q -- "--- PASS: ${name} " /tmp/resource-contracts.log
           done
 
