@@ -256,7 +256,8 @@ func (h *Handler) Bindings(c echo.Context) error {
 		return err
 	}
 	ctx := c.Request().Context()
-	mode, err := ownedAgent(ctx, h.pool, agentID, uid, false)
+	var mode, lifecycle string
+	err = h.pool.QueryRow(ctx, `SELECT connection_mode,lifecycle_status FROM agents WHERE id=$1 AND creator_id=$2`, agentID, uid).Scan(&mode, &lifecycle)
 	if err != nil {
 		return databaseError(err)
 	}
@@ -265,11 +266,19 @@ func (h *Handler) Bindings(c echo.Context) error {
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return databaseError(err)
 	}
+	hostStatus := "incompatible"
+	if mode == "runtime" && errors.Is(err, pgx.ErrNoRows) {
+		hostStatus = "none"
+	}
 	providers := []string{}
 	for _, p := range []string{"codex", "claude"} {
 		if slices.Contains(features, "skill_packages."+p+".v1") {
 			providers = append(providers, p)
 		}
+	}
+	supported := mode == "runtime" && slices.Contains(features, Feature) && len(providers) > 0
+	if supported {
+		hostStatus = "compatible"
 	}
 	var items json.RawMessage
 	err = h.pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(jsonb_build_object('package_id',p.id,'name',v.payload::jsonb->>'name','providers',v.providers,'latest_version_id',(SELECT id FROM skill_package_versions WHERE package_id=p.id ORDER BY created_at DESC,id LIMIT 1),'version_id',v.id,'version',v.version,'digest',v.digest,'capability_ids',v.capability_ids,'binding_id',b.binding_id,'status',b.status,'error_code',b.error_code,'last_run_id',b.last_run_id,'loaded_at',b.loaded_at) ORDER BY p.name,p.id),'[]'::jsonb)
@@ -277,7 +286,7 @@ func (h *Handler) Bindings(c echo.Context) error {
 	if err != nil {
 		return databaseError(err)
 	}
-	return c.JSON(http.StatusOK, map[string]any{"items": items, "supported": mode == "runtime" && slices.Contains(features, Feature) && len(providers) > 0, "providers": providers})
+	return c.JSON(http.StatusOK, map[string]any{"items": items, "lifecycle_status": lifecycle, "max_bindings": MaxBindings, "host_status": hostStatus, "supported": supported, "providers": providers})
 }
 
 func (h *Handler) Bind(c echo.Context) error {

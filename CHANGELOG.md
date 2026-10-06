@@ -9,6 +9,9 @@ runtime protocol, and migration contract are declared stable.
 
 ### Added
 
+- Expose lifecycle, binding limit, and host compatibility hints on the owner-only
+  Skill binding read response without changing binding admission or Run snapshots.
+
 - Public Skill package directories and immutable published version links, exact
   bundle downloads, verified private-copy imports, and explicit withdrawal.
 - Scoped MCP service endpoints and public service discovery, retaining Core

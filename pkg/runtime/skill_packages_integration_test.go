@@ -66,6 +66,7 @@ func TestSkillPackageLifecycle(t *testing.T) {
 	call(http.MethodGet, packagePath+"/versions/"+imported.VersionID.String(), nil, 404)
 	call(http.MethodPost, packagePath+"/versions", request, 404)
 	call(http.MethodPut, bindPath, body, 404)
+	call(http.MethodGet, "/agents/"+agentID.String()+"/skill-packages", nil, 404)
 	actor = creatorID
 	require.NotContains(t, call(http.MethodGet, packagePath, nil, 200).Body.String(), "PRIVATE-INSTRUCTION-CONTENT")
 	require.Contains(t, call(http.MethodGet, packagePath+"/versions/"+imported.VersionID.String(), nil, 200).Body.String(), "PRIVATE-INSTRUCTION-CONTENT")
@@ -78,7 +79,11 @@ func TestSkillPackageLifecycle(t *testing.T) {
 	invalidRequest = request
 	invalidRequest.Files = map[string]string{"SKILL.md": request.Files["SKILL.md"], "escaped.txt": strings.Repeat("<", 12000)}
 	require.Contains(t, call(http.MethodPost, "/skill-packages", invalidRequest, 400).Body.String(), "SKILL_PACKAGE_PAYLOAD_TOO_LARGE")
-	call(http.MethodPut, bindPath, body, 200)
+	bound := call(http.MethodPut, bindPath, body, 200)
+	require.Contains(t, bound.Body.String(), `"lifecycle_status":"active"`)
+	require.Contains(t, bound.Body.String(), `"max_bindings":5`)
+	require.Contains(t, bound.Body.String(), `"host_status":"compatible"`)
+	require.Equal(t, "private, no-store", bound.Header().Get("Cache-Control"))
 	// A sixth binding returns a stable actionable error and leaves the original intact.
 	extras := []string{}
 	for i := 0; i < 5; i++ {
@@ -95,6 +100,8 @@ func TestSkillPackageLifecycle(t *testing.T) {
 			require.Contains(t, call(http.MethodPut, path, map[string]any{"version_id": extra.VersionID}, 400).Body.String(), "SKILL_PACKAGE_BINDING_LIMIT")
 		}
 	}
+	// Re-saving a package at capacity remains permitted.
+	call(http.MethodPut, bindPath, body, 200)
 	for _, path := range extras {
 		call(http.MethodDelete, path, nil, 204)
 	}
@@ -196,7 +203,9 @@ func TestSkillPackageLifecycle(t *testing.T) {
  INSERT INTO runtime_session_attachments(id,runtime_session_id,core_instance_id,attachment_kind)
  SELECT gen_random_uuid(),runtime_session_id,attached_core_instance_id,'connected' FROM new_session`, agentID)
 	require.NoError(t, err)
-	require.Contains(t, call(http.MethodGet, "/agents/"+agentID.String()+"/skill-packages", nil, 200).Body.String(), `"supported":false`)
+	incompatibleBindings := call(http.MethodGet, "/agents/"+agentID.String()+"/skill-packages", nil, 200)
+	require.Contains(t, incompatibleBindings.Body.String(), `"supported":false`)
+	require.Contains(t, incompatibleBindings.Body.String(), `"host_status":"incompatible"`)
 	_, err = svc.Run(ctx, creatorID, makeRunReq(agentID, map[string]any{"text": "downgraded"}), "api")
 	var incompatible *httpx.HTTPError
 	require.ErrorAs(t, err, &incompatible)
@@ -204,10 +213,18 @@ func TestSkillPackageLifecycle(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, incompatible.Status)
 	require.NotContains(t, strings.ToLower(incompatible.Message), "skill")
 	require.Contains(t, call(http.MethodPut, bindPath, map[string]any{"version_id": updated.VersionID}, 400).Body.String(), "SKILL_PACKAGE_HOST_INCOMPATIBLE")
+	require.NoError(t, pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE runtime_session_attachments SET detached_at=clock_timestamp(),disconnect_reason='skill_read_test' WHERE runtime_session_id IN (SELECT runtime_session_id FROM runtime_sessions WHERE agent_id=$1) AND detached_at IS NULL`, agentID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE runtime_sessions SET status='closed',disconnected_at=clock_timestamp(),attached_core_instance_id=NULL WHERE agent_id=$1`, agentID)
+		return err
+	}))
+	require.Contains(t, call(http.MethodGet, "/agents/"+agentID.String()+"/skill-packages", nil, 200).Body.String(), `"host_status":"none"`)
 	// Disabled Agents retain read/remove access, while new associations stay forbidden.
 	_, err = pool.Exec(ctx, `UPDATE agents SET lifecycle_status='disabled' WHERE id=$1`, agentID)
 	require.NoError(t, err)
-	call(http.MethodGet, "/agents/"+agentID.String()+"/skill-packages", nil, 200)
+	require.Contains(t, call(http.MethodGet, "/agents/"+agentID.String()+"/skill-packages", nil, 200).Body.String(), `"lifecycle_status":"disabled"`)
 	require.Contains(t, call(http.MethodPut, bindPath, map[string]any{"version_id": updated.VersionID}, 400).Body.String(), "SKILL_PACKAGE_AGENT_DISABLED")
 	call(http.MethodDelete, bindPath, nil, 204)
 	require.NoError(t, pool.QueryRow(ctx, `SELECT to_jsonb(s) FROM run_skill_package_snapshots s WHERE run_id=$1`, run.RunID).Scan(&preserved))

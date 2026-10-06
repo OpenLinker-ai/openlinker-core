@@ -276,3 +276,21 @@ apply to the same newest published version before pagination and count, never a
 private draft or any older version. Name ordering has a stable package-ID tie
 breaker. Valid unknown capability IDs yield empty results. Duplicate filter or
 pagination parameters and invalid enums return 400.
+
+## Association verification UI
+
+The owner-only `GET /api/v1/creator/agents/:id/skill-packages` response also includes
+`lifecycle_status`, `max_bindings`, and `host_status` (`none`, `incompatible`, or
+`compatible`). Host status describes the latest non-closed, non-revoked session
+used for binding admission; it is not a liveness signal or Run readiness guarantee.
+`none` means a Runtime Agent has no such session; other connection modes are
+`incompatible`. `supported` retains its existing semantics.
+The PUT response is the same full list; clients select by package ID. Re-saving
+the same version preserves `binding_id` and all previous receipt fields.
+
+The Web trial UI compares the expected package, version, `binding_id`, digest, and
+the new Run ID against Core's accepted receipt. Raw Run events are not proof of
+loading. Concurrent association changes or a newer Run can make this check
+inconclusive. Loading and Run success are displayed separately. Observation is
+bounded to two minutes; manual refresh does not restart the deadline.
+No write, Run creation, or authorization is triggered by a verification URL.
