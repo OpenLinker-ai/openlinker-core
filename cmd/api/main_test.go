@@ -868,7 +868,7 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 			}, &stdout, &stderr)
 
 			if code != tt.wantCode {
-				t.Fatalf("runMigrateWith code = %d, want %d", code, tt.wantCode)
+				t.Fatalf("runMigrateWith code = %d, want %d; stderr = %q", code, tt.wantCode, stderr.String())
 			}
 			if tt.wantOut != "" && !strings.Contains(stdout.String(), tt.wantOut) {
 				t.Fatalf("stdout = %q, want contains %q", stdout.String(), tt.wantOut)
@@ -895,11 +895,11 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 func currentCoreMigrationSnapshot() migrationinit.Snapshot {
 	return migrationinit.Snapshot{
 		Core:                    migrationinit.MigrationTableState{Exists: true, Rows: 1, Version: migrationinit.CoreVersion},
-		NonBookkeepingObjects:   84,
+		NonBookkeepingObjects:   85,
 		CallbackOwnerIndexValid: true,
 		CoreShape: migrationinit.SchemaShape{
 			Digest: migrationinit.CoreSchemaDigest,
-			Tables: 84, Constraints: 692, Indexes: 293, Triggers: 75,
+			Tables: 85, Constraints: 698, Indexes: 294, Triggers: 75,
 			CoreIdentities: 1, RuntimeControls: 1, RuntimeSchemas: 11,
 			CurrentRuntime: 1, RuntimeWires: 5, CurrentWire: 1, PreviousWire: 1,
 			BuiltInSkills: 30, BuiltInSkillCases: 15,
