@@ -195,6 +195,9 @@ Common optional values:
 - `ALLOW_LOCAL_HTTP_ENDPOINTS` — set `true` for local development
 - `RUNTIME_ENDPOINT_RUN_*` — run timeout worker tuning
 
+Google OAuth requests account selection on every sign-in with
+`prompt=select_account`, so users explicitly choose their Google account.
+
 ### LLM configuration (optional, for task routing and benchmarks)
 
 When no LLM is configured, task routing falls back to keyword matching. To

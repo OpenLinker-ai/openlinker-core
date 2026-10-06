@@ -686,7 +686,10 @@ func ConfigureGoth(cfg *config.Config) {
 
 	if cfg.GoogleClientID != "" && cfg.GoogleClientSecret != "" {
 		callback := oauthCallbackBaseURL(cfg) + "/api/v1/auth/google/callback"
-		goth.UseProviders(gothgoogle.New(cfg.GoogleClientID, cfg.GoogleClientSecret, callback, "email", "profile"))
+		provider := gothgoogle.New(cfg.GoogleClientID, cfg.GoogleClientSecret, callback, "email", "profile")
+		// Always let the user choose an account, including on repeat sign-ins.
+		provider.SetPrompt("select_account")
+		goth.UseProviders(provider)
 		log.Info().Str("callback", callback).Msg("google oauth configured")
 	}
 	if cfg.GithubClientID != "" && cfg.GithubClientSecret != "" {
