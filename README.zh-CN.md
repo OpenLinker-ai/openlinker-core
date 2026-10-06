@@ -350,7 +350,7 @@ flowchart TB
 - `/api/v1/runs`
 - `/api/v1/runs/:id/stream`
 - `/api/v1/a2a/*`
-- `/api/v1/mcp`
+- `/api/v1/mcp`、`/api/v1/mcp/agents/:agentId` 与 `/api/v1/mcp-services`（[MCP 契约](MCP.md)）
 - `/api/v1/skills`
 - `/api/v1/tasks`
 - `/api/v1/workflows`

@@ -6,12 +6,13 @@ canonical seed data for a fresh database. The migration runner then applies
 `088_browser_human_control.up.sql`, `089_user_jwt_token_version.up.sql`,
 `090_task_callback_owner_index.up.sql`,
 `091_browser_interaction_policy.up.sql`,
-`092_browser_observation_audit.up.sql`, and
-`093_skill_packages.up.sql`, `094_cli_login.up.sql` and `095_runtime_node_upgrade.up.sql`. Supported exact clean predecessors are `094`, `093`, `092`,
-`091`, `088` and `086`; the current version is `095`.
+`092_browser_observation_audit.up.sql`,
+`093_skill_packages.up.sql`, `094_cli_login.up.sql`, `095_runtime_node_upgrade.up.sql`,
+`096_skill_package_publication.up.sql` and `097_resource_metadata.up.sql`. Supported exact clean predecessors are
+`096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `097`.
 `086_current_schema_init_verify.sql` is the PostgreSQL 16 current-catalog and
 seed fingerprint used after the complete migration chain. Fresh and predecessor
-paths therefore execute the same `095` DDL and converge on one version `095`
+paths therefore execute the same `097` DDL and converge on one version `097`
 catalog fingerprint without an idempotent duplicate schema definition.
 
 Migration `093` adds private skill packages, immutable versions, Agent bindings
@@ -31,8 +32,8 @@ standard Sessions, publication and connection-mode changes therefore cannot
 race past the initial policy decision.
 
 The migration command accepts only a truly empty database, an exact clean
-supported predecessor (`094`, `093`, `092`, `091`, `088` or `086`), or the exact clean version `095`
-current schema.
+supported predecessor (`096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
+version `097` current schema.
 Exactness is enforced with catalog object counts and a SHA-256 fingerprint over
 table, column/default, constraint, index, trigger, and function definitions.
 Legacy, dirty, partial, or malformed databases are rejected before the
@@ -74,6 +75,31 @@ successor admissions with database enforcement. It changes Runtime schema
 readiness identity and is forward-only. Use coordinated Core maintenance; see
 [controlled Node upgrades](../docs/runtime-node-upgrade.md) before upgrading.
 
-After the full chain through `095`, the PostgreSQL 16 current shape is 84 tables,
-691 constraints, 290 indexes and 75 triggers, with digest
-`f9f50c587f496bcc49be97b8cc76a3efa637563c7b2ca08705cb9e6fff5195ae`.
+Migration `096` adds skill package `visibility` (default `private`), per-version
+`published_at`, and import provenance (`source_package_id`, `source_version_id`)
+without foreign keys, plus partial indexes. It adds no tables and changes no
+Runtime schema identity. It is forward-only: its down script fails because
+dropping the columns would silently unpublish packages, erase provenance and
+change catalog column ordinals covered by the fingerprint.
+
+The exact clean `095` predecessor keeps its measured shape: 84 tables, 691
+constraints, 290 indexes and 75 triggers, digest
+`f9f50c587f496bcc49be97b8cc76a3efa637563c7b2ca08705cb9e6fff5195ae`. After the full
+chain through `096`, its preserved predecessor shape is 84 tables, 692 constraints,
+293 indexes and 75 triggers, with digest
+`2b590df0df297136ce8a8f9949dd23fb86cc9e2f8e87d41c2f15148b48a39720`.
+
+Migration `097` adds optional Skill version publication declarations and the
+`mcp_service_metadata` table. Currently published legacy versions get frozen `{}`;
+private and previously withdrawn versions retain NULL until a new publication.
+No bundle bytes, digest, runtime schema/wire seeds, owner identity, or visibility
+are rewritten. Public declarations cannot be NULL on a published version.
+The down script refuses rollback to avoid discarding frozen declarations.
+
+The measured PostgreSQL 16 current shape after `086..097` is 85 tables, 698
+constraints, 294 indexes and 75 triggers. Digest:
+`29615da16e86f5b0ab50dbc798ef008862184300431a339b620e40476d30d033`.
+The exact `096` predecessor retains 84/692/293/75 and digest
+`2b590df0df297136ce8a8f9949dd23fb86cc9e2f8e87d41c2f15148b48a39720`.
+The migration tests exercise fresh and every supported predecessor, plus a
+populated 096 database containing published, private and withdrawn versions.

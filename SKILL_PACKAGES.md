@@ -1,7 +1,8 @@
-# Private skill packages
+# Skill packages
 
 This source implements an optional `skill_packages.v1` execution extension.
-It requires Core schema 093 and a compatible execution host. Source availability
+Execution requires Core schema 093 and a compatible execution host; publication,
+public reads and private-copy imports require schema 096. Source availability
 does not imply that a released host, image or deployed Core supports it.
 
 ## Capability declarations and executable packages
@@ -28,6 +29,10 @@ All endpoints below are under `/api/v1/creator`, require a user JWT, and return
 | GET | `/skill-packages/:id` | Package and version metadata, without file bodies |
 | GET | `/skill-packages/:id/versions/:versionId` | The selected immutable version payload |
 | POST | `/skill-packages/:id/versions` | Add an immutable version |
+| PATCH | `/skill-packages/:id` | Set `{visibility: "private" \| "unlisted" \| "public"}`; returns package detail |
+| PUT | `/skill-packages/:id/versions/:versionId/publication` | Publish one version (empty body or `{}`); returns package detail |
+| DELETE | `/skill-packages/:id/versions/:versionId/publication` | Withdraw that version; returns package detail |
+| POST | `/skill-packages/imports` | Copy a published version into a new private package |
 | GET | `/agents/:id/skill-packages` | `{items, supported, providers}` |
 | PUT | `/agents/:id/skill-packages/:packageId` | Pin `{version_id: "<uuid>"}` |
 | DELETE | `/agents/:id/skill-packages/:packageId` | Remove the association; 204 |
@@ -46,6 +51,10 @@ Import example:
   "required_commands": ["git"]
 }
 ```
+
+Package list/detail items include `visibility` (default `private`) and
+`source_package_id`; version metadata includes `published_at` and
+`source_version_id` (both `null` unless published or imported).
 
 Successful imports return 201 with `{id, version_id, digest}`. Duplicate version
 labels return 409; existing content cannot be overwritten. Name and description
@@ -69,8 +78,64 @@ The import request body has a separate 128 KiB limit. Files require safe relativ
 ASCII paths; absolute paths, traversal, dotfiles, binary content, NULs and
 file/directory collisions are rejected. A package can map to five existing
 capabilities and declare up to 16 plain executable names as prerequisites.
-There is no package publication, marketplace, binary archive import, dependency
-installation, or package/version deletion API in this version.
+There is no marketplace ranking, binary archive import, dependency installation,
+or package/version deletion API in this version.
+
+## Publication and public reads
+
+Packages are private by default. Publication has two independent switches:
+package `visibility` and per-version `published_at`. Anonymous reads require all
+of: an enabled owner (not deleted or disabled), a `public` or `unlisted`
+package, and a published version. Every other state returns the same 404. The
+public list contains only `public` packages; `unlisted` packages are readable by
+ID. Only published versions are listed. Public names and descriptions come from
+the newest published version's payload, never from the package row, which a
+later private draft may rename. Publishing re-verifies the stored bytes first.
+
+All public responses use `Cache-Control: no-store` and `nosniff`:
+
+| Method | Path under `/api/v1` | Result |
+| --- | --- | --- |
+| GET | `/skill-packages?q=&page=&size=` | `{items, total, page, size}`; `size` defaults to 12, max 50; `q` matches published name/description |
+| GET | `/skill-packages/:id` | `{id, name, description, visibility, versions: [{id, version, digest, capability_ids, providers, created_at, published_at}]}` |
+| GET | `/skill-packages/:id/versions/:versionId` | Version metadata plus `package_id`, `visibility` and `contents` (the bundle object) |
+| GET | `.../bundle.json` | The exact stored payload bytes as an attachment; `sha256sum` equals `digest` |
+| GET | `.../files/*path` | One file from the verified file map by exact key, `text/plain; charset=utf-8` |
+| GET | `.../archive.zip` | Deterministic ZIP of the package files only |
+
+`bundle.json` is an archival and verification format. It is not an owner import
+request and cannot be POSTed to the create endpoint unchanged. Every public
+read hashes the stored payload, compares it with the stored digest and re-runs
+import validation; a mismatch is a 500 and nothing is served. File lookups never
+resolve paths. The ZIP stores files uncompressed in sorted order with a fixed
+1980-01-01 timestamp and mode 0644, without added metadata files. Its top
+directory is the SKILL.md `name` when that is lowercase letters, digits and
+single hyphens, at most 64 characters and without `anthropic`/`claude`;
+otherwise it is `skill-<package-id>`. SKILL.md is never rewritten. There is no
+owner-only ZIP endpoint yet.
+
+## Importing a published version
+
+`POST /api/v1/creator/skill-packages/imports` accepts
+`{source_package_id, source_version_id, expected_digest}` under the same JWT and
+private no-store rules as other owner endpoints. Core locks the importer's user
+row, then the source package and version (`FOR SHARE`), so withdrawal,
+visibility changes and import are linearized: an import either completes before
+a withdrawal commits or returns 404. Publishers lock only their own package or
+version row, so the lock order cannot invert. Core requires stored hash ==
+stored digest == `expected_digest` (otherwise 409 `SKILL_PACKAGE_DIGEST_MISMATCH`
+or `SKILL_PACKAGE_SOURCE_INVALID`), re-runs import validation, checks the
+200-package quota and capability IDs, and copies the exact payload bytes into a
+new private package owned by the caller. The copy records `source_package_id`
+and `source_version_id` without foreign keys, so a later withdrawal or deletion
+of the source never changes it. While the source remains published and readable,
+retrying the same source version returns the existing copy with **200** and the
+same body; a first import returns 201. After withdrawal a new import request
+returns 404, including retries; the already imported private copy remains usable.
+
+Publication does not permit cross-owner bindings. An Agent can bind only its
+owner's packages, including imported copies; the copy then uses the existing
+Run snapshot, assignment and receipt path unchanged.
 
 ## Runtime assignment extension
 
@@ -122,8 +187,8 @@ snapshot has `bundles: []`. Caller-supplied reserved metadata is discarded. The
 host validates identifiers, digest, paths and provider compatibility before
 using content. The registry API's privacy boundary does not sandbox an Agent's
 tools or guarantee that a model will never reproduce instructions in its output.
-Both Web apps describe packages as not listed publicly. Binding a public or
-unlisted Agent shows that callers may obtain SKILL.md and supporting files through
+Packages are not listed publicly unless their owner sets `public` visibility and
+publishes a version. Binding a public or unlisted Agent shows that callers may obtain SKILL.md and supporting files through
 model output; owners must not associate content that must remain secret from those
 callers. The notice also appears on existing bindings and follows visibility changes.
 
@@ -161,7 +226,11 @@ all batches before filtering/paginating the English catalog.
 ## Validation
 
 `pkg/runtime/skill_packages_integration_test.go` uses PostgreSQL and the production
-Run creation, assignment SQL and fenced EventStore. Plugin's
+Run creation, assignment SQL and fenced EventStore. Its publication test covers
+the private default, the visibility/publication matrix, draft-name isolation,
+exact bundle bytes, file lookup, deterministic ZIP, digest mismatch, a
+withdrawal holding the version lock while an import waits, copies surviving
+withdrawal, and a Run -> assignment -> receipt loop on an imported copy. Plugin's
 `packages/agent-adapters/agentexec/skill_packages_test.go` verifies prompt delivery
 through its actual Codex/Claude process adapters using deterministic fake client
 processes, version session isolation, concurrent materialization and failure paths.
@@ -173,3 +242,37 @@ and actual-write probes before capability advertisement. Prerequisite lookup use
 the Provider environment/identity and applicable native tool read roots; it does
 not install or execute dependencies. Runtime/image releases and real-model
 acceptance must be recorded separately from these source-level tests.
+
+## Publisher declarations (schema 097)
+
+`PUT /api/v1/creator/skill-packages/:id/versions/:versionId/publication`
+continues to accept no body or `{}`. An optional `metadata` object accepts
+`publisher_name` (80 Unicode characters), `repository_url` (2048, HTTPS without
+userinfo/query/fragment/whitespace), `license` (128) and `release_notes` (4000 plain text).
+Requests and stored declarations are bounded to 64 KiB; unknown fields, null
+metadata, non-string values and trailing JSON are rejected. Publisher names,
+licenses and repository URLs reject invisible Unicode format characters.
+Strings are trimmed and empty fields omitted. These are unverified publisher declarations.
+
+The first publication freezes normalized metadata, default `{}`, atomically
+with publication. Withdrawal preserves it. Republish without metadata or with
+identical normalized metadata is idempotent; different explicit metadata returns
+409 `SKILL_PACKAGE_METADATA_FROZEN`. Editing declarations requires a new version.
+Legacy versions published during 097 migration freeze `{}`. A legacy withdrawn
+version has no historical publication marker and freezes on its next publication.
+Old clients publishing `{}` against new Core intentionally freeze empty metadata;
+ship the frontends with Core to minimize this transition window.
+
+Public list/detail adds `metadata` from the newest published version without
+notes. The version endpoint adds complete `publication_metadata`; public version
+arrays do not duplicate declarations. Owner list omits notes, owner package
+detail includes them. Bundle/file/archive bytes, digests, imports, bindings,
+leases and runtime snapshots never include the new declarations. Imports retain
+provenance IDs, but do not inherit publisher claims.
+
+Public list filters: optional `provider=codex|claude`, exact `capability` ID,
+`sort=newest|name`. Defaults preserve newest-published ordering. Both filters
+apply to the same newest published version before pagination and count, never a
+private draft or any older version. Name ordering has a stable package-ID tie
+breaker. Valid unknown capability IDs yield empty results. Duplicate filter or
+pagination parameters and invalid enums return 400.

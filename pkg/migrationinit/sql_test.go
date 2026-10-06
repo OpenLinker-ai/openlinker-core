@@ -13,6 +13,10 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 		t.Fatal(err)
 	}
 	want := map[string]bool{
+		"097_resource_metadata.up.sql":               true,
+		"097_resource_metadata.down.sql":             true,
+		"096_skill_package_publication.up.sql":       true,
+		"096_skill_package_publication.down.sql":     true,
 		"095_runtime_node_upgrade.up.sql":            true,
 		"095_runtime_node_upgrade.down.sql":          true,
 		"086_current_schema_init.up.sql":             true,
@@ -224,9 +228,9 @@ func TestCoreFoundationalInitializerContainsPredecessorContracts(t *testing.T) {
 func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	verify := readInitializer(t, "../../migrations/086_current_schema_init_verify.sql")
 	for _, fragment := range []string{
-		"public_tables <> 84",
-		"public_constraints <> 691",
-		"public_indexes <> 290",
+		"public_tables <> 85",
+		"public_constraints <> 698",
+		"public_indexes <> 294",
 		"public_triggers <> 75",
 		"public_functions <> 68",
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",
@@ -252,10 +256,41 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 		"runtime_agent_browser_policy_intents_origins_consistent",
 		"users_token_version_nonnegative",
 		"column_name = 'token_version'",
+		"skill_packages_visibility_valid",
+		"skill_packages_public_listing",
+		"skill_package_versions_published",
+		"skill_packages_owner_source",
 	} {
 		if !strings.Contains(verify, fragment) {
 			t.Fatalf("Core initializer verifier missing %q", fragment)
 		}
+	}
+}
+
+func TestSkillPackagePublicationMigrationIsBoundedAndForwardOnly(t *testing.T) {
+	up := readInitializer(t, "../../migrations/096_skill_package_publication.up.sql")
+	for _, fragment := range []string{
+		"SET LOCAL lock_timeout = '5s'",
+		"SET LOCAL statement_timeout = '30s'",
+		"ADD COLUMN visibility text DEFAULT 'private'::text NOT NULL",
+		"ADD COLUMN source_package_id uuid,",
+		"CHECK (visibility IN ('private', 'unlisted', 'public'))",
+		"ADD COLUMN published_at timestamptz,",
+		"ADD COLUMN source_version_id uuid;",
+	} {
+		if !strings.Contains(up, fragment) {
+			t.Fatalf("publication migration missing %q", fragment)
+		}
+	}
+	// Provenance must not block withdrawal or deletion of a source package.
+	for _, forbidden := range []string{"REFERENCES", "IF NOT EXISTS", "DO $$", "UPDATE public."} {
+		if strings.Contains(up, forbidden) {
+			t.Fatalf("publication migration contains forbidden %q", forbidden)
+		}
+	}
+	down := readInitializer(t, "../../migrations/096_skill_package_publication.down.sql")
+	if !strings.Contains(down, "RAISE EXCEPTION") || strings.Contains(down, "DROP ") {
+		t.Fatal("publication rollback must fail closed instead of dropping publication state")
 	}
 }
 

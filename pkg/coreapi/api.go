@@ -203,7 +203,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	skillHandler := skill.NewHandler(skillSvc, pool)
 	skillHandler.Register(api)
 	skillHandler.RegisterProtected(api, jwtMiddleware)
-	skillpackage.NewHandler(pool).Register(api, jwtMiddleware)
+	skillPackages := skillpackage.NewHandler(pool)
+	skillPackages.Register(api, jwtMiddleware)
+	skillPackages.RegisterPublic(api)
 
 	runtimeSvc := runtime.NewService(pool, cfg)
 	if cfg.RuntimeMTLSEnabled && opts.RuntimePKI != nil {
@@ -315,7 +317,12 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 
 	mcpSvc := mcp.NewService(agentMarketSvc, runtimeSvc, taskSvc)
 	mcpHandler := mcp.NewHandler(mcpSvc)
+	mcpDirectory := mcp.NewDirectory(pool)
+	mcpHandler.SetAgentScopeResolver(mcpDirectory)
 	mcpHandler.Register(api, hybridMw)
+	mcpCatalog := mcp.NewCatalogHandler(mcpDirectory)
+	mcpCatalog.Register(api)
+	mcpCatalog.RegisterProtected(api, jwtMiddleware)
 
 	deliverySvc := delivery.NewService(pool, cfg)
 	deliveryHandler := delivery.NewHandler(deliverySvc)

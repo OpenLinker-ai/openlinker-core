@@ -7,6 +7,27 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+### Added
+
+- Public Skill package directories and immutable published version links, exact
+  bundle downloads, verified private-copy imports, and explicit withdrawal.
+- Scoped MCP service endpoints and public service discovery, retaining Core
+  authorization and the existing Run lifecycle.
+- Publisher-supplied source, license and release notes, stored separately from
+  execution bundles. Skill declarations freeze on first publication; MCP owner
+  edits use revision conflicts. Catalog filters run before pagination.
+
+### Compatibility
+
+- Schemas 096/097 are forward-only. Coordinate Core and Web rollout; legacy empty
+  publication requests remain valid and freeze empty display information.
+  Currently published versions receive empty declarations, while historically
+  withdrawn versions first freeze declarations on their next publication.
+- Publisher declarations are unverified and excluded from bundle SHA-256 and
+  imported private copies. Existing runtime, identity and session scopes remain
+  unchanged. Public MCP metadata excludes private upstream configuration.
+
+
 ## 0.3.0 - 2026-10-05
 
 ### Added

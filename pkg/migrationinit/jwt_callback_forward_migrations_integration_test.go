@@ -23,7 +23,7 @@ func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91
 	if baseURL == "" {
 		t.Skip("TEST_DATABASE_URL is required")
 	}
-	for _, mode := range []string{"fresh", "version-86", "version-88", "version-91", "version-92", "version-93", "version-94"} {
+	for _, mode := range []string{"fresh", "version-86", "version-88", "version-91", "version-92", "version-93", "version-94", "version-95", "version-96"} {
 		t.Run(mode, func(t *testing.T) {
 			databaseURL := createMigrationTestDatabase(t, baseURL)
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -33,7 +33,7 @@ func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91
 				if err != nil {
 					t.Fatal(err)
 				}
-				version := map[string]int64{"version-86": 86, "version-88": 88, "version-91": 91, "version-92": 92, "version-93": 93, "version-94": 94}[mode]
+				version := map[string]int64{"version-86": 86, "version-88": 88, "version-91": 91, "version-92": 92, "version-93": 93, "version-94": 94, "version-95": 95, "version-96": 96}[mode]
 				for _, migration := range []struct {
 					version int64
 					file    string
@@ -42,6 +42,8 @@ func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91
 					{88, "088_browser_human_control.up.sql"}, {89, "089_user_jwt_token_version.up.sql"},
 					{90, "090_task_callback_owner_index.up.sql"}, {91, "091_browser_interaction_policy.up.sql"},
 					{92, "092_browser_observation_audit.up.sql"}, {93, "093_skill_packages.up.sql"}, {94, "094_cli_login.up.sql"},
+					{95, "095_runtime_node_upgrade.up.sql"},
+					{96, "096_skill_package_publication.up.sql"},
 				} {
 					if migration.version <= version {
 						applyMigrationFile(t, ctx, conn, migration.file)

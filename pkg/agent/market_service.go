@@ -196,7 +196,7 @@ func stringAt(values []string, index int) string {
 // GetBySlug 按 slug 查询已公开 Agent 详情。
 //
 // 不存在 / 未公开 / 已禁用 → NotFound（统一返回 404，避免泄露状态信息）。
-// endpoint_auth_header 永不暴露给前端。
+// endpoint_auth_header 永不暴露给前端；mcp_server 的 endpoint_url 置空。
 func (s *MarketService) GetBySlug(ctx context.Context, slug string) (*AgentDetailResponse, error) {
 	if slug == "" {
 		return nil, httpx.NotFound("Agent 不存在")
@@ -211,10 +211,16 @@ func (s *MarketService) GetBySlug(ctx context.Context, slug string) (*AgentDetai
 		return nil, httpx.Internal("查询 Agent 详情失败")
 	}
 
-	return s.detailResponseFromSlugRow(ctx, db.GetAgentBySlugRow{
+	resp, err := s.detailResponseFromSlugRow(ctx, db.GetAgentBySlugRow{
 		Agent:       r.Agent,
 		CreatorName: r.CreatorName,
 	})
+	if err == nil && resp.ConnectionMode == ConnectionModeMCPServer {
+		// A public detail never discloses the upstream MCP server address. The
+		// owner path keeps it; invocation reads the stored Agent, not this view.
+		resp.EndpointURL = ""
+	}
+	return resp, err
 }
 
 // GetBySlugForOwner 按 slug 查询当前创作者自己的 Agent 详情。
