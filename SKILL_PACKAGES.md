@@ -294,3 +294,18 @@ loading. Concurrent association changes or a newer Run can make this check
 inconclusive. Loading and Run success are displayed separately. Observation is
 bounded to two minutes; manual refresh does not restart the deadline.
 No write, Run creation, or authorization is triggered by a verification URL.
+
+## Platform CLI access and lightweight public detail
+
+`GET /api/v1/skill-packages/:id/versions/:versionId/metadata` shares the full version's publication, owner-enabled and canonical-integrity checks. It returns explicit version metadata, `contents` with only name/description/required_commands, verified public publisher metadata, and `local_install_compatible`; no file contents or owner/source identifiers. Full version, bundle, ZIP and file routes remain available. Compatibility uses ArchiveDirectory(name,id)==name plus a 1024-code-point description limit; this is a conservative client convention, not a claim that npx rejects every other package.
+
+Only these existing creator routes accept Core User Tokens in addition to JWT:
+
+| Permission | Resource type/range | Routes |
+|---|---|---|
+| skill-packages:read | skill_package, wildcard only; still owner-filtered | GET owned list, detail, version (including private file contents) |
+| skill-packages:import | skill_package, wildcard only | POST /creator/skill-packages/imports (digest-pinned published copy) |
+| skill-bindings:read | agent, wildcard or owned Agent UUID | GET /creator/agents/:id/skill-packages |
+| skill-bindings:manage | agent, wildcard or owned Agent UUID | PUT/DELETE /creator/agents/:id/skill-packages/:packageId |
+
+All authoring/upload, visibility, publication and withdrawal routes remain JWT-only. Each permitted route checks its distinct grant before retaining existing ownership/lifecycle/runtime compatibility validation. CLI login accepts explicit requests for these scopes; its five default permissions and existing tokens are unchanged. Core is the only grant issuer/verifier, including when Hosted proxies these routes. No payload-storage or binding/Run-snapshot schema changes are involved.

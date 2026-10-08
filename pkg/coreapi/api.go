@@ -204,7 +204,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	skillHandler.Register(api)
 	skillHandler.RegisterProtected(api, jwtMiddleware)
 	skillPackages := skillpackage.NewHandler(pool)
-	skillPackages.Register(api, jwtMiddleware)
+	skillPackages.Register(api, jwtMiddleware, hybridMw)
 	skillPackages.RegisterPublic(api)
 
 	runtimeSvc := runtime.NewService(pool, cfg)
