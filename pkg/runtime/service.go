@@ -1243,6 +1243,16 @@ func (s *Service) createRunningRun(
 	// defaults derive from it and therefore never make retries drift.
 	runID := uuid.New()
 	runA2AContext := materializeRunA2AContext(req.A2AContext, runID)
+	if runA2AContext == nil && isQueuedRuntimeMode(agent.ConnectionMode) && req.CreationProtocol == "mcp" &&
+		opts.delegation == nil && !isPlaygroundMultiTurnMetadata(req.Metadata) {
+		// MCP tools do not accept a typed conversation context. Give each new
+		// Runtime invocation a Core-owned context after identity lookup so old
+		// idempotency fingerprints and committed replays remain unchanged.
+		runA2AContext = materializeRunA2AContext(&RunA2AContextRequest{
+			Source:        "a2a_protocol",
+			TargetAgentID: agentID.String(),
+		}, runID)
+	}
 	normalizedReq := *req
 	normalizedReq.Input = copyRunInput(req.Input)
 	normalizedReq.Metadata = trustedRunMetadata(req.Metadata)
@@ -1261,7 +1271,9 @@ func (s *Service) createRunningRun(
 		return nil, nil, httpx.Internal("生成 Runtime 调用身份失败")
 	}
 	normalizedReq.A2AContext = runA2AContext
-	attachRunA2AContextToInput(normalizedReq.Input, runA2AContext, inputSchema)
+	if req.A2AContext != nil {
+		attachRunA2AContextToInput(normalizedReq.Input, runA2AContext, inputSchema)
+	}
 	req = &normalizedReq
 
 	// 2. Core does not perform commercial settlement. Historical financial

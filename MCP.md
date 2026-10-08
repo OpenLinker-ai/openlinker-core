@@ -51,6 +51,14 @@ before any run starts. Core injects the path ID and then applies the ordinary
 continue with `get_run` or `list_run_events`; the scoped endpoint does not add
 server-side polling or change execution and terminal-state behavior.
 
+For new MCP calls to queued Runtime Agents, Core creates a fresh trusted
+conversation mapping in the Run transaction. Native adapters can therefore use
+their existing session isolation without caller-supplied identity or history.
+The default mapping does not modify application `input`; independent calls use
+different contexts, while idempotent retries return the original Run. Existing
+committed Runs, REST defaults, and explicitly supplied protocol contexts retain
+their previous behavior.
+
 Run tools first apply the ordinary checks (`runs:read`/`runs:cancel` grants,
 including run-restricted tokens, and the existing `GetRun` caller-or-owner
 policy), then require the run's `agent_id` to equal the path ID. A run of

@@ -7,6 +7,14 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+### Fixed
+
+- New MCP calls to queued Runtime Agents now receive an atomic Core-owned
+  conversation mapping, enabling native adapters that require trusted session
+  authority. Independent calls get separate contexts; retries preserve the
+  original Run. Application input and pre-existing idempotency fingerprints
+  stay unchanged; committed historical Runs are not rewritten.
+
 ### Added
 
 - Expose lifecycle, binding limit, and host compatibility hints on the owner-only
