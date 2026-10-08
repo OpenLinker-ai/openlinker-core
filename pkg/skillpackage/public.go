@@ -52,6 +52,7 @@ func (h *Handler) RegisterPublic(api *echo.Group) {
 	g.GET("", h.PublicList)
 	g.GET("/:id", h.PublicDetail)
 	g.GET("/:id/versions/:versionId", h.PublicVersion)
+	g.GET("/:id/versions/:versionId/metadata", h.PublicMetadata)
 	g.GET("/:id/versions/:versionId/bundle.json", h.PublicBundle)
 	g.GET("/:id/versions/:versionId/archive.zip", h.PublicArchive)
 	g.GET("/:id/versions/:versionId/files/*", h.PublicFile)
@@ -219,6 +220,53 @@ func (h *Handler) PublicVersion(c echo.Context) error {
 		publicVersion
 		Contents json.RawMessage `json:"contents"`
 	}{v, json.RawMessage(v.payload)})
+}
+
+// publicMetadata is a fixed display-only contract; adding fields to the full
+// version response must not implicitly expose them on this lightweight route.
+type publicMetadata struct {
+	ID                     uuid.UUID                 `json:"id"`
+	PackageID              uuid.UUID                 `json:"package_id"`
+	Version                string                    `json:"version"`
+	Digest                 string                    `json:"digest"`
+	Providers              []string                  `json:"providers"`
+	CapabilityIDs          []string                  `json:"capability_ids"`
+	CreatedAt              time.Time                 `json:"created_at"`
+	PublishedAt            *time.Time                `json:"published_at"`
+	Visibility             string                    `json:"visibility"`
+	PublicationMetadata    resourcemetadata.Metadata `json:"publication_metadata"`
+	LocalInstallCompatible bool                      `json:"local_install_compatible"`
+	Contents               metadataContents          `json:"contents"`
+}
+type metadataContents struct {
+	Name             string   `json:"name"`
+	Description      string   `json:"description"`
+	RequiredCommands []string `json:"required_commands"`
+}
+
+func displayMetadata(v publicVersion, b Bundle) (publicMetadata, error) {
+	metadata, err := resourcemetadata.Parse(v.PublicationMetadata)
+	if err != nil {
+		return publicMetadata{}, errIntegrity
+	}
+	return publicMetadata{
+		ID: v.ID, PackageID: v.PackageID, Version: v.Version, Digest: v.Digest,
+		Providers: v.Providers, CapabilityIDs: v.CapabilityIDs, CreatedAt: v.CreatedAt,
+		PublishedAt: v.PublishedAt, Visibility: v.Visibility, PublicationMetadata: metadata,
+		LocalInstallCompatible: ArchiveDirectory(b.Name, v.PackageID) == b.Name && utf8.RuneCountInString(b.Description) <= 1024,
+		Contents:               metadataContents{b.Name, b.Description, b.RequiredCommands},
+	}, nil
+}
+func (h *Handler) PublicMetadata(c echo.Context) error {
+	v, bundle, err := h.verifiedPublicVersion(c)
+	if err != nil {
+		return err
+	}
+	response, err := displayMetadata(v, bundle)
+	if err != nil {
+		return httpx.Internal("skill package integrity check failed")
+	}
+	return c.JSON(http.StatusOK, response)
 }
 
 // PublicBundle returns the exact stored bytes so `sha256sum` matches digest.

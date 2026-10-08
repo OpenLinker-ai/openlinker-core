@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -20,20 +21,48 @@ import (
 type Handler struct{ pool *pgxpool.Pool }
 
 func NewHandler(pool *pgxpool.Pool) *Handler { return &Handler{pool: pool} }
-func (h *Handler) Register(api *echo.Group, auth echo.MiddlewareFunc) {
-	g := api.Group("/creator", auth)
-	g.GET("/skill-packages", h.List)
+
+// Register keeps authoring JWT-only. A separate authenticated platform client
+// middleware is used only for the seven explicitly permission-guarded routes.
+func (h *Handler) Register(api *echo.Group, jwt echo.MiddlewareFunc, client ...echo.MiddlewareFunc) {
+	platformAuth := jwt
+	if len(client) > 0 {
+		platformAuth = client[0]
+	}
+	g := api.Group("/creator", jwt)
 	g.POST("/skill-packages", h.Import)
-	g.POST("/skill-packages/imports", h.ImportPublished)
-	g.GET("/skill-packages/:id", h.Detail)
 	g.PATCH("/skill-packages/:id", h.SetVisibility)
 	g.POST("/skill-packages/:id/versions", h.Import)
-	g.GET("/skill-packages/:id/versions/:versionId", h.Version)
 	g.PUT("/skill-packages/:id/versions/:versionId/publication", h.Publish)
 	g.DELETE("/skill-packages/:id/versions/:versionId/publication", h.Withdraw)
-	g.GET("/agents/:id/skill-packages", h.Bindings)
-	g.PUT("/agents/:id/skill-packages/:packageId", h.Bind)
-	g.DELETE("/agents/:id/skill-packages/:packageId", h.Unbind)
+	p := api.Group("/creator", platformAuth)
+	p.GET("/skill-packages", h.List, skillPermission("skill-packages:read", false))
+	p.GET("/skill-packages/:id", h.Detail, skillPermission("skill-packages:read", false))
+	p.GET("/skill-packages/:id/versions/:versionId", h.Version, skillPermission("skill-packages:read", false))
+	p.POST("/skill-packages/imports", h.ImportPublished, skillPermission("skill-packages:import", false))
+	p.GET("/agents/:id/skill-packages", h.Bindings, skillPermission("skill-bindings:read", true))
+	p.PUT("/agents/:id/skill-packages/:packageId", h.Bind, skillPermission("skill-bindings:manage", true))
+	p.DELETE("/agents/:id/skill-packages/:packageId", h.Unbind, skillPermission("skill-bindings:manage", true))
+}
+
+func skillPermission(permission string, agentScoped bool) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			resourceType := "skill_package"
+			var resourceID *uuid.UUID
+			if agentScoped {
+				id, err := parameter(c, "id")
+				if err != nil {
+					return err
+				}
+				resourceType, resourceID = "agent", &id
+			}
+			if err := auth.RequirePermission(c, permission, resourceType, resourceID); err != nil {
+				return err
+			}
+			return next(c)
+		}
+	}
 }
 
 func owner(c echo.Context) (uuid.UUID, error) {

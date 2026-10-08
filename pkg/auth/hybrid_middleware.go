@@ -95,8 +95,10 @@ func HybridAuthMiddlewareWithUserStatus(jwtSecret string, verifier ApiKeyVerifie
 
 func resourceTypeForLegacyScope(scope string) string {
 	switch {
-	case strings.HasPrefix(scope, "agents:"), strings.HasPrefix(scope, "agent-tokens:"):
+	case strings.HasPrefix(scope, "agents:"), strings.HasPrefix(scope, "agent-tokens:"), strings.HasPrefix(scope, "skill-bindings:"):
 		return "agent"
+	case strings.HasPrefix(scope, "skill-packages:"):
+		return "skill_package"
 	case strings.HasPrefix(scope, "runs:"):
 		return "run"
 	case strings.HasPrefix(scope, "tasks:"):

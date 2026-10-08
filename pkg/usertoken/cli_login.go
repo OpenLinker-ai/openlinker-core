@@ -31,7 +31,7 @@ import (
 const cliLoginTTL = 10 * time.Minute
 const cliTokenTTL = 30 * 24 * time.Hour
 
-var cliScopes = []string{"agents:read", "agents:run", "runs:read", "runs:cancel", "tasks:create"}
+var cliScopes = []string{"agents:read", "agents:run", "runs:read", "runs:cancel", "tasks:create", "skill-packages:read", "skill-packages:import", "skill-bindings:read", "skill-bindings:manage"}
 var cliProof = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 var cliVerifier = regexp.MustCompile(`^[A-Za-z0-9._~-]{43,128}$`)
 var cliUserCode = regexp.MustCompile(`^[A-Z2-9]{8}$`)

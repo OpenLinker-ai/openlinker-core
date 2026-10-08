@@ -355,3 +355,39 @@ func TestCLILoginPasswordChangeBetweenMiddlewareAndApprovalIntegration(t *testin
 		t.Fatalf("stale JWT approved login: HTTP %d", response.Code)
 	}
 }
+
+func TestCLILoginSkillScopesRequireExplicitBrowserApprovalIntegration(t *testing.T) {
+	f := newCLIFixture(t)
+	verifier, _ := cliRandom()
+	hash := sha256.Sum256([]byte(verifier))
+	scopes := []string{"skill-packages:read", "skill-packages:import", "skill-bindings:read", "skill-bindings:manage"}
+	req := cliStartRequest{CodeChallenge: base64.RawURLEncoding.EncodeToString(hash[:]), CodeChallengeMethod: "S256", Scopes: scopes, RedirectURI: "http://127.0.0.1:54321/callback", State: strings.Repeat("s", 43)}
+	start := cliJSON(t, f.call("POST", "/start", "", req), 201)
+	inspect := cliJSON(t, f.call("POST", "/request", f.jwt, map[string]any{"user_code": start["user_code"]}), 200)
+	displayed := inspect["scopes"].([]any)
+	if len(displayed) != len(scopes) {
+		t.Fatal("skill approval scope count changed")
+	}
+	for i, p := range displayed {
+		if p != scopes[i] {
+			t.Fatal("approval scope changed")
+		}
+	}
+	result := cliJSON(t, f.call("POST", "/token", "", browserExchange(t, f.approve(start, true), verifier)), 200)
+	principal, err := NewService(f.pool).VerifyPrincipal(context.Background(), result["access_token"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range scopes {
+		kind := "agent"
+		if strings.HasPrefix(scope, "skill-packages:") {
+			kind = "skill_package"
+		}
+		if !principal.Allows(scope, kind, nil) {
+			t.Fatal("approved skill scope absent", scope)
+		}
+	}
+	if principal.Allows("agents:run", "agent", nil) || principal.Allows("agent-tokens:issue", "agent", nil) {
+		t.Fatal("explicit skill approval broadened other authority")
+	}
+}
