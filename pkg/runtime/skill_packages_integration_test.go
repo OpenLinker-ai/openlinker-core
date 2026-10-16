@@ -193,7 +193,7 @@ func TestSkillPackageLifecycle(t *testing.T) {
 	event.Payload = map[string]any{"text": "after invalid receipt"}
 	_, err = store.Append(ctx, fixture.principal, fixture.identity, event)
 	require.NoError(t, err)
-	// A downgraded current host is visible and rejects new Runs immediately.
+	// After the compatible host closes, a downgraded current host rejects new Runs.
 	_, err = pool.Exec(ctx, `WITH source AS (SELECT * FROM runtime_sessions WHERE agent_id=$1 ORDER BY created_at DESC LIMIT 1),
  new_node AS (INSERT INTO runtime_nodes SELECT (jsonb_populate_record(NULL::runtime_nodes,to_jsonb(n)||jsonb_build_object(
  'node_id',gen_random_uuid(),'device_certificate_serial',gen_random_uuid()::text,'device_public_key_thumbprint',repeat(replace(gen_random_uuid()::text,'-',''),2),
@@ -203,6 +203,7 @@ func TestSkillPackageLifecycle(t *testing.T) {
  INSERT INTO runtime_session_attachments(id,runtime_session_id,core_instance_id,attachment_kind)
  SELECT gen_random_uuid(),runtime_session_id,attached_core_instance_id,'connected' FROM new_session`, agentID)
 	require.NoError(t, err)
+	(skillConsistencyFixture{pool: pool}).disconnect(t, *fixture.identity.RuntimeSessionID, "closed")
 	incompatibleBindings := call(http.MethodGet, "/agents/"+agentID.String()+"/skill-packages", nil, 200)
 	require.Contains(t, incompatibleBindings.Body.String(), `"supported":false`)
 	require.Contains(t, incompatibleBindings.Body.String(), `"host_status":"incompatible"`)
@@ -217,7 +218,7 @@ func TestSkillPackageLifecycle(t *testing.T) {
 		if _, err := tx.Exec(ctx, `UPDATE runtime_session_attachments SET detached_at=clock_timestamp(),disconnect_reason='skill_read_test' WHERE runtime_session_id IN (SELECT runtime_session_id FROM runtime_sessions WHERE agent_id=$1) AND detached_at IS NULL`, agentID); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `UPDATE runtime_sessions SET status='closed',disconnected_at=clock_timestamp(),attached_core_instance_id=NULL WHERE agent_id=$1`, agentID)
+		_, err := tx.Exec(ctx, `UPDATE runtime_sessions SET status='closed',disconnected_at=clock_timestamp(),attached_core_instance_id=NULL WHERE agent_id=$1 AND status NOT IN ('closed','revoked')`, agentID)
 		return err
 	}))
 	require.Contains(t, call(http.MethodGet, "/agents/"+agentID.String()+"/skill-packages", nil, 200).Body.String(), `"host_status":"none"`)
@@ -247,6 +248,8 @@ func TestSkillPackageOfflineQueue(t *testing.T) {
 		{"compatible closed", "closed", true, true},
 		{"incompatible offline", "offline", false, true},
 		{"incompatible closed", "closed", false, true},
+		{"compatible revoked", "revoked", true, true},
+		{"incompatible revoked", "revoked", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := setupTestDB(t)
@@ -284,7 +287,7 @@ func TestSkillPackageOfflineQueue(t *testing.T) {
 			require.NoError(t, err)
 			caller := insertRuntimeUser(t, pool)
 			run, err := newTestService(t, pool).StartRun(ctx, caller, makeRunReq(agentID, map[string]any{"text": "queued"}), "api")
-			if tc.history && !tc.compatible {
+			if tc.history && !tc.compatible && tc.status != "revoked" {
 				var unavailable *httpx.HTTPError
 				require.ErrorAs(t, err, &unavailable)
 				require.Equal(t, 503, unavailable.Status)
