@@ -81,9 +81,16 @@ func parameter(c echo.Context, name string) (uuid.UUID, error) {
 	return id, nil
 }
 func readRequest(c echo.Context, out any) error {
+	return decodeRequest(c, out, false)
+}
+
+func decodeRequest(c echo.Context, out any, allowEmpty bool) error {
 	decoder := json.NewDecoder(http.MaxBytesReader(c.Response(), c.Request().Body, 128*1024))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(out); err != nil {
+		if allowEmpty && errors.Is(err, io.EOF) {
+			return nil
+		}
 		return packageError("REQUEST_INVALID", "invalid or oversized request")
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
@@ -457,10 +464,8 @@ func (h *Handler) Unbind(c echo.Context) error {
 	var req struct {
 		ExpectedBindingID *string `json:"expected_binding_id"`
 	}
-	if c.Request().ContentLength != 0 {
-		if err := readRequest(c, &req); err != nil {
-			return err
-		}
+	if err := decodeRequest(c, &req, true); err != nil {
+		return err
 	}
 	ctx := c.Request().Context()
 	err = pgx.BeginFunc(ctx, h.pool, func(tx pgx.Tx) error {

@@ -303,6 +303,9 @@ legacy unconditional behavior for existing clients. Both Web clients always send
 the expectation, refresh on opening/focus, and require another explicit review
 and save after a conflict; they never automatically replay an outdated mutation.
 A different version also requires a confirmation tied to the reviewed generation.
+Rollout order: deploy this Core before either new Web. Older Core rejects the new
+PUT field and ignores a DELETE expectation; do not retry by dropping the field.
+Empty DELETE bodies, including chunked requests, retain legacy behavior.
 The owner-only `SKILL_PACKAGE_COMBINATION_INCOMPATIBLE` code means that the selected
 version is supported individually but no single Session can load the resulting
 set. It does not change external Run errors or the scheduler's per-Session filter.

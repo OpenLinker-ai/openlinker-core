@@ -161,6 +161,15 @@ func TestSkillPackageBindingConcurrency(t *testing.T) {
 	slices.Sort(statuses)
 	require.Equal(t, []int{200, 409}, statuses)
 	require.NotEqual(t, third, f.binding(t, pkg))
+	// Legacy empty DELETE remains accepted even when framing is chunked.
+	f.call(t, http.MethodPut, path, map[string]any{"version_id": v1}, 200)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/creator"+path, bytes.NewReader(nil))
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+	rec := httptest.NewRecorder()
+	f.e.ServeHTTP(rec, req)
+	require.Equal(t, 204, rec.Code, rec.Body.String())
+
 }
 
 func TestSkillPackageSessionCompatibility(t *testing.T) {
@@ -212,6 +221,18 @@ func TestSkillPackageSessionCompatibility(t *testing.T) {
 		f.call(t, http.MethodPut, f.path(pkg), map[string]any{"version_id": version}, 200)
 		_, err := newTestService(t, f.pool).StartRun(context.Background(), f.owner, makeRunReq(f.agent, map[string]any{"text": "valid session"}), "api")
 		require.NoError(t, err)
+	})
+	t.Run("only latest closed session is compatibility history", func(t *testing.T) {
+		f := newSkillConsistencyFixture(t)
+		pkg, version := f.version(t, uuid.Nil, "1", "codex")
+		f.call(t, http.MethodPut, f.path(pkg), map[string]any{"version_id": version}, 200)
+		latest := f.addSession(t)
+		f.disconnect(t, f.session, "closed")
+		f.disconnect(t, latest, "closed")
+		_, err := newTestService(t, f.pool).StartRun(context.Background(), f.owner, makeRunReq(f.agent, map[string]any{"text": "latest closed incompatible"}), "api")
+		var unavailable *httpx.HTTPError
+		require.ErrorAs(t, err, &unavailable)
+		require.Equal(t, 503, unavailable.Status)
 	})
 	t.Run("closed compatible history cannot override current downgrade", func(t *testing.T) {
 		f := newSkillConsistencyFixture(t)
