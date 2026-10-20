@@ -112,3 +112,38 @@ The directory accepts exact `capability` and `tag` filters plus
 private/unlisted/inactive/internal-test-tag Agents remain excluded. Defaults keep
 creation-time order. Unknown valid capability IDs yield no results; duplicate
 query parameters and invalid sort/ID values return 400.
+
+## Owner-selected Runtime tools (schema 098)
+
+Owner JWT routes under `/api/v1/creator/agents/:id/mcp-bindings` manage private
+associations. GET lists selected tools and Host status; `/candidates?q=` searches
+owned and public MCP services; `/candidates/:targetId` previews the current tool.
+PUT `/:targetId` requires `expected_binding_id` (empty for a new binding), the
+preview's `expected_tool_digest`, and `acknowledge_tool_access: true`. DELETE
+requires the current `expected_binding_id`. Disabled Agents can view/remove tools.
+
+A selection grants callers of the parent Agent access to the selected tool,
+including an owner's private MCP service. The UI requires explicit acknowledgment:
+callers may obtain tool results and trigger side effects. Public Agent/catalog
+responses do not expose the association, credentials or endpoint. Model-visible
+tool names, descriptions and results are not secrets.
+
+Core snapshots each selection at Run admission and only dispatches it to Hosts
+advertising `mcp_bindings.v1`. Unknown/offline Hosts preserve queuing; a known
+incompatible Host returns a generic 503. The existing SDK invocation capability,
+active Attempt, cancellation and delegation limits remain authoritative. Each
+call validates the current binding generation and execution-relevant service
+digest. Removal or endpoint/credential/schema/policy changes revoke new calls;
+already executing calls may finish. Reselecting creates a new generation.
+
+Consumers expose selected tools over their private per-Attempt stdio MCP proxy;
+credentials remain in Core. Tool calls are normal child Runs via the existing
+SDK `CallAgent`/`ReadDelegatedRun` callbacks. Repeating the same `request_key`
+retrieves the same child; different arguments with the same key are rejected.
+`run.mcp_bindings.ready` reports tool discovery, `used` successful execution, and
+`failed` loading failure. Invalid optional receipts do not block durable events.
+
+This uses the existing registered `mcp_server` contract: one remote HTTP JSON-RPC
+`tools/call` tool per service Agent with its registered object input schema.
+It does not install arbitrary local MCP servers or add remote initialize/SSE
+negotiation. An MCP result with `isError: true` fails the child Run.

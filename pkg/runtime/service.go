@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/mcpbinding"
 	"io"
 	"net/http"
 	"net/url"
@@ -112,6 +113,7 @@ type runInvocation struct {
 }
 
 type createRunOptions struct {
+	mcpGrant                  *mcpbinding.Reference
 	delegation                *Delegation
 	allowOfflineQueuedRuntime bool
 	replayOfRunID             *uuid.UUID
@@ -845,6 +847,8 @@ func trustedRunMetadata(input map[string]interface{}) map[string]interface{} {
 	delete(out, "conversation")
 	delete(out, "_openlinker_runtime_authority")
 	delete(out, skillpackage.MetadataKey)
+	delete(out, mcpbinding.MetadataKey)
+	delete(out, mcpbinding.CallMetadataKey)
 	return out
 }
 
@@ -858,6 +862,8 @@ func trustedRunMetadata(input map[string]interface{}) map[string]interface{} {
 // metadata verbatim from stored records, so the outbound projection is what
 // actually guarantees they never leave the platform.
 var thirdPartyDeniedMetadataKeys = map[string]struct{}{
+	mcpbinding.MetadataKey:          {},
+	mcpbinding.CallMetadataKey:      {},
 	skillpackage.MetadataKey:        {},
 	"_openlinker_runtime_authority": {},
 	"actor_user_id":                 {},
@@ -1174,7 +1180,7 @@ func (s *Service) createRunningRun(
 		return nil, nil, httpx.Internal("查询 Agent 失败")
 	}
 	agent := target.Agent
-	if agent.LifecycleStatus != "active" || (agent.Visibility == "private" && agent.CreatorID != userID) {
+	if agent.LifecycleStatus != "active" || (agent.Visibility == "private" && agent.CreatorID != userID && opts.mcpGrant == nil) {
 		return nil, nil, httpx.Forbidden("Agent 未公开或已下架")
 	}
 	inputSchema, schemaErr := validateRunTargetApplicationInput(target, req.Input)
@@ -1355,6 +1361,16 @@ func (s *Service) createRunningRun(
 				return authorizeErr
 			}
 		}
+		if opts.mcpGrant != nil {
+			refreshed, e := q.GetAgentRunTargetByID(ctx, agentID)
+			if e != nil {
+				return e
+			}
+			if _, e = validateRunTargetApplicationInput(refreshed, req.Input); e != nil {
+				return e
+			}
+			agent = refreshed.Agent
+		}
 		if lineageErr := validatePlaygroundLineage(
 			ctx,
 			q,
@@ -1436,6 +1452,9 @@ func (s *Service) createRunningRun(
 			return createErr
 		}
 		if agent.ConnectionMode == connectionModeRuntime {
+			if err := mcpbinding.Snapshot(ctx, tx, run.ID, agentID); err != nil {
+				return err
+			}
 			if err := skillpackage.Snapshot(ctx, tx, run.ID, agentID); err != nil {
 				return err
 			}
@@ -2514,6 +2533,42 @@ type mcpToolCallError struct {
 func (s *Service) callMCPServer(
 	ctx context.Context, agent *db.Agent, runID, userID uuid.UUID, req *RunRequest, delegation *Delegation,
 ) (map[string]interface{}, []AgentEvent, *AgentError, error) {
+	if s.pool != nil {
+		var linked bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM run_mcp_tool_calls WHERE run_id=$1)`, runID).Scan(&linked); err != nil {
+			return nil, nil, nil, err
+		}
+		if linked {
+			err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+				var parent, parentAgent uuid.UUID
+				var ref mcpbinding.Reference
+				err := tx.QueryRow(ctx, `SELECT c.parent_run_id,s.agent_id,s.binding_id,s.digest FROM run_mcp_tool_calls c
+ JOIN run_mcp_binding_snapshots s ON s.run_id=c.parent_run_id AND s.binding_id=c.binding_id
+ JOIN runs p ON p.id=c.parent_run_id AND p.status='running' AND p.active_attempt_id=c.parent_attempt_id
+ JOIN run_attempts a ON a.id=c.parent_attempt_id AND a.finished_at IS NULL AND a.accepted_at IS NOT NULL AND a.attempt_deadline_at>clock_timestamp() AND a.lease_expires_at>clock_timestamp()
+ WHERE c.run_id=$1 AND NOT EXISTS(SELECT 1 FROM run_cancellations x WHERE x.run_id=p.id) FOR SHARE OF p`, runID).Scan(&parent, &parentAgent, &ref.BindingID, &ref.Digest)
+				if err != nil {
+					return err
+				}
+				if err = mcpbinding.Authorize(ctx, tx, parent, parentAgent, agent.ID, ref); err != nil {
+					return err
+				}
+				target, err := s.queries.WithTx(tx).GetAgentRunTargetByID(ctx, agent.ID)
+				if err != nil {
+					return err
+				}
+				if _, err = validateRunTargetApplicationInput(target, req.Input); err != nil {
+					return err
+				}
+				agent = &target.Agent
+				return nil
+			})
+			if err != nil {
+				return nil, nil, &AgentError{Code: "MCP_TOOL_ACCESS_REVOKED", Message: "Tool access has changed or the parent execution has ended. Ask the Agent owner to review its tools."}, nil
+			}
+		}
+	}
+
 	var toolName string
 	if agent.MCPToolName != nil {
 		toolName = strings.TrimSpace(*agent.MCPToolName)
@@ -2599,6 +2654,12 @@ func (s *Service) callMCPServer(
 			Code:    fmt.Sprintf("MCP_%d", mr.Error.Code),
 			Message: truncate(mr.Error.Message, errMsgMaxLen),
 		}, nil
+	}
+	if mr.Result == nil {
+		return nil, nil, &AgentError{Code: "INVALID_MCP_RESPONSE", Message: "MCP endpoint returned no tool result"}, nil
+	}
+	if failed, _ := mr.Result["isError"].(bool); failed {
+		return nil, nil, &AgentError{Code: "MCP_TOOL_FAILED", Message: "MCP tool reported an execution error"}, nil
 	}
 	return normalizeMCPResult(mr.Result), nil, nil, nil
 }

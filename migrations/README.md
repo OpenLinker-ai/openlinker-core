@@ -8,11 +8,11 @@ canonical seed data for a fresh database. The migration runner then applies
 `091_browser_interaction_policy.up.sql`,
 `092_browser_observation_audit.up.sql`,
 `093_skill_packages.up.sql`, `094_cli_login.up.sql`, `095_runtime_node_upgrade.up.sql`,
-`096_skill_package_publication.up.sql` and `097_resource_metadata.up.sql`. Supported exact clean predecessors are
-`096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `097`.
+`096_skill_package_publication.up.sql` `097_resource_metadata.up.sql` and `098_agent_mcp_bindings.up.sql`. Supported exact clean predecessors are
+`097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `098`.
 `086_current_schema_init_verify.sql` is the PostgreSQL 16 current-catalog and
 seed fingerprint used after the complete migration chain. Fresh and predecessor
-paths therefore execute the same `097` DDL and converge on one version `097`
+paths therefore execute the same `098` DDL and converge on one version `098`
 catalog fingerprint without an idempotent duplicate schema definition.
 
 Migration `093` adds private skill packages, immutable versions, Agent bindings
@@ -32,8 +32,8 @@ standard Sessions, publication and connection-mode changes therefore cannot
 race past the initial policy decision.
 
 The migration command accepts only a truly empty database, an exact clean
-supported predecessor (`096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
-version `097` current schema.
+supported predecessor (`097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
+version `098` current schema.
 Exactness is enforced with catalog object counts and a SHA-256 fingerprint over
 table, column/default, constraint, index, trigger, and function definitions.
 Legacy, dirty, partial, or malformed databases are rejected before the
@@ -96,10 +96,21 @@ No bundle bytes, digest, runtime schema/wire seeds, owner identity, or visibilit
 are rewritten. Public declarations cannot be NULL on a published version.
 The down script refuses rollback to avoid discarding frozen declarations.
 
-The measured PostgreSQL 16 current shape after `086..097` is 85 tables, 698
+The measured PostgreSQL 16 preserved predecessor shape after `086..097` is 85 tables, 698
 constraints, 294 indexes and 75 triggers. Digest:
 `29615da16e86f5b0ab50dbc798ef008862184300431a339b620e40476d30d033`.
 The exact `096` predecessor retains 84/692/293/75 and digest
 `2b590df0df297136ce8a8f9949dd23fb86cc9e2f8e87d41c2f15148b48a39720`.
 The migration tests exercise fresh and every supported predecessor, plus a
 populated 096 database containing published, private and withdrawn versions.
+
+## Agent MCP bindings (098)
+
+Migration `098` adds owner-private MCP tool grants, immutable Run tool snapshots,
+and child-Run grant references. It does not copy endpoint credentials or alter
+Runtime wire/schema identity. Deleting a binding revokes subsequent calls from
+existing snapshots; historical snapshots remain auditable with their parent Run.
+The measured PostgreSQL 16 current shape is 88 tables, 713 constraints, 303
+indexes and 75 triggers; digest
+`5c4521286adb6b335916aaaa0e6386fb3a7109bdbf9e74099fe326bb5f5c2e70`.
+The exact `097` predecessor retains 85/698/294/75 and its digest above.

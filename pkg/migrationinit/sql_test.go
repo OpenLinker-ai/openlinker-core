@@ -13,6 +13,8 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 		t.Fatal(err)
 	}
 	want := map[string]bool{
+		"098_agent_mcp_bindings.up.sql":              true,
+		"098_agent_mcp_bindings.down.sql":            true,
 		"097_resource_metadata.up.sql":               true,
 		"097_resource_metadata.down.sql":             true,
 		"096_skill_package_publication.up.sql":       true,
