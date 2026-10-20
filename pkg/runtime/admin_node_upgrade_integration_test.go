@@ -247,19 +247,26 @@ func TestRuntimeNodeControlledUpgradeExpiryDoesNotFallback(t *testing.T) {
 	pool, f, svc, actor := upgradeFixture(t, true)
 	ctx := context.Background()
 	r := upgradeRequest("version_change", upgradeVersionA, upgradeVersionB, 0)
-	r.DeadlineAt = time.Now().Add(time.Second)
+	require.NoError(t, pool.QueryRow(ctx, `SELECT clock_timestamp()+INTERVAL '2 seconds'`).Scan(&r.DeadlineAt))
+	r.TargetFeatures = append(runtime.RuntimeRequiredFeatures(), "mcp_bindings.v1")
 	_, err := svc.UpgradeRuntimeNode(ctx, f.nodeID, actor, r)
 	require.NoError(t, err)
 	sessions := runtime.NewRuntimeSessionService(pool, f.coreInstanceID)
 	principal := runtimeNodeAdminPrincipal(f)
 	admitted := upgradedSessionRequest(f, upgradeVersionB, 2)
+	admitted.Features = r.TargetFeatures
 	_, err = sessions.CreateOrAttachSession(ctx, principal, admitted)
 	require.NoError(t, err)
 	detachUpgradeSession(t, pool, f, false)
-	time.Sleep(time.Until(r.DeadlineAt) + 20*time.Millisecond)
+	require.Eventually(t, func() bool {
+		var expired bool
+		return pool.QueryRow(ctx, `SELECT clock_timestamp()>$1::timestamptz`, r.DeadlineAt).Scan(&expired) == nil && expired
+	}, 3*time.Second, 10*time.Millisecond)
 	_, err = sessions.CreateOrAttachSession(ctx, principal, admitted)
 	require.Error(t, err, "expired admission must also fence offline reattachment by the admitted ID")
-	_, err = sessions.CreateOrAttachSession(ctx, principal, upgradedSessionRequest(f, upgradeVersionB, 3))
+	next := upgradedSessionRequest(f, upgradeVersionB, 3)
+	next.Features = r.TargetFeatures
+	_, err = sessions.CreateOrAttachSession(ctx, principal, next)
 	require.Error(t, err, "expired permit must not fall back to ordinary offline recovery")
 	receipt, err := svc.UpgradeRuntimeNode(ctx, f.nodeID, actor, r)
 	require.NoError(t, err)

@@ -81,9 +81,16 @@ func parameter(c echo.Context, name string) (uuid.UUID, error) {
 	return id, nil
 }
 func readRequest(c echo.Context, out any) error {
+	return decodeRequest(c, out, false)
+}
+
+func decodeRequest(c echo.Context, out any, allowEmpty bool) error {
 	decoder := json.NewDecoder(http.MaxBytesReader(c.Response(), c.Request().Body, 128*1024))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(out); err != nil {
+		if allowEmpty && errors.Is(err, io.EOF) {
+			return nil
+		}
 		return packageError("REQUEST_INVALID", "invalid or oversized request")
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
@@ -290,22 +297,29 @@ func (h *Handler) Bindings(c echo.Context) error {
 	if err != nil {
 		return databaseError(err)
 	}
-	var features []string
-	err = h.pool.QueryRow(ctx, `SELECT features FROM runtime_sessions WHERE agent_id=$1 AND status NOT IN ('revoked','closed') ORDER BY created_at DESC LIMIT 1`, agentID).Scan(&features)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	hosts, err := packageHosts(ctx, h.pool, agentID, false)
+	if err != nil {
 		return databaseError(err)
 	}
 	hostStatus := "incompatible"
-	if mode == "runtime" && errors.Is(err, pgx.ErrNoRows) {
+	if mode == "runtime" && len(hosts) == 0 {
 		hostStatus = "none"
 	}
 	providers := []string{}
-	for _, p := range []string{"codex", "claude"} {
-		if slices.Contains(features, "skill_packages."+p+".v1") {
-			providers = append(providers, p)
+	providerSets := [][]string{}
+	for _, host := range hosts {
+		if len(host.providers) > 0 && !slices.ContainsFunc(providerSets, func(set []string) bool { return slices.Equal(set, host.providers) }) {
+			providerSets = append(providerSets, host.providers)
+		}
+		for _, provider := range host.providers {
+			if !slices.Contains(providers, provider) {
+				providers = append(providers, provider)
+			}
 		}
 	}
-	supported := mode == "runtime" && slices.Contains(features, Feature) && len(providers) > 0
+	slices.Sort(providers)
+	slices.SortFunc(providerSets, func(a, b []string) int { return strings.Compare(strings.Join(a, ","), strings.Join(b, ",")) })
+	supported := mode == "runtime" && anyPackageHost(hosts, nil)
 	if supported {
 		hostStatus = "compatible"
 	}
@@ -315,7 +329,48 @@ func (h *Handler) Bindings(c echo.Context) error {
 	if err != nil {
 		return databaseError(err)
 	}
-	return c.JSON(http.StatusOK, map[string]any{"items": items, "lifecycle_status": lifecycle, "max_bindings": MaxBindings, "host_status": hostStatus, "supported": supported, "providers": providers})
+	var bindings []struct {
+		Providers []string `json:"providers"`
+	}
+	if err := json.Unmarshal(items, &bindings); err != nil {
+		return databaseError(err)
+	}
+	var requirements [][]string
+	for _, binding := range bindings {
+		requirements = append(requirements, binding.Providers)
+	}
+	online := slices.ContainsFunc(hosts, func(host packageHost) bool {
+		return (host.status == "active" || host.status == "draining") && host.supports(requirements)
+	})
+	return c.JSON(http.StatusOK, map[string]any{"items": items, "lifecycle_status": lifecycle, "max_bindings": MaxBindings,
+		"host_status": hostStatus, "supported": supported, "providers": providers, "provider_sets": providerSets,
+		"bindings_compatible": supported && anyPackageHost(hosts, requirements), "compatible_session_online": online})
+}
+
+// The Agent row is locked by both mutations before this comparison. An empty
+// expectation means no binding; a UUID identifies the generation last reviewed.
+// Omission preserves compatibility with existing platform clients.
+func checkBindingExpectation(ctx context.Context, tx pgx.Tx, agentID, packageID uuid.UUID, expected *string) error {
+	if expected == nil {
+		return nil
+	}
+	want := uuid.Nil
+	if *expected != "" {
+		var err error
+		want, err = uuid.Parse(*expected)
+		if err != nil || want == uuid.Nil {
+			return packageError("REQUEST_INVALID", "invalid expected binding identifier")
+		}
+	}
+	var actual uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT binding_id FROM agent_skill_package_bindings WHERE agent_id=$1 AND package_id=$2`, agentID, packageID).Scan(&actual)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if actual != want {
+		return packageError("BINDING_CONFLICT", "the association changed; reload and review it before saving", http.StatusConflict)
+	}
+	return nil
 }
 
 func (h *Handler) Bind(c echo.Context) error {
@@ -332,7 +387,8 @@ func (h *Handler) Bind(c echo.Context) error {
 		return err
 	}
 	var req struct {
-		VersionID uuid.UUID `json:"version_id"`
+		VersionID         uuid.UUID `json:"version_id"`
+		ExpectedBindingID *string   `json:"expected_binding_id"`
 	}
 	if err = readRequest(c, &req); err != nil {
 		return err
@@ -341,6 +397,9 @@ func (h *Handler) Bind(c echo.Context) error {
 	err = pgx.BeginFunc(ctx, h.pool, func(tx pgx.Tx) error {
 		mode, err := ownedAgent(ctx, tx, agentID, uid, true)
 		if err != nil {
+			return err
+		}
+		if err := checkBindingExpectation(ctx, tx, agentID, packageID, req.ExpectedBindingID); err != nil {
 			return err
 		}
 		var active bool
@@ -357,19 +416,19 @@ func (h *Handler) Bind(c echo.Context) error {
 		if err = tx.QueryRow(ctx, `SELECT v.providers FROM skill_package_versions v JOIN skill_packages p ON p.id=v.package_id WHERE p.id=$1 AND p.owner_user_id=$2 AND v.id=$3`, packageID, uid, req.VersionID).Scan(&providers); err != nil {
 			return err
 		}
-		var features []string
-		if err = tx.QueryRow(ctx, `SELECT features FROM runtime_sessions WHERE agent_id=$1 AND status NOT IN ('revoked','closed') ORDER BY created_at DESC LIMIT 1`, agentID).Scan(&features); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return packageError("HOST_INCOMPATIBLE", "connect a compatible execution host before binding packages")
-			}
+		hosts, err := packageHosts(ctx, tx, agentID, false)
+		if err != nil {
 			return err
 		}
-		compatible := false
-		for _, p := range providers {
-			compatible = compatible || slices.Contains(features, "skill_packages."+p+".v1")
-		}
-		if !slices.Contains(features, Feature) || !compatible {
+		if !anyPackageHost(hosts, [][]string{providers}) {
 			return packageError("HOST_INCOMPATIBLE", "the Agent's execution environment is incompatible with this version")
+		}
+		requirements, err := packageRequirements(ctx, tx, agentID, packageID)
+		if err != nil {
+			return err
+		}
+		if !anyPackageHost(hosts, append(requirements, providers)) {
+			return packageError("COMBINATION_INCOMPATIBLE", "no single execution session can load the selected package combination")
 		}
 		var count int
 		if err = tx.QueryRow(ctx, `SELECT count(*) FROM agent_skill_package_bindings WHERE agent_id=$1 AND package_id<>$2`, agentID, packageID).Scan(&count); err != nil {
@@ -402,9 +461,18 @@ func (h *Handler) Unbind(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	var req struct {
+		ExpectedBindingID *string `json:"expected_binding_id"`
+	}
+	if err := decodeRequest(c, &req, true); err != nil {
+		return err
+	}
 	ctx := c.Request().Context()
 	err = pgx.BeginFunc(ctx, h.pool, func(tx pgx.Tx) error {
 		if _, err := ownedAgent(ctx, tx, agentID, uid, true); err != nil {
+			return err
+		}
+		if err := checkBindingExpectation(ctx, tx, agentID, packageID, req.ExpectedBindingID); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `DELETE FROM agent_skill_package_bindings WHERE agent_id=$1 AND package_id=$2`, agentID, packageID)

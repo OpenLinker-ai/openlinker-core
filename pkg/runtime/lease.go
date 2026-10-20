@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/mcpbinding"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -203,6 +205,7 @@ func (s *RuntimeLeaseService) ClaimOffer(
 				BrowserExecutionProfile: runtimeSessionUsesBrowserProfile(principal.Features),
 				FullBrowserInteraction:  runtimeSessionUsesFullBrowserInteraction(principal.Features),
 				SkillPackageProviders:   skillpackage.CompatibleProviders(principal.Features),
+				MCPBindings:             slices.Contains(principal.Features, mcpbinding.Feature),
 			},
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -967,6 +970,9 @@ func (s *RuntimeLeaseService) assignmentFromAttempt(
 		return RunAssignedPayload{}, err
 	}
 	if err := skillpackage.ValidateAssignment(metadata[skillpackage.MetadataKey], principal.Features); err != nil {
+		return RunAssignedPayload{}, newRuntimeLeaseError(RuntimeLeaseErrorValidationFailed, err)
+	}
+	if err := mcpbinding.ValidateAssignment(metadata[mcpbinding.MetadataKey], principal.Features); err != nil {
 		return RunAssignedPayload{}, newRuntimeLeaseError(RuntimeLeaseErrorValidationFailed, err)
 	}
 	digest := sha256.Sum256(canonicalInput)

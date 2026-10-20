@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/mcpbinding"
 	"math"
 	"regexp"
 	"time"
@@ -357,6 +358,10 @@ func (s *EventStore) Append(
 			FencingToken:       identity.FencingToken,
 		})
 		if err != nil {
+			return err
+		}
+
+		if err := mcpbinding.RecordReceipt(ctx, tx, identity.RunID, principal.AgentID, request.EventType, payload); err != nil && !errors.Is(err, mcpbinding.ErrInvalidReceipt) {
 			return err
 		}
 

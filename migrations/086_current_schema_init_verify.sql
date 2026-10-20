@@ -13,8 +13,8 @@ BEGIN
     FROM pg_catalog.pg_tables
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_tables <> 85 THEN
-        RAISE EXCEPTION 'Core initializer table count is %, expected 85', public_tables;
+    IF public_tables <> 88 THEN
+        RAISE EXCEPTION 'Core initializer table count is %, expected 88', public_tables;
     END IF;
 
     SELECT count(*) INTO public_constraints
@@ -23,16 +23,16 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 698 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 698', public_constraints;
+    IF public_constraints <> 714 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 714', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 294 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 294', public_indexes;
+    IF public_indexes <> 303 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 303', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers
@@ -81,12 +81,12 @@ BEGIN
         RAISE EXCEPTION 'Core singleton initialization is incomplete';
     END IF;
 
-    IF (SELECT count(*) FROM runtime_schema_contracts) <> 11
+    IF (SELECT count(*) FROM runtime_schema_contracts) <> 12
        OR (SELECT count(*) FROM runtime_schema_contracts WHERE is_current) <> 1
        OR NOT EXISTS (
             SELECT 1 FROM runtime_schema_contracts
-            WHERE schema_version = 95
-              AND migration_name = '095_runtime_node_upgrade'
+            WHERE schema_version = 99
+              AND migration_name = '099_runtime_node_upgrade_features'
               AND runtime_contract_id = 'openlinker.runtime.v2'
               AND runtime_contract_digest = '4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481'
               AND is_current

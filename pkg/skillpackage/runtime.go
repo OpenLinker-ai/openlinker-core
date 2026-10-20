@@ -68,20 +68,26 @@ func Snapshot(ctx context.Context, tx pgx.Tx, runID, agentID uuid.UUID) error {
 	if err != nil {
 		return err
 	}
-	var incompatible bool
-	// Session features remain valid historical evidence after disconnect/close.
-	// Unknown history must not turn an otherwise queueable Run into an error.
-	err = tx.QueryRow(ctx, `WITH latest_host AS (
- SELECT features FROM runtime_sessions WHERE agent_id=$2 ORDER BY created_at DESC,runtime_session_id DESC LIMIT 1)
- SELECT EXISTS(SELECT 1 FROM run_skill_package_snapshots s
- JOIN skill_package_versions v ON v.id=s.version_id CROSS JOIN latest_host h
- WHERE s.run_id=$1 AND NOT ('skill_packages.v1'=ANY(h.features) AND EXISTS (
- SELECT 1 FROM unnest(v.providers) p WHERE ('skill_packages.'||p||'.v1')=ANY(h.features))))`, runID, agentID).Scan(&incompatible)
-	if err == nil && incompatible {
+	rows, err := tx.Query(ctx, `SELECT v.providers FROM run_skill_package_snapshots s
+ JOIN skill_package_versions v ON v.id=s.version_id WHERE s.run_id=$1`, runID)
+	if err != nil {
+		return err
+	}
+	requirements, err := pgx.CollectRows(rows, pgx.RowTo[[]string])
+	if err != nil || len(requirements) == 0 {
+		return err
+	}
+	hosts, err := packageHosts(ctx, tx, agentID, true)
+	if err != nil {
+		return err
+	}
+	// Unknown history preserves offline queuing. Known candidates must include
+	// one session supporting the entire immutable snapshot.
+	if len(hosts) > 0 && !anyPackageHost(hosts, requirements) {
 		// Caller-facing admission errors must not disclose private Agent configuration.
 		return httpx.NewError(http.StatusServiceUnavailable, httpx.CodeServiceUnavailable, "Agent execution environment is temporarily unavailable")
 	}
-	return err
+	return nil
 }
 
 var ErrInvalidReceipt = errors.New("invalid skill package receipt")

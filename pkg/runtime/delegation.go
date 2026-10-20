@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/mcpbinding"
 	"net/http"
 	"strings"
 	"time"
@@ -199,7 +200,16 @@ func (s *RuntimeDelegationService) CallAgent(
 	if parentAgentID != capability.AgentID {
 		return RunSummary{}, newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 	}
-	if err = s.validateDelegationTarget(ctx, capability, request.TargetAgentID); err != nil {
+	grant, err := mcpbinding.ReferenceFrom(request.Metadata[mcpbinding.CallMetadataKey])
+	if err != nil {
+		return RunSummary{}, err
+	}
+	if grant != nil {
+		if err = mcpbinding.Authorize(ctx, s.pool, capability.RunID, capability.AgentID, request.TargetAgentID, *grant, s.runtime.cfg.EffectiveRuntimeMasterSecret()); err != nil {
+			return RunSummary{}, err
+		}
+	}
+	if err = s.validateDelegationTarget(ctx, capability, request.TargetAgentID, grant != nil); err != nil {
 		return RunSummary{}, err
 	}
 	childContext, err := s.childA2AContext(ctx, capability, request.TargetAgentID)
@@ -228,10 +238,22 @@ func (s *RuntimeDelegationService) CallAgent(
 		"api",
 		createRunOptions{
 			delegation: &delegation,
+			mcpGrant:   grant,
+			afterCreate: func(txCtx context.Context, tx pgx.Tx, child uuid.UUID) error {
+				if grant == nil {
+					return nil
+				}
+				_, err := tx.Exec(txCtx, `INSERT INTO run_mcp_tool_calls(run_id,parent_run_id,binding_id,parent_attempt_id) VALUES($1,$2,$3,$4)`, child, capability.RunID, grant.BindingID, capability.AttemptID)
+				return err
+			},
 			beforeCreate: func(txCtx context.Context, tx pgx.Tx) error {
-				return s.authorizeChildCreation(
-					txCtx, tx, authorization, capability, parentUserID,
-				)
+				if err := s.authorizeChildCreation(txCtx, tx, authorization, capability, parentUserID); err != nil {
+					return err
+				}
+				if grant != nil {
+					return mcpbinding.Authorize(txCtx, tx, capability.RunID, capability.AgentID, request.TargetAgentID, *grant, s.runtime.cfg.EffectiveRuntimeMasterSecret())
+				}
+				return nil
 			},
 		},
 	)
@@ -278,6 +300,7 @@ func (s *RuntimeDelegationService) validateDelegationTarget(
 	ctx context.Context,
 	capability RuntimeInvocationCapability,
 	targetAgentID uuid.UUID,
+	boundMCP ...bool,
 ) error {
 	caller, err := s.queries.GetAgentByID(ctx, capability.AgentID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -297,7 +320,7 @@ func (s *RuntimeDelegationService) validateDelegationTarget(
 	if err != nil {
 		return runtimeDatabaseUnavailable(err)
 	}
-	if policy == "private" || (policy == "same_creator" && caller.CreatorID != target.CreatorID) {
+	if (len(boundMCP) == 0 || !boundMCP[0]) && (policy == "private" || (policy == "same_creator" && caller.CreatorID != target.CreatorID)) {
 		return newRuntimeTransportError(
 			RuntimeErrorPermissionDenied, runtimeErrorDefaultMessage(RuntimeErrorPermissionDenied), nil,
 		)

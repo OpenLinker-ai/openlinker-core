@@ -45,9 +45,11 @@ func (t *postgresRuntimeSessionTransaction) createControlledRuntimeSessionSucces
  AND b.public_key_thumbprint=$8 AND n.device_public_key_thumbprint=$8 AND n.device_certificate_serial=$9
  AND source.node_id=n.node_id AND source.agent_id=a.agent_id AND source.worker_id=a.worker_id
  AND source.credential_id=a.credential_id AND source.session_epoch=a.minimum_epoch AND source.status='closed'
+ AND n.features @> $10::text[] AND $10::text[] @> n.features
+ AND $10::text[] @> COALESCE(op.target_features,source.features) AND COALESCE(op.target_features,source.features) @> $10::text[]
  AND NOT EXISTS(SELECT 1 FROM runtime_sessions s WHERE s.node_id=n.node_id AND s.agent_id=a.agent_id AND s.worker_id=a.worker_id
    AND (s.session_epoch >= $7 OR s.status IN ('active','draining') OR s.inflight<>0))
-)`, operationID, p.NodeID, p.NodeVersion, p.AgentID, p.WorkerID, p.CredentialID, p.SessionEpoch, p.DevicePublicKeyThumbprint, p.DeviceCertificateSerial).Scan(&allowed)
+)`, operationID, p.NodeID, p.NodeVersion, p.AgentID, p.WorkerID, p.CredentialID, p.SessionEpoch, p.DevicePublicKeyThumbprint, p.DeviceCertificateSerial, p.Features).Scan(&allowed)
 	if err != nil {
 		return db.RuntimeSession{}, true, err
 	}

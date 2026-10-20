@@ -143,7 +143,8 @@ A host advertises `skill_packages.v1` plus its supported provider feature:
 `skill_packages.codex.v1` or `skill_packages.claude.v1`. Core preserves these as
 optional Session features; the base Runtime protocol and its required feature
 set remain unchanged. A binding requires an active owned runtime Agent and a
-compatible latest non-closed/non-revoked Session. Agents using other connection
+compatible non-closed/non-revoked Session that can load the entire resulting set.
+Provider support from different Sessions is never combined. Agents using other connection
 modes and Workers without this extension cannot receive package-bearing Runs.
 
 Run creation snapshots the current associations in the same transaction as the
@@ -153,9 +154,11 @@ index supports reference checks; it does not permit deleting referenced versions
 or bypass restrictions during cascading owner deletion. Retries retain those versions even
 after an upgrade or association removal. Private payloads are stored once on the
 immutable version, separately from caller-visible `request_metadata`.
-New Run admission checks the latest known Session, including closed Sessions.
-No Session history or a compatible offline/closed Session preserves the existing
-offline queue policy. Only an explicitly incompatible latest Session causes
+New Run admission checks each current non-closed/non-revoked Session against the
+whole snapshot. Only when no current Sessions remain does it use the latest closed
+Session. Revoked Sessions are never compatibility evidence. Unknown history or a
+compatible offline/closed Session preserves the existing offline queue policy.
+Known candidates with no Session compatible with the whole snapshot cause
 admission to return HTTP 503 `SERVICE_UNAVAILABLE`, with a generic execution
 environment message that does not disclose private package configuration. The
 owner-only binding API retains its specific `SKILL_PACKAGE_HOST_INCOMPATIBLE`
@@ -235,7 +238,10 @@ withdrawal, and a Run -> assignment -> receipt loop on an imported copy. Plugin'
 through its actual Codex/Claude process adapters using deterministic fake client
 processes, version session isolation, concurrent materialization and failure paths.
 The offline queue tests cover unknown history and compatible/incompatible offline
-and closed Sessions through production Run creation and assignment queries.
+and closed Sessions through production Run creation and assignment queries; revoked
+Sessions are ignored. `skill_packages_consistency_test.go` covers concurrent
+conditional writes, stale removal, multiple current Sessions, full-set admission,
+and the production scheduler filter.
 The current Node/Plugin source supports native Codex/Claude and correctly
 provisioned Plugin Provider images. Shared image caches must pass both permission
 and actual-write probes before capability advertisement. Prerequisite lookup uses
@@ -281,10 +287,28 @@ pagination parameters and invalid enums return 400.
 
 The owner-only `GET /api/v1/creator/agents/:id/skill-packages` response also includes
 `lifecycle_status`, `max_bindings`, and `host_status` (`none`, `incompatible`, or
-`compatible`). Host status describes the latest non-closed, non-revoked session
-used for binding admission; it is not a liveness signal or Run readiness guarantee.
-`none` means a Runtime Agent has no such session; other connection modes are
-`incompatible`. `supported` retains its existing semantics.
+`compatible`). Host status describes the non-closed, non-revoked Session candidates;
+it is not a Run readiness guarantee. `none` means a Runtime Agent has no such
+Session; other connection modes are `incompatible`. `supported` means at least one
+Session supports the extension. `provider_sets` preserves the providers offered
+by each candidate (deduplicated), while legacy `providers` is their union for
+display only. `bindings_compatible` requires one candidate to support every bound
+version; `compatible_session_online` additionally requires active/draining status.
+Web distinguishes offline compatibility from missing Sessions and incompatible sets.
+PUT and DELETE accept optional `expected_binding_id`. An empty string expects no
+association; a UUID expects that exact association generation. Core checks it
+under the Agent row lock before writing and returns 409
+`SKILL_PACKAGE_BINDING_CONFLICT` if the association changed. Missing/null retains
+legacy unconditional behavior for existing clients. Both Web clients always send
+the expectation, refresh on opening/focus, and require another explicit review
+and save after a conflict; they never automatically replay an outdated mutation.
+A different version also requires a confirmation tied to the reviewed generation.
+Rollout order: deploy this Core before either new Web. Older Core rejects the new
+PUT field and ignores a DELETE expectation; do not retry by dropping the field.
+Empty DELETE bodies, including chunked requests, retain legacy behavior.
+The owner-only `SKILL_PACKAGE_COMBINATION_INCOMPATIBLE` code means that the selected
+version is supported individually but no single Session can load the resulting
+set. It does not change external Run errors or the scheduler's per-Session filter.
 The PUT response is the same full list; clients select by package ID. Re-saving
 the same version preserves `binding_id` and all previous receipt fields.
 
