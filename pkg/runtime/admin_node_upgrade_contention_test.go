@@ -261,6 +261,10 @@ func TestRuntimeNodeControlledUpgradeFencesInvalidOfflineHistory(t *testing.T) {
 // A fresh disposable predecessor DB avoids weakening current-schema guards to
 // fabricate historical state. Cleanup never selects a caller-supplied DB name.
 func controlledUpgradePredecessor(t *testing.T) func() {
+	return controlledUpgradePredecessorVersion(t, 94)
+}
+
+func controlledUpgradePredecessorVersion(t *testing.T, predecessor uint) func() {
 	t.Helper()
 	base := os.Getenv("TEST_DATABASE_URL")
 	if base == "" {
@@ -300,9 +304,9 @@ func controlledUpgradePredecessor(t *testing.T) func() {
 		require.NoError(t, sourceErr)
 		require.NoError(t, dbErr)
 	}
-	migrateTo(94)
+	migrateTo(predecessor)
 	t.Setenv("TEST_DATABASE_URL", dsn)
-	return func() { migrateTo(95) }
+	return func() { migrateTo(uint(runtime.RuntimeSchemaVersion)) }
 }
 
 func TestRuntimeNodeControlledUpgradeExpiresWhileWaitingToInsert(t *testing.T) {
@@ -314,7 +318,7 @@ func TestRuntimeNodeControlledUpgradeExpiresWhileWaitingToInsert(t *testing.T) {
 	_, err = held.Exec(ctx, `LOCK TABLE runtime_node_upgrade_operations IN SHARE MODE`)
 	require.NoError(t, err)
 	request := upgradeRequest("version_change", upgradeVersionA, upgradeVersionB, 0)
-	request.DeadlineAt = time.Now().Add(500 * time.Millisecond)
+	require.NoError(t, pool.QueryRow(ctx, `SELECT clock_timestamp()+INTERVAL '500 milliseconds'`).Scan(&request.DeadlineAt))
 	done := make(chan error, 1)
 	go func() { _, err := svc.UpgradeRuntimeNode(ctx, f.nodeID, actor, request); done <- err }()
 	require.Eventually(t, func() bool {
@@ -322,7 +326,10 @@ func TestRuntimeNodeControlledUpgradeExpiresWhileWaitingToInsert(t *testing.T) {
 		err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'INSERT INTO runtime_node_upgrade_operations%'`).Scan(&n)
 		return err == nil && n > 0
 	}, time.Second, 10*time.Millisecond)
-	time.Sleep(time.Until(request.DeadlineAt) + 20*time.Millisecond)
+	require.Eventually(t, func() bool {
+		var expired bool
+		return pool.QueryRow(ctx, `SELECT clock_timestamp()>$1::timestamptz`, request.DeadlineAt).Scan(&expired) == nil && expired
+	}, time.Second, 10*time.Millisecond)
 	require.NoError(t, held.Rollback(ctx))
 	requireUpgradeCode(t, <-done, "RUNTIME_NODE_OPERATION_EXPIRED")
 	var count int

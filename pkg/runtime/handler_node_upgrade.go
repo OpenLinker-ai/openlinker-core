@@ -38,7 +38,7 @@ func (h *Handler) UpgradeRuntimeNode(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	// Exactly six distinct fields. Reject unknown, duplicate, omitted and trailing
+	// Six required fields and an optional exact target feature set. Reject unknown, duplicate, omitted and trailing
 	// values before they can be mistaken for a different idempotent intent.
 	d := json.NewDecoder(http.MaxBytesReader(c.Response(), c.Request().Body, 4096))
 	token, err := d.Token()
@@ -46,7 +46,7 @@ func (h *Handler) UpgradeRuntimeNode(c echo.Context) error {
 		return httpx.BadRequest("请求体格式错误")
 	}
 	fields := map[string]json.RawMessage{}
-	allowed := map[string]bool{"operation_id": true, "kind": true, "expected_version": true, "expected_revision": true, "target_version": true, "deadline_at": true}
+	allowed := map[string]bool{"operation_id": true, "kind": true, "expected_version": true, "expected_revision": true, "target_version": true, "deadline_at": true, "target_features": true}
 	for d.More() {
 		key, err := d.Token()
 		if err != nil {
@@ -62,7 +62,14 @@ func (h *Handler) UpgradeRuntimeNode(c echo.Context) error {
 		}
 		fields[name] = value
 	}
-	if _, err = d.Token(); err != nil || len(fields) != 6 {
+	if _, err = d.Token(); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	requiredCount := len(fields)
+	if fields["target_features"] != nil {
+		requiredCount--
+	}
+	if requiredCount != 6 {
 		return httpx.BadRequest("升级请求需要完整六个字段")
 	}
 	var trailing any

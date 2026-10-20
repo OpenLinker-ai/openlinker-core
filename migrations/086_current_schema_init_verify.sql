@@ -23,8 +23,8 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 713 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 713', public_constraints;
+    IF public_constraints <> 714 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 714', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
@@ -81,12 +81,12 @@ BEGIN
         RAISE EXCEPTION 'Core singleton initialization is incomplete';
     END IF;
 
-    IF (SELECT count(*) FROM runtime_schema_contracts) <> 11
+    IF (SELECT count(*) FROM runtime_schema_contracts) <> 12
        OR (SELECT count(*) FROM runtime_schema_contracts WHERE is_current) <> 1
        OR NOT EXISTS (
             SELECT 1 FROM runtime_schema_contracts
-            WHERE schema_version = 95
-              AND migration_name = '095_runtime_node_upgrade'
+            WHERE schema_version = 99
+              AND migration_name = '099_runtime_node_upgrade_features'
               AND runtime_contract_id = 'openlinker.runtime.v2'
               AND runtime_contract_digest = '4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481'
               AND is_current

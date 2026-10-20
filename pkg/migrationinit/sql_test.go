@@ -13,6 +13,8 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 		t.Fatal(err)
 	}
 	want := map[string]bool{
+		"099_runtime_node_upgrade_features.up.sql":   true,
+		"099_runtime_node_upgrade_features.down.sql": true,
 		"098_agent_mcp_bindings.up.sql":              true,
 		"098_agent_mcp_bindings.down.sql":            true,
 		"097_resource_metadata.up.sql":               true,
@@ -231,14 +233,14 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	verify := readInitializer(t, "../../migrations/086_current_schema_init_verify.sql")
 	for _, fragment := range []string{
 		"public_tables <> 88",
-		"public_constraints <> 713",
+		"public_constraints <> 714",
 		"public_indexes <> 303",
 		"public_triggers <> 75",
 		"public_functions <> 68",
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",
 		"Core initializer built-in skills are incomplete",
 		"Core Runtime schema contract initialization is inconsistent",
-		"count(*) FROM runtime_schema_contracts) <> 11",
+		"count(*) FROM runtime_schema_contracts) <> 12",
 		"Core Runtime wire contract initialization is inconsistent",
 		"idx_runtime_node_certificates_retention",
 		"idx_runtime_sessions_credential_lifecycle",

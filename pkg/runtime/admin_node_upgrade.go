@@ -28,21 +28,26 @@ type RuntimeNodeUpgradeRequest struct {
 	ExpectedRevision int64     `json:"expected_revision"`
 	TargetVersion    string    `json:"target_version"`
 	DeadlineAt       time.Time `json:"deadline_at"`
+	// Omitted preserves the enrolled feature set. Changes require an explicit
+	// version_change; this is an exact target, not a feature allowlist.
+	TargetFeatures []string `json:"target_features,omitempty"`
 }
 
 type RuntimeNodeUpgradeStatus struct {
-	NodeID             uuid.UUID         `json:"node_id"`
-	Version            string            `json:"version"`
-	Revision           int64             `json:"revision"`
-	DatabaseTime       time.Time         `json:"database_time"`
-	SessionCount       int               `json:"session_count"`
-	LiveSessions       int               `json:"live_sessions"`
-	Inflight           int64             `json:"inflight"`
-	UnfinishedAttempts int               `json:"unfinished_attempts"`
-	LiveAttachments    int               `json:"live_attachments"`
-	AdmissionCount     int               `json:"admission_count"`
-	Eligible           bool              `json:"eligible"`
-	Blockers           []httpx.ErrorCode `json:"blockers"`
+	NodeID             uuid.UUID                  `json:"node_id"`
+	Version            string                     `json:"version"`
+	Features           []string                   `json:"features"`
+	Revision           int64                      `json:"revision"`
+	DatabaseTime       time.Time                  `json:"database_time"`
+	SessionCount       int                        `json:"session_count"`
+	LiveSessions       int                        `json:"live_sessions"`
+	Inflight           int64                      `json:"inflight"`
+	UnfinishedAttempts int                        `json:"unfinished_attempts"`
+	LiveAttachments    int                        `json:"live_attachments"`
+	AdmissionCount     int                        `json:"admission_count"`
+	Eligible           bool                       `json:"eligible"`
+	Blockers           []httpx.ErrorCode          `json:"blockers"`
+	CurrentOperation   *RuntimeNodeUpgradeReceipt `json:"current_operation,omitempty"`
 }
 
 type RuntimeNodeUpgradeReceipt struct {
@@ -56,6 +61,8 @@ type RuntimeNodeUpgradeReceipt struct {
 	CreatedAt      time.Time `json:"created_at"`
 	DeadlineAt     time.Time `json:"deadline_at"`
 	Replayed       bool      `json:"replayed"`
+	FromFeatures   []string  `json:"from_features,omitempty"`
+	TargetFeatures []string  `json:"target_features,omitempty"`
 }
 
 var runtimeNodeVersionPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9.+_-]*$`)
@@ -101,6 +108,16 @@ func (s *Service) CheckRuntimeNodeUpgrade(ctx context.Context, nodeID uuid.UUID)
 	if err != nil {
 		return nil, nodeUpgradeDatabaseError(err, "检查 Runtime Node 升级失败")
 	}
+	var current *uuid.UUID
+	if err = tx.QueryRow(ctx, `SELECT current_operation_id FROM runtime_node_upgrade_state WHERE node_id=$1`, nodeID).Scan(&current); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, nodeUpgradeDatabaseError(err, "查询当前升级授权失败")
+	}
+	if current != nil {
+		status.CurrentOperation, _, err = runtimeNodeUpgradeReceipt(ctx, tx, *current)
+		if err != nil {
+			return nil, nodeUpgradeDatabaseError(err, "查询当前升级授权失败")
+		}
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, nodeUpgradeDatabaseError(err, "检查 Runtime Node 升级失败")
 	}
@@ -117,6 +134,16 @@ func (s *Service) UpgradeRuntimeNode(ctx context.Context, nodeID, actorID uuid.U
 		return nil, httpx.BadRequest("受控升级参数无效")
 	}
 	r.DeadlineAt = r.DeadlineAt.UTC().Truncate(time.Microsecond)
+	if r.TargetFeatures != nil {
+		if len(r.TargetFeatures) > 64 {
+			return nil, httpx.BadRequest("目标能力集合无效")
+		}
+		features, err := normalizeRuntimeSessionFeatures(r.TargetFeatures, RuntimeContractDigest)
+		if err != nil {
+			return nil, httpx.BadRequest("目标能力集合无效")
+		}
+		r.TargetFeatures = features
+	}
 	canonical, _ := json.Marshal(struct {
 		Node, Actor uuid.UUID
 		Request     RuntimeNodeUpgradeRequest
@@ -212,9 +239,28 @@ func (s *Service) upgradeRuntimeNodeOnce(ctx context.Context, nodeID, actorID uu
 	if r.ExpectedVersion != node.nodeVersion || r.ExpectedRevision != status.Revision {
 		return nil, nodeUpgradeConflict("RUNTIME_NODE_REVISION_CONFLICT")
 	}
+	targetFeatures := r.TargetFeatures
+	if targetFeatures == nil {
+		if r.Kind == "version_change" {
+			// The recorded Node may already describe a target that never started.
+			// Do not silently assign its features to a different/reverse binary.
+			var changed bool
+			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM runtime_sessions
+ WHERE runtime_session_id=ANY($1::uuid[]) AND NOT (features @> $2::text[] AND $2::text[] @> features))`, candidates, node.features).Scan(&changed); err != nil {
+				return nil, nodeUpgradeDatabaseError(err, "检查目标能力集合失败")
+			}
+			if changed {
+				return nil, httpx.BadRequest("未启动的升级改变了能力集合；请显式提供目标版本的 target_features")
+			}
+		}
+		targetFeatures = node.features
+	}
+	if r.Kind == "restart_after_drain" && !sameRuntimeFeatureSet(targetFeatures, node.features) {
+		return nil, httpx.BadRequest("同版本重启不能改变能力集合")
+	}
 	_, err = tx.Exec(ctx, `INSERT INTO runtime_node_upgrade_operations
- (operation_id,node_id,actor_id,request_fingerprint,kind,from_version,target_version,revision,admission_count,deadline_at)
- VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, r.OperationID, nodeID, actorID, fingerprint, r.Kind, node.nodeVersion, r.TargetVersion, status.Revision+1, len(candidates), r.DeadlineAt)
+ (operation_id,node_id,actor_id,request_fingerprint,kind,from_version,target_version,revision,admission_count,deadline_at,from_features,target_features)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, r.OperationID, nodeID, actorID, fingerprint, r.Kind, node.nodeVersion, r.TargetVersion, status.Revision+1, len(candidates), r.DeadlineAt, node.features, targetFeatures)
 	if err != nil {
 		var pe *pgconn.PgError
 		if errors.As(err, &pe) && pe.Code == "23514" && pe.ConstraintName == "runtime_node_upgrade_operations_check" {
@@ -245,7 +291,7 @@ func (s *Service) upgradeRuntimeNodeOnce(ctx context.Context, nodeID, actorID uu
 	if _, err = tx.Exec(ctx, `SELECT set_config('openlinker.runtime_node_upgrade',$1,true)`, r.OperationID.String()); err != nil {
 		return nil, nodeUpgradeDatabaseError(err, "Runtime Node 升级事务失败")
 	}
-	if _, err = tx.Exec(ctx, `UPDATE runtime_nodes SET node_version=$2,updated_at=clock_timestamp() WHERE node_id=$1`, nodeID, r.TargetVersion); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE runtime_nodes SET node_version=$2,features=$3,updated_at=clock_timestamp() WHERE node_id=$1`, nodeID, r.TargetVersion, targetFeatures); err != nil {
 		return nil, nodeUpgradeDatabaseError(err, "更新 Runtime Node 版本失败")
 	}
 	receipt, _, err := runtimeNodeUpgradeReceipt(ctx, tx, r.OperationID)
@@ -261,8 +307,8 @@ func (s *Service) upgradeRuntimeNodeOnce(ctx context.Context, nodeID, actorID uu
 func runtimeNodeUpgradeReceipt(ctx context.Context, tx pgx.Tx, id uuid.UUID) (*RuntimeNodeUpgradeReceipt, string, error) {
 	r := &RuntimeNodeUpgradeReceipt{}
 	var fingerprint string
-	err := tx.QueryRow(ctx, `SELECT operation_id,node_id,kind,from_version,target_version,revision,admission_count,created_at,deadline_at,request_fingerprint
- FROM runtime_node_upgrade_operations WHERE operation_id=$1`, id).Scan(&r.OperationID, &r.NodeID, &r.Kind, &r.FromVersion, &r.TargetVersion, &r.Revision, &r.AdmissionCount, &r.CreatedAt, &r.DeadlineAt, &fingerprint)
+	err := tx.QueryRow(ctx, `SELECT operation_id,node_id,kind,from_version,target_version,revision,admission_count,created_at,deadline_at,request_fingerprint,from_features,target_features
+ FROM runtime_node_upgrade_operations WHERE operation_id=$1`, id).Scan(&r.OperationID, &r.NodeID, &r.Kind, &r.FromVersion, &r.TargetVersion, &r.Revision, &r.AdmissionCount, &r.CreatedAt, &r.DeadlineAt, &fingerprint, &r.FromFeatures, &r.TargetFeatures)
 	return r, fingerprint, err
 }
 
@@ -312,7 +358,7 @@ func runtimeNodeUpgradeScope(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, l
 }
 
 func inspectRuntimeNodeUpgrade(ctx context.Context, tx pgx.Tx, node runtimeNodeRecord, ids []uuid.UUID, instanceID uuid.UUID) (*RuntimeNodeUpgradeStatus, []uuid.UUID, error) {
-	r := &RuntimeNodeUpgradeStatus{NodeID: node.nodeID, Version: node.nodeVersion, SessionCount: len(ids), Blockers: []httpx.ErrorCode{}}
+	r := &RuntimeNodeUpgradeStatus{NodeID: node.nodeID, Version: node.nodeVersion, Features: node.features, SessionCount: len(ids), Blockers: []httpx.ErrorCode{}}
 	err := tx.QueryRow(ctx, `SELECT clock_timestamp(),COALESCE((SELECT revision FROM runtime_node_upgrade_state WHERE node_id=$1),0)`, node.nodeID).Scan(&r.DatabaseTime, &r.Revision)
 	if err != nil {
 		return nil, nil, err
@@ -369,10 +415,13 @@ func inspectRuntimeNodeUpgrade(ctx context.Context, tx pgx.Tx, node runtimeNodeR
  AND s.drain_reason_code='ADMIN_REQUESTED' AND s.drain_requested_at IS NOT NULL
  AND s.device_certificate_serial=n.device_certificate_serial
  AND s.protocol_version=n.protocol_version AND s.runtime_contract_id=n.runtime_contract_id AND s.runtime_contract_digest=n.runtime_contract_digest
- AND s.features @> n.features AND n.features @> s.features
- AND (s.node_version=n.node_version OR EXISTS (
+ AND ((s.node_version=n.node_version AND s.features @> n.features AND n.features @> s.features) OR EXISTS (
    SELECT 1 FROM runtime_node_upgrade_state st JOIN runtime_node_upgrade_admissions a ON a.operation_id=st.current_operation_id
-   WHERE st.node_id=n.node_id AND a.source_session_id=s.runtime_session_id AND a.credential_id=s.credential_id))
+   JOIN runtime_node_upgrade_operations op ON op.operation_id=a.operation_id AND op.revision=st.revision AND op.node_id=st.node_id
+   WHERE st.node_id=n.node_id AND a.source_session_id=s.runtime_session_id AND a.credential_id=s.credential_id
+   AND s.agent_id=a.agent_id AND s.worker_id=a.worker_id AND s.session_epoch=a.minimum_epoch
+   AND n.node_version=op.target_version
+   AND n.features @> COALESCE(op.target_features,s.features) AND COALESCE(op.target_features,s.features) @> n.features))
  AND EXISTS (SELECT 1 FROM runtime_node_bindings b WHERE b.credential_id=s.credential_id AND b.agent_id=s.agent_id AND b.node_id=n.node_id
    AND b.public_key_thumbprint=n.device_public_key_thumbprint AND (b.binding_mode='token_only' OR (b.binding_mode='mtls' AND EXISTS (
      SELECT 1 FROM runtime_node_certificates cert WHERE cert.node_id=n.node_id AND cert.public_key_thumbprint=b.public_key_thumbprint

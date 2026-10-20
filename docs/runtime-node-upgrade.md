@@ -1,20 +1,24 @@
 # Controlled Runtime Node version changes
 
-Schema 095 adds Core-owned authorization for replacing the binary of an enrolled
+Schema 095 added Core-owned authorization for replacing the binary of an enrolled
 Node and for restarting an administratively drained Node. The SDK remains the
 only Worker implementation. Neither this API nor credential renewal chooses,
 downloads, starts or rolls back a binary. This feature does not change the Hello
 wire contract, Node identity, Worker ID, credential, SDK DataDir or provider
 session scope.
 
+Schema 099 adds explicit feature-set authorization for version changes. Omitting
+`target_features` preserves the enrolled set; no successor can negotiate extra
+features implicitly.
+
 ## Core migration
 
 Use a coordinated Core maintenance window. Drain and stop the old Core members,
-apply the normal forward migrations, start all members with schema 095 support,
+apply the normal forward migrations, start all members with schema 099 support,
 and verify readiness before returning the cluster to normal mode. The runtime
-schema identity advances from 80 to 95; the wire contract remains unchanged.
+schema identity advances to 99; the wire contract remains unchanged.
 Old Core must fail readiness on the new schema. Mixed old/new Core
-serving and a rolling schema rollout are unsupported. Migration 095 cannot be
+serving and a rolling schema rollout are unsupported. Migrations 095 and 099 cannot be
 rolled back: operation history and admission fences must survive a Node binary
 rollback. Back up the database and follow the normal migration incident process
 if a migration fails; do not force-clear dirty bookkeeping.
@@ -36,7 +40,7 @@ supported upgrade procedure. Fresh enrollment is a separate operation.
    existing identity and DataDir. Stop every Worker process on that Node.
 3. Read `GET /api/v1/admin/runtime/nodes/:id/upgrade` using an administrator JWT.
    `eligible` must be true. This is a read-only snapshot, not a reservation.
-4. POST the following six fields to the same URL, using a new UUID and the
+4. POST the following six required fields to the same URL, using a new UUID and the
    exact observed version/revision. Choose a deadline after `database_time`
    and no more than 15 minutes later. Actor identity comes from the JWT.
 
@@ -50,6 +54,18 @@ supported upgrade procedure. Fresh enrollment is a separate operation.
      "deadline_at": "2026-10-05T08:10:00Z"
    }
    ```
+
+   When the selected binary changes its advertised extensions, also supply
+   `target_features` with its **complete exact feature set**, including all required
+   Runtime features. GET includes the current `features` and outstanding `current_operation`
+   (including its recorded before/after sets); compare them with the
+   release's tested target set. This optional array rejects null, duplicates,
+   missing required features and more than 64 entries. Omission keeps the current
+   set. A version change with an unstarted feature-changing operation requires
+   an explicit target set, preventing an ambiguous reverse from inheriting the
+   never-started binary's features. Same-version restart cannot add/remove features. The immutable receipt
+   includes `from_features` and `target_features`; a different target set with the
+   same operation ID conflicts, while reordering the same set replays safely.
 
    Replace the example values, especially the deadline; use the binary's exact
    reported version. For restart without changing the binary, use
@@ -91,7 +107,7 @@ a compatible version through a new controlled operation.
 The Node must be administratively draining with no live Sessions, inflight
 counters, unfinished/unreleased Attempts or attached transports. Candidate
 Workers require a valid Runtime credential and durable device binding, current
-protocol/contract and the exact same advertised features (including `session_drain`), and an administratively
+protocol/contract and the exact authorized advertised features (including `session_drain`), and an administratively
 drained offline/closed predecessor. Revoked or incompatible terminal history is
 not an admission candidate. Invalid offline identities are fenced without receiving a successor
 admission; they cannot block valid sibling Workers. Latest offline generations are fenced on success; historical version/epoch

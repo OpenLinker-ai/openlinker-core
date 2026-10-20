@@ -164,6 +164,9 @@ jobs:
           set -euo pipefail
           go test -p 1 -race -v ./pkg/runtime ./pkg/runtimepki -run '^TestRuntimeNodeControlled|^TestCredentialIssuanceReplaysCommittedLeafWithinMinimumInterval$' -count=1 -timeout=8m | tee /tmp/node-upgrade.log
           if grep -q -- '--- SKIP:' /tmp/node-upgrade.log; then exit 1; fi
+          grep -q -- '--- PASS: TestRuntimeNodeControlledUpgradePre099Permit' /tmp/node-upgrade.log
+          grep -q -- '--- PASS: TestRuntimeNodeControlledUpgradeExactFeatures' /tmp/node-upgrade.log
+          grep -q -- '--- PASS: TestRuntimeNodeControlledUpgradeFeaturesFailClosed' /tmp/node-upgrade.log
           grep -q -- '--- PASS: TestRuntimeNodeControlledUpgradeTotalBudget' /tmp/node-upgrade.log
           grep -q -- '--- PASS: TestRuntimeNodeControlledUpgradeScopeChangeRetries' /tmp/node-upgrade.log
           grep -q -- '--- PASS: TestRuntimeNodeControlledUpgradeCapacity' /tmp/node-upgrade.log

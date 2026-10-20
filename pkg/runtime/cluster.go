@@ -21,12 +21,12 @@ const (
 	// RuntimeSchemaVersion is the schema contract compiled into this Core
 	// release. A migration that changes the current runtime schema contract must
 	// update both this version and RuntimeSchemaChecksum.
-	RuntimeSchemaVersion       int32 = 95
-	RuntimeSchemaMigrationName       = "095_runtime_node_upgrade"
+	RuntimeSchemaVersion       int32 = 99
+	RuntimeSchemaMigrationName       = "099_runtime_node_upgrade_features"
 	// RuntimeSchemaChecksum is SHA-256 over the canonical current schema
 	// contract tuple:
-	// 95:095_runtime_node_upgrade:<contract id>:<contract digest>.
-	RuntimeSchemaChecksum = "d0f3aeb58cb468579a30b950f8d645d31858fb899a10b5be3c7e1db8c3e87241"
+	// 99:099_runtime_node_upgrade_features:<contract id>:<contract digest>.
+	RuntimeSchemaChecksum = "b2af71c7ee60d80f617d895f4ca824a8735a86665c7599bd4841c2991eb527a5"
 
 	RuntimeClusterModeNormal          RuntimeClusterMode = "normal"
 	RuntimeClusterModeDraining        RuntimeClusterMode = "draining"

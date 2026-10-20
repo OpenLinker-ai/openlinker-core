@@ -31,6 +31,7 @@ func TestRuntimeNodeControlledUpgradeAdminHTTP(t *testing.T) {
 	runtime.NewHandler(svc).RegisterAdmin(e.Group("/api/v1"), auth.JWTMiddlewareWithUserStatus(newTestConfig().JWTSecret, auth.NewDBUserStatusChecker(pool)), auth.AdminMiddleware(db.New(pool)))
 	url := "/api/v1/admin/runtime/nodes/" + f.nodeID.String() + "/upgrade"
 	r := upgradeRequest("version_change", upgradeVersionA, upgradeVersionB, 0)
+	r.TargetFeatures = append(runtime.RuntimeRequiredFeatures(), "mcp_bindings.v1")
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	request := func(method, token, body string) *httptest.ResponseRecorder {
@@ -63,6 +64,8 @@ func TestRuntimeNodeControlledUpgradeAdminHTTP(t *testing.T) {
 		strings.Replace(string(raw), `"expected_revision":0,`, "", 1),
 		strings.Replace(string(raw), `"expected_revision":0`, `"expected_revision":null`, 1),
 		string(raw) + ` {}`, `[]`,
+		strings.TrimSuffix(string(raw), "}") + `,"target_features":[]}`,
+		strings.Replace(string(raw), `"target_features":[`, `"target_features":null,"unused":[`, 1),
 		strings.Replace(string(raw), upgradeVersionB, "different-product/0.2.0", 1),
 		strings.Replace(string(raw), `"version_change"`, `"restart_after_drain"`, 1),
 	} {

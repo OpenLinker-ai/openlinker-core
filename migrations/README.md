@@ -8,11 +8,11 @@ canonical seed data for a fresh database. The migration runner then applies
 `091_browser_interaction_policy.up.sql`,
 `092_browser_observation_audit.up.sql`,
 `093_skill_packages.up.sql`, `094_cli_login.up.sql`, `095_runtime_node_upgrade.up.sql`,
-`096_skill_package_publication.up.sql` `097_resource_metadata.up.sql` and `098_agent_mcp_bindings.up.sql`. Supported exact clean predecessors are
-`097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `098`.
+`096_skill_package_publication.up.sql` `097_resource_metadata.up.sql` `098_agent_mcp_bindings.up.sql` and `099_runtime_node_upgrade_features.up.sql`. Supported exact clean predecessors are
+`098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `099`.
 `086_current_schema_init_verify.sql` is the PostgreSQL 16 current-catalog and
 seed fingerprint used after the complete migration chain. Fresh and predecessor
-paths therefore execute the same `098` DDL and converge on one version `098`
+paths therefore execute the same `099` DDL and converge on one version `099`
 catalog fingerprint without an idempotent duplicate schema definition.
 
 Migration `093` adds private skill packages, immutable versions, Agent bindings
@@ -32,8 +32,8 @@ standard Sessions, publication and connection-mode changes therefore cannot
 race past the initial policy decision.
 
 The migration command accepts only a truly empty database, an exact clean
-supported predecessor (`097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
-version `098` current schema.
+supported predecessor (`098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
+version `099` current schema.
 Exactness is enforced with catalog object counts and a SHA-256 fingerprint over
 table, column/default, constraint, index, trigger, and function definitions.
 Legacy, dirty, partial, or malformed databases are rejected before the
@@ -114,3 +114,19 @@ The measured PostgreSQL 16 current shape is 88 tables, 713 constraints, 303
 indexes and 75 triggers; digest
 `5c4521286adb6b335916aaaa0e6386fb3a7109bdbf9e74099fe326bb5f5c2e70`.
 The exact `097` predecessor retains 85/698/294/75 and its digest above.
+
+## Exact Node upgrade features (099)
+
+Migration `099` records the administrator-approved before/after feature sets on
+immutable upgrade operations. Historical operations retain NULL pairs and the
+existing exact-feature behavior. New successor Sessions must match the authorized
+set; required wire features, identity, credentials, epoch, drain and expiry fences
+remain enforced. Same-version restarts cannot change features. No historical
+Session is rewritten. Runtime readiness advances to schema identity 99, requiring
+a coordinated Core upgrade; old Core cannot serve against this schema. Rollback
+is refused to preserve authorization history.
+
+PostgreSQL 16 measured shape: 88 tables, 714 constraints, 303 indexes, 75 triggers,
+12 Runtime schema records; digest
+`d7ec84e9ffe0aa26261b73a98cd03e4006ecedd7e40005299649d330ea0281c2`.
+The exact 098 predecessor retains its 88/713/303/75 fingerprint above.

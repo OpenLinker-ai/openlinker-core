@@ -14,6 +14,8 @@ func TestValidateCoreUp(t *testing.T) {
 	}{
 		{name: "fresh", snapshot: Snapshot{}},
 		{name: "current", snapshot: currentCoreSnapshot(), wantNoop: true},
+		{name: "feature upgrade predecessor", snapshot: featureUpgradePredecessorCoreSnapshot()},
+		{name: "feature upgrade predecessor drift", snapshot: withCoreDigest(featureUpgradePredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
 		{name: "supported predecessor", snapshot: upgradeableCoreSnapshot()},
 		{name: "reviewed bridge predecessor", snapshot: reviewedBridgeCoreSnapshot()},
 		{name: "resource metadata predecessor", snapshot: metadataPredecessorCoreSnapshot()},
@@ -122,12 +124,12 @@ func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
 		Tables:            88,
-		Constraints:       713,
+		Constraints:       714,
 		Indexes:           303,
 		Triggers:          75,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
-		RuntimeSchemas:    11,
+		RuntimeSchemas:    12,
 		CurrentRuntime:    1,
 		RuntimeWires:      5,
 		CurrentWire:       1,
@@ -140,6 +142,7 @@ func currentCoreShape() SchemaShape {
 func publicationPredecessorCoreSnapshot() Snapshot {
 	shape := currentCoreShape()
 	shape.Digest = CorePackagePublicationPredecessorDigest
+	shape.RuntimeSchemas = 11
 	shape.Tables = 84
 	shape.Constraints = 691
 	shape.Indexes = 290
@@ -335,9 +338,19 @@ func metadataPredecessorCoreSnapshot() Snapshot {
 	s := currentCoreSnapshot()
 	s.Core.Version = CoreResourceMetadataPredecessorVersion
 	s.CoreShape.Digest = CoreResourceMetadataPredecessorDigest
+	s.CoreShape.RuntimeSchemas = 11
 	s.CoreShape.Tables = 84
 	s.CoreShape.Constraints = 692
 	s.CoreShape.Indexes = 293
 	s.NonBookkeepingObjects = 84
+	return s
+}
+
+func featureUpgradePredecessorCoreSnapshot() Snapshot {
+	s := currentCoreSnapshot()
+	s.Core.Version = CoreFeatureUpgradePredecessorVersion
+	s.CoreShape.Digest = CoreFeatureUpgradePredecessorDigest
+	s.CoreShape.Constraints = 713
+	s.CoreShape.RuntimeSchemas = 11
 	return s
 }
