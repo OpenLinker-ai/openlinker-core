@@ -205,7 +205,7 @@ func (s *RuntimeDelegationService) CallAgent(
 		return RunSummary{}, err
 	}
 	if grant != nil {
-		if err = mcpbinding.Authorize(ctx, s.pool, capability.RunID, capability.AgentID, request.TargetAgentID, *grant); err != nil {
+		if err = mcpbinding.Authorize(ctx, s.pool, capability.RunID, capability.AgentID, request.TargetAgentID, *grant, s.runtime.cfg.EffectiveRuntimeMasterSecret()); err != nil {
 			return RunSummary{}, err
 		}
 	}
@@ -251,7 +251,7 @@ func (s *RuntimeDelegationService) CallAgent(
 					return err
 				}
 				if grant != nil {
-					return mcpbinding.Authorize(txCtx, tx, capability.RunID, capability.AgentID, request.TargetAgentID, *grant)
+					return mcpbinding.Authorize(txCtx, tx, capability.RunID, capability.AgentID, request.TargetAgentID, *grant, s.runtime.cfg.EffectiveRuntimeMasterSecret())
 				}
 				return nil
 			},

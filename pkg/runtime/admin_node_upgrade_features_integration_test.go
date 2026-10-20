@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"fmt"
+	"net/http"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -96,7 +98,9 @@ func TestRuntimeNodeControlledUpgradeExactFeatures(t *testing.T) {
 				restart := upgradeRequest("restart_after_drain", upgradeVersionB, upgradeVersionB, revision)
 				restart.TargetFeatures = source
 				_, err = svc.UpgradeRuntimeNode(ctx, f.nodeID, actor, restart)
-				require.Error(t, err, "same-version restarts cannot change features")
+				var bad *httpx.HTTPError
+				require.ErrorAs(t, err, &bad)
+				require.Equal(t, http.StatusBadRequest, bad.Status)
 				restart.TargetFeatures = nil // legacy six-field requests preserve features
 				_, err = svc.UpgradeRuntimeNode(ctx, f.nodeID, actor, restart)
 				require.NoError(t, err)
@@ -145,11 +149,15 @@ func TestRuntimeNodeControlledUpgradeFeaturesFailClosed(t *testing.T) {
 		append(slices.Clone(status.Features), status.Features[0]),
 		append(slices.Clone(status.Features), ""),
 		make([]string, 65),
+		slices.DeleteFunc(slices.Clone(status.Features), func(f string) bool { return f == "session_drain" }),
 	} {
 		r := upgradeRequest("version_change", upgradeVersionA, upgradeVersionB, 0)
 		r.TargetFeatures = features
 		_, err = svc.UpgradeRuntimeNode(ctx, f.nodeID, actor, r)
-		require.Error(t, err)
+		var bad *httpx.HTTPError
+		require.ErrorAs(t, err, &bad)
+		require.Equal(t, http.StatusBadRequest, bad.Status)
+		require.Equal(t, httpx.CodeBadRequest, bad.Code)
 	}
 	// Omission does not auto-learn the successor's advertised extensions.
 	r := upgradeRequest("version_change", upgradeVersionA, upgradeVersionB, 0)
@@ -172,12 +180,11 @@ func TestRuntimeNodeControlledUpgradePre099Permit(t *testing.T) {
 	legacy := upgradeRequest("version_change", upgradeVersionA, upgradeVersionB, 0)
 	legacy.DeadlineAt = legacy.DeadlineAt.UTC().Truncate(time.Microsecond)
 	operation := legacy.OperationID
-	canonical, err := json.Marshal(struct {
-		Node, Actor uuid.UUID
-		Request     runtime.RuntimeNodeUpgradeRequest
-	}{f.nodeID, actor, legacy})
-	require.NoError(t, err)
-	require.NotContains(t, string(canonical), "target_features")
+	// Freeze the released 098 JSON field names/order independently of the current
+	// request struct. Replay must continue to match this historical encoding.
+	canonical := []byte(fmt.Sprintf(`{"Node":%q,"Actor":%q,"Request":{"operation_id":%q,"kind":%q,"expected_version":%q,"expected_revision":0,"target_version":%q,"deadline_at":%q}}`,
+		f.nodeID.String(), actor.String(), operation.String(), legacy.Kind,
+		legacy.ExpectedVersion, legacy.TargetVersion, legacy.DeadlineAt.Format(time.RFC3339Nano)))
 	hash := sha256.Sum256(canonical)
 	fingerprint := hex.EncodeToString(hash[:])
 	// Seed a permit using the released 095/098 table/guard contract, before the
@@ -215,7 +222,7 @@ func TestRuntimeNodeControlledUpgradePre099Permit(t *testing.T) {
 	req := upgradedSessionRequest(f, upgradeVersionB, 2)
 	req.Features = append(req.Features, "mcp_bindings.v1")
 	_, err = sessions.CreateOrAttachSession(ctx, runtimeNodeAdminPrincipal(f), req)
-	require.Error(t, err, "migration never broadens an existing permit")
+	require.True(t, runtime.IsRuntimeSessionError(err, runtime.RuntimeSessionErrorContractMismatch), "%v", err)
 	req = upgradedSessionRequest(f, upgradeVersionB, 2)
 	_, err = sessions.CreateOrAttachSession(ctx, runtimeNodeAdminPrincipal(f), req)
 	require.NoError(t, err)

@@ -4,6 +4,7 @@ package mcpbinding
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -48,10 +49,14 @@ func denied() error {
 	return httpx.Forbidden("Tool authorization is unavailable; refresh the Agent configuration")
 }
 
-// Resolve checks the selecting owner's authority and hashes every execution-
+// Resolve checks the selecting owner's authority and authenticates every execution-
 // relevant service field. Changing a URL, credential, tool, schema or policy
-// invalidates the grant until the owner explicitly saves it again.
-func Resolve(ctx context.Context, q DB, owner, target uuid.UUID) (Tool, error) {
+// invalidates the grant until the owner explicitly saves it again. The stable Core
+// master secret prevents the public digest from becoming an offline credential oracle.
+func Resolve(ctx context.Context, q DB, owner, target uuid.UUID, secret string) (Tool, error) {
+	if strings.TrimSpace(secret) == "" {
+		return Tool{}, httpx.ServiceUnavailable("MCP authorization key is unavailable")
+	}
 	var t Tool
 	var config []byte
 	err := q.QueryRow(ctx, `SELECT a.name,a.description,a.mcp_tool_name,COALESCE(c.input_schema,'{"type":"object"}'::jsonb),
@@ -77,8 +82,11 @@ func Resolve(ctx context.Context, q DB, owner, target uuid.UUID) (Tool, error) {
 	if len([]rune(t.Description)) > 500 {
 		t.Description = string([]rune(t.Description)[:500])
 	}
-	hash := sha256.Sum256(config)
-	t.Digest = hex.EncodeToString(hash[:])
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte("openlinker/mcp-binding/config/v1\x00"))
+	_, _ = mac.Write(target[:])
+	_, _ = mac.Write(config)
+	t.Digest = hex.EncodeToString(mac.Sum(nil))
 	return t, nil
 }
 
@@ -96,7 +104,7 @@ func ReferenceFrom(value any) (*Reference, error) {
 
 // Authorize is called both before admission and under the parent's active
 // Attempt locks. A removed/replaced grant cannot be revived by an old snapshot.
-func Authorize(ctx context.Context, q DB, parentRun, parentAgent, target uuid.UUID, ref Reference) error {
+func Authorize(ctx context.Context, q DB, parentRun, parentAgent, target uuid.UUID, ref Reference, secret string) error {
 	var owner uuid.UUID
 	err := q.QueryRow(ctx, `SELECT s.owner_user_id FROM run_mcp_binding_snapshots s
  JOIN agent_mcp_bindings b ON b.binding_id=s.binding_id AND b.agent_id=s.agent_id AND b.target_agent_id=s.target_agent_id AND b.digest=s.digest AND b.owner_user_id=s.owner_user_id
@@ -108,7 +116,7 @@ func Authorize(ctx context.Context, q DB, parentRun, parentAgent, target uuid.UU
 	if err != nil {
 		return err
 	}
-	t, err := Resolve(ctx, q, owner, target)
+	t, err := Resolve(ctx, q, owner, target, secret)
 	if err != nil {
 		return err
 	}
@@ -118,7 +126,7 @@ func Authorize(ctx context.Context, q DB, parentRun, parentAgent, target uuid.UU
 	return nil
 }
 
-func Snapshot(ctx context.Context, tx pgx.Tx, run, agent uuid.UUID) error {
+func Snapshot(ctx context.Context, tx pgx.Tx, run, agent uuid.UUID, secret string) error {
 	// Serialize with owner edits so a Run receives one coherent selection.
 	if _, err := tx.Exec(ctx, `SELECT id FROM agents WHERE id=$1 FOR SHARE`, agent); err != nil {
 		return err
@@ -145,7 +153,7 @@ func Snapshot(ctx context.Context, tx pgx.Tx, run, agent uuid.UUID) error {
 		return err
 	}
 	for _, g := range grants {
-		if err = Authorize(ctx, tx, run, agent, g.TargetID, Reference{BindingID: g.BindingID, Digest: g.Digest}); err != nil {
+		if err = Authorize(ctx, tx, run, agent, g.TargetID, Reference{BindingID: g.BindingID, Digest: g.Digest}, secret); err != nil {
 			return httpx.NewError(http.StatusServiceUnavailable, httpx.CodeServiceUnavailable, "Agent execution environment is temporarily unavailable")
 		}
 	}

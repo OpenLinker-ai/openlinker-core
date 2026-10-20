@@ -1452,7 +1452,7 @@ func (s *Service) createRunningRun(
 			return createErr
 		}
 		if agent.ConnectionMode == connectionModeRuntime {
-			if err := mcpbinding.Snapshot(ctx, tx, run.ID, agentID); err != nil {
+			if err := mcpbinding.Snapshot(ctx, tx, run.ID, agentID, s.cfg.EffectiveRuntimeMasterSecret()); err != nil {
 				return err
 			}
 			if err := skillpackage.Snapshot(ctx, tx, run.ID, agentID); err != nil {
@@ -2550,7 +2550,7 @@ func (s *Service) callMCPServer(
 				if err != nil {
 					return err
 				}
-				if err = mcpbinding.Authorize(ctx, tx, parent, parentAgent, agent.ID, ref); err != nil {
+				if err = mcpbinding.Authorize(ctx, tx, parent, parentAgent, agent.ID, ref, s.cfg.EffectiveRuntimeMasterSecret()); err != nil {
 					return err
 				}
 				target, err := s.queries.WithTx(tx).GetAgentRunTargetByID(ctx, agent.ID)

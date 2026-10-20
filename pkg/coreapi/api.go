@@ -207,7 +207,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	skillPackages := skillpackage.NewHandler(pool)
 	skillPackages.Register(api, jwtMiddleware, hybridMw)
 	skillPackages.RegisterPublic(api)
-	mcpbinding.NewHandler(pool).Register(api, jwtMiddleware)
+	mcpbinding.NewHandler(pool, cfg.EffectiveRuntimeMasterSecret()).Register(api, jwtMiddleware)
 
 	runtimeSvc := runtime.NewService(pool, cfg)
 	if cfg.RuntimeMTLSEnabled && opts.RuntimePKI != nil {

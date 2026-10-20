@@ -13,9 +13,12 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-type Handler struct{ pool *pgxpool.Pool }
+type Handler struct {
+	pool         *pgxpool.Pool
+	digestSecret string
+}
 
-func NewHandler(p *pgxpool.Pool) *Handler { return &Handler{p} }
+func NewHandler(p *pgxpool.Pool, digestSecret string) *Handler { return &Handler{p, digestSecret} }
 
 // Selecting tools grants execution authority and is owner JWT-only, like other
 // privileged Agent settings. Public Agent/catalog reads never join these rows.
@@ -70,7 +73,7 @@ func (h *Handler) List(c echo.Context) error {
 	}
 	for _, item := range items {
 		id, _ := uuid.Parse(item["target_agent_id"].(string))
-		t, e := Resolve(ctx, h.pool, owner, id)
+		t, e := Resolve(ctx, h.pool, owner, id, h.digestSecret)
 		item["needs_review"] = e != nil || t.Digest != item["digest"]
 	}
 	var known, supported bool
@@ -188,7 +191,7 @@ func (h *Handler) edit(c echo.Context, remove bool) error {
 		if current == "" && count >= MaxBindings {
 			return httpx.NewError(400, "MCP_BINDING_LIMIT", "At most 16 MCP tools can be selected")
 		}
-		result, e = Resolve(ctx, tx, owner, target)
+		result, e = Resolve(ctx, tx, owner, target, h.digestSecret)
 		if e != nil {
 			return e
 		}
@@ -224,7 +227,7 @@ func (h *Handler) Preview(c echo.Context) error {
 	if err = h.pool.QueryRow(ctx, `SELECT id FROM agents WHERE id=$1 AND creator_id=$2`, agent, owner).Scan(&id); err != nil {
 		return failure(err)
 	}
-	tool, err := Resolve(ctx, h.pool, owner, target)
+	tool, err := Resolve(ctx, h.pool, owner, target, h.digestSecret)
 	if err != nil {
 		return failure(err)
 	}

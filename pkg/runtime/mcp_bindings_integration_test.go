@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -57,7 +58,7 @@ func TestMCPBindingOwnerGrantDispatchAndRevocation(t *testing.T) {
 	secret := strings.Repeat("mcp-test-secret-", 3)
 	e := echo.New()
 	e.HTTPErrorHandler = func(err error, c echo.Context) { _ = httpx.SendError(c, err) }
-	mcpbinding.NewHandler(pool).Register(e.Group("/api/v1"), auth.JWTMiddlewareWithUserStatus(secret, auth.NewDBUserStatusChecker(pool)))
+	mcpbinding.NewHandler(pool, newTestConfig().EffectiveRuntimeMasterSecret()).Register(e.Group("/api/v1"), auth.JWTMiddlewareWithUserStatus(secret, auth.NewDBUserStatusChecker(pool)))
 	jwt, err := auth.GenerateToken(owner.String(), secret, time.Hour)
 	require.NoError(t, err)
 	other, err := auth.GenerateToken(caller.String(), secret, time.Hour)
@@ -85,6 +86,21 @@ func TestMCPBindingOwnerGrantDispatchAndRevocation(t *testing.T) {
 	var tool mcpbinding.Tool
 	var preview mcpbinding.Tool
 	require.NoError(t, json.Unmarshal(call("GET", "/candidates/"+target.String(), jwt, nil, 200).Body.Bytes(), &preview))
+	// A public preview must not provide an offline verifier for a guessed
+	// endpoint credential. It is stable only under the same Core master secret.
+	var config []byte
+	require.NoError(t, pool.QueryRow(ctx, `SELECT jsonb_build_array(a.creator_id,a.connection_mode,a.lifecycle_status,a.visibility,a.endpoint_url,a.endpoint_auth_header,a.mcp_tool_name,COALESCE(c.input_schema,'{"type":"object"}'::jsonb),COALESCE(p.callable_by,'public'))
+ FROM agents a LEFT JOIN agent_capabilities c ON c.agent_id=a.id LEFT JOIN agent_call_policies p ON p.agent_id=a.id WHERE a.id=$1`, target).Scan(&config))
+	plain := sha256.Sum256(config)
+	require.NotEqual(t, hex.EncodeToString(plain[:]), preview.Digest)
+	again, err := mcpbinding.Resolve(ctx, pool, owner, target, newTestConfig().EffectiveRuntimeMasterSecret())
+	require.NoError(t, err)
+	require.Equal(t, preview.Digest, again.Digest)
+	rotatedKey, err := mcpbinding.Resolve(ctx, pool, owner, target, "different-synthetic-master-secret")
+	require.NoError(t, err)
+	require.NotEqual(t, preview.Digest, rotatedKey.Digest)
+	_, err = mcpbinding.Resolve(ctx, pool, owner, target, "")
+	require.Error(t, err, "an absent key must never fall back to a public hash")
 	rec := call("PUT", "/"+target.String(), jwt, map[string]any{"expected_binding_id": "", "acknowledge_tool_access": true, "expected_tool_digest": preview.Digest}, 200)
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &tool))
 	require.NotContains(t, rec.Body.String(), "SYNTHETIC-SERVICE-CREDENTIAL")
@@ -107,7 +123,9 @@ func TestMCPBindingOwnerGrantDispatchAndRevocation(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(candidate.RequestMetadata), tool.BindingID.String())
 	require.NotContains(t, string(candidate.RequestMetadata), "SYNTHETIC-SERVICE-CREDENTIAL")
-	require.NoError(t, pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return mcpbinding.Snapshot(ctx, tx, parent.identity.RunID, agent) }))
+	require.NoError(t, pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return mcpbinding.Snapshot(ctx, tx, parent.identity.RunID, agent, newTestConfig().EffectiveRuntimeMasterSecret())
+	}))
 	cap := runtime.RuntimeInvocationCapability{Audience: "openlinker.runtime.v2/delegation", RunID: parent.identity.RunID, AttemptID: parent.identity.AttemptID, LeaseID: parent.identity.LeaseID, FencingToken: parent.identity.FencingToken, AgentID: agent, CredentialID: parent.credentialID, NodeID: *parent.identity.NodeID, InputSHA256: sha256.Sum256([]byte(`{}`))}
 	device := runtime.RuntimeDeviceIdentity{NodeID: *parent.identity.NodeID, CertificateFingerprintSHA256: strings.Repeat("a", 64)}
 	require.NoError(t, pool.QueryRow(ctx, `SELECT a.runtime_worker_id,a.runtime_session_id,a.offered_at,a.attempt_deadline_at,n.device_certificate_serial,n.device_public_key_thumbprint FROM run_attempts a JOIN runtime_nodes n ON n.node_id=a.node_id WHERE a.id=$1`, parent.identity.AttemptID).Scan(&cap.WorkerID, &cap.RuntimeSessionID, &cap.IssuedAt, &cap.ExpiresAt, &device.CertificateSerial, &device.PublicKeyThumbprintSHA256))
@@ -219,7 +237,7 @@ func TestMCPBindingOfflineQueue(t *testing.T) {
 			target := insertAgent(t, pool, creatorID, "https://example.test/mcp", 0, "approved")
 			_, err = pool.Exec(ctx, `UPDATE agents SET connection_mode='mcp_server',mcp_tool_name='lookup',visibility='private' WHERE id=$1`, target)
 			require.NoError(t, err)
-			tool, err := mcpbinding.Resolve(ctx, pool, creatorID, target)
+			tool, err := mcpbinding.Resolve(ctx, pool, creatorID, target, newTestConfig().EffectiveRuntimeMasterSecret())
 			require.NoError(t, err)
 			tool.BindingID = uuid.New()
 			raw, err := json.Marshal(tool)
