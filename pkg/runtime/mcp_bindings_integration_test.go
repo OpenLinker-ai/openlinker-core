@@ -244,6 +244,33 @@ func TestMCPBindingOfflineQueue(t *testing.T) {
 			require.NoError(t, err)
 			_, err = pool.Exec(ctx, `INSERT INTO agent_mcp_bindings(agent_id,target_agent_id,binding_id,owner_user_id,digest,tool) VALUES($1,$2,$3,$4,$5,$6)`, agentID, target, tool.BindingID, creatorID, tool.Digest, raw)
 			require.NoError(t, err)
+			// The owner page and admission must describe the same known Host.
+			host, err := mcpbinding.CheckHost(ctx, pool, agentID)
+			require.NoError(t, err)
+			require.False(t, host.Connected)
+			wantHost := "offline"
+			if tc.history && !tc.compatible && tc.status != "revoked" {
+				wantHost = "incompatible"
+			}
+			require.Equal(t, wantHost, host.Status())
+			e := echo.New()
+			e.HTTPErrorHandler = func(err error, c echo.Context) { _ = httpx.SendError(c, err) }
+			secret := strings.Repeat("owner-view-secret-", 3)
+			mcpbinding.NewHandler(pool, newTestConfig().EffectiveRuntimeMasterSecret()).Register(e.Group("/api/v1"), auth.JWTMiddlewareWithUserStatus(secret, auth.NewDBUserStatusChecker(pool)))
+			jwt, err := auth.GenerateToken(creatorID.String(), secret, time.Hour)
+			require.NoError(t, err)
+			req := httptest.NewRequest("GET", "/api/v1/creator/agents/"+agentID.String()+"/mcp-bindings", nil)
+			req.Header.Set("Authorization", "Bearer "+jwt)
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			require.Equal(t, 200, rec.Code, rec.Body.String())
+			var view struct {
+				HostStatus string `json:"host_status"`
+				Connected  bool   `json:"host_connected"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &view))
+			require.Equal(t, wantHost, view.HostStatus)
+			require.False(t, view.Connected)
 			caller := insertRuntimeUser(t, pool)
 			run, err := newTestService(t, pool).StartRun(ctx, caller, makeRunReq(agentID, map[string]any{"text": "queued"}), "api")
 			if tc.history && !tc.compatible && tc.status != "revoked" {

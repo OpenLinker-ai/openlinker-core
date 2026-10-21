@@ -73,7 +73,7 @@ func (s *CredentialService) Register(api *echo.Group) {
 		return
 	}
 	api.POST("/runtime-credentials", s.issue)
-	api.POST("/runtime-credentials/renew", s.issue)
+	api.POST("/runtime-credentials/renew", s.renew)
 }
 
 func (s *CredentialService) RegisterTrustBundle(e *echo.Echo) {
@@ -91,6 +91,14 @@ func (s *CredentialService) RegisterTrustBundle(e *echo.Echo) {
 }
 
 func (s *CredentialService) issue(c echo.Context) error {
+	return s.credential(c, false)
+}
+
+func (s *CredentialService) renew(c echo.Context) error {
+	return s.credential(c, true)
+}
+
+func (s *CredentialService) credential(c echo.Context, renewalOnly bool) error {
 	if s == nil || s.pool == nil || s.authority == nil || s.tokens == nil {
 		return httpx.ServiceUnavailable("Runtime 自动签发不可用")
 	}
@@ -110,7 +118,7 @@ func (s *CredentialService) issue(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	response, err := s.issueOrReplayCredential(c.Request().Context(), token, nodeID, request, csr)
+	response, err := s.credentialTransaction(c.Request().Context(), token, nodeID, request, csr, renewalOnly)
 	if err != nil {
 		return writeCredentialServiceError(c, err)
 	}
@@ -137,6 +145,10 @@ func (s *CredentialService) issueOrReplayCredential(
 	request CredentialRequest,
 	csr *x509.CertificateRequest,
 ) (CredentialResponse, error) {
+	return s.credentialTransaction(ctx, token, nodeID, request, csr, false)
+}
+
+func (s *CredentialService) credentialTransaction(ctx context.Context, token db.AgentRuntimeToken, nodeID uuid.UUID, request CredentialRequest, csr *x509.CertificateRequest, renewalOnly bool) (CredentialResponse, error) {
 	if csr == nil || len(csr.RawSubjectPublicKeyInfo) == 0 {
 		return CredentialResponse{}, httpx.BadRequest("CSR 无法签发")
 	}
@@ -163,16 +175,26 @@ WHERE credential_id = $1`, token.ID).Scan(&boundNodeID, &boundThumbprint, &bindi
 		return CredentialResponse{}, httpx.Internal("查询 Runtime 凭证绑定失败")
 	}
 
-	var nodeStatus string
+	var nodeStatus, nodeVersion, contractID, contractDigest string
+	var protocolVersion int32
+	var enrolledFeatures []string
 	if bindingErr == nil {
 		if err = tx.QueryRow(ctx, `
-SELECT status
+SELECT status, node_version, protocol_version, runtime_contract_id, runtime_contract_digest, features
 FROM runtime_nodes
 WHERE node_id = $1
-FOR UPDATE`, boundNodeID).Scan(&nodeStatus); err != nil {
+FOR UPDATE`, boundNodeID).Scan(&nodeStatus, &nodeVersion, &protocolVersion, &contractID, &contractDigest, &enrolledFeatures); err != nil {
 			return CredentialResponse{}, httpx.Internal("查询 Runtime Node 失败")
 		}
 	} else {
+		if renewalOnly {
+			return CredentialResponse{}, httpx.NewError(http.StatusConflict, "RUNTIME_CREDENTIAL_NOT_ENROLLED", "Runtime Node 尚未登记")
+		}
+		// First enrollment retains the baseline-only gate. Renewal below uses
+		// the exact server-authorized set, including controlled-upgrade extensions.
+		if request.ProtocolVersion != coreruntime.RuntimeProtocolVersion || request.RuntimeContractID != coreruntime.RuntimeContractID || request.RuntimeContractDigest != coreruntime.RuntimeContractDigest || !sameStrings(request.Features, coreruntime.RuntimeRequiredFeatures()) {
+			return CredentialResponse{}, httpx.NewError(http.StatusConflict, "RUNTIME_CONTRACT_UNSUPPORTED", "Runtime contract 不受支持")
+		}
 		if _, err = tx.Exec(ctx, `
 SELECT pg_advisory_xact_lock(hashtextextended('runtime-node-enrollment:' || $1::text, 0))`, nodeID); err != nil {
 			return CredentialResponse{}, httpx.Internal("锁定 Runtime Node 登记失败")
@@ -222,19 +244,13 @@ FOR UPDATE`, token.ID).Scan(&boundNodeID, &boundThumbprint, &bindingMode)
 		if nodeStatus == "revoked" {
 			return CredentialResponse{}, httpx.NewError(http.StatusForbidden, "RUNTIME_NODE_REVOKED", "Runtime Node 已撤销")
 		}
-		if _, err = tx.Exec(ctx, `
-UPDATE runtime_nodes
-SET display_name = $2,
-    node_version = $3,
-    protocol_version = $4,
-    runtime_contract_id = $5,
-    runtime_contract_digest = $6,
-    features = $7,
-    capacity = GREATEST($8, inflight),
-    updated_at = clock_timestamp()
-WHERE node_id = $1`, nodeID, request.DisplayName, request.NodeVersion,
-			request.ProtocolVersion, request.RuntimeContractID, request.RuntimeContractDigest,
-			request.Features, request.Capacity); err != nil {
+		// Older SDKs send only the protocol baseline during renewal, even after
+		// Hello negotiated extensions. Accept that legacy certificate request,
+		// or the exact approved set, without changing any Node metadata. Neither
+		// form grants capabilities: Hello/upgrade keep their exact-feature gates.
+		// The Node lock serializes this comparison with upgrades and Hello.
+		featuresMatch := sameStrings(request.Features, enrolledFeatures) || sameStrings(request.Features, coreruntime.RuntimeRequiredFeatures())
+		if request.NodeVersion != nodeVersion || request.ProtocolVersion != protocolVersion || request.RuntimeContractID != contractID || request.RuntimeContractDigest != contractDigest || !featuresMatch {
 			return CredentialResponse{}, httpx.NewError(http.StatusConflict, "RUNTIME_NODE_UPDATE_REJECTED", "Runtime Node 状态不允许续期")
 		}
 	case errors.Is(err, pgx.ErrNoRows):
@@ -373,9 +389,20 @@ func validateCredentialRequest(request *CredentialRequest) (uuid.UUID, *x509.Cer
 	}
 	if request.ProtocolVersion != coreruntime.RuntimeProtocolVersion ||
 		request.RuntimeContractID != coreruntime.RuntimeContractID ||
-		request.RuntimeContractDigest != coreruntime.RuntimeContractDigest ||
-		!sameStrings(request.Features, coreruntime.RuntimeRequiredFeatures()) {
+		request.RuntimeContractDigest != coreruntime.RuntimeContractDigest {
 		return uuid.Nil, nil, httpx.NewError(http.StatusConflict, "RUNTIME_CONTRACT_UNSUPPORTED", "Runtime contract 不受支持")
+	}
+	// This only validates syntax. The transaction decides whether the set is
+	// the enrollment baseline or exactly the already-authorized Node features.
+	if len(request.Features) == 0 || len(request.Features) > 128 {
+		return uuid.Nil, nil, httpx.BadRequest("features 无效")
+	}
+	seen := make(map[string]bool, len(request.Features))
+	for _, feature := range request.Features {
+		if !utf8.ValidString(feature) || strings.TrimSpace(feature) != feature || len(feature) == 0 || len(feature) > 200 || seen[feature] || strings.ContainsAny(feature, "\r\n\x00") {
+			return uuid.Nil, nil, httpx.BadRequest("features 无效")
+		}
+		seen[feature] = true
 	}
 	if request.Capacity < 1 || request.Capacity > 1024 {
 		return uuid.Nil, nil, httpx.BadRequest("capacity 必须为 1 到 1024")

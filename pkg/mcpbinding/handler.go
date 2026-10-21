@@ -76,19 +76,15 @@ func (h *Handler) List(c echo.Context) error {
 		t, e := Resolve(ctx, h.pool, owner, id, h.digestSecret)
 		item["needs_review"] = e != nil || t.Digest != item["digest"]
 	}
-	var known, supported bool
-	err = h.pool.QueryRow(ctx, `SELECT count(*)>0,COALESCE(bool_or($2=ANY(features)),false) FROM runtime_sessions WHERE agent_id=$1 AND status NOT IN ('closed','revoked')`, agent, Feature).Scan(&known, &supported)
+	host, err := CheckHost(ctx, h.pool, agent)
 	if err != nil {
 		return failure(err)
 	}
-	status := "offline"
-	if known {
+	status := host.Status()
+	if mode != "runtime" {
 		status = "incompatible"
 	}
-	if supported && mode == "runtime" {
-		status = "compatible"
-	}
-	return c.JSON(http.StatusOK, map[string]any{"items": items, "host_status": status, "max_bindings": MaxBindings})
+	return c.JSON(http.StatusOK, map[string]any{"items": items, "host_status": status, "host_connected": host.Connected, "host_known": host.Known, "max_bindings": MaxBindings})
 }
 func (h *Handler) Candidates(c echo.Context) error {
 	owner, agent, err := identity(c)
