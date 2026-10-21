@@ -89,7 +89,7 @@ func NewManager(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config) (*M
 	if err := m.loadOrCreateAuthorities(ctx); err != nil {
 		return nil, err
 	}
-	if cfg.RuntimeMTLSEnabled {
+	if cfg.RuntimeMTLSListenerEnabled() {
 		if err := m.configureServerNames(cfg); err != nil {
 			return nil, err
 		}

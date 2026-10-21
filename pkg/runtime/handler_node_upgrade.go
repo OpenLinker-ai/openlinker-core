@@ -38,7 +38,7 @@ func (h *Handler) UpgradeRuntimeNode(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	// Six required fields and an optional exact target feature set. Reject unknown, duplicate, omitted and trailing
+	// Six required fields plus kind-specific authentication targets and an optional exact feature set. Reject unknown, duplicate, omitted and trailing
 	// values before they can be mistaken for a different idempotent intent.
 	d := json.NewDecoder(http.MaxBytesReader(c.Response(), c.Request().Body, 4096))
 	token, err := d.Token()
@@ -46,7 +46,7 @@ func (h *Handler) UpgradeRuntimeNode(c echo.Context) error {
 		return httpx.BadRequest("请求体格式错误")
 	}
 	fields := map[string]json.RawMessage{}
-	allowed := map[string]bool{"operation_id": true, "kind": true, "expected_version": true, "expected_revision": true, "target_version": true, "deadline_at": true, "target_features": true}
+	allowed := map[string]bool{"operation_id": true, "kind": true, "expected_version": true, "expected_revision": true, "target_version": true, "deadline_at": true, "target_features": true, "credential_id": true, "public_key_thumbprint": true}
 	for d.More() {
 		key, err := d.Token()
 		if err != nil {
@@ -65,12 +65,21 @@ func (h *Handler) UpgradeRuntimeNode(c echo.Context) error {
 	if _, err = d.Token(); err != nil {
 		return httpx.BadRequest("请求体格式错误")
 	}
-	requiredCount := len(fields)
-	if fields["target_features"] != nil {
-		requiredCount--
+	for _, name := range []string{"operation_id", "kind", "expected_version", "expected_revision", "target_version", "deadline_at"} {
+		if fields[name] == nil {
+			return httpx.BadRequest("升级请求需要完整六个字段")
+		}
 	}
-	if requiredCount != 6 {
-		return httpx.BadRequest("升级请求需要完整六个字段")
+	var kind string
+	if err = json.Unmarshal(fields["kind"], &kind); err != nil {
+		return httpx.BadRequest("升级请求字段类型错误")
+	}
+	if kind == "token_to_mtls" || kind == "certificate_rotation" {
+		if fields["credential_id"] == nil || fields["public_key_thumbprint"] == nil {
+			return httpx.BadRequest("认证操作需要精确凭据和公钥")
+		}
+	} else if fields["credential_id"] != nil || fields["public_key_thumbprint"] != nil {
+		return httpx.BadRequest("普通升级不能更改认证目标")
 	}
 	var trailing any
 	if err = d.Decode(&trailing); err != io.EOF {

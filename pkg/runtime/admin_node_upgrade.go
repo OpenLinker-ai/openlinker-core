@@ -30,7 +30,9 @@ type RuntimeNodeUpgradeRequest struct {
 	DeadlineAt       time.Time `json:"deadline_at"`
 	// Omitted preserves the enrolled feature set. Changes require an explicit
 	// version_change; this is an exact target, not a feature allowlist.
-	TargetFeatures []string `json:"target_features,omitempty"`
+	TargetFeatures      []string  `json:"target_features,omitempty"`
+	CredentialID        uuid.UUID `json:"credential_id,omitzero"`
+	PublicKeyThumbprint string    `json:"public_key_thumbprint,omitempty"`
 }
 
 type RuntimeNodeUpgradeStatus struct {
@@ -51,18 +53,20 @@ type RuntimeNodeUpgradeStatus struct {
 }
 
 type RuntimeNodeUpgradeReceipt struct {
-	OperationID    uuid.UUID `json:"operation_id"`
-	NodeID         uuid.UUID `json:"node_id"`
-	Kind           string    `json:"kind"`
-	FromVersion    string    `json:"from_version"`
-	TargetVersion  string    `json:"target_version"`
-	Revision       int64     `json:"revision"`
-	AdmissionCount int       `json:"admission_count"`
-	CreatedAt      time.Time `json:"created_at"`
-	DeadlineAt     time.Time `json:"deadline_at"`
-	Replayed       bool      `json:"replayed"`
-	FromFeatures   []string  `json:"from_features,omitempty"`
-	TargetFeatures []string  `json:"target_features,omitempty"`
+	CredentialID        *uuid.UUID `json:"credential_id,omitzero"`
+	PublicKeyThumbprint *string    `json:"public_key_thumbprint,omitempty"`
+	OperationID         uuid.UUID  `json:"operation_id"`
+	NodeID              uuid.UUID  `json:"node_id"`
+	Kind                string     `json:"kind"`
+	FromVersion         string     `json:"from_version"`
+	TargetVersion       string     `json:"target_version"`
+	Revision            int64      `json:"revision"`
+	AdmissionCount      int        `json:"admission_count"`
+	CreatedAt           time.Time  `json:"created_at"`
+	DeadlineAt          time.Time  `json:"deadline_at"`
+	Replayed            bool       `json:"replayed"`
+	FromFeatures        []string   `json:"from_features,omitempty"`
+	TargetFeatures      []string   `json:"target_features,omitempty"`
 }
 
 var runtimeNodeVersionPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9.+_-]*$`)
@@ -72,6 +76,12 @@ func validRuntimeNodeUpgradeRequest(r RuntimeNodeUpgradeRequest) bool {
 		len(r.ExpectedVersion) > 100 || len(r.TargetVersion) > 100 ||
 		!runtimeNodeVersionPattern.MatchString(r.ExpectedVersion) || !runtimeNodeVersionPattern.MatchString(r.TargetVersion) ||
 		strings.SplitN(r.ExpectedVersion, "/", 2)[0] != strings.SplitN(r.TargetVersion, "/", 2)[0] {
+		return false
+	}
+	if r.Kind == "token_to_mtls" || r.Kind == "certificate_rotation" {
+		return r.ExpectedVersion == r.TargetVersion && r.CredentialID != uuid.Nil && validSHA256Hex(r.PublicKeyThumbprint)
+	}
+	if r.CredentialID != uuid.Nil || r.PublicKeyThumbprint != "" {
 		return false
 	}
 	return (r.Kind == "version_change" && r.ExpectedVersion != r.TargetVersion) ||
@@ -255,8 +265,16 @@ func (s *Service) upgradeRuntimeNodeOnce(ctx context.Context, nodeID, actorID uu
 		}
 		targetFeatures = node.features
 	}
-	if r.Kind == "restart_after_drain" && !sameRuntimeFeatureSet(targetFeatures, node.features) {
+	if r.Kind != "version_change" && !sameRuntimeFeatureSet(targetFeatures, node.features) {
 		return nil, httpx.BadRequest("同版本重启不能改变能力集合")
+	}
+	var credentialID, fromKey, targetKey any
+	if r.Kind == "token_to_mtls" || r.Kind == "certificate_rotation" {
+		previousKey, authErr := s.checkCredentialUpgrade(ctx, tx, node, r, candidates)
+		if authErr != nil {
+			return nil, authErr
+		}
+		credentialID, fromKey, targetKey = r.CredentialID, previousKey, r.PublicKeyThumbprint
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO runtime_node_upgrade_operations
  (operation_id,node_id,actor_id,request_fingerprint,kind,from_version,target_version,revision,admission_count,deadline_at,from_features,target_features)
@@ -270,6 +288,11 @@ func (s *Service) upgradeRuntimeNodeOnce(ctx context.Context, nodeID, actorID uu
 			return nil, nodeUpgradeConflict("RUNTIME_NODE_OPERATION_CONFLICT")
 		}
 		return nil, nodeUpgradeDatabaseError(err, "记录 Runtime Node 升级失败")
+	}
+	if credentialID != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO runtime_node_credential_authorizations(operation_id,credential_id,from_public_key_thumbprint,target_public_key_thumbprint) VALUES($1,$2,$3,$4)`, r.OperationID, credentialID, fromKey, targetKey); err != nil {
+			return nil, nodeUpgradeDatabaseError(err, "记录 Runtime 认证目标失败")
+		}
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO runtime_node_upgrade_state (node_id,revision,current_operation_id) VALUES ($1,$2,$3)
  ON CONFLICT (node_id) DO UPDATE SET revision=EXCLUDED.revision,current_operation_id=EXCLUDED.current_operation_id`, nodeID, status.Revision+1, r.OperationID); err != nil {
@@ -307,8 +330,8 @@ func (s *Service) upgradeRuntimeNodeOnce(ctx context.Context, nodeID, actorID uu
 func runtimeNodeUpgradeReceipt(ctx context.Context, tx pgx.Tx, id uuid.UUID) (*RuntimeNodeUpgradeReceipt, string, error) {
 	r := &RuntimeNodeUpgradeReceipt{}
 	var fingerprint string
-	err := tx.QueryRow(ctx, `SELECT operation_id,node_id,kind,from_version,target_version,revision,admission_count,created_at,deadline_at,request_fingerprint,from_features,target_features
- FROM runtime_node_upgrade_operations WHERE operation_id=$1`, id).Scan(&r.OperationID, &r.NodeID, &r.Kind, &r.FromVersion, &r.TargetVersion, &r.Revision, &r.AdmissionCount, &r.CreatedAt, &r.DeadlineAt, &fingerprint, &r.FromFeatures, &r.TargetFeatures)
+	err := tx.QueryRow(ctx, `SELECT operation_id,node_id,kind,from_version,target_version,revision,admission_count,created_at,deadline_at,request_fingerprint,from_features,target_features,credential_id,target_public_key_thumbprint
+ FROM runtime_node_upgrade_operations LEFT JOIN runtime_node_credential_authorizations USING(operation_id) WHERE operation_id=$1`, id).Scan(&r.OperationID, &r.NodeID, &r.Kind, &r.FromVersion, &r.TargetVersion, &r.Revision, &r.AdmissionCount, &r.CreatedAt, &r.DeadlineAt, &fingerprint, &r.FromFeatures, &r.TargetFeatures, &r.CredentialID, &r.PublicKeyThumbprint)
 	return r, fingerprint, err
 }
 

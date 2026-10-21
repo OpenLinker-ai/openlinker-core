@@ -99,6 +99,7 @@ type RuntimeHTTPDependencies struct {
 	DeviceAuthenticator  RuntimeDeviceAuthenticator
 	PrincipalBinder      RuntimePrincipalBinder
 	TokenOnlyTransport   bool
+	MTLSTransition       bool
 	TransportPolicy      RuntimeTransportPolicyProvider
 	Sessions             RuntimeSessionAPI
 	Leases               RuntimeLeaseAPI
@@ -802,7 +803,7 @@ func (h *RuntimeHTTPController) CallAgent(c echo.Context) error {
 
 func (h *RuntimeHTTPController) handleDelegation(c echo.Context, read bool) error {
 	if h == nil || h.stopping.Load() || h.dependencies.Delegation == nil ||
-		(!h.dependencies.TokenOnlyTransport && h.dependencies.DeviceAuthenticator == nil) {
+		(!h.tokenOnlyRequest(c.Request()) && h.dependencies.DeviceAuthenticator == nil) {
 		return writeRuntimeError(c, runtimeUnavailableError())
 	}
 	invocationToken, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
@@ -810,7 +811,7 @@ func (h *RuntimeHTTPController) handleDelegation(c echo.Context, read bool) erro
 		return writeRuntimeError(c, runtimeUnauthorizedError(err))
 	}
 	var device RuntimeDeviceIdentity
-	if h.dependencies.TokenOnlyTransport {
+	if h.tokenOnlyRequest(c.Request()) {
 		resolver, ok := h.dependencies.Delegation.(runtimeInvocationDeviceResolver)
 		if !ok {
 			return writeRuntimeError(c, runtimeUnavailableError())
@@ -873,7 +874,7 @@ func (h *RuntimeHTTPController) handleDelegation(c echo.Context, read bool) erro
 
 func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRuntimePrincipal, *RuntimeTransportError) {
 	if h == nil || h.stopping.Load() || h.dependencies.TokenValidator == nil ||
-		(!h.dependencies.TokenOnlyTransport && h.dependencies.DeviceAuthenticator == nil) {
+		(!h.tokenOnlyRequest(c.Request()) && h.dependencies.DeviceAuthenticator == nil) {
 		return AuthenticatedRuntimePrincipal{}, runtimeUnavailableError()
 	}
 	if cached, ok := c.Get(runtimeAuthenticatedPrincipalContextKey).(AuthenticatedRuntimePrincipal); ok {
@@ -890,7 +891,7 @@ func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRunti
 		return AuthenticatedRuntimePrincipal{}, runtimeAuthenticationError(err)
 	}
 	var device RuntimeDeviceIdentity
-	if h.dependencies.TokenOnlyTransport {
+	if h.tokenOnlyRequest(c.Request()) {
 		if h.dependencies.PrincipalBinder == nil {
 			return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(nil)
 		}
@@ -907,7 +908,7 @@ func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRunti
 	if err != nil {
 		return AuthenticatedRuntimePrincipal{}, runtimeAuthenticationError(err)
 	}
-	if !h.dependencies.TokenOnlyTransport && h.dependencies.PrincipalBinder != nil {
+	if !h.tokenOnlyRequest(c.Request()) && h.dependencies.PrincipalBinder != nil {
 		if err = h.dependencies.PrincipalBinder.VerifyRuntimePrincipalBinding(c.Request().Context(), token.ID, device); err != nil {
 			return AuthenticatedRuntimePrincipal{}, runtimeAuthenticationError(err)
 		}
@@ -1477,4 +1478,10 @@ func writeRuntimeError(c echo.Context, err *RuntimeTransportError) error {
 		err = NewRuntimeTransportError(RuntimeErrorInternal, runtimeErrorDefaultMessage(RuntimeErrorInternal))
 	}
 	return c.JSON(RuntimeHTTPStatus(err.Body.Code), err.Envelope())
+}
+
+// Listener provenance, never a forwarded header or client certificate claim,
+// chooses the authentication path during an explicitly enabled transition.
+func (h *RuntimeHTTPController) tokenOnlyRequest(r *http.Request) bool {
+	return h.dependencies.TokenOnlyTransport && !(h.dependencies.MTLSTransition && FromMTLSListener(r.Context()))
 }

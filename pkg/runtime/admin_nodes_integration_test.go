@@ -292,7 +292,7 @@ func insertRuntimeNodeAdminFixtureVersion(t *testing.T, pool *pgxpool.Pool, vers
 	return insertRuntimeNodeAdminFixtureDevice(t, pool, version, strings.Repeat("b", 64))
 }
 
-func insertRuntimeNodeAdminFixtureDevice(t *testing.T, pool *pgxpool.Pool, version, thumbprint string) runtimeNodeAdminFixture {
+func insertRuntimeNodeAdminFixtureDevice(t *testing.T, pool *pgxpool.Pool, version, thumbprint string, features ...string) runtimeNodeAdminFixture {
 	t.Helper()
 	creatorID := insertCreator(t, pool)
 	agentID := insertAgent(t, pool, creatorID, "https://example.com/runtime", 0, "approved")
@@ -312,7 +312,9 @@ WHERE id = $1`, agentID)
 	}
 	serial := strings.ReplaceAll(fixture.nodeID.String(), "-", "")
 	prefix := "ol_agent_" + fixture.credentialID.String()[:8]
-	features := runtime.RuntimeRequiredFeatures()
+	if len(features) == 0 {
+		features = runtime.RuntimeRequiredFeatures()
+	}
 	sort.Strings(features)
 	err = pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(context.Background(), `

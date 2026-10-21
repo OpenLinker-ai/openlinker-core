@@ -123,7 +123,7 @@ func main() {
 	defer pool.Close()
 	log.Info().Msg("database connected")
 	var runtimePKI *runtimepki.Manager
-	if cfg.RuntimeMTLSEnabled && cfg.RuntimePKIMode == "auto" {
+	if cfg.RuntimeMTLSListenerEnabled() && cfg.RuntimePKIMode == "auto" {
 		runtimePKI, err = runtimepki.NewManager(rootCtx, pool, cfg)
 		if err != nil {
 			log.Fatal().Err(err).Msg("initialize automatic runtime PKI failed")
@@ -179,13 +179,14 @@ func main() {
 		pool,
 		runtimeSignalBus,
 		runtime.RuntimeClusterIdentity{
-			InstanceID:            coreInstanceID,
-			ReleaseVersion:        cfg.ReleaseVersion,
-			ReleaseCommit:         cfg.ReleaseCommit,
-			SchemaVersion:         runtime.RuntimeSchemaVersion,
-			SchemaChecksum:        runtime.RuntimeSchemaChecksum,
-			RuntimeContractID:     runtime.RuntimeContractID,
-			RuntimeContractDigest: runtime.RuntimeContractDigest,
+			InstanceID:             coreInstanceID,
+			AuthenticationPolicyID: cfg.RuntimeAuthenticationPolicyID(),
+			ReleaseVersion:         cfg.ReleaseVersion,
+			ReleaseCommit:          cfg.ReleaseCommit,
+			SchemaVersion:          runtime.RuntimeSchemaVersion,
+			SchemaChecksum:         runtime.RuntimeSchemaChecksum,
+			RuntimeContractID:      runtime.RuntimeContractID,
+			RuntimeContractDigest:  runtime.RuntimeContractDigest,
 		},
 		cfg.RuntimeHAMode,
 	)
@@ -240,7 +241,7 @@ func main() {
 		}
 	}
 	var automaticRuntimeTLS *tls.Config
-	if cfg.RuntimeMTLSEnabled && runtimePKI != nil {
+	if cfg.RuntimeMTLSListenerEnabled() && runtimePKI != nil {
 		automaticRuntimeTLS, err = runtimePKI.ServerTLSConfig()
 		if err != nil {
 			log.Fatal().Err(err).Msg("configure automatic runtime mTLS failed")

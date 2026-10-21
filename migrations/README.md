@@ -8,11 +8,11 @@ canonical seed data for a fresh database. The migration runner then applies
 `091_browser_interaction_policy.up.sql`,
 `092_browser_observation_audit.up.sql`,
 `093_skill_packages.up.sql`, `094_cli_login.up.sql`, `095_runtime_node_upgrade.up.sql`,
-`096_skill_package_publication.up.sql` `097_resource_metadata.up.sql` `098_agent_mcp_bindings.up.sql` and `099_runtime_node_upgrade_features.up.sql`. Supported exact clean predecessors are
-`098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `099`.
+`096_skill_package_publication.up.sql` `097_resource_metadata.up.sql` `098_agent_mcp_bindings.up.sql` `099_runtime_node_upgrade_features.up.sql` and `100_runtime_mtls_transition.up.sql`. Supported exact clean predecessors are
+`099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `100`.
 `086_current_schema_init_verify.sql` is the PostgreSQL 16 current-catalog and
 seed fingerprint used after the complete migration chain. Fresh and predecessor
-paths therefore execute the same `099` DDL and converge on one version `099`
+paths therefore execute the same `100` DDL and converge on one version `100`
 catalog fingerprint without an idempotent duplicate schema definition.
 
 Migration `093` adds private skill packages, immutable versions, Agent bindings
@@ -32,8 +32,8 @@ standard Sessions, publication and connection-mode changes therefore cannot
 race past the initial policy decision.
 
 The migration command accepts only a truly empty database, an exact clean
-supported predecessor (`098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
-version `099` current schema.
+supported predecessor (`099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
+version `100` current schema.
 Exactness is enforced with catalog object counts and a SHA-256 fingerprint over
 table, column/default, constraint, index, trigger, and function definitions.
 Legacy, dirty, partial, or malformed databases are rejected before the
@@ -130,3 +130,12 @@ PostgreSQL 16 measured shape: 88 tables, 714 constraints, 303 indexes, 75 trigge
 12 Runtime schema records; digest
 `d7ec84e9ffe0aa26261b73a98cd03e4006ecedd7e40005299649d330ea0281c2`.
 The exact 098 predecessor retains its 88/713/303/75 fingerprint above.
+
+Migration `100` adds controlled token-to-mTLS authorizations, certificate receipts,
+and cluster authentication policy evidence as separate tables. Original Node,
+Agent, credential, Worker and stable serial anchor are retained. An authorization
+permanently fences the old token-only mode even if its deadline expires before
+issuance. The down script is permitted only before any authentication operation
+exists; exact 099 rollback and 100 reapplication are tested. After authorization,
+keep the history and recover forward using a new exact administrative operation.
+See [controlled authentication migration](../docs/runtime-mtls-transition.md).

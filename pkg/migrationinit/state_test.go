@@ -65,7 +65,7 @@ func TestValidateCloudUp(t *testing.T) {
 	current := fresh
 	current.Cloud = MigrationTableState{Exists: true, Rows: 1, Version: CloudVersion}
 	current.CloudShape = currentCloudShape()
-	current.NonBookkeepingObjects = 95
+	current.NonBookkeepingObjects = 98
 
 	tests := []struct {
 		name      string
@@ -115,7 +115,7 @@ func currentCoreSnapshot() Snapshot {
 	return Snapshot{
 		Core:                    MigrationTableState{Exists: true, Rows: 1, Version: CoreVersion},
 		CoreShape:               currentCoreShape(),
-		NonBookkeepingObjects:   88,
+		NonBookkeepingObjects:   91,
 		CallbackOwnerIndexValid: true,
 	}
 }
@@ -123,13 +123,13 @@ func currentCoreSnapshot() Snapshot {
 func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
-		Tables:            88,
-		Constraints:       714,
-		Indexes:           303,
-		Triggers:          75,
+		Tables:            91,
+		Constraints:       728,
+		Indexes:           308,
+		Triggers:          80,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
-		RuntimeSchemas:    12,
+		RuntimeSchemas:    13,
 		CurrentRuntime:    1,
 		RuntimeWires:      5,
 		CurrentWire:       1,
@@ -139,8 +139,19 @@ func currentCoreShape() SchemaShape {
 	}
 }
 
-func publicationPredecessorCoreSnapshot() Snapshot {
+func authenticationPredecessorCoreShape() SchemaShape {
 	shape := currentCoreShape()
+	shape.Digest = CoreAuthenticationPredecessorDigest
+	shape.Tables = 88
+	shape.Constraints = 714
+	shape.Indexes = 303
+	shape.Triggers = 75
+	shape.RuntimeSchemas = 12
+	return shape
+}
+
+func publicationPredecessorCoreSnapshot() Snapshot {
+	shape := authenticationPredecessorCoreShape()
 	shape.Digest = CorePackagePublicationPredecessorDigest
 	shape.RuntimeSchemas = 11
 	shape.Tables = 84
@@ -336,6 +347,7 @@ func withUnclassifiedBrowserAgents(snapshot Snapshot, count int64) Snapshot {
 
 func metadataPredecessorCoreSnapshot() Snapshot {
 	s := currentCoreSnapshot()
+	s.CoreShape = authenticationPredecessorCoreShape()
 	s.Core.Version = CoreResourceMetadataPredecessorVersion
 	s.CoreShape.Digest = CoreResourceMetadataPredecessorDigest
 	s.CoreShape.RuntimeSchemas = 11
@@ -348,6 +360,8 @@ func metadataPredecessorCoreSnapshot() Snapshot {
 
 func featureUpgradePredecessorCoreSnapshot() Snapshot {
 	s := currentCoreSnapshot()
+	s.CoreShape = authenticationPredecessorCoreShape()
+	s.NonBookkeepingObjects = 88
 	s.Core.Version = CoreFeatureUpgradePredecessorVersion
 	s.CoreShape.Digest = CoreFeatureUpgradePredecessorDigest
 	s.CoreShape.Constraints = 713

@@ -116,9 +116,10 @@ func RegisterRuntimeAttachOnly(
 	agent.NewRegistrationHandler(registrationSvc).RegisterRuntimeAttachReadOnly(api, jwtMiddleware)
 
 	runtimeSvc := runtime.NewService(pool, cfg)
-	if cfg.RuntimeMTLSEnabled && opts.RuntimePKI != nil {
-		runtimeCredentials := runtimepki.NewCredentialService(pool, opts.RuntimePKI, runtimeSvc)
+	if cfg.RuntimeMTLSListenerEnabled() && opts.RuntimePKI != nil {
+		runtimeCredentials := runtimepki.NewCredentialService(pool, opts.RuntimePKI, runtimeSvc, opts.CoreInstanceID)
 		runtimeCredentials.Register(api)
+		runtimeCredentials.RegisterSecurityPolicy(api, cfg)
 		runtimeCredentials.RegisterTrustBundle(e)
 	}
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
@@ -210,9 +211,10 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	mcpbinding.NewHandler(pool, cfg.EffectiveRuntimeMasterSecret()).Register(api, jwtMiddleware)
 
 	runtimeSvc := runtime.NewService(pool, cfg)
-	if cfg.RuntimeMTLSEnabled && opts.RuntimePKI != nil {
-		runtimeCredentials := runtimepki.NewCredentialService(pool, opts.RuntimePKI, runtimeSvc)
+	if cfg.RuntimeMTLSListenerEnabled() && opts.RuntimePKI != nil {
+		runtimeCredentials := runtimepki.NewCredentialService(pool, opts.RuntimePKI, runtimeSvc, opts.CoreInstanceID)
 		runtimeCredentials.Register(api)
+		runtimeCredentials.RegisterSecurityPolicy(api, cfg)
 		runtimeCredentials.RegisterTrustBundle(e)
 	}
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
@@ -567,6 +569,7 @@ func configureRuntime(
 		DeviceAuthenticator: runtime.NewMTLSRuntimeDeviceAuthenticator(verifier),
 		PrincipalBinder:     runtimepki.NewBindingVerifier(pool),
 		TokenOnlyTransport:  !cfg.RuntimeMTLSEnabled,
+		MTLSTransition:      cfg.RuntimeMTLSTransitionEnabled,
 		Sessions:            sessions,
 		Leases:              leases,
 		EventProjector:      runtimeService,
@@ -655,6 +658,7 @@ func configureRuntimeAttachOnly(
 	}
 	if cfg != nil {
 		dependencies.TokenOnlyTransport = !cfg.RuntimeMTLSEnabled
+		dependencies.MTLSTransition = cfg.RuntimeMTLSTransitionEnabled
 		dependencies.WebSocketConcurrency = runtime.RuntimeWebSocketConcurrencyConfig{
 			ConnectionMaxInflight: cfg.RuntimeWSConnectionMaxInflight,
 			ProcessMaxInflight:    cfg.RuntimeWSProcessMaxInflight,

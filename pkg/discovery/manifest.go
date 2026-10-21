@@ -38,6 +38,7 @@ type ManifestBaseURLs struct {
 }
 
 type ManifestRuntime struct {
+	SecurityPolicyEndpoint   string                         `json:"security_policy_endpoint,omitempty"`
 	Enabled                  bool                           `json:"enabled"`
 	MTLSRequired             bool                           `json:"mtls_required"`
 	CredentialEndpoint       string                         `json:"credential_endpoint,omitempty"`
@@ -142,6 +143,10 @@ func NewManifestWithRuntimeTransportPolicy(
 		transports = append(transports, string(transport))
 	}
 
+	securityPolicyEndpoint := ""
+	if cfg.RuntimeMTLSTransitionEnabled {
+		securityPolicyEndpoint = apiBase + "/api/v1/runtime-security-policy"
+	}
 	credentialEndpoint := ""
 	trustBundleEndpoint := ""
 	certificateLifetimeHours := 0
@@ -245,6 +250,7 @@ func NewManifestWithRuntimeTransportPolicy(
 		Runtime: ManifestRuntime{
 			Enabled:                  runtimeEnabled,
 			MTLSRequired:             cfg.RuntimeMTLSEnabled,
+			SecurityPolicyEndpoint:   securityPolicyEndpoint,
 			CredentialEndpoint:       credentialEndpoint,
 			TrustBundleEndpoint:      trustBundleEndpoint,
 			CertificateLifetimeHours: certificateLifetimeHours,

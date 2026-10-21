@@ -162,8 +162,10 @@ jobs:
           RUNTIME_NODE_UPGRADE_CAPACITY: "1"
         run: |
           set -euo pipefail
-          go test -p 1 -race -v ./pkg/runtime ./pkg/runtimepki -run '^TestRuntimeNodeControlled|^TestCredentialIssuanceReplaysCommittedLeafWithinMinimumInterval$' -count=1 -timeout=8m | tee /tmp/node-upgrade.log
+          go test -p 1 -race -v ./pkg/runtime ./pkg/runtimepki -run '^TestRuntimeControlledMTLS|^TestRuntimeNodeControlled|^TestCredentialIssuanceReplaysCommittedLeafWithinMinimumInterval$' -count=1 -timeout=8m | tee /tmp/node-upgrade.log
           if grep -q -- '--- SKIP:' /tmp/node-upgrade.log; then exit 1; fi
+          grep -q -- '--- PASS: TestRuntimeControlledMTLSTransitionAndRotation' /tmp/node-upgrade.log
+          grep -q -- '--- PASS: TestRuntimeControlledMTLSRejectsInvalidAuthorization' /tmp/node-upgrade.log
           grep -q -- '--- PASS: TestRuntimeNodeControlledUpgradePre099Permit' /tmp/node-upgrade.log
           grep -q -- '--- PASS: TestRuntimeNodeControlledUpgradeMTLSRenewal' /tmp/node-upgrade.log
           grep -q -- '--- PASS: TestCredentialIssuanceReplaysCommittedLeafWithinMinimumInterval' /tmp/node-upgrade.log

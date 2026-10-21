@@ -24,10 +24,8 @@ const (
 	maximumRuntimeMTLSMaxConnections = 65535
 )
 
-type runtimeListenerContextKey struct{}
-
 func startRuntimeMTLSListener(ctx context.Context, cfg *config.Config, application http.Handler, automatic ...*tls.Config) (*http.Server, net.Listener, error) {
-	if cfg == nil || !cfg.RuntimeMTLSEnabled {
+	if cfg == nil || !cfg.RuntimeMTLSListenerEnabled() {
 		return nil, nil, nil
 	}
 	tlsConfig, err := buildRuntimeMTLSConfig(cfg, automatic...)
@@ -158,7 +156,7 @@ func validateRuntimeMTLSConfig(cfg *config.Config) error {
 			}
 		}
 	}
-	if !cfg.RuntimeMTLSEnabled {
+	if !cfg.RuntimeMTLSListenerEnabled() {
 		return nil
 	}
 	if cfg.RuntimeMTLSPort < 1 || cfg.RuntimeMTLSPort > 65535 {
@@ -205,7 +203,7 @@ func runtimeOnlyHandler(application http.Handler) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		ctx := context.WithValue(r.Context(), runtimeListenerContextKey{}, true)
+		ctx := runtime.WithMTLSListener(r.Context())
 		application.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -223,7 +221,7 @@ func runtimeListenerIsolationForConfig(cfg *config.Config) echo.MiddlewareFunc {
 		return func(c echo.Context) error {
 			path := c.Request().URL.Path
 			isRuntimePath := strings.HasPrefix(path, runtimePathPrefix)
-			fromRuntimeListener, _ := c.Request().Context().Value(runtimeListenerContextKey{}).(bool)
+			fromRuntimeListener := runtime.FromMTLSListener(c.Request().Context())
 			mtlsRequired := cfg == nil || cfg.RuntimeMTLSEnabled
 			if mtlsRequired && isRuntimePath && !fromRuntimeListener {
 				return echo.ErrNotFound

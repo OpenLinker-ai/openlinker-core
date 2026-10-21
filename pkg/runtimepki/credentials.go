@@ -33,12 +33,16 @@ type RuntimeTokenValidator interface {
 }
 
 type CredentialService struct {
-	pool      *pgxpool.Pool
-	authority *Manager
-	tokens    RuntimeTokenValidator
+	pool                   *pgxpool.Pool
+	coreInstanceID         uuid.UUID
+	authenticationPolicyID string
+	transitionOnly         bool
+	authority              *Manager
+	tokens                 RuntimeTokenValidator
 }
 
 type CredentialRequest struct {
+	OperationID           string   `json:"operation_id,omitempty"`
 	NodeID                string   `json:"node_id"`
 	DisplayName           string   `json:"display_name"`
 	NodeVersion           string   `json:"node_version"`
@@ -64,8 +68,12 @@ type CredentialResponse struct {
 	CertificateLifetimeHr int       `json:"certificate_lifetime_hours"`
 }
 
-func NewCredentialService(pool *pgxpool.Pool, authority *Manager, tokens RuntimeTokenValidator) *CredentialService {
-	return &CredentialService{pool: pool, authority: authority, tokens: tokens}
+func NewCredentialService(pool *pgxpool.Pool, authority *Manager, tokens RuntimeTokenValidator, instanceIDs ...uuid.UUID) *CredentialService {
+	s := &CredentialService{pool: pool, authority: authority, tokens: tokens}
+	if len(instanceIDs) > 0 {
+		s.coreInstanceID = instanceIDs[0]
+	}
+	return s
 }
 
 func (s *CredentialService) Register(api *echo.Group) {
@@ -187,7 +195,10 @@ FOR UPDATE`, boundNodeID).Scan(&nodeStatus, &nodeVersion, &protocolVersion, &con
 			return CredentialResponse{}, httpx.Internal("查询 Runtime Node 失败")
 		}
 	} else {
-		if renewalOnly {
+		if s.transitionOnly {
+			return CredentialResponse{}, httpx.NewError(http.StatusConflict, "RUNTIME_CREDENTIAL_MIGRATION_REQUIRED", "过渡模式需要管理员授权已登记身份的认证迁移")
+		}
+		if renewalOnly || request.OperationID != "" {
 			return CredentialResponse{}, httpx.NewError(http.StatusConflict, "RUNTIME_CREDENTIAL_NOT_ENROLLED", "Runtime Node 尚未登记")
 		}
 		// First enrollment retains the baseline-only gate. Renewal below uses
@@ -238,6 +249,12 @@ WHERE credential_id = $1
 FOR UPDATE`, token.ID).Scan(&boundNodeID, &boundThumbprint, &bindingMode)
 	switch {
 	case err == nil:
+		if request.OperationID != "" {
+			if boundNodeID != nodeID || nodeStatus != "draining" || request.NodeVersion != nodeVersion || request.ProtocolVersion != protocolVersion || request.RuntimeContractID != contractID || request.RuntimeContractDigest != contractDigest || !sameStrings(request.Features, enrolledFeatures) {
+				return CredentialResponse{}, httpx.NewError(http.StatusConflict, "RUNTIME_NODE_UPDATE_REJECTED", "认证操作与当前 Node 状态不匹配")
+			}
+			return s.controlledCredential(ctx, tx, token, nodeID, request, csr, bindingMode, boundThumbprint, publicKeyThumbprint)
+		}
 		if bindingMode != "mtls" || boundNodeID != nodeID || boundThumbprint != publicKeyThumbprint {
 			return CredentialResponse{}, httpx.NewError(http.StatusConflict, "RUNTIME_CREDENTIAL_BOUND", "Agent Token 已绑定其他 Runtime Node、公钥或认证模式")
 		}
@@ -367,6 +384,12 @@ func credentialResponse(agentID, nodeID uuid.UUID, issued ClientCertificate) Cre
 func validateCredentialRequest(request *CredentialRequest) (uuid.UUID, *x509.CertificateRequest, error) {
 	if request == nil {
 		return uuid.Nil, nil, httpx.BadRequest("请求体不能为空")
+	}
+	if request.OperationID != "" {
+		operationID, err := uuid.Parse(request.OperationID)
+		if err != nil || operationID == uuid.Nil || operationID.String() != request.OperationID {
+			return uuid.Nil, nil, httpx.BadRequest("operation_id 无效")
+		}
 	}
 	request.NodeID = strings.TrimSpace(request.NodeID)
 	request.DisplayName = strings.TrimSpace(request.DisplayName)

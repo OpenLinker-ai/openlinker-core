@@ -101,7 +101,11 @@ SELECT node.node_id, binding.agent_id, node.device_certificate_serial,
        COALESCE(certificate.certificate_fingerprint,
                 CASE WHEN binding.binding_mode = 'token_only'
                      THEN binding.public_key_thumbprint ELSE '' END),
-       binding.public_key_thumbprint, node.status, binding.binding_mode
+       binding.public_key_thumbprint, node.status,
+       CASE WHEN binding.binding_mode='token_only' AND EXISTS (
+           SELECT 1 FROM runtime_node_upgrade_operations op
+           WHERE op.node_id=node.node_id AND op.kind='token_to_mtls')
+         THEN 'migration_required' ELSE binding.binding_mode END
 FROM runtime_node_bindings binding
 JOIN runtime_nodes node ON node.node_id = binding.node_id
 LEFT JOIN LATERAL (
@@ -126,7 +130,7 @@ WHERE binding.credential_id = $1`, capability.CredentialID).Scan(
 	}
 	if err != nil || device.NodeID != capability.NodeID || agentID != capability.AgentID ||
 		(status != "active" && status != "draining") ||
-		(bindingMode != "token_only" && bindingMode != "mtls") ||
+		bindingMode != "token_only" ||
 		device.CertificateFingerprintSHA256 == "" {
 		return RuntimeDeviceIdentity{}, runtimeUnauthorizedError(ErrInvalidRuntimeInvocation)
 	}

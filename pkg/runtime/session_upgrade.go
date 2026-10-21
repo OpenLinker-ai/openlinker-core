@@ -32,6 +32,7 @@ func (t *postgresRuntimeSessionTransaction) createControlledRuntimeSessionSucces
 	err = t.tx.QueryRow(ctx, `SELECT EXISTS (
  SELECT 1 FROM runtime_node_upgrade_admissions a
  JOIN runtime_node_upgrade_operations op USING(operation_id)
+ LEFT JOIN runtime_node_credential_authorizations auth USING(operation_id)
  JOIN runtime_node_upgrade_state st ON st.current_operation_id=op.operation_id AND st.node_id=op.node_id AND st.revision=op.revision
  JOIN runtime_nodes n ON n.node_id=op.node_id
  JOIN runtime_sessions source ON source.runtime_session_id=a.source_session_id
@@ -39,6 +40,9 @@ func (t *postgresRuntimeSessionTransaction) createControlledRuntimeSessionSucces
  JOIN agent_tokens token ON token.id=a.credential_id AND token.agent_id=a.agent_id
  WHERE op.operation_id=$1 AND op.node_id=$2 AND op.deadline_at>clock_timestamp() AND op.target_version=$3
  AND a.agent_id=$4 AND a.worker_id=$5 AND a.credential_id=$6 AND a.last_admitted_epoch<$7
+ AND (op.kind NOT IN ('token_to_mtls','certificate_rotation') OR
+   (b.binding_mode='mtls' AND b.credential_id=auth.credential_id AND b.public_key_thumbprint=auth.target_public_key_thumbprint
+    AND EXISTS (SELECT 1 FROM runtime_node_credential_operations done WHERE done.operation_id=op.operation_id)))
  AND n.status='draining' AND n.revoked_at IS NULL
  AND token.status='active_runtime' AND token.revoked_at IS NULL AND token.scopes @> ARRAY['agent:pull']::text[]
  AND (token.expires_at IS NULL OR token.expires_at>clock_timestamp())
