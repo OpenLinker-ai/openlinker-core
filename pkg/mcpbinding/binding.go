@@ -157,15 +157,11 @@ func Snapshot(ctx context.Context, tx pgx.Tx, run, agent uuid.UUID, secret strin
 			return httpx.NewError(http.StatusServiceUnavailable, httpx.CodeServiceUnavailable, "Agent execution environment is temporarily unavailable")
 		}
 	}
-	// Preserve offline queuing when no Session has ever been seen.
-	var known, compatible bool
-	err = tx.QueryRow(ctx, `WITH current AS (SELECT features FROM runtime_sessions WHERE agent_id=$1 AND status NOT IN ('closed','revoked')),
- hosts AS (SELECT features FROM current UNION ALL SELECT features FROM (SELECT features FROM runtime_sessions WHERE agent_id=$1 AND status='closed' ORDER BY created_at DESC,runtime_session_id DESC LIMIT 1) h WHERE NOT EXISTS(SELECT 1 FROM current))
- SELECT count(*)>0,COALESCE(bool_or($2=ANY(features)),false) FROM hosts`, agent, Feature).Scan(&known, &compatible)
+	host, err := CheckHost(ctx, tx, agent)
 	if err != nil {
 		return err
 	}
-	if known && !compatible {
+	if host.Known && !host.Compatible {
 		return httpx.NewError(http.StatusServiceUnavailable, httpx.CodeServiceUnavailable, "Agent execution environment is temporarily unavailable")
 	}
 	return nil

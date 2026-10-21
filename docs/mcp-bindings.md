@@ -21,3 +21,20 @@ or remove the binding. Run admission fails closed while any selected grant is
 invalid, instead of silently omitting a tool the Agent depends on. Callers receive
 a generic unavailable error so the response does not disclose private bindings.
 Already executing operations may complete; new calls from stale snapshots fail.
+
+The owner view and Run admission share the same Host compatibility lookup: current
+non-closed/non-revoked Sessions, or the last closed Session if none remain. Unknown
+and last-known compatible offline Hosts retain offline queuing. A known incompatible
+Host blocks admission with the same generic unavailable response. `host_connected`
+is separate from compatibility, so the settings page can explain an offline Host
+that also requires an upgrade.
+
+`ready` and `used` receipts are evidence reported by the authorized Runtime Worker;
+they are not an independent attestation of model intent. `failed` means the tools
+did not become ready for that Run. A `provider_ended_before_discovery` stage preserves
+the Provider's own authentication/network/startup error rather than relabeling it.
+Callers may see granted tool names, descriptions, results and child-Run endpoint
+host/port metadata. Associations remain owner-only; that does not make tool outputs
+secret from callers. Request keys deduplicate repeated calls within the existing
+Attempt/child-Run contract; side-effecting services still need business-level
+idempotency across new Attempts and new model-generated keys.

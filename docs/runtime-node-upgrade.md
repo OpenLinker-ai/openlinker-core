@@ -115,7 +115,7 @@ fields are never rewritten.
 
 The complete Core cluster must be normal and ready: exactly `expected_replicas`
 live members (heartbeat within 15 seconds), one release version/commit, schema
-095 checksum and current wire identity, including the serving member. Do not
+099 checksum and current wire identity, including the serving member. Do not
 reduce the expected member count to bypass this check. POST holds the cluster
 control shared lock through commit, serializing with entry into maintenance.
 
@@ -169,3 +169,36 @@ owns the actual old/new Node binary and SDK DataDir compatibility matrix;
 provider-specific state is supported only to the extent recorded there. This
 Core API does not certify arbitrary historical binaries or native client login
 state, install new software, or switch running Agents.
+
+## Certificate renewal after a controlled upgrade
+
+Issuance for a new mTLS identity retains the baseline-only enrollment gate. For
+an existing binding, both issuance retries and `/runtime-credentials/renew` compare
+the requested version, protocol and contract to the locked Node row. Features
+must be the exact approved set or the protocol baseline sent by older SDKs.
+That legacy certificate format grants no feature changes: Hello and controlled
+upgrades still require their exact approved sets. The approved extensions survive replay and rotation, with active
+or offline Sessions and while a controlled upgrade permit is pending. Renewal
+never changes Node metadata, capability grants, capacity, identity or upgrade state.
+A renewal-only request cannot enroll a new Node. Use the administrative upgrade
+operation for a version/feature change; arbitrary partial sets and unapproved
+features are rejected. The old leaf remains valid
+according to the existing certificate rotation policy.
+
+`TestRuntimeNodeControlledUpgradeMTLSRenewal` covers HTTP enrollment and renewal,
+controlled MCP feature expansion, active/offline replay, identity/feature/version
+rejection, legacy SDK requests, a new signed leaf, a real mutually authenticated
+TLS connection, original identity binding and exact-feature reconnect.
+The controlled-upgrade CI job requires this test to pass without skipping.
+
+Deployment order matters for mTLS: deploy the Core certificate-renewal
+compatibility fix before switching Node or Plugin Host to the corresponding SDK.
+An older Core rejects renewal requests containing approved extensions. Release
+notes must pin the minimum compatible Core commit; schema 099 alone does not
+identify this fix. Preserve the existing DataDir and private key during upgrade.
+
+A retained local certificate is evidence of a prior enrollment. If Core loses
+the associated binding/Node records during a database reset or restore, the SDK
+does not silently downgrade the renewal request to a fresh enrollment. Restore
+the matching Core identity state or use an explicit administrative recovery plan;
+do not clear the DataDir or spool to bypass this mismatch.
