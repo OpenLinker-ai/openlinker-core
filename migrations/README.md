@@ -131,6 +131,8 @@ PostgreSQL 16 measured shape: 88 tables, 714 constraints, 303 indexes, 75 trigge
 `d7ec84e9ffe0aa26261b73a98cd03e4006ecedd7e40005299649d330ea0281c2`.
 The exact 098 predecessor retains its 88/713/303/75 fingerprint above.
 
+## Controlled Runtime authentication transition (100)
+
 Migration `100` adds controlled token-to-mTLS authorizations, certificate receipts,
 and cluster authentication policy evidence as separate tables. Original Node,
 Agent, credential, Worker and stable serial anchor are retained. An authorization
@@ -139,3 +141,8 @@ issuance. The down script is permitted only before any authentication operation
 exists; exact 099 rollback and 100 reapplication are tested. After authorization,
 keep the history and recover forward using a new exact administrative operation.
 See [controlled authentication migration](../docs/runtime-mtls-transition.md).
+
+PostgreSQL 16 measured shape: 91 tables, 728 constraints, 308 indexes, 80 triggers,
+13 Runtime schema records; digest
+`64a634ba38a93340806555751838772e0534341d4306920eb1ccbb7b0ab4910a`.
+The exact 099 predecessor retains its 88/714/303/75 fingerprint above.
