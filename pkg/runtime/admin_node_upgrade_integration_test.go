@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,20 +23,26 @@ func upgradeFixture(t *testing.T, closed bool) (*pgxpool.Pool, runtimeNodeAdminF
 }
 
 func upgradeFixtureWithCluster(t *testing.T, closed, register bool) (*pgxpool.Pool, runtimeNodeAdminFixture, *runtime.Service, uuid.UUID) {
+	return upgradeFixtureWithBinding(t, closed, register, true)
+}
+
+func upgradeFixtureWithBinding(t *testing.T, closed, register, bound bool, features ...string) (*pgxpool.Pool, runtimeNodeAdminFixture, *runtime.Service, uuid.UUID) {
 	t.Helper()
 	pool := setupTestDB(t)
 	requireReliableRuntimeSchema(t, pool)
 	resetRuntimeNodeAdminTables(t, pool)
-	f := insertRuntimeNodeAdminFixtureVersion(t, pool, upgradeVersionA)
+	f := insertRuntimeNodeAdminFixtureDevice(t, pool, upgradeVersionA, strings.Repeat("b", 64), features...)
 	svc := newTestService(t, pool)
 	svc.ConfigureCoreRuntime(f.coreInstanceID)
 	_, err := pool.Exec(context.Background(), `UPDATE runtime_sessions SET inflight=0 WHERE runtime_session_id=$1`, f.sessionID)
 	require.NoError(t, err)
 	_, err = pool.Exec(context.Background(), `UPDATE runtime_nodes SET inflight=0 WHERE node_id=$1`, f.nodeID)
 	require.NoError(t, err)
-	_, err = pool.Exec(context.Background(), `INSERT INTO runtime_node_bindings(credential_id,node_id,agent_id,public_key_thumbprint,binding_mode)
+	if bound {
+		_, err = pool.Exec(context.Background(), `INSERT INTO runtime_node_bindings(credential_id,node_id,agent_id,public_key_thumbprint,binding_mode)
  SELECT $1,node_id,$2,device_public_key_thumbprint,'token_only' FROM runtime_nodes WHERE node_id=$3`, f.credentialID, f.agentID, f.nodeID)
-	require.NoError(t, err)
+		require.NoError(t, err)
+	}
 	_, err = svc.DrainRuntimeNode(context.Background(), f.nodeID)
 	require.NoError(t, err)
 	detachUpgradeSession(t, pool, f, closed)
@@ -47,7 +54,7 @@ func upgradeFixtureWithCluster(t *testing.T, closed, register bool) (*pgxpool.Po
 
 func registerUpgradeFixtureCluster(t *testing.T, pool *pgxpool.Pool, f runtimeNodeAdminFixture) {
 	t.Helper()
-	_, err := pool.Exec(context.Background(), `TRUNCATE runtime_cluster_members`)
+	_, err := pool.Exec(context.Background(), `TRUNCATE runtime_cluster_members CASCADE`)
 	require.NoError(t, err)
 	_, err = pool.Exec(context.Background(), `INSERT INTO runtime_cluster_members(instance_id,release_version,release_commit,schema_version,schema_checksum,runtime_contract_id,runtime_contract_digest,ready)
  VALUES($1,'upgrade-test','synthetic',$2,$3,$4,$5,true)`, f.coreInstanceID, runtime.RuntimeSchemaVersion, runtime.RuntimeSchemaChecksum, runtime.RuntimeContractID, runtime.RuntimeContractDigest)

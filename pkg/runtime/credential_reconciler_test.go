@@ -486,14 +486,14 @@ func TestRuntimeCredentialReconcilerLowFrequencyAuditFindsSilentProjectionDiverg
 	default:
 	}
 	clock.Advance(time.Nanosecond)
-	require.Eventually(t, func() bool {
-		return validator.CallCount() == 1
-	}, time.Second, time.Millisecond)
+	// Validate increments its counter before the reconciler publishes the
+	// wake. Wait for the observable closure, not the earlier counter update.
 	select {
 	case <-wake:
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("database audit did not close the silently divergent connection")
 	}
+	require.Equal(t, 1, validator.CallCount())
 
 	cancel()
 	require.NoError(t, <-done)

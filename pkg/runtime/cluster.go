@@ -21,12 +21,12 @@ const (
 	// RuntimeSchemaVersion is the schema contract compiled into this Core
 	// release. A migration that changes the current runtime schema contract must
 	// update both this version and RuntimeSchemaChecksum.
-	RuntimeSchemaVersion       int32 = 99
-	RuntimeSchemaMigrationName       = "099_runtime_node_upgrade_features"
+	RuntimeSchemaVersion       int32 = 100
+	RuntimeSchemaMigrationName       = "100_runtime_mtls_transition"
 	// RuntimeSchemaChecksum is SHA-256 over the canonical current schema
 	// contract tuple:
-	// 99:099_runtime_node_upgrade_features:<contract id>:<contract digest>.
-	RuntimeSchemaChecksum = "b2af71c7ee60d80f617d895f4ca824a8735a86665c7599bd4841c2991eb527a5"
+	// 100:100_runtime_mtls_transition:<contract id>:<contract digest>.
+	RuntimeSchemaChecksum = "ed0cf4dd9059360971e79944eeec4c2afe8d28df488ad1994144f6b131f7fbc8"
 
 	RuntimeClusterModeNormal          RuntimeClusterMode = "normal"
 	RuntimeClusterModeDraining        RuntimeClusterMode = "draining"
@@ -53,13 +53,14 @@ type RuntimeClusterOperation string
 // heartbeat. Release fields deliberately come from deployment metadata rather
 // than a mutable database setting.
 type RuntimeClusterIdentity struct {
-	InstanceID            uuid.UUID `json:"instance_id"`
-	ReleaseVersion        string    `json:"release_version"`
-	ReleaseCommit         string    `json:"release_commit"`
-	SchemaVersion         int32     `json:"schema_version"`
-	SchemaChecksum        string    `json:"schema_checksum"`
-	RuntimeContractID     string    `json:"runtime_contract_id"`
-	RuntimeContractDigest string    `json:"runtime_contract_digest"`
+	AuthenticationPolicyID string    `json:"authentication_policy_id,omitempty"`
+	InstanceID             uuid.UUID `json:"instance_id"`
+	ReleaseVersion         string    `json:"release_version"`
+	ReleaseCommit          string    `json:"release_commit"`
+	SchemaVersion          int32     `json:"schema_version"`
+	SchemaChecksum         string    `json:"schema_checksum"`
+	RuntimeContractID      string    `json:"runtime_contract_id"`
+	RuntimeContractDigest  string    `json:"runtime_contract_digest"`
 }
 
 type RuntimeClusterControlSnapshot struct {
@@ -367,7 +368,8 @@ func runtimeSchemaMatchesIdentity(contract RuntimeSchemaContractSnapshot, identi
 }
 
 func runtimeClusterIdentityEqual(left, right RuntimeClusterIdentity) bool {
-	return constantTimeTextEqual(left.ReleaseVersion, right.ReleaseVersion) &&
+	return constantTimeTextEqual(left.AuthenticationPolicyID, right.AuthenticationPolicyID) &&
+		constantTimeTextEqual(left.ReleaseVersion, right.ReleaseVersion) &&
 		constantTimeTextEqual(left.ReleaseCommit, right.ReleaseCommit) &&
 		left.SchemaVersion == right.SchemaVersion &&
 		constantTimeTextEqual(left.SchemaChecksum, right.SchemaChecksum) &&
@@ -449,7 +451,7 @@ func (r *postgresRuntimeClusterRepository) UpsertMember(
 		return errors.New("runtime cluster database is unavailable")
 	}
 	_, err := r.pool.Exec(ctx, `
-INSERT INTO runtime_cluster_members (
+WITH member AS (INSERT INTO runtime_cluster_members (
     instance_id, release_version, release_commit, schema_version,
     schema_checksum, runtime_contract_id, runtime_contract_digest,
     draining, ready
@@ -464,9 +466,13 @@ SET release_version = EXCLUDED.release_version,
     heartbeat_at = clock_timestamp(),
     draining = EXCLUDED.draining,
     ready = EXCLUDED.ready
+RETURNING instance_id)
+INSERT INTO runtime_cluster_authentication_policies(instance_id,authentication_policy_id)
+SELECT instance_id,$10 FROM member
+ON CONFLICT(instance_id) DO UPDATE SET authentication_policy_id=EXCLUDED.authentication_policy_id
 `, identity.InstanceID, identity.ReleaseVersion, identity.ReleaseCommit,
 		identity.SchemaVersion, identity.SchemaChecksum, identity.RuntimeContractID,
-		identity.RuntimeContractDigest, draining, ready)
+		identity.RuntimeContractDigest, draining, ready, identity.AuthenticationPolicyID)
 	return err
 }
 
@@ -499,8 +505,8 @@ WHERE c.singleton_id = 1
 	rows, err := r.pool.Query(ctx, `
 SELECT instance_id, release_version, release_commit, schema_version,
        schema_checksum, runtime_contract_id, runtime_contract_digest,
-       heartbeat_at, draining, ready
-FROM runtime_cluster_members
+       heartbeat_at, draining, ready, COALESCE(authentication_policy_id,'')
+FROM runtime_cluster_members LEFT JOIN runtime_cluster_authentication_policies USING(instance_id)
 WHERE heartbeat_at >= clock_timestamp() - ($1::bigint * interval '1 millisecond')
 ORDER BY started_at ASC, instance_id ASC
 `, liveWindow.Milliseconds())
@@ -521,6 +527,7 @@ ORDER BY started_at ASC, instance_id ASC
 			&member.HeartbeatAt,
 			&member.Draining,
 			&member.Ready,
+			&member.AuthenticationPolicyID,
 		); err != nil {
 			return RuntimeClusterSnapshot{}, err
 		}

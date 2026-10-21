@@ -107,7 +107,11 @@ func (v *BindingVerifier) ResolveTokenOnlyRuntimeDeviceIdentity(
 	var bindingMode string
 	err := v.pool.QueryRow(ctx, `
 SELECT node.node_id, node.device_certificate_serial,
-       node.device_public_key_thumbprint, node.status, binding.binding_mode
+       node.device_public_key_thumbprint, node.status,
+       CASE WHEN binding.binding_mode='token_only' AND EXISTS (
+           SELECT 1 FROM runtime_node_upgrade_operations op
+           WHERE op.node_id=node.node_id AND op.kind='token_to_mtls')
+         THEN 'migration_required' ELSE binding.binding_mode END
 FROM runtime_node_bindings binding
 JOIN runtime_nodes node ON node.node_id = binding.node_id
 WHERE binding.credential_id = $1`, credentialID).Scan(
@@ -120,7 +124,7 @@ WHERE binding.credential_id = $1`, credentialID).Scan(
 	if err == nil {
 		if identity.NodeID != nodeID ||
 			(status != "active" && status != "draining") ||
-			(bindingMode != "token_only" && bindingMode != "mtls") {
+			bindingMode != "token_only" {
 			return coreruntime.RuntimeDeviceIdentity{}, errors.New("Agent Token is not bound to the selected Runtime Node")
 		}
 		identity.AuthenticationMode = coreruntime.RuntimeAuthenticationTokenOnly

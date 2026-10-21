@@ -16,14 +16,16 @@ import (
 )
 
 const (
-	CoreVersion int64 = 99
+	CoreVersion int64 = 100
 	// CoreShapeVersion is the migration version the shape constants below were
 	// measured against. The digest and the object counts come from a live
 	// catalog, so adding a migration cannot update them offline; leaving them
 	// stale would pass every test and then fail the postflight shape check at
 	// deploy time. A test requires these two to match, turning that into a
 	// local failure with an explicit instruction.
-	CoreShapeVersion                         int64 = 99
+	CoreShapeVersion                         int64 = 100
+	CoreAuthenticationPredecessorVersion     int64 = 99
+	CoreAuthenticationPredecessorDigest            = "d7ec84e9ffe0aa26261b73a98cd03e4006ecedd7e40005299649d330ea0281c2"
 	CoreFeatureUpgradePredecessorVersion     int64 = 98
 	CoreFeatureUpgradePredecessorDigest            = "5c4521286adb6b335916aaaa0e6386fb3a7109bdbf9e74099fe326bb5f5c2e70"
 	CoreMCPBindingPredecessorVersion         int64 = 97
@@ -47,7 +49,7 @@ const (
 	CoreReviewedBridgeVersion      int64 = 88
 	CoreLegacyBridgeVersion        int64 = 86
 	CloudVersion                   int64 = 55
-	CoreSchemaDigest                     = "d7ec84e9ffe0aa26261b73a98cd03e4006ecedd7e40005299649d330ea0281c2"
+	CoreSchemaDigest                     = "64a634ba38a93340806555751838772e0534341d4306920eb1ccbb7b0ab4910a"
 	CoreUpgradeSchemaDigest              = "1b2591b579018b4edd6465e19f36823fca28af01068742358293d1367c1c1ed8"
 	CoreReviewedBridgeSchemaDigest       = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
 	CoreLegacyBridgeSchemaDigest         = "6c22808a8cd658cf827a5828a92d3343f040d7d6ff3302f9fdab691fe90aec5b"
@@ -55,6 +57,7 @@ const (
 )
 
 var coreTables = []string{
+	"runtime_node_credential_operations", "runtime_node_credential_authorizations", "runtime_cluster_authentication_policies",
 	"agent_mcp_bindings", "run_mcp_binding_snapshots", "run_mcp_tool_calls",
 	"mcp_service_metadata",
 	"runtime_node_upgrade_state", "runtime_node_upgrade_operations", "runtime_node_upgrade_admissions",
@@ -283,17 +286,18 @@ func Inspect(ctx context.Context, databaseURL string) (Snapshot, error) {
 	// 097 adds one table. Both 096 and 095 are one table short; older
 	// predecessors retain their measured absolute counts and fingerprints.
 	if snapshot.CoreShape.Tables == int64(len(coreTables)) ||
+		((snapshot.Core.Version == CoreAuthenticationPredecessorVersion || snapshot.Core.Version == CoreFeatureUpgradePredecessorVersion) && snapshot.CoreShape.Tables == 88) ||
 		(snapshot.Core.Version == CoreMCPBindingPredecessorVersion && snapshot.CoreShape.Tables == 85) ||
-		((snapshot.Core.Version == CoreResourceMetadataPredecessorVersion || snapshot.Core.Version == CorePackagePublicationPredecessorVersion) && snapshot.CoreShape.Tables == int64(len(coreTables)-4)) ||
-		(snapshot.Core.Version == CoreNodeUpgradePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-7)) ||
-		(snapshot.Core.Version == CoreCLILoginPredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-9)) ||
-		(snapshot.Core.Version == CoreSkillPackagePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-13)) ||
+		((snapshot.Core.Version == CoreResourceMetadataPredecessorVersion || snapshot.Core.Version == CorePackagePublicationPredecessorVersion) && snapshot.CoreShape.Tables == int64(len(coreTables)-7)) ||
+		(snapshot.Core.Version == CoreNodeUpgradePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-10)) ||
+		(snapshot.Core.Version == CoreCLILoginPredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-12)) ||
+		(snapshot.Core.Version == CoreSkillPackagePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-16)) ||
 		(snapshot.Core.Version == CoreUpgradeVersion &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-15)) ||
+			snapshot.CoreShape.Tables == int64(len(coreTables)-18)) ||
 		(snapshot.Core.Version == CoreReviewedBridgeVersion &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-16)) ||
+			snapshot.CoreShape.Tables == int64(len(coreTables)-19)) ||
 		(snapshot.Core.Version == CoreLegacyBridgeVersion &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-19)) {
+			snapshot.CoreShape.Tables == int64(len(coreTables)-22)) {
 		if err := inspectCoreSeeds(ctx, conn, &snapshot.CoreShape, snapshot.Core.Version); err != nil {
 			return Snapshot{}, err
 		}
@@ -500,7 +504,10 @@ func inspectSchemaDigest(ctx context.Context, conn *pgx.Conn, tables []string, c
 }
 
 func inspectCoreSeeds(ctx context.Context, conn *pgx.Conn, shape *SchemaShape, version int64) error {
-	schemaVersion, migrationName := 99, "099_runtime_node_upgrade_features"
+	schemaVersion, migrationName := 100, "100_runtime_mtls_transition"
+	if version > 0 && version < 100 {
+		schemaVersion, migrationName = 99, "099_runtime_node_upgrade_features"
+	}
 	if version > 0 && version < 99 {
 		schemaVersion, migrationName = 95, "095_runtime_node_upgrade"
 	}
@@ -563,7 +570,7 @@ func (s Snapshot) ValidateCoreUp() (bool, error) {
 			return false, err
 		}
 		return true, nil
-	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion, CorePackagePublicationPredecessorVersion, CoreResourceMetadataPredecessorVersion, CoreMCPBindingPredecessorVersion, CoreFeatureUpgradePredecessorVersion:
+	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion, CorePackagePublicationPredecessorVersion, CoreResourceMetadataPredecessorVersion, CoreMCPBindingPredecessorVersion, CoreFeatureUpgradePredecessorVersion, CoreAuthenticationPredecessorVersion:
 		if s.Core.Version >= CoreCLILoginPredecessorVersion && (!s.CallbackOwnerIndexValid || s.UnclassifiedBrowserAgents != 0) {
 			return false, errors.New("Core predecessor has invalid callback index or incomplete Browser profile backfill")
 		}
@@ -619,7 +626,7 @@ func (s Snapshot) ValidateCloudUp() (bool, error) {
 				s.UnclassifiedBrowserAgents,
 			)
 		}
-	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion, CorePackagePublicationPredecessorVersion, CoreResourceMetadataPredecessorVersion, CoreMCPBindingPredecessorVersion, CoreFeatureUpgradePredecessorVersion:
+	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion, CorePackagePublicationPredecessorVersion, CoreResourceMetadataPredecessorVersion, CoreMCPBindingPredecessorVersion, CoreFeatureUpgradePredecessorVersion, CoreAuthenticationPredecessorVersion:
 		if s.Core.Version >= CoreCLILoginPredecessorVersion && (!s.CallbackOwnerIndexValid || s.UnclassifiedBrowserAgents != 0) {
 			return false, errors.New("Core predecessor has invalid callback index or incomplete Browser profile backfill")
 		}
@@ -713,6 +720,38 @@ func validateMigrationTableState(owner string, state MigrationTableState) error 
 func validateCoreShape(shape SchemaShape) error {
 	want := SchemaShape{
 		Digest: CoreSchemaDigest,
+		// 100 adds controlled authentication migration and certificate rotation.
+		// Measured on a clean PostgreSQL 16 with 086..100 applied; the digest is
+		// a catalog fingerprint and cannot be derived from the DDL alone.
+		Tables:            91,
+		Constraints:       728,
+		Indexes:           308,
+		Triggers:          80,
+		CoreIdentities:    1,
+		RuntimeControls:   1,
+		RuntimeSchemas:    13,
+		CurrentRuntime:    1,
+		RuntimeWires:      5,
+		CurrentWire:       1,
+		PreviousWire:      1,
+		BuiltInSkills:     30,
+		BuiltInSkillCases: 15,
+	}
+	if shape.Digest != want.Digest || shape.Tables != want.Tables || shape.Constraints != want.Constraints ||
+		shape.Indexes != want.Indexes || shape.Triggers != want.Triggers ||
+		shape.CoreIdentities != want.CoreIdentities || shape.RuntimeControls != want.RuntimeControls ||
+		shape.RuntimeSchemas != want.RuntimeSchemas || shape.CurrentRuntime != want.CurrentRuntime ||
+		shape.RuntimeWires != want.RuntimeWires || shape.CurrentWire != want.CurrentWire ||
+		shape.PreviousWire != want.PreviousWire || shape.BuiltInSkills != want.BuiltInSkills ||
+		shape.BuiltInSkillCases < want.BuiltInSkillCases {
+		return fmt.Errorf("Core schema fingerprint mismatch: %s", formatShape(shape))
+	}
+	return nil
+}
+
+func validateCoreAuthenticationPredecessorShape(shape SchemaShape) error {
+	want := SchemaShape{
+		Digest: CoreAuthenticationPredecessorDigest,
 		// 099 binds exact feature sets to controlled upgrades and advances Runtime readiness.
 		// Measured on a clean PostgreSQL 16 with 086..099 applied; the digest is
 		// a catalog fingerprint and cannot be derived from the DDL alone.
@@ -967,6 +1006,9 @@ func validateCorePackagePredecessorShape(shape SchemaShape) error {
 }
 
 func validateCorePredecessorShape(shape SchemaShape, version int64) error {
+	if version == CoreAuthenticationPredecessorVersion {
+		return validateCoreAuthenticationPredecessorShape(shape)
+	}
 	if version == CoreFeatureUpgradePredecessorVersion {
 		return validateCoreFeatureUpgradePredecessorShape(shape)
 	}

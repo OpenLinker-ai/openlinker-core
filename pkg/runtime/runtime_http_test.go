@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1469,3 +1470,70 @@ var (
 	_ RuntimeDelegationAPI       = (*runtimeDelegationServiceFake)(nil)
 	_ RuntimeCancellationAPI     = (*runtimeCancellationServiceFake)(nil)
 )
+
+func TestRuntimeTransitionRoutesAuthenticateByListenerNotHeaders(t *testing.T) {
+	for _, mtls := range []bool{false, true} {
+		for _, delegated := range []bool{false, true} {
+			fixture := newRuntimeHandlerFixture()
+			fixture.sessions.create = func(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionRequest) (RuntimeSessionState, error) {
+				return fixture.sessionState(), nil
+			}
+			fixture.delegation.summary = RunSummary{RunID: uuid.New(), Status: RuntimeRunRunning, DispatchState: RuntimeDispatchPending}
+			fixture.delegation.resolvedDevice = fixture.authenticated.Device
+			binder := &runtimePrincipalBinderFake{device: fixture.authenticated.Device}
+			controller := fixture.controller()
+			controller.dependencies.TokenOnlyTransport = true
+			controller.dependencies.MTLSTransition = true
+			controller.dependencies.PrincipalBinder = binder
+			body, err := json.Marshal(fixture.hello())
+			require.NoError(t, err)
+			path := "/api/v1/agent-runtime/sessions"
+			if delegated {
+				path = runtimeCallAgentPath
+				body = []byte(`{"target_agent_id":"` + uuid.NewString() + `","input":{"q":"test"}}`)
+			}
+			req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer runtime-secret")
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(RuntimeNodeIDHeader, fixture.authenticated.Device.NodeID.String())
+			req.Header.Set("X-Forwarded-Client-Cert", "forged")
+			req.Header.Set("X-OpenLinker-MTLS-Listener", "true")
+			req.Header.Set("Idempotency-Key", "transition-test")
+			req.Header.Set("OpenLinker-Invocation-Context", "node-envelope")
+			req.Header.Set("OpenLinker-Invocation-Proof", "request-proof")
+			if mtls {
+				req = req.WithContext(WithMTLSListener(req.Context()))
+			}
+			e := echo.New()
+			controller.Register(e.Group("/api/v1"))
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			expected := http.StatusOK
+			if delegated {
+				expected = http.StatusAccepted
+			}
+			require.Equal(t, expected, rec.Code, rec.Body.String())
+			if mtls {
+				require.Equal(t, 1, fixture.devices.calls)
+				require.Zero(t, binder.resolveCalls)
+				require.Zero(t, fixture.delegation.resolveCalls)
+			} else {
+				require.Zero(t, fixture.devices.calls)
+				if delegated {
+					require.Equal(t, 1, fixture.delegation.resolveCalls)
+				} else {
+					require.Equal(t, 1, binder.resolveCalls)
+				}
+			}
+			if mtls {
+				controller.dependencies.DeviceAuthenticator = NewMTLSRuntimeDeviceAuthenticator(nil)
+				req = httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body)).WithContext(WithMTLSListener(context.Background()))
+				req.Header.Set("Authorization", "Bearer runtime-secret")
+				req.Header.Set("Content-Type", "application/json")
+				rec = httptest.NewRecorder()
+				e.ServeHTTP(rec, req)
+				require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+			}
+		}
+	}
+}

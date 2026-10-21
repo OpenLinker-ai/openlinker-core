@@ -119,14 +119,16 @@ func TestRuntimeNodeControlledUpgradeRejectsNonQuiescentAndExpired(t *testing.T)
 	for _, change := range []string{
 		`UPDATE runtime_nodes SET inflight=1`,
 		`UPDATE agent_tokens SET expires_at=clock_timestamp()-INTERVAL '1 second'`,
-		`DELETE FROM runtime_node_bindings`,
+		`missing credential binding`,
 	} {
 		t.Run(change, func(t *testing.T) {
-			pool, f, svc, actor := upgradeFixture(t, true)
+			pool, f, svc, actor := upgradeFixtureWithBinding(t, true, true, change != "missing credential binding")
 			ctx := context.Background()
-			_, err := pool.Exec(ctx, change)
-			require.NoError(t, err)
-			_, err = svc.UpgradeRuntimeNode(ctx, f.nodeID, actor, upgradeRequest("version_change", upgradeVersionA, upgradeVersionB, 0))
+			if change != "missing credential binding" {
+				_, err := pool.Exec(ctx, change)
+				require.NoError(t, err)
+			}
+			_, err := svc.UpgradeRuntimeNode(ctx, f.nodeID, actor, upgradeRequest("version_change", upgradeVersionA, upgradeVersionB, 0))
 			var he *httpx.HTTPError
 			require.ErrorAs(t, err, &he)
 			require.Equal(t, 409, he.Status)

@@ -146,7 +146,7 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	if !cfg.AllowLocalHTTPEndpoints {
 		t.Fatalf("expected AllowLocalHTTPEndpoints from env")
 	}
-	if cfg.RuntimeMTLSEnabled || cfg.RuntimeMTLSPort != 9443 || cfg.RuntimeMTLSMaxConnections != 4096 ||
+	if cfg.RuntimeMTLSEnabled || cfg.RuntimeMTLSTransitionEnabled || cfg.RuntimeMTLSPort != 9443 || cfg.RuntimeMTLSMaxConnections != 4096 ||
 		cfg.RuntimeMTLSAPIURL != "" || cfg.RuntimePKIMode != "auto" ||
 		cfg.RuntimeInvocationSigningKeyID != "current" || len(cfg.RuntimeInvocationSigningSecret) != 64 ||
 		cfg.RuntimeWSConnectionMaxInflight != 8 || cfg.RuntimeWSProcessMaxInflight != 16 ||

@@ -105,15 +105,16 @@ type Config struct {
 	// Core-terminated mTLS is an explicit high-security mode. In auto mode Core
 	// owns the CA and server certificate; the legacy file fields remain an
 	// explicit external-PKI compatibility mode.
-	RuntimeMTLSEnabled        bool   `envconfig:"RUNTIME_MTLS_ENABLED" default:"false"`
-	RuntimeMTLSPort           int    `envconfig:"RUNTIME_MTLS_PORT" default:"9443"`
-	RuntimeMTLSMaxConnections int    `envconfig:"RUNTIME_MTLS_MAX_CONNECTIONS" default:"4096"`
-	RuntimeMTLSAPIURL         string `envconfig:"RUNTIME_MTLS_API_URL"`
-	RuntimePKIMode            string `envconfig:"RUNTIME_PKI_MODE" default:"auto"`
-	RuntimePKIMasterSecret    string `envconfig:"RUNTIME_PKI_MASTER_SECRET"`
-	RuntimeMTLSCertFile       string `envconfig:"RUNTIME_MTLS_CERT_FILE"`
-	RuntimeMTLSKeyFile        string `envconfig:"RUNTIME_MTLS_KEY_FILE"`
-	RuntimeMTLSClientCAFile   string `envconfig:"RUNTIME_MTLS_CLIENT_CA_FILE"`
+	RuntimeMTLSTransitionEnabled bool   `envconfig:"RUNTIME_MTLS_TRANSITION_ENABLED" default:"false"`
+	RuntimeMTLSEnabled           bool   `envconfig:"RUNTIME_MTLS_ENABLED" default:"false"`
+	RuntimeMTLSPort              int    `envconfig:"RUNTIME_MTLS_PORT" default:"9443"`
+	RuntimeMTLSMaxConnections    int    `envconfig:"RUNTIME_MTLS_MAX_CONNECTIONS" default:"4096"`
+	RuntimeMTLSAPIURL            string `envconfig:"RUNTIME_MTLS_API_URL"`
+	RuntimePKIMode               string `envconfig:"RUNTIME_PKI_MODE" default:"auto"`
+	RuntimePKIMasterSecret       string `envconfig:"RUNTIME_PKI_MASTER_SECRET"`
+	RuntimeMTLSCertFile          string `envconfig:"RUNTIME_MTLS_CERT_FILE"`
+	RuntimeMTLSKeyFile           string `envconfig:"RUNTIME_MTLS_KEY_FILE"`
+	RuntimeMTLSClientCAFile      string `envconfig:"RUNTIME_MTLS_CLIENT_CA_FILE"`
 	// Runtime WebSocket data messages retain per-Attempt FIFO ordering while
 	// independent Attempts may execute within these bounded limits.
 	RuntimeWSConnectionMaxInflight int `envconfig:"RUNTIME_WS_CONNECTION_MAX_INFLIGHT" default:"8"`
@@ -219,6 +220,9 @@ func normalizeRuntimePKIConfig(cfg *Config) error {
 	if cfg.RuntimePKIMode != "auto" && cfg.RuntimePKIMode != "files" {
 		return fmt.Errorf("RUNTIME_PKI_MODE must be auto or files")
 	}
+	if cfg.RuntimeMTLSTransitionEnabled && cfg.RuntimePKIMode != "auto" {
+		return fmt.Errorf("RUNTIME_MTLS_TRANSITION_ENABLED requires RUNTIME_PKI_MODE=auto")
+	}
 	if strings.TrimSpace(cfg.RuntimeInvocationSigningSecret) == "" {
 		if strings.TrimSpace(cfg.JWTSecret) == "" {
 			return fmt.Errorf("RUNTIME_INVOCATION_SIGNING_SECRET cannot be derived without JWT_SECRET")
@@ -226,7 +230,7 @@ func normalizeRuntimePKIConfig(cfg *Config) error {
 		digest := sha256.Sum256([]byte("openlinker/runtime-invocation/signing/v1\x00" + cfg.JWTSecret))
 		cfg.RuntimeInvocationSigningSecret = hex.EncodeToString(digest[:])
 	}
-	if !cfg.RuntimeMTLSEnabled || strings.TrimSpace(cfg.RuntimeMTLSAPIURL) != "" {
+	if !cfg.RuntimeMTLSListenerEnabled() || strings.TrimSpace(cfg.RuntimeMTLSAPIURL) != "" {
 		return nil
 	}
 	origin, err := DeriveRuntimePublicOrigin(cfg.APIURL, cfg.RuntimeMTLSPort)
@@ -274,4 +278,30 @@ func (c *Config) IsProduction() bool {
 
 func (c *Config) ExternalExecutionEnabled() bool {
 	return c != nil && strings.TrimSpace(c.ExternalExecutionJWTCurrentPublicKey) != ""
+}
+
+// RuntimeMTLSListenerEnabled preserves global enforcement while allowing an
+// explicit, per-identity transition on the same strictly authenticated listener.
+func (c *Config) RuntimeMTLSListenerEnabled() bool {
+	return c != nil && (c.RuntimeMTLSEnabled || c.RuntimeMTLSTransitionEnabled)
+}
+
+// RuntimeAuthenticationPolicyID is public, non-secret process evidence. Every
+// Core authorizing an authentication operation must advertise the same policy.
+func (c *Config) RuntimeAuthenticationPolicyID() string {
+	if c == nil {
+		return ""
+	}
+	origin := strings.TrimSpace(c.RuntimeMTLSAPIURL)
+	mode := "token_only"
+	if c.RuntimeMTLSEnabled {
+		mode = "mtls"
+	} else if c.RuntimeMTLSTransitionEnabled {
+		mode = "transition"
+	}
+	if mode == "token_only" {
+		origin = ""
+	}
+	digest := sha256.Sum256([]byte("openlinker/runtime-authentication-policy/v1\x00" + mode + "\x00" + origin + "\x00" + c.RuntimePKIMode))
+	return hex.EncodeToString(digest[:])
 }

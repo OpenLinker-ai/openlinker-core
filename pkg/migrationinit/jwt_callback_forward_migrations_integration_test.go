@@ -23,7 +23,7 @@ func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91
 	if baseURL == "" {
 		t.Skip("TEST_DATABASE_URL is required")
 	}
-	for _, mode := range []string{"fresh", "version-86", "version-88", "version-91", "version-92", "version-93", "version-94", "version-95", "version-96", "version-97", "version-98"} {
+	for _, mode := range []string{"fresh", "version-86", "version-88", "version-91", "version-92", "version-93", "version-94", "version-95", "version-96", "version-97", "version-98", "version-99"} {
 		t.Run(mode, func(t *testing.T) {
 			databaseURL := createMigrationTestDatabase(t, baseURL)
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -33,7 +33,7 @@ func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91
 				if err != nil {
 					t.Fatal(err)
 				}
-				version := map[string]int64{"version-86": 86, "version-88": 88, "version-91": 91, "version-92": 92, "version-93": 93, "version-94": 94, "version-95": 95, "version-96": 96, "version-97": 97, "version-98": 98}[mode]
+				version := map[string]int64{"version-86": 86, "version-88": 88, "version-91": 91, "version-92": 92, "version-93": 93, "version-94": 94, "version-95": 95, "version-96": 96, "version-97": 97, "version-98": 98, "version-99": 99}[mode]
 				for _, migration := range []struct {
 					version int64
 					file    string
@@ -46,6 +46,7 @@ func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91
 					{96, "096_skill_package_publication.up.sql"},
 					{97, "097_resource_metadata.up.sql"},
 					{98, "098_agent_mcp_bindings.up.sql"},
+					{99, "099_runtime_node_upgrade_features.up.sql"},
 				} {
 					if migration.version <= version {
 						applyMigrationFile(t, ctx, conn, migration.file)
@@ -285,5 +286,42 @@ func TestCLILoginRollbackAndReapplyIntegration(t *testing.T) {
 	}
 	if noop, err := snapshot.ValidateCoreUp(); err != nil || !noop {
 		t.Fatalf("reapply fingerprint: noop=%t err=%v", noop, err)
+	}
+}
+
+func TestRuntimeMTLSTransitionRollbackBeforeAuthorization(t *testing.T) {
+	base := os.Getenv("TEST_DATABASE_URL")
+	if base == "" {
+		t.Skip("TEST_DATABASE_URL is required")
+	}
+	databaseURL := createMigrationTestDatabase(t, base)
+	migrateTestDatabaseToCurrent(t, databaseURL)
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyMigrationFile(t, ctx, conn, "100_runtime_mtls_transition.down.sql")
+	if _, err = conn.Exec(ctx, `UPDATE schema_migrations SET version=99,dirty=false`); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close(ctx)
+	snapshot, err := Inspect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.CoreShape.Digest != CoreAuthenticationPredecessorDigest {
+		t.Fatalf("rollback changed schema 099 fingerprint: %s", snapshot.CoreShape.Digest)
+	}
+	if noop, err := snapshot.ValidateCoreUp(); err != nil || noop {
+		t.Fatalf("rollback preflight: noop=%t err=%v", noop, err)
+	}
+	migrateTestDatabaseToCurrent(t, databaseURL)
+	snapshot, err = Inspect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noop, err := snapshot.ValidateCoreUp(); err != nil || !noop {
+		t.Fatalf("reapply preflight: noop=%t err=%v", noop, err)
 	}
 }
