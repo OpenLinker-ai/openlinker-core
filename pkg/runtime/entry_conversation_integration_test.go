@@ -25,6 +25,7 @@ func TestEntrypointsWithoutConversationReceiveCoreOwnedContext(t *testing.T) {
 		metadata                 map[string]any
 	}{
 		{"external_execution", "external-execution.start", "api", map[string]any{"trace_id": "service-order-trace"}},
+		{"hosted", "service-order.execute", "api", map[string]any{"trace_id": "legacy-service-order-trace"}},
 		{"workflow", "node.run", "api", map[string]any{"workflow_node_key": "step-1"}},
 		{"task", "run", "web", nil},
 	}
@@ -245,10 +246,6 @@ VALUES ($1,$2,'synthetic task',ARRAY[]::text[],ARRAY[]::text[],$3,$4,clock_times
 	second := run("task-second")
 	require.NotEqual(t, first, second, "two executions of one task are separate Runs")
 	for _, id := range []string{first, second} {
-		var persisted []byte
-		require.NoError(t, pool.QueryRow(ctx, `SELECT input FROM runs WHERE id=$1`, id).Scan(&persisted))
-		var input map[string]any
-		require.NoError(t, json.Unmarshal(persisted, &input))
-		requireIndependentCoreConversation(t, pool, id, input)
+		requireIndependentCoreConversation(t, pool, id, map[string]any{"text": "same task"})
 	}
 }

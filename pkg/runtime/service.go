@@ -1126,13 +1126,14 @@ func isQueuedRuntimeMode(mode string) bool {
 }
 
 // coreOwnsRuntimeConversation reports entrypoints whose callers cannot supply
-// a typed conversation: MCP tools, Hosted service orders, workflow steps and
+// a typed conversation: MCP tools, Hosted service orders (including legacy
+// "hosted" launch identities that are still recovered), workflow steps and
 // Task runs. Native Runtime hosts require a trusted conversation, so Core
 // issues an independent one. REST, A2A and delegated calls keep the context
 // their caller chose.
 func coreOwnsRuntimeConversation(protocol string) bool {
 	switch protocol {
-	case "mcp", "external_execution", "workflow", "task":
+	case "mcp", "external_execution", "hosted", "workflow", "task":
 		return true
 	default:
 		return false
