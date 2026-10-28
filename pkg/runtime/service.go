@@ -1125,6 +1125,21 @@ func isQueuedRuntimeMode(mode string) bool {
 	return mode == connectionModeRuntime
 }
 
+// coreOwnsRuntimeConversation reports entrypoints whose callers cannot supply
+// a typed conversation: MCP tools, Hosted service orders (including legacy
+// "hosted" launch identities that are still recovered), workflow steps and
+// Task runs. Native Runtime hosts require a trusted conversation, so Core
+// issues an independent one. REST, A2A and delegated calls keep the context
+// their caller chose.
+func coreOwnsRuntimeConversation(protocol string) bool {
+	switch protocol {
+	case "mcp", "external_execution", "hosted", "workflow", "task":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Service) createRunningRun(
 	ctx context.Context,
 	userID uuid.UUID,
@@ -1249,11 +1264,11 @@ func (s *Service) createRunningRun(
 	// defaults derive from it and therefore never make retries drift.
 	runID := uuid.New()
 	runA2AContext := materializeRunA2AContext(req.A2AContext, runID)
-	if runA2AContext == nil && isQueuedRuntimeMode(agent.ConnectionMode) && req.CreationProtocol == "mcp" &&
+	if runA2AContext == nil && isQueuedRuntimeMode(agent.ConnectionMode) && coreOwnsRuntimeConversation(req.CreationProtocol) &&
 		opts.delegation == nil && !isPlaygroundMultiTurnMetadata(req.Metadata) {
-		// MCP tools do not accept a typed conversation context. Give each new
-		// Runtime invocation a Core-owned context after identity lookup so old
-		// idempotency fingerprints and committed replays remain unchanged.
+		// These entrypoints do not accept a typed conversation context. Give
+		// each new Runtime invocation a Core-owned context after identity lookup
+		// so old idempotency fingerprints and committed replays remain unchanged.
 		runA2AContext = materializeRunA2AContext(&RunA2AContextRequest{
 			Source:        "a2a_protocol",
 			TargetAgentID: agentID.String(),
@@ -1277,7 +1292,10 @@ func (s *Service) createRunningRun(
 		return nil, nil, httpx.Internal("生成 Runtime 调用身份失败")
 	}
 	normalizedReq.A2AContext = runA2AContext
-	if req.A2AContext != nil {
+	// A replay copies the source Run's stored input, which already holds any
+	// A2A fields its own creation attached. Re-attaching would add fields to
+	// Runs whose conversation was Core-owned and never part of their input.
+	if req.A2AContext != nil && opts.replayOfRunID == nil {
 		attachRunA2AContextToInput(normalizedReq.Input, runA2AContext, inputSchema)
 	}
 	req = &normalizedReq

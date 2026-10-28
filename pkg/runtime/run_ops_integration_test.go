@@ -126,6 +126,13 @@ func TestRuntimeDeadLetterReplayIsAppendOnlyAndIdempotent(t *testing.T) {
 	require.Equal(t, "replay-conversation", replayedContext.ProtocolContextID)
 	require.Equal(t, "replay-conversation", replayedContext.RootContextID)
 	require.Equal(t, "replay-source-task", replayedContext.ProtocolTaskID)
+	var sourceInput, replayInput []byte
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT (SELECT input FROM runs WHERE id = $1), (SELECT input FROM runs WHERE id = $2)`,
+		fixture.identity.RunID, createdID,
+	).Scan(&sourceInput, &replayInput))
+	require.JSONEq(t, string(sourceInput), string(replayInput),
+		"replay continues the source conversation without adding its fields to the copied input")
 
 	listedRuns, err := queries.ListRunsByUserWithAgent(context.Background(), db.ListRunsByUserWithAgentParams{
 		UserID: ownerID,
@@ -242,4 +249,63 @@ func requireRunOpsHTTPStatus(t *testing.T, err error, want int) {
 	var httpErr *httpx.HTTPError
 	require.True(t, errors.As(err, &httpErr), "expected HTTP error, got %T: %v", err, err)
 	require.Equal(t, want, httpErr.Status)
+}
+
+// A caller-chosen conversation is persisted twice: in the mapping and in the
+// A2A fields attached to the stored input. Replay must keep both exactly.
+func TestRuntimeDeadLetterReplayKeepsExplicitContextInput(t *testing.T) {
+	pool := setupTestDB(t)
+	requireReliableRuntimeSchema(t, pool)
+	ctx := context.Background()
+	fixture := insertEventStoreExecutingAttempt(t, pool, 20*time.Millisecond)
+	setFinalizerMaxAttempts(t, pool, fixture.identity.RunID, 1)
+	seedFinalizerEffectTargets(t, pool, fixture.identity.RunID, fixture.identity.AgentID, "run.failed")
+	waitForRuntimeLeaseDue(t, pool, fixture.identity.AttemptID)
+	result, err := runtime.NewRuntimeDeadlineReconciler(pool, nil).ReconcileBatch(ctx, 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.DeadLettered)
+
+	var ownerID uuid.UUID
+	require.NoError(t, pool.QueryRow(ctx, `SELECT user_id FROM runs WHERE id = $1`, fixture.identity.RunID).Scan(&ownerID))
+	_, err = db.New(pool).UpsertA2AContextMapping(ctx, db.UpsertA2AContextMappingParams{
+		RunID: fixture.identity.RunID, UserID: ownerID, AgentID: fixture.identity.AgentID,
+		ProtocolContextID: "explicit-conversation", ProtocolTaskID: "explicit-task",
+		RootContextID: "explicit-root", ParentTaskID: "explicit-parent-task",
+		TraceID: "explicit-trace", Source: "a2a_protocol",
+		ReferenceTaskIDs: []string{"explicit-reference"},
+	})
+	require.NoError(t, err)
+	sourceInput := `{"task":"explicit","a2a_context_id":"explicit-conversation","a2a_task_id":"explicit-task",` +
+		`"a2a_root_context_id":"explicit-root","a2a_parent_task_id":"explicit-parent-task","a2a_reference_task_ids":["explicit-reference"]}`
+	// Runs are immutable after creation; the fixture stores the input an
+	// explicit-context creation would have committed, bypassing that trigger.
+	require.NoError(t, pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE runs SET input = $2::jsonb WHERE id = $1`, fixture.identity.RunID, sourceInput)
+		return err
+	}))
+	_, err = pool.Exec(ctx, `
+		UPDATE agents
+		SET connection_mode = 'runtime',
+		    endpoint_url = 'openlinker-runtime://run-ops-test'
+		WHERE id = $1`, fixture.identity.AgentID)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `UPDATE agent_tokens SET last_used_at = clock_timestamp() WHERE id = $1`, fixture.credentialID)
+	require.NoError(t, err)
+
+	replay, err := newTestService(t, pool).ReplayRun(ctx, ownerID, fixture.identity.RunID, "dlq-explicit-context", "api")
+	require.NoError(t, err)
+	replayID := uuid.MustParse(replay.RunID)
+	var replayInput []byte
+	require.NoError(t, pool.QueryRow(ctx, `SELECT input FROM runs WHERE id = $1`, replayID).Scan(&replayInput))
+	require.JSONEq(t, sourceInput, string(replayInput))
+	mapping, err := db.New(pool).GetA2AContextMappingByRun(ctx, replayID)
+	require.NoError(t, err)
+	require.Equal(t, "explicit-conversation", mapping.ProtocolContextID)
+	require.Equal(t, "explicit-root", mapping.RootContextID)
+	require.Equal(t, "explicit-task", mapping.ProtocolTaskID)
+	require.Equal(t, []string{"explicit-reference"}, mapping.ReferenceTaskIDs)
+	require.Equal(t, "explicit-parent-task", mapping.ParentTaskID)
 }
