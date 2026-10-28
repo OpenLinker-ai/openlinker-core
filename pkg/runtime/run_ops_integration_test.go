@@ -126,6 +126,13 @@ func TestRuntimeDeadLetterReplayIsAppendOnlyAndIdempotent(t *testing.T) {
 	require.Equal(t, "replay-conversation", replayedContext.ProtocolContextID)
 	require.Equal(t, "replay-conversation", replayedContext.RootContextID)
 	require.Equal(t, "replay-source-task", replayedContext.ProtocolTaskID)
+	var sourceInput, replayInput []byte
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT (SELECT input FROM runs WHERE id = $1), (SELECT input FROM runs WHERE id = $2)`,
+		fixture.identity.RunID, createdID,
+	).Scan(&sourceInput, &replayInput))
+	require.JSONEq(t, string(sourceInput), string(replayInput),
+		"replay continues the source conversation without adding its fields to the copied input")
 
 	listedRuns, err := queries.ListRunsByUserWithAgent(context.Background(), db.ListRunsByUserWithAgentParams{
 		UserID: ownerID,
