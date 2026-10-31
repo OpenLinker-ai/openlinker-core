@@ -125,6 +125,16 @@ jobs:
           grep -q -- '--- PASS: TestRuntimeCancellationHTTPContentionRetriesWithoutWake' /tmp/runtime-cancellation.log
           grep -q -- '--- PASS: TestRuntimeCancellationNormalAppendSerializesOnSession' /tmp/runtime-cancellation.log
           grep -q -- '--- PASS: TestRuntimeCancellationPresenceUsesSessionAndDeadline' /tmp/runtime-cancellation.log
+      - name: Prove Agent Token last use follows Runtime authentication and WebSocket use
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race -v ./pkg/runtime -run '^TestAgentTokenLastUsedTracksRuntimeAuthenticationAndHeartbeat$' -count=1 | tee /tmp/agent-token-last-used.log
+          if grep -q -- '--- SKIP:' /tmp/agent-token-last-used.log; then
+            echo "Agent Token last-use regression must not skip" >&2
+            exit 1
+          fi
+          grep -q -- '--- PASS: TestAgentTokenLastUsedTracksRuntimeAuthenticationAndHeartbeat ' /tmp/agent-token-last-used.log
 
 
   node-upgrade:

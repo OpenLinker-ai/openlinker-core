@@ -566,6 +566,7 @@ func configureRuntime(
 	}
 	handler.SetRuntimeDependencies(runtime.RuntimeHTTPDependencies{
 		TokenValidator:      runtimeService,
+		TokenUsage:          runtimeService,
 		DeviceAuthenticator: runtime.NewMTLSRuntimeDeviceAuthenticator(verifier),
 		PrincipalBinder:     runtimepki.NewBindingVerifier(pool),
 		TokenOnlyTransport:  !cfg.RuntimeMTLSEnabled,
@@ -674,6 +675,9 @@ func configureRuntimeAttachOnly(
 		runtime.NewDBRuntimeNodeCredentialVerifier(pool),
 	)
 	dependencies.PrincipalBinder = runtimepki.NewBindingVerifier(pool)
+	// Cutover WebSockets can stay attached past the token-use interval; the
+	// bookkeeping write is not execution, so it stays inside this boundary.
+	dependencies.TokenUsage = runtimeService
 	runtimeSessions := runtime.NewRuntimeSessionService(pool, coreInstanceID)
 	dependencies.Sessions = runtimeSessions
 	handler.SetRuntimeDependencies(dependencies)

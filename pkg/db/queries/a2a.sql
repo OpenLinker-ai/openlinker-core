@@ -17,7 +17,11 @@ UPDATE agent_tokens SET last_used_at = clock_timestamp()
 WHERE id = $1
   AND status = 'active_runtime'
   AND revoked_at IS NULL
-  AND (expires_at IS NULL OR expires_at > clock_timestamp());
+  AND (expires_at IS NULL OR expires_at > clock_timestamp())
+  AND (
+    last_used_at IS NULL
+    OR last_used_at < clock_timestamp() - INTERVAL '5 minutes'
+  );
 
 -- name: GetAgentCallPolicy :one
 SELECT COALESCE(

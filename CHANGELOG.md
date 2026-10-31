@@ -9,6 +9,14 @@ runtime protocol, and migration contract are declared stable.
 
 ### Fixed
 
+- Agent Token `last_used_at` is recorded again for Runtime v2. It stopped
+  updating when the v1 execution paths were removed, so every token showed as
+  never used. Runtime authentication records it, and established WebSocket
+  connections refresh it from their heartbeat loop, including when healthy
+  Redis leases skip PostgreSQL heartbeats. Writes happen at most once every
+  five minutes per token, as for User Tokens, and wait at most about one second
+  when another transaction holds the token row.
+
 - New MCP calls to queued Runtime Agents now receive an atomic Core-owned
   conversation mapping, enabling native adapters that require trusted session
   authority. Independent calls get separate contexts; retries preserve the

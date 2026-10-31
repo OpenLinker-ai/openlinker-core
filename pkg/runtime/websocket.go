@@ -344,6 +344,9 @@ type runtimeWSConnection struct {
 	maintenanceStarted bool
 	connectionID       string
 	reportedReason     RuntimeTransportReason
+	// tokenUseRecordedAt is owned by the maintenance goroutine. Connecting
+	// authenticated the token, which already recorded its use.
+	tokenUseRecordedAt time.Time
 
 	lifecycleMu   sync.RWMutex
 	dispatchMu    sync.Mutex
@@ -387,21 +390,22 @@ func newRuntimeWSConnection(
 ) *runtimeWSConnection {
 	ctx, cancel := context.WithCancel(parent)
 	return &runtimeWSConnection{
-		controller:       controller,
-		socket:           socket,
-		authenticated:    authenticated,
-		ctx:              ctx,
-		cancel:           cancel,
-		writes:           make(chan runtimeWSWriteRequest, runtimeWSWriteQueue),
-		writerDone:       make(chan struct{}),
-		maintenanceDone:  make(chan struct{}),
-		dispatchContinue: make(chan struct{}, 1),
-		controlContinue:  make(chan struct{}, 1),
-		assignments:      make(map[uuid.UUID]runtimeWSAssignmentCorrelation),
-		cancellations:    make(map[uuid.UUID]runtimeWSCancellationCorrelation),
-		dispatchLimit:    1,
-		connectionID:     "ws:" + uuid.NewString(),
-		reportedReason:   reportedReason,
+		controller:         controller,
+		socket:             socket,
+		authenticated:      authenticated,
+		ctx:                ctx,
+		cancel:             cancel,
+		writes:             make(chan runtimeWSWriteRequest, runtimeWSWriteQueue),
+		writerDone:         make(chan struct{}),
+		maintenanceDone:    make(chan struct{}),
+		dispatchContinue:   make(chan struct{}, 1),
+		controlContinue:    make(chan struct{}, 1),
+		assignments:        make(map[uuid.UUID]runtimeWSAssignmentCorrelation),
+		cancellations:      make(map[uuid.UUID]runtimeWSCancellationCorrelation),
+		dispatchLimit:      1,
+		connectionID:       "ws:" + uuid.NewString(),
+		reportedReason:     reportedReason,
+		tokenUseRecordedAt: time.Now(),
 	}
 }
 
@@ -1158,6 +1162,7 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 }
 
 func (c *runtimeWSConnection) heartbeatMaintenanceSession(reason string) bool {
+	c.recordTokenUse()
 	if c.leaseRegistered && c.controller.dependencies.SessionLeases != nil &&
 		c.controller.dependencies.SessionLeases.HealthyFor(c.connectionID) {
 		observeWorker(c.controller.dependencies.Observer, "runtime.websocket.session_heartbeat", "redis_lease", 1)
@@ -1185,6 +1190,19 @@ func (c *runtimeWSConnection) heartbeatMaintenanceSession(reason string) bool {
 	}
 	c.controller.refreshPresence(c.ctx, state, c.connectionID)
 	return true
+}
+
+// recordTokenUse keeps the Agent Token's last use current for a long-lived
+// WebSocket, which presents the token only when connecting. It runs on every
+// heartbeat path, including healthy Redis leases that skip PostgreSQL, but
+// writes at most once per agentTokenTouchInterval.
+func (c *runtimeWSConnection) recordTokenUse() {
+	recorder := c.controller.dependencies.TokenUsage
+	if recorder == nil || time.Since(c.tokenUseRecordedAt) < agentTokenTouchInterval {
+		return
+	}
+	c.tokenUseRecordedAt = time.Now()
+	recorder.RecordRuntimeTokenUse(c.ctx, c.authenticated.CredentialID)
 }
 
 func (c *runtimeWSConnection) refreshMaintenanceSession() bool {
