@@ -137,6 +137,8 @@ func TestRuntimeWebSocketHeartbeatUsesHealthyLeaseAndFallsBackOnRedisFailure(t *
 
 	controller := fixture.controller()
 	controller.dependencies.SessionLeases = manager
+	tokenUsage := &runtimeTokenUsageRecorderFake{}
+	controller.dependencies.TokenUsage = tokenUsage
 	sessionRequest := runtimeSessionRequestFromHello(fixture.hello)
 	sessionRequest.Transport = RuntimeTransportWebSocket
 	sessionRequest.ReportedTransportReason = RuntimeTransportReasonExplicit
@@ -147,19 +149,35 @@ func TestRuntimeWebSocketHeartbeatUsesHealthyLeaseAndFallsBackOnRedisFailure(t *
 		sessionState: fixture.sessions.state, sessionPrincipal: fixture.principal,
 		attachmentID: fixture.principal.AttachmentID,
 		connectionID: connectionID, leaseRegistered: true,
+		tokenUseRecordedAt: time.Now(),
 	}
+	staleTokenUse := func() time.Time { return time.Now().Add(-agentTokenTouchInterval - time.Second) }
 	require.True(t, connection.heartbeatMaintenanceSession("ticker"))
 	resolveCalls, heartbeatCalls := fixture.sessions.maintenanceCalls()
 	require.Zero(t, resolveCalls)
 	require.Zero(t, heartbeatCalls)
+	require.Empty(t, tokenUsage.recorded(), "a token used at connect time is still fresh")
+
+	// Healthy leases skip PostgreSQL heartbeats, but a long-lived connection
+	// must still keep its Agent Token's last use current.
+	connection.tokenUseRecordedAt = staleTokenUse()
+	require.True(t, connection.heartbeatMaintenanceSession("ticker"))
+	require.True(t, connection.heartbeatMaintenanceSession("ticker"))
+	resolveCalls, heartbeatCalls = fixture.sessions.maintenanceCalls()
+	require.Zero(t, resolveCalls)
+	require.Zero(t, heartbeatCalls)
+	require.Equal(t, []uuid.UUID{fixture.authenticated.CredentialID}, tokenUsage.recorded(),
+		"one stale interval records exactly one use")
 
 	store.setRefreshError(errors.New("redis unavailable"))
 	manager.refresh(context.Background())
 	require.False(t, manager.HealthyFor(connectionID))
+	connection.tokenUseRecordedAt = staleTokenUse()
 	require.True(t, connection.heartbeatMaintenanceSession("ticker"))
 	resolveCalls, heartbeatCalls = fixture.sessions.maintenanceCalls()
 	require.Equal(t, 1, resolveCalls)
 	require.Equal(t, 1, heartbeatCalls)
+	require.Len(t, tokenUsage.recorded(), 2, "the PostgreSQL fallback records use too")
 }
 
 func TestRuntimeWebSocketRegistersLeaseBeforeReadyAndRemovesItAfterDurableClose(t *testing.T) {
@@ -1431,6 +1449,23 @@ func (o *runtimeWSOperations) snapshot() []string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return append([]string(nil), o.items...)
+}
+
+type runtimeTokenUsageRecorderFake struct {
+	mu          sync.Mutex
+	credentials []uuid.UUID
+}
+
+func (f *runtimeTokenUsageRecorderFake) RecordRuntimeTokenUse(_ context.Context, credentialID uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.credentials = append(f.credentials, credentialID)
+}
+
+func (f *runtimeTokenUsageRecorderFake) recorded() []uuid.UUID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]uuid.UUID(nil), f.credentials...)
 }
 
 type runtimeWSTokenValidatorFake struct {

@@ -56,6 +56,13 @@ const (
 	connectionModeRuntime    = "runtime"
 
 	runtimeTokenPrefixLen = credential.PrefixLen
+
+	// agentTokenTouchInterval mirrors the throttle in TouchAgentRuntimeToken so
+	// fresh tokens skip the write round trip on every Runtime request.
+	agentTokenTouchInterval = 5 * time.Minute
+	// agentTokenTouchTimeout bounds the best-effort write, which can wait on a
+	// credential issuance or revocation holding the token row lock.
+	agentTokenTouchTimeout = time.Second
 )
 
 var allowedAgentResponseEventTypes = map[string]struct{}{
@@ -2309,10 +2316,29 @@ func (s *Service) verifyRuntimeTokenAny(ctx context.Context, plaintext string, a
 	}
 	for _, token := range tokens {
 		if credential.VerifyTokenHash(token.TokenHash, plaintext) && hasAnyRuntimeScope(token.Scopes, acceptedScopes...) {
+			s.touchRuntimeToken(ctx, token)
 			return token, nil
 		}
 	}
 	return db.AgentRuntimeToken{}, httpx.Unauthorized("Agent Token 无效或已撤销")
+}
+
+func (s *Service) touchRuntimeToken(ctx context.Context, token db.AgentRuntimeToken) {
+	if token.LastUsedAt != nil && time.Since(*token.LastUsedAt) < agentTokenTouchInterval {
+		return
+	}
+	s.RecordRuntimeTokenUse(ctx, token.ID)
+}
+
+// RecordRuntimeTokenUse records Agent Token use for the token list. It is
+// best-effort: a failed write never rejects a verified token, and a locked
+// token row delays the caller by at most agentTokenTouchTimeout.
+func (s *Service) RecordRuntimeTokenUse(ctx context.Context, tokenID uuid.UUID) {
+	touchCtx, cancel := context.WithTimeout(ctx, agentTokenTouchTimeout)
+	defer cancel()
+	if err := s.queries.TouchAgentRuntimeToken(touchCtx, tokenID); err != nil && ctx.Err() == nil {
+		log.Warn().Err(err).Str("token_id", tokenID.String()).Msg("runtime.RecordRuntimeTokenUse")
+	}
 }
 
 func hasAnyRuntimeScope(scopes []string, accepted ...string) bool {

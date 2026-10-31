@@ -31,6 +31,13 @@ type RuntimeTokenValidator interface {
 	ValidateRuntimeToken(context.Context, string, ...string) (db.AgentRuntimeToken, error)
 }
 
+// RuntimeTokenUsageRecorder records that an Agent Token is still in use by a
+// connection that does not re-present it, such as an established WebSocket.
+// Implementations are best-effort and must return promptly.
+type RuntimeTokenUsageRecorder interface {
+	RecordRuntimeTokenUse(context.Context, uuid.UUID)
+}
+
 // RuntimeDeviceAuthenticator authenticates the independently enrolled Node
 // device. An implementation must use the verified TLS peer certificate, never
 // forwarded certificate or identity headers.
@@ -96,6 +103,7 @@ type RuntimeCancellationAPI interface {
 // no database access and cannot reconstruct trusted principals from JSON.
 type RuntimeHTTPDependencies struct {
 	TokenValidator       RuntimeTokenValidator
+	TokenUsage           RuntimeTokenUsageRecorder
 	DeviceAuthenticator  RuntimeDeviceAuthenticator
 	PrincipalBinder      RuntimePrincipalBinder
 	TokenOnlyTransport   bool
