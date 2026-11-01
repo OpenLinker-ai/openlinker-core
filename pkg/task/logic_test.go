@@ -22,7 +22,7 @@ import (
 
 func TestTokenizeAndRuleParse(t *testing.T) {
 	tokens := tokenize("SQL2 R2 API a I 7 é 数据分析 中, SQL2!")
-	require.ElementsMatch(t, []string{"sql2", "r2", "api", "é", "数据分析", "数", "据", "分", "析", "中"}, tokens)
+	require.ElementsMatch(t, []string{"sql2", "r2", "api", "é", "数据分析", "数据", "据分", "分析", "中"}, tokens)
 
 	skills := []db.Skill{
 		{ID: "data/sql", Name: "SQL Query", Description: "schema analysis"},
@@ -41,6 +41,70 @@ func TestTokenizeAndRuleParse(t *testing.T) {
 		{ID: "ops/web-scraping", Name: "网页抓取", Description: "抓取站点 / API / 监控 / 价格追踪"},
 		{ID: "data/sql-query", Name: "SQL 查询", Description: "自然语言转 SQL、慢查询优化、schema 解读"},
 	}))
+}
+
+func TestRuleParseChineseQueriesAgainstCatalog(t *testing.T) {
+	skills := []db.Skill{
+		{ID: "ai/safety-eval", Name: "安全评测", Description: "幻觉检测、jailbreak 测试、合规审查"},
+		{ID: "content/translation", Name: "翻译", Description: "中英互译、多语言翻译、术语库本地化"},
+		{ID: "content/summarization", Name: "摘要", Description: "长文压缩、要点提取、会议纪要生成"},
+		{ID: "content/copywriting", Name: "文案", Description: "营销文案、社媒推文、产品描述、广告创意"},
+		{ID: "content/proofreading", Name: "校对润色", Description: "错别字、语法、风格统一、SEO 优化"},
+		{ID: "data/data-cleaning", Name: "数据清洗", Description: "去重 / 补全 / 类型转换 / 异常值检测"},
+		{ID: "data/analysis", Name: "数据分析", Description: "统计 / 趋势 / 同比环比、生成洞察文字"},
+		{ID: "data/forecasting", Name: "预测", Description: "时序预测、销量 / 流量 / 库存预估"},
+		{ID: "dev/code-generation", Name: "代码生成", Description: "按 spec 生成函数 / 测试 / 脚手架"},
+		{ID: "dev/test-generation", Name: "测试生成", Description: "单测 / 集成测试 / mock 数据生成"},
+		{ID: "dev/devops-ci", Name: "CI/CD", Description: "GitHub Actions、流水线、部署脚本"},
+		{ID: "media/image-generate", Name: "图像生成", Description: "文生图、产品图、海报、avatar"},
+		{ID: "ops/document-generate", Name: "文档生成", Description: "PDF / Word / 报告 / 合同 / 简历"},
+		{ID: "ops/email-process", Name: "邮件处理", Description: "分类 / 自动回复 / 内容抽取 / 抄送决策"},
+	}
+
+	// 单字不再误命中“预测”“安全评测”，场景前缀不改变结果。
+	want := []string{"data/data-cleaning", "data/analysis"}
+	require.Equal(t, want, ruleParse("汇总一份月度销售指标的趋势和异常", skills))
+	require.Equal(t, want, ruleParse("验收测试：汇总一份月度销售指标的趋势和异常", skills))
+	require.Equal(t, want, ruleParse("验收测试: 汇总一份月度销售指标的趋势和异常", skills))
+
+	require.Equal(t, "dev/test-generation", ruleParse("帮我写集成测试", skills)[0])
+	require.Equal(t, []string{"data/forecasting"}, ruleParse("预测", skills))
+	require.Empty(t, ruleParse("验收", skills))
+
+	// 非场景前缀是任务本身，不能被丢弃。
+	require.Equal(t, "content/translation", ruleParse("翻译：销量下降", skills)[0])
+	require.Equal(t, "content/translation", ruleParse("翻译：hello world", skills)[0])
+	require.Contains(t, ruleParse("测试：数据清洗模块", skills), "dev/test-generation")
+	require.Contains(t, ruleParse("任务：测试：数据清洗模块", skills), "dev/test-generation")
+	require.Contains(t, ruleParse("文档：翻译、校对润色", skills), "content/translation")
+
+	// 单独就能表达能力的汉字。
+	require.Equal(t, "content/translation", ruleParse("中译英", skills)[0])
+	require.Equal(t, "content/translation", ruleParse("将下面中文翻成英语", skills)[0])
+	require.Equal(t, "content/proofreading", ruleParse("帮我润一下这段话", skills)[0])
+
+	// 同分时专门词优先于“生成”这样的通用词。
+	require.Equal(t, "media/image-generate", ruleParse("内容：请生成一张海报", skills)[0])
+	require.Contains(t, ruleParse("请生成一张海报并配上文案", skills), "media/image-generate")
+
+	// 盘符、编号不算前缀。
+	require.Empty(t, ruleParse(`C:\reports\monthly.csv`, skills))
+	require.Equal(t, []string{"content/translation"}, ruleParse("C: 帮我翻译这段话", skills))
+}
+
+func TestContextualQueryBody(t *testing.T) {
+	body, ok := contextualQueryBody("验收测试：汇总指标")
+	require.True(t, ok)
+	require.Equal(t, "汇总指标", body)
+
+	body, ok = contextualQueryBody("Task: summarize metrics")
+	require.True(t, ok)
+	require.Equal(t, "summarize metrics", body)
+
+	for _, query := range []string{"没有冒号", "：只有正文", "验收测试：", "翻译：销量下降", "测试：数据清洗模块"} {
+		_, ok := contextualQueryBody(query)
+		require.False(t, ok, query)
+	}
 }
 
 func TestLLMParsingBuildsPromptFiltersAndLimits(t *testing.T) {
