@@ -86,12 +86,12 @@ func (s *Service) materializeDefaultDeliveryEffect(
 			code: "DELIVERY_TARGET_UNAVAILABLE", safeMessage: "default delivery target has no endpoint", cause: nil,
 		}
 	}
-	payload, err := json.Marshal(buildPayload(
+	payload, err := json.Marshal(projectDeliveryPayload(buildPayload(
 		&run,
 		agent.Slug,
 		agent.Name,
 		deliveryEventForRunStatus(run.Status),
-	))
+	), run.UserID, agent))
 	if err != nil {
 		return db.GetRunDeliveryRow{}, permanentDeliveryEffectError{
 			code: "DELIVERY_PAYLOAD_INVALID", safeMessage: "default delivery payload cannot be encoded", cause: err,

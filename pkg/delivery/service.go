@@ -25,6 +25,7 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/endpointurl"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runoutput"
 )
 
 const (
@@ -514,7 +515,7 @@ func (s *Service) enqueue(ctx context.Context, userID uuid.UUID, run *db.Run, ta
 		log.Error().Err(err).Str("agent_id", run.AgentID.String()).Msg("delivery.enqueue: GetAgentByID")
 		return db.RunDelivery{}, httpx.Internal("查询 Agent 失败")
 	}
-	payload := buildPayload(run, agent.Slug, agent.Name, eventType)
+	payload := projectDeliveryPayload(buildPayload(run, agent.Slug, agent.Name, eventType), run.UserID, agent)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return db.RunDelivery{}, httpx.Internal("序列化投递 payload 失败")
@@ -752,6 +753,13 @@ func buildPayload(run *db.Run, agentSlug, agentName, eventType string) DeliveryP
 		StartedAt:  run.StartedAt.UTC().Format(time.RFC3339),
 		FinishedAt: finishedAt.Format(time.RFC3339),
 	}
+}
+
+// 投递目标属于 Run 所有者，不是 Agent 创作者时与读取接口一样过滤。
+func projectDeliveryPayload(payload DeliveryPayload, ownerID uuid.UUID, agent db.Agent) DeliveryPayload {
+	projection := runoutput.ForViewer(ownerID, agent.CreatorID, agent.EndpointAuthHeader)
+	payload.Output, payload.OutputRedacted = projection.Object(payload.Output)
+	return payload
 }
 
 func parseTargetConfig(raw []byte) deliveryTargetConfig {

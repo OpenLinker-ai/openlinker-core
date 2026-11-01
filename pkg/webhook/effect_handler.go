@@ -263,7 +263,11 @@ func (s *Service) materializeTaskCallbackEffect(
 	if err != nil {
 		return db.GetTaskCallbackDeliveryByIDRow{}, err
 	}
-	payload, err := json.Marshal(taskCallbackPayload(subscription, event))
+	projected, err := projectedTaskCallbackPayload(ctx, q, subscription, event)
+	if err != nil {
+		return db.GetTaskCallbackDeliveryByIDRow{}, err
+	}
+	payload, err := json.Marshal(projected)
 	if err != nil {
 		return db.GetTaskCallbackDeliveryByIDRow{}, permanentEffectHandlerError{
 			code: "CALLBACK_PAYLOAD_INVALID", safeMessage: "task callback payload cannot be encoded", cause: err,

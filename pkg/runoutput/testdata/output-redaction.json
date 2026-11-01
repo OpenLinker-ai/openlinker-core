@@ -1,0 +1,164 @@
+[
+  {
+    "name": "transport headers and source IP from an httpbin echo",
+    "input": {
+      "origin": "203.0.113.7, 10.0.0.1",
+      "url": "https://echo.example/anything",
+      "headers": {
+        "X-Forwarded-For": ["203.0.113.7"],
+        "X-Real-Ip": ["203.0.113.7"],
+        "Authorization": ["Bearer secret"],
+        "Cookie": ["session=secret"],
+        "X-Api-Key": "secret",
+        "X-Openlinker-Token": ["seller-endpoint-token"],
+        "User-Agent": ["Go-http-client/1.1"]
+      }
+    },
+    "expected": {
+      "url": "https://echo.example/anything",
+      "headers": { "User-Agent": ["Go-http-client/1.1"] }
+    }
+  },
+  {
+    "name": "request_headers container is filtered case-insensitively",
+    "input": { "Request_Headers": { "SET-COOKIE": "a=b", "Forwarded": "for=1.1.1.1", "Accept": "*/*" } },
+    "expected": { "Request_Headers": { "Accept": "*/*" } }
+  },
+  {
+    "name": "other party identity is removed at any depth, own order identifiers stay",
+    "input": {
+      "steps": [{ "seller_user_id": "u-1", "note": "kept" }, { "nested": [{ "caller_service_id": "svc" }] }],
+      "body": {
+        "metadata": {
+          "_openlinker_runtime_authority": { "principal_scope_id": "ps1" },
+          "PRINCIPAL_SCOPE_ID": "ps2",
+          "trace_id": "trace-1",
+          "external_order_id": "order-1"
+        }
+      },
+      "headers": { "X-Openlinker-User-Id": "u-1", "X-Openlinker-Run-Id": "run-1" }
+    },
+    "expected": {
+      "steps": [{ "note": "kept" }, { "nested": [{}] }],
+      "body": { "metadata": { "trace_id": "trace-1", "external_order_id": "order-1" } },
+      "headers": { "X-Openlinker-Run-Id": "run-1" }
+    }
+  },
+  {
+    "name": "business fields named like headers stay outside header containers",
+    "input": {
+      "cookie": "oatmeal",
+      "authorization": { "summary": "Reviewed" },
+      "forwarded": 3,
+      "terminal_outputs": { "authorization": { "summary": "Reviewed" }, "cookie": { "title": "Recipe" } }
+    },
+    "expected": {
+      "cookie": "oatmeal",
+      "authorization": { "summary": "Reviewed" },
+      "forwarded": 3,
+      "terminal_outputs": { "authorization": { "summary": "Reviewed" }, "cookie": { "title": "Recipe" } }
+    }
+  },
+  {
+    "name": "business origin values stay",
+    "input": {
+      "a": { "origin": "Shanghai" },
+      "b": { "origin": "12:30:00" },
+      "c": { "origin": "aa:bb:cc:dd:ee:ff" },
+      "d": { "origin": "999.999.999.999" },
+      "e": { "origin": "1:2:3" },
+      "f": { "origin": 42 },
+      "g": { "origin": "" }
+    },
+    "expected": {
+      "a": { "origin": "Shanghai" },
+      "b": { "origin": "12:30:00" },
+      "c": { "origin": "aa:bb:cc:dd:ee:ff" },
+      "d": { "origin": "999.999.999.999" },
+      "e": { "origin": "1:2:3" },
+      "f": { "origin": 42 },
+      "g": { "origin": "" }
+    }
+  },
+  {
+    "name": "real IP literals in origin are removed",
+    "input": {
+      "a": { "origin": "10.0.0.1" },
+      "b": { "origin": "2001:db8::1" },
+      "c": { "origin": "::1" },
+      "d": { "origin": "::ffff:10.0.0.1" },
+      "e": { "origin": "1:2:3:4:5:6:7:8" },
+      "f": { "origin": "10.0.0.1, 2001:db8::1" },
+      "g": { "Origin": "10.0.0.1" }
+    },
+    "expected": { "a": {}, "b": {}, "c": {}, "d": {}, "e": {}, "f": {}, "g": {} }
+  },
+  {
+    "name": "embedded JSON keeps member order and number source text",
+    "input": {
+      "data": "{\"zeta\":1.50,\"origin\":\"2001:db8::1\",\"headers\":{\"x-api-key\":\"secret\",\"Accept\":\"*/*\"},\"record_id\":9007199254740993,\"huge\":1e400,\"alpha\":\"<a&b>\"}"
+    },
+    "expected": {
+      "data": "{\"zeta\":1.50,\"headers\":{\"Accept\":\"*/*\"},\"record_id\":9007199254740993,\"huge\":1e400,\"alpha\":\"<a&b>\"}"
+    }
+  },
+  {
+    "name": "JSON nested inside JSON strings is redacted",
+    "input": {
+      "data": "{\"seller_user_id\":\"private\",\"nested\":\"{\\\"principal_scope_id\\\":\\\"ps1\\\",\\\"n\\\":0.1000000000000000055511151231257827}\"}"
+    },
+    "expected": { "data": "{\"nested\":\"{\\\"n\\\":0.1000000000000000055511151231257827}\"}" }
+  },
+  {
+    "name": "escaped key names are matched after decoding",
+    "input": { "data": "{\"seller\\u005fuser_id\":\"u-1\",\"ok\":true}" },
+    "expected": { "data": "{\"ok\":true}" }
+  },
+  {
+    "name": "embedded JSON without redacted members keeps its formatting",
+    "input": {
+      "plain": "[1, 2]",
+      "spaced": "{ \"cookie\" : \"oatmeal\", \"origin\" : \"Shanghai\" }",
+      "padded": "  {\"a\": 1}"
+    },
+    "expected": {
+      "plain": "[1, 2]",
+      "spaced": "{ \"cookie\" : \"oatmeal\", \"origin\" : \"Shanghai\" }",
+      "padded": "  {\"a\": 1}"
+    }
+  },
+  {
+    "name": "unparseable text naming an identity field or a credential header is hidden",
+    "input": {
+      "identity": "{\"principal_scope_id\": \"ps1_x\", ",
+      "escaped": "{\"seller\\u005fuser_id\":\"u-1\", ",
+      "doubleEscaped": "{\"wrapped\":\"{\\\"caller\\\\u005fservice_id\\\":\\\"svc\\\", \"}",
+      "header": "{\"headers\":{\"authorization\":\"Bearer secret\"},",
+      "trailing": "{\"seller_user_id\":\"u-1\"} tail"
+    },
+    "expected": {
+      "identity": "[redacted]",
+      "escaped": "[redacted]",
+      "doubleEscaped": "{\"wrapped\":\"[redacted]\"}",
+      "header": "[redacted]",
+      "trailing": "[redacted]"
+    }
+  },
+  {
+    "name": "ordinary text and unparseable business text stay",
+    "input": {
+      "note": "{not json",
+      "log": "[INFO] started",
+      "summary": "[PASS] Authorization checks completed successfully.",
+      "business": "{\"cookie\":\"oatmeal\",\"quantity\":2,",
+      "redacted": "[redacted]"
+    },
+    "expected": {
+      "note": "{not json",
+      "log": "[INFO] started",
+      "summary": "[PASS] Authorization checks completed successfully.",
+      "business": "{\"cookie\":\"oatmeal\",\"quantity\":2,",
+      "redacted": "[redacted]"
+    }
+  }
+]

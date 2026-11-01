@@ -94,7 +94,7 @@ func newWorkflowRunUpdateRuntimeFake(runIDs ...uuid.UUID) *workflowRunUpdateRunt
 	return &workflowRunUpdateRuntimeFake{statuses: statuses, queries: make(map[uuid.UUID]int)}
 }
 
-func (f *workflowRunUpdateRuntimeFake) Run(
+func (f *workflowRunUpdateRuntimeFake) RunUnprojected(
 	context.Context,
 	uuid.UUID,
 	*coreruntime.RunRequest,
@@ -103,7 +103,7 @@ func (f *workflowRunUpdateRuntimeFake) Run(
 	return nil, nil
 }
 
-func (f *workflowRunUpdateRuntimeFake) GetRun(
+func (f *workflowRunUpdateRuntimeFake) GetRunUnprojected(
 	_ context.Context,
 	_ uuid.UUID,
 	runID uuid.UUID,

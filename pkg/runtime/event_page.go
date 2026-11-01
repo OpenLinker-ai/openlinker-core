@@ -84,6 +84,10 @@ func (s *Service) ListRunEventsPage(
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.ListRunEventsPage: ListRunEventsByRun")
 		return nil, httpx.Internal("查询调用事件失败")
 	}
+	projection, err := s.runOutputProjection(ctx, queries, userID, run.AgentID)
+	if err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.ListRunEventsPage: Commit")
 		return nil, httpx.Internal("查询调用事件失败")
@@ -91,7 +95,7 @@ func (s *Service) ListRunEventsPage(
 
 	items := make([]RunEventResponse, 0, len(events))
 	for _, event := range events {
-		items = append(items, runEventToResponse(event))
+		items = append(items, projectRunEvent(projection, runEventToResponse(event)))
 	}
 	terminal := isTerminalRunStatus(run.Status)
 	streamComplete := false

@@ -100,7 +100,7 @@ func (s *Service) findExistingRunByIdentity(
 }
 
 func (s *Service) idempotencyReplayResponse(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
-	resp, err := s.GetRun(ctx, userID, runID)
+	resp, err := s.GetRunUnprojected(ctx, userID, runID)
 	if err != nil {
 		return nil, err
 	}

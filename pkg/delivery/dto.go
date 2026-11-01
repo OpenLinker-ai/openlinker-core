@@ -73,18 +73,19 @@ type DeliveryListFilter struct {
 //
 // webhook target 直接收到该 JSON；slack target 由 service 层重新打包成 text。
 type DeliveryPayload struct {
-	Event      string                 `json:"event"`
-	RunID      string                 `json:"run_id"`
-	AgentID    string                 `json:"agent_id"`
-	AgentSlug  string                 `json:"agent_slug"`
-	AgentName  string                 `json:"agent_name"`
-	Status     string                 `json:"status"`
-	Input      map[string]interface{} `json:"input"`
-	Output     map[string]interface{} `json:"output,omitempty"`
-	CostCents  int32                  `json:"cost_cents"`
-	DurationMs int32                  `json:"duration_ms"`
-	StartedAt  string                 `json:"started_at"`
-	FinishedAt string                 `json:"finished_at"`
+	Event          string                 `json:"event"`
+	RunID          string                 `json:"run_id"`
+	AgentID        string                 `json:"agent_id"`
+	AgentSlug      string                 `json:"agent_slug"`
+	AgentName      string                 `json:"agent_name"`
+	Status         string                 `json:"status"`
+	Input          map[string]interface{} `json:"input"`
+	Output         map[string]interface{} `json:"output,omitempty"`
+	OutputRedacted bool                   `json:"output_redacted,omitempty"`
+	CostCents      int32                  `json:"cost_cents"`
+	DurationMs     int32                  `json:"duration_ms"`
+	StartedAt      string                 `json:"started_at"`
+	FinishedAt     string                 `json:"finished_at"`
 }
 
 func toTargetResponse(t db.DeliveryTarget, includeSecret bool) TargetResponse {

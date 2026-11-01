@@ -21,6 +21,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runoutput"
 	runtimepkg "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/webhook"
 )
@@ -842,7 +843,7 @@ func TestA2ARunTaskArtifactAndEventMapping(t *testing.T) {
 		StartedAt:    eventAt,
 		FinishedAt:   &finishedAt,
 		Source:       "api",
-	}, true, nil, nil)
+	}, true, nil, nil, runoutput.Projection{})
 	if dbTask.ContextID != "ctx-db" || dbTask.Status.Timestamp != "2026-06-20T02:01:00Z" || len(dbTask.Artifacts) == 0 {
 		t.Fatalf("taskFromDBRun = %#v", dbTask)
 	}

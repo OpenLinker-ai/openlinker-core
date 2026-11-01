@@ -1799,7 +1799,7 @@ type workflowRuntimeFake struct {
 	onGetRun         func(uuid.UUID) error
 }
 
-func (f *workflowRuntimeFake) Run(
+func (f *workflowRuntimeFake) RunUnprojected(
 	context.Context,
 	uuid.UUID,
 	*runtimemod.RunRequest,
@@ -1811,7 +1811,7 @@ func (f *workflowRuntimeFake) Run(
 	return f.runResponse, f.runErr
 }
 
-func (f *workflowRuntimeFake) GetRun(
+func (f *workflowRuntimeFake) GetRunUnprojected(
 	ctx context.Context,
 	_ uuid.UUID,
 	runID uuid.UUID,
