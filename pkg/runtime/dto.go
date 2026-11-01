@@ -119,7 +119,9 @@ type RunResponse struct {
 	Status              string                 `json:"status"`
 	Input               map[string]interface{} `json:"input,omitempty"`
 	Output              map[string]interface{} `json:"output,omitempty"`
-	ErrorCode           string                 `json:"error_code,omitempty"`
+	// OutputRedacted 表示查看者不是 Agent 创作者，输出或错误信息中有内容被过滤；库内原文不变。
+	OutputRedacted bool   `json:"output_redacted,omitempty"`
+	ErrorCode      string `json:"error_code,omitempty"`
 	// ErrorMsg keeps the historical Go field name while preserving the public
 	// JSON contract as error_message.
 	ErrorMsg                           string                          `json:"error_message,omitempty"`
@@ -305,7 +307,9 @@ type RunEventResponse struct {
 	Sequence    int32                  `json:"sequence"`
 	EventType   string                 `json:"event_type"`
 	Payload     map[string]interface{} `json:"payload"`
-	CreatedAt   time.Time              `json:"created_at"`
+	// OutputRedacted 见 RunResponse.OutputRedacted；event_id 和 sequence 不受过滤影响。
+	OutputRedacted bool      `json:"output_redacted,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // RunEventPageResponse is an owner-readable event page plus the durable
@@ -342,18 +346,20 @@ type RunArtifactResponse struct {
 	FileName         string                 `json:"file_name,omitempty"`
 	FileSHA256       string                 `json:"file_sha256,omitempty"`
 	FileSizeBytes    *int64                 `json:"file_size_bytes,omitempty"`
+	OutputRedacted   bool                   `json:"output_redacted,omitempty"`
 	CreatedAt        time.Time              `json:"created_at"`
 }
 
 // RunMessageResponse is a stable replay record derived from user input and agent message events.
 type RunMessageResponse struct {
-	ID            string                 `json:"id"`
-	RunID         string                 `json:"run_id"`
-	EventSequence *int32                 `json:"event_sequence,omitempty"`
-	Role          string                 `json:"role"`
-	Content       string                 `json:"content"`
-	Payload       map[string]interface{} `json:"payload"`
-	CreatedAt     time.Time              `json:"created_at"`
+	ID             string                 `json:"id"`
+	RunID          string                 `json:"run_id"`
+	EventSequence  *int32                 `json:"event_sequence,omitempty"`
+	Role           string                 `json:"role"`
+	Content        string                 `json:"content"`
+	Payload        map[string]interface{} `json:"payload"`
+	OutputRedacted bool                   `json:"output_redacted,omitempty"`
+	CreatedAt      time.Time              `json:"created_at"`
 }
 
 // AgentRequest 平台 → 创作者 endpoint 的请求体。

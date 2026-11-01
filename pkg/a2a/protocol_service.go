@@ -19,6 +19,7 @@ import (
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runoutput"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
@@ -621,6 +622,7 @@ func (s *Service) ListProtocolTasks(ctx context.Context, userID uuid.UUID, slug 
 	}
 	includeArtifacts := params.IncludeArtifacts != nil && *params.IncludeArtifacts
 	tasks := make([]A2ATask, 0, len(rows))
+	projections := map[uuid.UUID]runoutput.Projection{}
 	for _, row := range rows {
 		var artifacts []runtime.RunArtifactResponse
 		if includeArtifacts {
@@ -639,7 +641,15 @@ func (s *Service) ListProtocolTasks(ctx context.Context, userID uuid.UUID, slug 
 				messages = messages[len(messages)-*params.HistoryLength:]
 			}
 		}
-		task := taskFromDBRun(row, includeArtifacts, artifacts, messages)
+		projection, cached := projections[row.AgentID]
+		if !cached {
+			projection, err = s.runtime.RunOutputProjection(ctx, userID, row.AgentID)
+			if err != nil {
+				return nil, err
+			}
+			projections[row.AgentID] = projection
+		}
+		task := taskFromDBRun(row, includeArtifacts, artifacts, messages, projection)
 		if params.HistoryLength != nil {
 			trimA2ATaskHistory(task, *params.HistoryLength)
 		}
@@ -883,7 +893,7 @@ func parseA2AStatusTimestampAfter(raw string) (time.Time, bool, error) {
 	return value, false, nil
 }
 
-func taskFromDBRun(run db.Run, includeArtifacts bool, artifacts []runtime.RunArtifactResponse, messages []runtime.RunMessageResponse) *A2ATask {
+func taskFromDBRun(run db.Run, includeArtifacts bool, artifacts []runtime.RunArtifactResponse, messages []runtime.RunMessageResponse, projection runoutput.Projection) *A2ATask {
 	resp := &runtime.RunResponse{
 		RunID:     run.ID.String(),
 		Status:    run.Status,
@@ -905,7 +915,7 @@ func taskFromDBRun(run db.Run, includeArtifacts bool, artifacts []runtime.RunArt
 			resp.Output = out
 		}
 	}
-	task := taskFromRun(resp, a2aContextIDFromRunInput(run.Input), artifacts, messages)
+	task := taskFromRun(runtime.ProjectRunResponse(projection, resp), a2aContextIDFromRunInput(run.Input), artifacts, messages)
 	statusAt := run.StartedAt
 	if run.FinishedAt != nil {
 		statusAt = *run.FinishedAt
@@ -1175,6 +1185,9 @@ func taskFromRun(resp *runtime.RunResponse, contextID string, artifacts []runtim
 	}
 	if resp.CallerAgentID != "" {
 		task.Metadata["openlinker"].(map[string]interface{})["caller_agent_id"] = resp.CallerAgentID
+	}
+	if resp.OutputRedacted {
+		task.Metadata["openlinker"].(map[string]interface{})["output_redacted"] = true
 	}
 	if resp.A2AContext != nil {
 		task.Metadata["openlinker"].(map[string]interface{})["a2a_context"] = resp.A2AContext

@@ -1464,3 +1464,63 @@ func requireA2AServiceHTTPStatus(t *testing.T, err error, want int) {
 	require.True(t, ok, "expected *httpx.HTTPError, got %T (%v)", err, err)
 	assert.Equal(t, want, httpErr.Status)
 }
+
+func TestProtocolTaskReadsRedactOutputForNonCreator(t *testing.T) {
+	pool, svc, runtimeSvc := setupService(t)
+	ctx := context.Background()
+	const token = "seller-endpoint-token"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": map[string]any{
+			"origin":  "203.0.113.7",
+			"marker":  "kept",
+			"headers": map[string]any{"X-Openlinker-Token": []string{r.Header.Get("X-Openlinker-Token")}},
+		}})
+	}))
+	t.Cleanup(server.Close)
+
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, server.URL)
+	_, err := pool.Exec(ctx, `UPDATE agents SET endpoint_auth_header=$2, price_per_call_cents=0 WHERE id=$1`, agentID, token)
+	require.NoError(t, err)
+	var slug string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT slug FROM agents WHERE id=$1`, agentID).Scan(&slug))
+
+	run := func(userID uuid.UUID) string {
+		resp, err := runtimeSvc.Run(ctx, userID, &runtime.RunRequest{
+			AgentID: agentID.String(), Input: map[string]any{"q": "hi"}, IdempotencyKey: "test/" + uuid.NewString(),
+		}, "api")
+		require.NoError(t, err)
+		require.Equal(t, "success", resp.Status)
+		return resp.RunID
+	}
+	assertTask := func(task *a2a.A2ATask, redacted bool) {
+		t.Helper()
+		encoded, err := json.Marshal(task)
+		require.NoError(t, err)
+		if redacted {
+			require.NotContains(t, string(encoded), token)
+			require.NotContains(t, string(encoded), "203.0.113.7")
+			require.Contains(t, string(encoded), "kept")
+			require.Equal(t, true, task.Metadata["openlinker"].(map[string]any)["output_redacted"])
+			return
+		}
+		require.Contains(t, string(encoded), token)
+		require.NotContains(t, task.Metadata["openlinker"], "output_redacted")
+	}
+
+	buyer := insertCreator(t, pool)
+	includeArtifacts := true
+	task, err := svc.GetProtocolTask(ctx, buyer, slug, run(buyer), nil)
+	require.NoError(t, err)
+	assertTask(task, true)
+	listed, err := svc.ListProtocolTasks(ctx, buyer, slug, &a2a.A2ATaskListParams{IncludeArtifacts: &includeArtifacts})
+	require.NoError(t, err)
+	require.Len(t, listed.Tasks, 1)
+	assertTask(&listed.Tasks[0], true)
+
+	own, err := svc.GetProtocolTask(ctx, creatorID, slug, run(creatorID), nil)
+	require.NoError(t, err)
+	assertTask(own, false)
+}

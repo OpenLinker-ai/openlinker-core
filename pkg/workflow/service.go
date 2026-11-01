@@ -33,8 +33,8 @@ type Service struct {
 }
 
 type workflowRuntime interface {
-	Run(context.Context, uuid.UUID, *runtime.RunRequest, string) (*runtime.RunResponse, error)
-	GetRun(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error)
+	RunUnprojected(context.Context, uuid.UUID, *runtime.RunRequest, string) (*runtime.RunResponse, error)
+	GetRunUnprojected(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error)
 }
 
 const defaultWorkflowRunMaxAttempts int32 = 3
@@ -1002,7 +1002,11 @@ func (s *Service) ListWorkflowRunsPage(ctx context.Context, userID, workflowID u
 		return nil, httpx.Internal("查询 workflow_run_steps 失败")
 	}
 	for _, run := range rows {
-		items = append(items, workflowRunToResponse(run, stepsByRunID[run.ID]))
+		item := workflowRunToResponse(run, stepsByRunID[run.ID])
+		if err := s.projectWorkflowRun(ctx, userID, &item); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
 	}
 	return &WorkflowRunListResponse{
 		Items:        items,
@@ -1246,7 +1250,7 @@ func (s *Service) runWorkflowNode(
 			}
 		}
 	} else {
-		resp, err = s.runtime.Run(ctx, userID, runRequest, "api")
+		resp, err = s.runtime.RunUnprojected(ctx, userID, runRequest, "api")
 	}
 	if err != nil {
 		msg := err.Error()
@@ -1413,7 +1417,7 @@ func (s *Service) waitForRuntimeRunCompletionByPolling(
 				Category: "workflow.child_run.query", Reason: "poll", BatchSize: 1,
 			})
 		}
-		childRun, err := s.runtime.GetRun(ctx, userID, runID)
+		childRun, err := s.runtime.GetRunUnprojected(ctx, userID, runID)
 		if err != nil {
 			return nil, err
 		}
@@ -1450,7 +1454,7 @@ func (s *Service) waitForRuntimeRunCompletionByEvent(
 				Category: "workflow.child_run.query", Reason: reason, BatchSize: 1,
 			})
 		}
-		childRun, err := s.runtime.GetRun(ctx, userID, runID)
+		childRun, err := s.runtime.GetRunUnprojected(ctx, userID, runID)
 		if err != nil {
 			return nil, err
 		}
@@ -1508,7 +1512,7 @@ func (s *Service) waitForRuntimeRunCompletionByPollingUntil(
 				Category: "workflow.child_run.query", Reason: "degraded_poll", BatchSize: 1,
 			})
 		}
-		childRun, err := s.runtime.GetRun(ctx, userID, runID)
+		childRun, err := s.runtime.GetRunUnprojected(ctx, userID, runID)
 		if err != nil {
 			return nil, err
 		}
@@ -1540,7 +1544,20 @@ func (s *Service) waitForRuntimeRunCompletionByPollingUntil(
 	return nil, fmt.Errorf("workflow node run %s did not finish within %s", runID.String(), timeout)
 }
 
+// GetWorkflowRun 返回给查看者的 workflow run：各节点 Agent 的输出按创作者是否是查看者过滤。
 func (s *Service) GetWorkflowRun(ctx context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {
+	resp, err := s.GetWorkflowRunUnprojected(ctx, userID, workflowRunID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.projectWorkflowRun(ctx, userID, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// GetWorkflowRunUnprojected 与 GetWorkflowRun 的权限相同但返回原文，只给内部调用方。
+func (s *Service) GetWorkflowRunUnprojected(ctx context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {
 	run, err := s.getWorkflowRunForOwner(ctx, userID, workflowRunID)
 	if err != nil {
 		return nil, err

@@ -455,7 +455,7 @@ func (s *Service) finalizeCoreResult(
 func (s *Service) readRunResponseAfterExecution(invocation *runInvocation) *RunResponse {
 	ctx, cancel := context.WithTimeout(context.Background(), coreFinalizationTimeout)
 	defer cancel()
-	resp, err := s.GetRun(ctx, invocation.userID, invocation.runID)
+	resp, err := s.GetRunUnprojected(ctx, invocation.userID, invocation.runID)
 	if err == nil && resp != nil {
 		return resp
 	}

@@ -99,6 +99,7 @@ type TaskCallbackPayload struct {
 	EventType      string                 `json:"event_type"`
 	Sequence       int32                  `json:"sequence"`
 	Payload        map[string]interface{} `json:"payload"`
+	OutputRedacted bool                   `json:"output_redacted,omitempty"`
 	SubscriptionID string                 `json:"subscription_id"`
 	CreatedAt      string                 `json:"created_at"`
 

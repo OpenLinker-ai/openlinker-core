@@ -1080,6 +1080,15 @@ func applyA2AContextMappingToAgentContext(ctx *AgentA2AContext, mapping db.A2ACo
 // source 标记调用来源：'web' / 'mcp' / 'api'，写入 runs.source 以便 /usage 分类显示。
 // 传空字符串时默认 'web'，便于旧调用方零修改。
 func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
+	resp, err := s.RunUnprojected(ctx, userID, req, source)
+	if err != nil {
+		return nil, err
+	}
+	return s.ProjectRunForViewer(ctx, userID, resp)
+}
+
+// RunUnprojected 返回未按查看者过滤的结果，只给要把输出继续传递的内部调用方（如工作流节点）。
+func (s *Service) RunUnprojected(ctx context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
 	invocation, resp, err := s.createRunningRun(ctx, userID, req, source, createRunOptions{})
 	if err != nil {
 		return nil, err
@@ -1095,9 +1104,13 @@ func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, so
 
 // StartRun 创建 running run 并在后台执行；调用方可用 GetRun/ListRunEvents/SSE 查询进度。
 func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
-	return s.startRunWithOptions(ctx, userID, req, source, createRunOptions{
+	resp, err := s.startRunWithOptions(ctx, userID, req, source, createRunOptions{
 		allowOfflineQueuedRuntime: true,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return s.ProjectRunForViewer(ctx, userID, resp)
 }
 
 func (s *Service) startRunWithOptions(
@@ -1937,8 +1950,17 @@ func (s *Service) callAgent(
 	}
 }
 
-// GetRun 查单条调用详情；调用者本人和被调用 Agent 创作者可看。
+// GetRun 查单条调用详情；调用者本人和被调用 Agent 创作者可看。非创作者读到的是过滤后的输出。
 func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
+	resp, err := s.GetRunUnprojected(ctx, userID, runID)
+	if err != nil {
+		return nil, err
+	}
+	return s.ProjectRunForViewer(ctx, userID, resp)
+}
+
+// GetRunUnprojected 与 GetRun 的权限相同但返回原文，只给内部调用方，不得直接返回给查看者。
+func (s *Service) GetRunUnprojected(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
 	r, err := s.queries.GetRunByID(ctx, runID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -2234,36 +2256,61 @@ func (s *Service) ListRunEvents(ctx context.Context, userID, runID uuid.UUID, af
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.ListRunEvents: ListRunEventsByRun")
 		return nil, httpx.Internal("查询调用事件失败")
 	}
+	projection, err := s.runOutputProjection(ctx, s.queries, userID, r.AgentID)
+	if err != nil {
+		return nil, err
+	}
 	resp := make([]RunEventResponse, 0, len(events))
 	for _, event := range events {
-		resp = append(resp, runEventToResponse(event))
+		resp = append(resp, projectRunEvent(projection, runEventToResponse(event)))
 	}
 	return resp, nil
 }
 
 // ListRunArtifacts returns persisted artifacts for a run. Only the run owner can read them.
 func (s *Service) ListRunArtifacts(ctx context.Context, userID, runID uuid.UUID) ([]RunArtifactResponse, error) {
+	r, artifacts, err := s.listRunArtifacts(ctx, userID, runID)
+	if err != nil {
+		return nil, err
+	}
+	projection, err := s.runOutputProjection(ctx, s.queries, userID, r.AgentID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range artifacts {
+		artifacts[i] = projectRunArtifact(projection, artifacts[i])
+	}
+	return artifacts, nil
+}
+
+// ListRunArtifactsUnprojected 与 ListRunArtifacts 的权限相同但返回原文，只给内部调用方。
+func (s *Service) ListRunArtifactsUnprojected(ctx context.Context, userID, runID uuid.UUID) ([]RunArtifactResponse, error) {
+	_, artifacts, err := s.listRunArtifacts(ctx, userID, runID)
+	return artifacts, err
+}
+
+func (s *Service) listRunArtifacts(ctx context.Context, userID, runID uuid.UUID) (db.Run, []RunArtifactResponse, error) {
 	r, err := s.queries.GetRunByID(ctx, runID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.NotFound("调用记录不存在")
+			return db.Run{}, nil, httpx.NotFound("调用记录不存在")
 		}
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.ListRunArtifacts: GetRunByID")
-		return nil, httpx.Internal("查询调用记录失败")
+		return db.Run{}, nil, httpx.Internal("查询调用记录失败")
 	}
 	if r.UserID != userID {
-		return nil, httpx.NotFound("调用记录不存在")
+		return db.Run{}, nil, httpx.NotFound("调用记录不存在")
 	}
 	artifacts, err := s.queries.ListRunArtifactsByRun(ctx, runID)
 	if err != nil {
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.ListRunArtifacts: ListRunArtifactsByRun")
-		return nil, httpx.Internal("查询运行产物失败")
+		return db.Run{}, nil, httpx.Internal("查询运行产物失败")
 	}
 	resp := make([]RunArtifactResponse, 0, len(artifacts))
 	for _, artifact := range artifacts {
 		resp = append(resp, runArtifactToResponse(artifact))
 	}
-	return resp, nil
+	return r, resp, nil
 }
 
 // ListRunMessages returns stable message replay records for a run.
@@ -2284,9 +2331,13 @@ func (s *Service) ListRunMessages(ctx context.Context, userID, runID uuid.UUID) 
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.ListRunMessages: ListRunMessagesByRun")
 		return nil, httpx.Internal("查询运行消息失败")
 	}
+	projection, err := s.runOutputProjection(ctx, s.queries, userID, r.AgentID)
+	if err != nil {
+		return nil, err
+	}
 	resp := make([]RunMessageResponse, 0, len(messages))
 	for _, message := range messages {
-		resp = append(resp, runMessageToResponse(message))
+		resp = append(resp, projectRunMessage(projection, runMessageToResponse(message)))
 	}
 	return resp, nil
 }

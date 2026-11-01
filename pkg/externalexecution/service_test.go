@@ -1110,14 +1110,14 @@ func (f *fakeRuntimeService) GetRunCancellationEvidence(context.Context, uuid.UU
 	return runtime.RunCancellationEvidence{CancellationID: uuid.New(), State: "stopped"}, nil
 }
 
-func (f *fakeRuntimeService) GetRun(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error) {
+func (f *fakeRuntimeService) GetRunUnprojected(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error) {
 	if f.getResponse == nil {
 		return nil, errors.New("unexpected GetRun")
 	}
 	return f.getResponse, nil
 }
 
-func (f *fakeRuntimeService) ListRunArtifacts(_ context.Context, _ uuid.UUID, runID uuid.UUID) ([]runtime.RunArtifactResponse, error) {
+func (f *fakeRuntimeService) ListRunArtifactsUnprojected(_ context.Context, _ uuid.UUID, runID uuid.UUID) ([]runtime.RunArtifactResponse, error) {
 	return f.artifacts[runID], nil
 }
 

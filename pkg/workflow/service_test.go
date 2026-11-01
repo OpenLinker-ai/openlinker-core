@@ -1666,3 +1666,93 @@ func requireWorkflowHTTPStatus(t *testing.T, err error, want int) {
 	require.ErrorAs(t, err, &httpErr)
 	require.Equal(t, want, httpErr.Status)
 }
+
+func TestWorkflowRunReadsAreRedactedButNodesReceiveOriginalOutput(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+	ctx := context.Background()
+	const token = "seller-endpoint-token"
+
+	var mu sync.Mutex
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req runtimemod.AgentRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		encodedInput, _ := json.Marshal(req.Input)
+		mu.Lock()
+		bodies = append(bodies, string(encodedInput))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{"output": map[string]interface{}{
+			"origin":  "203.0.113.7",
+			"marker":  "kept",
+			"headers": map[string]interface{}{"X-Openlinker-Token": []string{r.Header.Get("X-Openlinker-Token")}},
+		}}))
+	}))
+	t.Cleanup(server.Close)
+
+	buyer := insertWorkflowUser(t, pool, "wf-buyer")
+	seller := insertWorkflowUser(t, pool, "wf-seller")
+	agentID := insertWorkflowAgent(t, pool, seller, server.URL)
+	_, err := pool.Exec(ctx, `UPDATE agents SET endpoint_auth_header=$2 WHERE id=$1`, agentID, token)
+	require.NoError(t, err)
+
+	runtimeSvc := runtimemod.NewService(pool, newWorkflowRuntimeTestConfig(5, true))
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
+	svc := workflow.NewService(pool, runtimeSvc)
+	create := func(owner uuid.UUID) *workflow.WorkflowRunResponse {
+		created, err := svc.CreateWorkflow(ctx, owner, &workflow.CreateWorkflowRequest{
+			Name: "Echo workflow", Description: "echo",
+			Nodes: []workflow.WorkflowNodeRequest{
+				{Key: "first", Title: "First", AgentID: agentID},
+				{Key: "second", Title: "Second", AgentID: agentID},
+			},
+		})
+		require.NoError(t, err)
+		run, err := svc.RunWorkflow(ctx, owner, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+			Input: map[string]interface{}{"topic": "echo"},
+		})
+		require.NoError(t, err)
+		require.Equal(t, "success", run.Status)
+		return run
+	}
+
+	run := create(buyer)
+	mu.Lock()
+	secondInput := bodies[1]
+	mu.Unlock()
+	require.Contains(t, secondInput, token, "下游节点要收到库内原值，过滤只发生在展示")
+
+	assertRedacted := func(value interface{}) {
+		t.Helper()
+		encoded, err := json.Marshal(value)
+		require.NoError(t, err)
+		require.NotContains(t, string(encoded), token)
+		require.NotContains(t, string(encoded), "203.0.113.7")
+		require.Contains(t, string(encoded), "kept")
+	}
+	assertRedacted(run)
+	require.True(t, run.OutputRedacted)
+	require.True(t, run.Steps[0].OutputRedacted)
+
+	runID := uuid.MustParse(run.ID)
+	got, err := svc.GetWorkflowRun(ctx, buyer, runID)
+	require.NoError(t, err)
+	assertRedacted(got)
+	list, err := svc.ListWorkflowRuns(ctx, buyer, uuid.MustParse(run.WorkflowID), 10)
+	require.NoError(t, err)
+	assertRedacted(list)
+
+	original, err := svc.GetWorkflowRunUnprojected(ctx, buyer, runID)
+	require.NoError(t, err)
+	require.False(t, original.OutputRedacted)
+	require.Contains(t, original.Output, "origin")
+
+	var stored string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT output::text FROM workflow_runs WHERE id=$1`, runID).Scan(&stored))
+	require.Contains(t, stored, token, "读取不改写库内原文")
+
+	ownRun := create(seller)
+	require.False(t, ownRun.OutputRedacted)
+	require.Contains(t, ownRun.Output, "origin", "所有节点都是自己的 Agent 时看原文")
+}

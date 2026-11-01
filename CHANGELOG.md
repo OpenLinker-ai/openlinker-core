@@ -7,6 +7,21 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+### Changed
+
+- Run reads now filter Agent output for anyone who is not the Agent's creator.
+  Echoing Agents could hand callers the endpoint token Core sends upstream
+  (`X-OpenLinker-Token`), plus source IPs, credential headers and internal
+  identity. `POST /run`, `POST /runs`, `GET /runs/:id`, `/events`, `/stream`,
+  `/messages`, `/artifacts`, the MCP run tools, A2A task reads, `/workflow-runs`,
+  task callbacks and run deliveries all apply the same rules from
+  `pkg/runoutput`, and non-creators no longer see `endpoint_host` on
+  `run.started`. Filtered items carry `output_redacted: true`; event ids and
+  sequence numbers do not change. Stored Runs are not rewritten, creators still
+  read the original, and workflow nodes still receive the original output.
+  Non-creators lose `headers.Set-Cookie`-style fields and IP-valued `origin`
+  from diagnostic Agents, with no way to recover them.
+
 ### Fixed
 
 - Agent Token `last_used_at` is recorded again for Runtime v2. It stopped

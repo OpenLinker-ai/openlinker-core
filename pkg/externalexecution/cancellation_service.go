@@ -137,7 +137,7 @@ func (s *Service) cancelRuntimeExecution(
 ) (*ExecutionRecord, CancellationRecord, error) {
 	_, cancelErr := s.runtime.CancelRun(ctx, principal.ActorUserID, *execution.ExecutionID)
 	if cancelErr != nil {
-		run, getErr := s.runtime.GetRun(ctx, principal.ActorUserID, *execution.ExecutionID)
+		run, getErr := s.runtime.GetRunUnprojected(ctx, principal.ActorUserID, *execution.ExecutionID)
 		if getErr != nil {
 			return execution, cancellation, httpx.ServiceUnavailable("Runtime 取消状态正在确认")
 		}

@@ -1057,3 +1057,25 @@ func (q *fakeDeliveryQueries) MarkRunDeliveryFailedFinal(_ context.Context, arg 
 func (q *fakeDeliveryQueries) ListPendingRunDeliveries(context.Context) ([]db.RunDelivery, error) {
 	return q.pending, q.pendingErr
 }
+
+func TestProjectDeliveryPayloadFiltersForNonCreatorOwner(t *testing.T) {
+	token := "seller-endpoint-token"
+	creatorID := uuid.New()
+	agent := db.Agent{CreatorID: creatorID, EndpointAuthHeader: &token}
+	payload := DeliveryPayload{Output: map[string]interface{}{
+		"origin": "203.0.113.7", "marker": "kept", "note": "used " + token,
+	}}
+
+	buyer := projectDeliveryPayload(payload, uuid.New(), agent)
+	if !buyer.OutputRedacted {
+		t.Fatal("expected output_redacted for a non-creator owner")
+	}
+	if _, ok := buyer.Output["origin"]; ok || buyer.Output["note"] != "used [redacted]" || buyer.Output["marker"] != "kept" {
+		t.Fatalf("unexpected filtered output: %#v", buyer.Output)
+	}
+
+	creator := projectDeliveryPayload(payload, creatorID, agent)
+	if creator.OutputRedacted || creator.Output["origin"] != "203.0.113.7" {
+		t.Fatalf("creator delivery should keep the original: %#v", creator)
+	}
+}
