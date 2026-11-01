@@ -26,6 +26,7 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/endpointurl"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runoutput"
 )
 
 const (
@@ -692,8 +693,8 @@ func (s *Service) CreateProxyRun(ctx context.Context, requestingUserID uuid.UUID
 		log.Error().Err(err).Str("registry_listing_id", registryListingID.String()).Msg("registry.CreateProxyRun")
 		return nil, httpx.Internal("创建 Proxy Run 失败")
 	}
-	resp := proxyRunToResponse(run)
-	return &resp, nil
+	// 幂等重放会返回已完成的 Run。
+	return s.projectProxyRunForRequester(ctx, requestingUserID, proxyRunToResponse(run))
 }
 
 func (s *Service) CreateRemoteProxyRun(ctx context.Context, requestingUserID uuid.UUID, req *CreateRemoteProxyRunRequest) (*RemoteProxyRunResponse, error) {
@@ -771,7 +772,8 @@ func (s *Service) CreateRemoteProxyRun(ctx context.Context, requestingUserID uui
 		RemoteAPIBaseURL: remoteRoot,
 		RegistryPeerID:   registryPeerID,
 		RouteMode:        routeMode,
-		RemoteRun:        remoteRun,
+		// 远端 Agent 的创建者和令牌这里都不知道，只能靠规则。
+		RemoteRun: projectProxyRun(runoutput.ForNonCreator(), remoteRun),
 	}, nil
 }
 
@@ -875,8 +877,7 @@ func (s *Service) GetProxyRun(ctx context.Context, requestingUserID, runID uuid.
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("registry.GetProxyRun")
 		return nil, httpx.Internal("查询 Proxy Run 失败")
 	}
-	resp := proxyRunToResponse(run)
-	return &resp, nil
+	return s.projectProxyRunForRequester(ctx, requestingUserID, proxyRunToResponse(run))
 }
 
 func (s *Service) ClaimProxyRun(ctx context.Context, plaintextSecret string) (*ProxyRunResponse, error) {
@@ -1002,14 +1003,20 @@ func (s *Service) CompleteProxyRun(ctx context.Context, plaintextSecret string, 
 }
 
 func (s *Service) ListProxyRunArtifacts(ctx context.Context, requestingUserID, runID uuid.UUID) ([]ProxyRunArtifactResponse, error) {
-	if _, err := s.q.GetProxyRunForRequester(ctx, db.GetProxyRunForRequesterParams{
+	run, err := s.q.GetProxyRunForRequester(ctx, db.GetProxyRunForRequesterParams{
 		ID:               runID,
 		RequestingUserID: requestingUserID,
-	}); errors.Is(err, pgx.ErrNoRows) {
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, httpx.NotFound("Proxy Run 不存在")
-	} else if err != nil {
+	}
+	if err != nil {
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("registry.ListProxyRunArtifacts: run")
 		return nil, httpx.Internal("查询 Proxy Run 失败")
+	}
+	projection, err := s.proxyRunProjection(ctx, requestingUserID, run.LocalAgentID.String())
+	if err != nil {
+		return nil, err
 	}
 	rows, err := s.q.ListProxyRunArtifactsForRequester(ctx, db.ListProxyRunArtifactsForRequesterParams{
 		ProxyRunID:       runID,
@@ -1021,7 +1028,7 @@ func (s *Service) ListProxyRunArtifacts(ctx context.Context, requestingUserID, r
 	}
 	items := make([]ProxyRunArtifactResponse, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, proxyRunArtifactToResponse(row))
+		items = append(items, projectProxyRunArtifact(projection, proxyRunArtifactToResponse(row)))
 	}
 	return items, nil
 }

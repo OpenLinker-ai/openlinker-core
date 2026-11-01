@@ -17,6 +17,7 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/llm"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runoutput"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
@@ -456,9 +457,15 @@ func (s *Service) ListMinePage(ctx context.Context, userID uuid.UUID, query, sta
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("task.ListMine: count")
 		return nil, httpx.Internal("查询任务历史失败")
 	}
+	redacted, err := s.projectCompletionSummaries(ctx, userID, rows)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]HistoryItem, 0, len(rows))
 	for i := range rows {
-		out = append(out, toHistoryItem(&rows[i]))
+		item := toHistoryItem(&rows[i])
+		item.CompletionSummaryRedacted = redacted[rows[i].ID]
+		out = append(out, item)
 	}
 	return &HistoryListResponse{
 		Items:        out,
@@ -528,7 +535,51 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 		return nil, httpx.NotFound("任务不存在")
 	}
 
-	return s.detailFromTask(ctx, &t)
+	rows := []db.TaskQuery{t}
+	redacted, err := s.projectCompletionSummaries(ctx, userID, rows)
+	if err != nil {
+		return nil, err
+	}
+	detail, err := s.detailFromTask(ctx, &rows[0])
+	if err != nil {
+		return nil, err
+	}
+	detail.CompletionSummaryRedacted = redacted[t.ID]
+	return detail, nil
+}
+
+// projectCompletionSummaries 就地替换要返回给 viewerID 的摘要，返回内容有变化的任务。查询失败时不返回原文。
+func (s *Service) projectCompletionSummaries(ctx context.Context, viewerID uuid.UUID, rows []db.TaskQuery) (map[uuid.UUID]bool, error) {
+	runIDs := make([]uuid.UUID, 0, len(rows))
+	for i := range rows {
+		if rows[i].CompletionSummary != nil && rows[i].CompletionRunID != nil {
+			runIDs = append(runIDs, *rows[i].CompletionRunID)
+		}
+	}
+	if len(runIDs) == 0 {
+		return nil, nil
+	}
+	sources, err := s.queries.ListTaskCompletionSources(ctx, runIDs)
+	if err != nil {
+		log.Error().Err(err).Str("viewer_id", viewerID.String()).Msg("task.projectCompletionSummaries")
+		return nil, httpx.Internal("查询任务失败")
+	}
+	byRun := make(map[uuid.UUID]*runoutput.CompletionSource, len(sources))
+	for _, source := range sources {
+		byRun[source.RunID] = &runoutput.CompletionSource{
+			Output: source.Output, CreatorID: source.CreatorID, EndpointToken: source.EndpointAuthHeader,
+		}
+	}
+	redacted := make(map[uuid.UUID]bool, len(rows))
+	for i := range rows {
+		if rows[i].CompletionSummary == nil || rows[i].CompletionRunID == nil {
+			continue
+		}
+		summary, changed := runoutput.ProjectCompletionSummary(viewerID, *rows[i].CompletionSummary, byRun[*rows[i].CompletionRunID])
+		rows[i].CompletionSummary = &summary
+		redacted[rows[i].ID] = changed
+	}
+	return redacted, nil
 }
 
 func (s *Service) detailFromTask(ctx context.Context, t *db.TaskQuery) (*DetailResponse, error) {

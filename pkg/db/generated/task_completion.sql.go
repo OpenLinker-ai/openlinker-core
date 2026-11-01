@@ -39,3 +39,44 @@ func (q *Queries) CompletePrivateTaskFromSuccessfulRun(ctx context.Context, arg 
 	err := row.Scan(&id)
 	return id, err
 }
+
+const listTaskCompletionSources = `-- name: ListTaskCompletionSources :many
+SELECT run.id AS run_id, run.output, agent.creator_id, agent.endpoint_auth_header
+FROM runs run
+LEFT JOIN agents agent ON agent.id = run.agent_id
+WHERE run.id = ANY($1::uuid[])
+`
+
+type ListTaskCompletionSourcesRow struct {
+	RunID              uuid.UUID  `db:"run_id" json:"run_id"`
+	Output             []byte     `db:"output" json:"output"`
+	CreatorID          *uuid.UUID `db:"creator_id" json:"creator_id"`
+	EndpointAuthHeader *string    `db:"endpoint_auth_header" json:"endpoint_auth_header"`
+}
+
+// The stored summary can cut a secret in half, so reads re-derive it from the
+// Run output. The Agent may be gone; such reads count as non-creator reads.
+func (q *Queries) ListTaskCompletionSources(ctx context.Context, dollar_1 []uuid.UUID) ([]ListTaskCompletionSourcesRow, error) {
+	rows, err := q.db.Query(ctx, listTaskCompletionSources, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTaskCompletionSourcesRow{}
+	for rows.Next() {
+		var i ListTaskCompletionSourcesRow
+		if err := rows.Scan(
+			&i.RunID,
+			&i.Output,
+			&i.CreatorID,
+			&i.EndpointAuthHeader,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

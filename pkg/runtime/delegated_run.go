@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog/log"
 )
 
 const runtimeDelegatedRunReadPath = "/api/v1/agent-runtime/delegated-runs/read"
@@ -19,7 +20,9 @@ type DelegatedRunReadRequest struct {
 }
 
 // DelegatedRunView intentionally excludes input, credentials, transport evidence
-// and owner metadata. Only the direct caller may inspect this result.
+// and owner metadata. Only the direct caller may inspect this result. A caller
+// Agent from another creator reads the filtered output. The wire contract has no
+// marker for that: every SDK rejects unknown fields on this response.
 type DelegatedRunView struct {
 	RunSummary
 	Output       json.RawMessage `json:"output,omitempty"`
@@ -85,14 +88,20 @@ func (s *RuntimeDelegationService) ReadDelegatedRun(ctx context.Context, authori
 		return DelegatedRunView{}, err
 	}
 	var result DelegatedRunView
+	var callerCreatorID, targetCreatorID *uuid.UUID
+	var targetEndpointToken *string
 	err = tx.QueryRow(ctx, `
 SELECT r.id, r.status, r.dispatch_state, r.output,
-       COALESCE(r.error_code, ''), COALESCE(r.error_message, '')
+       COALESCE(r.error_code, ''), COALESCE(r.error_message, ''),
+       caller.creator_id, target.creator_id, target.endpoint_auth_header
 FROM run_delegations d JOIN runs r ON r.id = d.child_run_id
+LEFT JOIN agents caller ON caller.id = d.caller_agent_id
+LEFT JOIN agents target ON target.id = r.agent_id
 WHERE d.parent_run_id = $1 AND d.caller_agent_id = $2 AND d.child_run_id = $3
   AND r.user_id = $4 AND r.runtime_contract_id = 'openlinker.runtime.v2'`,
 		capability.RunID, capability.AgentID, request.RunID, parentUserID).Scan(
-		&result.RunID, &result.Status, &result.DispatchState, &result.Output, &result.ErrorCode, &result.ErrorMessage)
+		&result.RunID, &result.Status, &result.DispatchState, &result.Output, &result.ErrorCode, &result.ErrorMessage,
+		&callerCreatorID, &targetCreatorID, &targetEndpointToken)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DelegatedRunView{}, newRuntimeTransportError(RuntimeErrorNotFound, runtimeErrorDefaultMessage(RuntimeErrorNotFound), err)
 	}
@@ -102,8 +111,16 @@ WHERE d.parent_run_id = $1 AND d.caller_agent_id = $2 AND d.child_run_id = $3
 	if err = ValidateRuntimePayload(result.RunSummary); err != nil {
 		return DelegatedRunView{}, err
 	}
+	redacted, err := projectDelegatedRun(&result, delegatedRunProjection(callerCreatorID, targetCreatorID, targetEndpointToken))
+	if err != nil {
+		return DelegatedRunView{}, newRuntimeTransportError(RuntimeErrorInternal, runtimeErrorDefaultMessage(RuntimeErrorInternal), err)
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return DelegatedRunView{}, runtimeDatabaseUnavailable(err)
+	}
+	if redacted {
+		log.Info().Str("run_id", result.RunID.String()).Str("caller_agent_id", capability.AgentID.String()).
+			Msg("runtime.ReadDelegatedRun: output filtered for caller from another creator")
 	}
 	return result, nil
 }

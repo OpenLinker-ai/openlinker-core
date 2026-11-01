@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runoutput"
 )
 
 const (
@@ -29,7 +30,6 @@ const (
 	maxRuntimeResultPayloadBytes = 4 * 1024 * 1024
 	maxRuntimeResultErrorCodeLen = 120
 	maxRuntimeResultErrorTextLen = 500
-	maxPrivateTaskSummaryLen     = 2000
 	externalRunEffectMaxAttempts = 3
 	internalRunEffectMaxAttempts = 12
 )
@@ -635,7 +635,7 @@ func (f *ResultFinalizer) finalizeTx(
 		}
 		_, taskErr := queries.CompletePrivateTaskFromSuccessfulRun(ctx, db.CompletePrivateTaskFromSuccessfulRunParams{
 			RunID:             run.id,
-			CompletionSummary: privateTaskCompletionSummary(request.Output),
+			CompletionSummary: runoutput.CompletionSummary(request.Output),
 		})
 		if taskErr != nil && !errors.Is(taskErr, pgx.ErrNoRows) {
 			return RuntimeResultAck{}, taskErr
@@ -667,31 +667,6 @@ func (f *ResultFinalizer) finalizeTx(
 		Replayed:       false,
 		NextAttemptAt:  finalized.NextAttemptAt,
 	}, nil
-}
-
-func privateTaskCompletionSummary(output map[string]interface{}) string {
-	for _, key := range []string{"summary", "text", "message", "answer"} {
-		if value, ok := output[key].(string); ok {
-			if summary := compactRuntimeTaskSummary(value); summary != "" {
-				return summary
-			}
-		}
-	}
-	if encoded, err := json.Marshal(output); err == nil {
-		if summary := compactRuntimeTaskSummary(string(encoded)); summary != "" && summary != "{}" {
-			return summary
-		}
-	}
-	return "运行成功"
-}
-
-func compactRuntimeTaskSummary(value string) string {
-	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
-	runes := []rune(value)
-	if len(runes) > maxPrivateTaskSummaryLen {
-		value = string(runes[:maxPrivateTaskSummaryLen])
-	}
-	return value
 }
 
 var terminalEventNamespace = uuid.MustParse("b61ef958-9798-5f8f-998b-9d9f5de7c2e8")

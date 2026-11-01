@@ -142,6 +142,9 @@ type HistoryItem struct {
 	CompletedAt         *string  `json:"completed_at,omitempty"`
 	CompletionSummary   *string  `json:"completion_summary,omitempty"`
 	CreatedAt           string   `json:"created_at"`
+
+	// CompletionSummaryRedacted 表示摘要已按查看者过滤。
+	CompletionSummaryRedacted bool `json:"completion_summary_redacted,omitempty"`
 }
 
 type HistoryListResponse struct {
@@ -176,4 +179,7 @@ type DetailResponse struct {
 	CreatedAt         string           `json:"created_at"`
 	Recommendations   []Recommendation `json:"recommendations"`
 	NextAction        *TaskNextAction  `json:"next_action,omitempty"`
+
+	// CompletionSummaryRedacted 表示摘要已按查看者过滤。
+	CompletionSummaryRedacted bool `json:"completion_summary_redacted,omitempty"`
 }

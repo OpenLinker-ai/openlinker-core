@@ -16,3 +16,11 @@ WHERE run.id = $1
   AND task.chosen_agent_id = run.agent_id
   AND evidence.agent_id = run.agent_id
 RETURNING task.id;
+
+-- name: ListTaskCompletionSources :many
+-- The stored summary can cut a secret in half, so reads re-derive it from the
+-- Run output. The Agent may be gone; such reads count as non-creator reads.
+SELECT run.id AS run_id, run.output, agent.creator_id, agent.endpoint_auth_header
+FROM runs run
+LEFT JOIN agents agent ON agent.id = run.agent_id
+WHERE run.id = ANY($1::uuid[]);

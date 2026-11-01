@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 	"testing"
 	"time"
 
@@ -271,15 +270,6 @@ func TestTerminalRuntimeResultPayloadPreservesProductResult(t *testing.T) {
 	require.Equal(t, "Run deadline exceeded", payload["error_message"])
 	require.NotContains(t, fmt.Sprint(payload), failure.Error.ErrorCode)
 	require.NotContains(t, fmt.Sprint(payload), failure.Error.Message)
-}
-
-func TestPrivateTaskCompletionSummaryUsesStableOutputFallbacks(t *testing.T) {
-	require.Equal(t, "done now", privateTaskCompletionSummary(map[string]interface{}{"summary": "  done\nnow  "}))
-	require.Equal(t, `{"rows":3}`, privateTaskCompletionSummary(map[string]interface{}{"rows": 3}))
-	require.Equal(t, "运行成功", privateTaskCompletionSummary(map[string]interface{}{}))
-	require.Len(t, []rune(privateTaskCompletionSummary(map[string]interface{}{
-		"summary": strings.Repeat("数", maxPrivateTaskSummaryLen+1),
-	})), maxPrivateTaskSummaryLen)
 }
 
 func runtimeResultTestIdentity() RuntimeAttemptIdentity {

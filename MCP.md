@@ -126,7 +126,9 @@ A selection grants callers of the parent Agent access to the selected tool,
 including an owner's private MCP service. The UI requires explicit acknowledgment:
 callers may obtain tool results and trigger side effects. Public Agent/catalog
 responses do not expose the association, credentials or endpoint. Model-visible
-tool names, descriptions and results are not secrets.
+tool names, descriptions and results are not secrets. A tool from another creator
+returns output filtered by Core's run output rules, so an endpoint that echoes its
+request does not hand over its credential.
 
 Core snapshots each selection at Run admission and only dispatches it to Hosts
 advertising `mcp_bindings.v1`. Unknown/offline Hosts preserve queuing; a known
