@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/google/uuid"
@@ -99,4 +101,45 @@ func projectRunMessage(projection runoutput.Projection, message RunMessageRespon
 	message.Content, contentChanged = projection.Text(message.Content)
 	message.OutputRedacted = payloadChanged || contentChanged
 	return message
+}
+
+// delegatedRunProjection 把调用方 Agent 的创建者当作查看者：Worker 属于他，子 Agent 的令牌不属于他。
+// 任一 Agent 已不存在时无法确认是同一创建者，按非创建者处理。
+func delegatedRunProjection(callerCreatorID, targetCreatorID *uuid.UUID, targetEndpointToken *string) runoutput.Projection {
+	var viewerID, creatorID uuid.UUID
+	if callerCreatorID != nil {
+		viewerID = *callerCreatorID
+	}
+	if targetCreatorID != nil {
+		creatorID = *targetCreatorID
+	}
+	return runoutput.ForViewer(viewerID, creatorID, targetEndpointToken)
+}
+
+// projectDelegatedRun 过滤后返回内容是否有变化。未变化的输出保留原始字节，数字的写法不受影响。
+func projectDelegatedRun(view *DelegatedRunView, projection runoutput.Projection) (bool, error) {
+	if !projection.Active() {
+		return false, nil
+	}
+	var outputChanged bool
+	if len(view.Output) > 0 {
+		var output map[string]any
+		decoder := json.NewDecoder(bytes.NewReader(view.Output))
+		decoder.UseNumber()
+		if err := decoder.Decode(&output); err != nil {
+			return false, err
+		}
+		projected, changed := projection.Object(output)
+		if changed {
+			raw, err := json.Marshal(projected)
+			if err != nil {
+				return false, err
+			}
+			view.Output = raw
+			outputChanged = true
+		}
+	}
+	var errorChanged bool
+	view.ErrorMessage, errorChanged = projection.Text(view.ErrorMessage)
+	return outputChanged || errorChanged, nil
 }

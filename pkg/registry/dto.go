@@ -201,6 +201,9 @@ type ProxyRunResponse struct {
 	FinishedAt            string         `json:"finished_at,omitempty"`
 	CreatedAt             string         `json:"created_at"`
 	UpdatedAt             string         `json:"updated_at"`
+
+	// OutputRedacted 表示 output、output_summary 或 error_message 已按查看者过滤。
+	OutputRedacted bool `json:"output_redacted,omitempty"`
 }
 
 type RemoteProxyRunResponse struct {
@@ -224,6 +227,9 @@ type ProxyRunArtifactResponse struct {
 	FileSHA256       string         `json:"file_sha256,omitempty"`
 	FileSizeBytes    *int64         `json:"file_size_bytes,omitempty"`
 	CreatedAt        string         `json:"created_at"`
+
+	// OutputRedacted 表示 title 或 content 已按查看者过滤。file_uri 指向的文件内容不处理。
+	OutputRedacted bool `json:"output_redacted,omitempty"`
 }
 
 type ProxyRunArtifactListResponse struct {

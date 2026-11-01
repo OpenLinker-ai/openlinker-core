@@ -21,6 +21,14 @@ runtime protocol, and migration contract are declared stable.
   read the original, and workflow nodes still receive the original output.
   Non-creators lose `headers.Set-Cookie`-style fields and IP-valued `origin`
   from diagnostic Agents, with no way to recover them.
+- The same filter now covers three more reads. `POST
+  /api/v1/agent-runtime/delegated-runs/read` filters a child Run when the caller
+  Agent and the child Agent have different creators; the response shape does not
+  change and carries no marker, because every SDK rejects unknown fields there.
+  `completion_summary` on task and admin task reads is re-derived from the filtered
+  Run output and carries `completion_summary_redacted`. Proxy Run reads and
+  `POST /proxy/remote-runs` filter `output`, `output_summary`, `error_message` and
+  artifact `title`/`content`, and carry `output_redacted`.
 
 ### Fixed
 

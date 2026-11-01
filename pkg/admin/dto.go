@@ -139,6 +139,9 @@ type TaskItem struct {
 	CreatedAt             string     `json:"created_at"`
 	User                  *TaskUser  `json:"user,omitempty"`
 	ChosenAgent           *TaskAgent `json:"chosen_agent,omitempty"`
+
+	// CompletionSummaryRedacted 表示摘要已过滤。管理员不是 Agent 创建者，一律读过滤后的内容。
+	CompletionSummaryRedacted bool `json:"completion_summary_redacted,omitempty"`
 }
 
 type TaskListResponse struct {

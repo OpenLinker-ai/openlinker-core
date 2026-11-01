@@ -3,6 +3,7 @@ package runoutput
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -123,4 +124,51 @@ func TestEventPayload(t *testing.T) {
 	kept, changed := Projection{}.EventPayload("run.started", raw)
 	assert.False(t, changed)
 	assert.Equal(t, raw, kept)
+}
+
+func TestCompletionSummaryUsesStableOutputFallbacks(t *testing.T) {
+	assert.Equal(t, "done now", CompletionSummary(map[string]any{"summary": "  done\nnow  "}))
+	assert.Equal(t, `{"rows":3}`, CompletionSummary(map[string]any{"rows": 3}))
+	assert.Equal(t, "运行成功", CompletionSummary(map[string]any{}))
+	assert.Len(t, []rune(CompletionSummary(map[string]any{
+		"summary": strings.Repeat("数", maxCompletionSummaryLength+1),
+	})), maxCompletionSummaryLength)
+}
+
+func TestProjectCompletionSummary(t *testing.T) {
+	const token = "seller-endpoint-token"
+	viewer, creator := uuid.New(), uuid.New()
+	tokenPtr := token
+	source := func(output string) *CompletionSource {
+		return &CompletionSource{Output: []byte(output), CreatorID: &creator, EndpointToken: &tokenPtr}
+	}
+	// 2000 rune 处切断令牌：已存摘要里只剩残段，规则和原值替换都命中不了。
+	long := strings.Repeat("x", maxCompletionSummaryLength-10) + " " + token
+	stored := CompletionSummary(map[string]any{"message": long})
+	require.Contains(t, stored, token[:9])
+	require.NotContains(t, stored, token)
+	raw, err := json.Marshal(map[string]any{"message": long})
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name, stored, want string
+		viewer             uuid.UUID
+		source             *CompletionSource
+		changed            bool
+	}{
+		{name: "creator keeps the stored text", stored: "signed with " + token, want: "signed with " + token, viewer: creator, source: source(`{"message":"signed with ` + token + `"}`)},
+		{name: "token in a summary key", stored: "signed with " + token, want: "signed with [redacted]", viewer: viewer, source: source(`{"message":"signed with ` + token + `"}`), changed: true},
+		{name: "echo is summarized again from the filtered output", stored: `{"headers":{"X-Openlinker-Token":["` + token + `"]},"note":"ok"}`, want: `{"headers":{},"note":"ok"}`, viewer: viewer, source: source(`{"headers":{"X-Openlinker-Token":["` + token + `"]},"note":"ok"}`), changed: true},
+		{name: "token cut by truncation", stored: stored, want: CompletionSummary(map[string]any{"message": strings.Repeat("x", maxCompletionSummaryLength-10) + " [redacted]"}), viewer: viewer, source: source(string(raw)), changed: true},
+		{name: "business summary", stored: "季度营收增长 12%", want: "季度营收增长 12%", viewer: viewer, source: source(`{"summary":"季度营收增长 12%"}`)},
+		{name: "run is gone", stored: `{"headers":{"X-Forwarded-For":["203.0.113.7"]},"origin":"203.0.113`, want: "[redacted]", viewer: viewer, changed: true},
+		{name: "output is gone", stored: "signed with " + token, want: "signed with [redacted]", viewer: viewer, source: source(`null`), changed: true},
+		{name: "agent is gone", stored: "ok", want: "ok", viewer: creator, source: &CompletionSource{Output: []byte(`{"text":"ok"}`)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, changed := ProjectCompletionSummary(tc.viewer, tc.stored, tc.source)
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.changed, changed)
+		})
+	}
 }

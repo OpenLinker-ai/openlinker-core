@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openlinker.ai/contracts/delegated-run-read.v1",
   "title": "Optional delegated_run_read.v1 HTTP capability",
-  "description": "POST /api/v1/agent-runtime/delegated-runs/read. Requires the openlinker.runtime.v2/delegation signed audience, exact request proof, an active parent Attempt and a direct child relation. The immutable base Runtime wire contract remains unchanged.",
+  "description": "POST /api/v1/agent-runtime/delegated-runs/read. Requires the openlinker.runtime.v2/delegation signed audience, exact request proof, an active parent Attempt and a direct child relation. The immutable base Runtime wire contract remains unchanged. When the caller Agent and the child Agent have different creators, output and error_message hold the content filtered by Core's run output rules, with no marker in the response.",
   "$defs": {
     "Request": {
       "type": "object",

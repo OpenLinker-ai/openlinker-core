@@ -15,6 +15,7 @@ import (
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runoutput"
 )
 
 const (
@@ -337,9 +338,19 @@ func (s *Service) ListTasks(ctx context.Context, query, status string, limit, of
 		return nil, httpx.Internal("加载任务总数失败")
 	}
 
+	sources, err := s.taskCompletionSources(ctx, items)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]TaskItem, 0, len(items))
 	for _, row := range items {
-		out = append(out, toTaskItem(&row))
+		item := toTaskItem(&row)
+		if row.TaskQuery.CompletionSummary != nil && row.TaskQuery.CompletionRunID != nil {
+			summary, changed := runoutput.ProjectCompletionSummary(uuid.Nil, *row.TaskQuery.CompletionSummary, sources[*row.TaskQuery.CompletionRunID])
+			item.CompletionSummary = &summary
+			item.CompletionSummaryRedacted = changed
+		}
+		out = append(out, item)
 	}
 	return &TaskListResponse{Items: out, Total: total, Limit: limit, Offset: offset}, nil
 }
@@ -380,6 +391,30 @@ func normalizeAgentFilter(value string, allowedValues map[string]bool) string {
 		return value
 	}
 	return ""
+}
+
+func (s *Service) taskCompletionSources(ctx context.Context, items []db.ListAdminTasksRow) (map[uuid.UUID]*runoutput.CompletionSource, error) {
+	runIDs := make([]uuid.UUID, 0, len(items))
+	for i := range items {
+		if items[i].TaskQuery.CompletionRunID != nil {
+			runIDs = append(runIDs, *items[i].TaskQuery.CompletionRunID)
+		}
+	}
+	if len(runIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := s.queries.ListTaskCompletionSources(ctx, runIDs)
+	if err != nil {
+		log.Error().Err(err).Msg("admin.taskCompletionSources")
+		return nil, httpx.Internal("加载任务列表失败")
+	}
+	sources := make(map[uuid.UUID]*runoutput.CompletionSource, len(rows))
+	for _, row := range rows {
+		sources[row.RunID] = &runoutput.CompletionSource{
+			Output: row.Output, CreatorID: row.CreatorID, EndpointToken: row.EndpointAuthHeader,
+		}
+	}
+	return sources, nil
 }
 
 func normalizeTaskFilter(value string, allowedValues map[string]bool) string {
