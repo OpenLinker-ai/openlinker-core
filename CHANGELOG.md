@@ -23,6 +23,18 @@ runtime protocol, and migration contract are declared stable.
   their existing path and responses.
   The deadline reconciler now isolates a failing candidate instead of stopping
   the batch. No protocol message, API, configuration or migration changed.
+- The availability monitor probes each direct HTTP/MCP Agent once per staleness
+  window across Core replicas (per-Agent advisory lock), and stores a result
+  only if the Agent was not edited during the probe; any guard or write failure
+  stores nothing and raises no alert.
+- Saving Agent settings no longer reverts a concurrent visibility or connection
+  change made elsewhere; the read, carry-over, validation and update run in one
+  transaction.
+- Retrying self-registration with the same Agent Token and slug after a lost
+  response returns the original `{agent, agent_token}` (201) instead of 401.
+  This applies only to tokens redeemed by that registration; every other case is
+  unchanged. A database error while looking up the token now returns 500
+  instead of 401.
 - Agent Token `last_used_at` is recorded again for Runtime v2. It stopped
   updating when the v1 execution paths were removed, so every token showed as
   never used. Runtime authentication records it, and established WebSocket

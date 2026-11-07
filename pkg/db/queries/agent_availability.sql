@@ -77,6 +77,34 @@ WHERE a.lifecycle_status = 'active'
 ORDER BY COALESCE(s.last_checked_at, TIMESTAMPTZ 'epoch') ASC, a.created_at ASC
 LIMIT $2;
 
+-- name: TryLockAgentAvailabilityCheck :one
+-- 多副本巡检协调：会话级 advisory lock，只有持锁副本探测该 Agent。
+SELECT pg_try_advisory_lock(
+    hashtextextended('agent-availability-check:' || ($1::uuid)::text, 0)
+);
+
+-- name: UnlockAgentAvailabilityCheck :one
+SELECT pg_advisory_unlock(
+    hashtextextended('agent-availability-check:' || ($1::uuid)::text, 0)
+);
+
+-- name: IsAgentAvailabilityCheckDue :one
+-- 持锁后复核：快照仍过期才探测；其他副本刚写入的结果说明本窗口已巡检。
+SELECT NOT EXISTS (
+    SELECT 1
+    FROM agent_availability_snapshots s
+    WHERE s.agent_id = $1
+      AND s.last_checked_at >= NOW() - ($2::int * INTERVAL '1 second')
+);
+
+-- name: LockAgentIfUnchangedSince :one
+-- 巡检结果只在 Agent 行仍是探测时读取的版本时写入；FOR SHARE 持有到写入提交，
+-- 编辑不能插在确认与写入之间。行已变化时返回 0 行，结果丢弃，下一轮重新探测。
+SELECT id
+FROM agents
+WHERE id = $1 AND updated_at = $2
+FOR SHARE;
+
 -- name: UpsertAgentAvailabilityAlert :one
 INSERT INTO agent_availability_alerts (
     agent_id, creator_id, alert_type, severity, availability_status,

@@ -238,6 +238,32 @@ func (q *Queries) GetAgentByIDForOwner(ctx context.Context, arg GetAgentByIDForO
 	return a, err
 }
 
+const getAgentByIDForOwnerForUpdate = `-- name: GetAgentByIDForOwnerForUpdate :one
+WITH profile_lock AS MATERIALIZED (
+    SELECT pg_advisory_xact_lock(
+        hashtextextended('runtime-agent-profile:' || ($1::uuid)::text, 0)
+    )
+)
+SELECT agents.id, agents.creator_id, agents.slug, agents.name, agents.description, agents.endpoint_url,
+       agents.endpoint_auth_header, agents.price_per_call_cents, agents.tags,
+       agents.lifecycle_status, agents.visibility, agents.certification_status,
+       agents.rejection_reason, agents.certified_at,
+       agents.total_calls, agents.total_revenue_cents,
+       agents.webhook_url, agents.connection_mode, agents.mcp_tool_name, agents.created_at, agents.updated_at
+FROM agents
+CROSS JOIN profile_lock
+WHERE agents.id = $1 AND agents.creator_id = $2
+FOR NO KEY UPDATE OF agents`
+
+// GetAgentByIDForOwnerForUpdate 必须在事务内调用：锁定创作者 Agent 行直到事务结束，
+// 取锁顺序与 UpdateAgentDraft 相同（profile advisory lock → 行锁）。
+func (q *Queries) GetAgentByIDForOwnerForUpdate(ctx context.Context, arg GetAgentByIDForOwnerParams) (Agent, error) {
+	row := q.db.QueryRow(ctx, getAgentByIDForOwnerForUpdate, arg.ID, arg.CreatorID)
+	var a Agent
+	err := scanAgent(row, &a)
+	return a, err
+}
+
 const getAgentByID = `-- name: GetAgentByID :one
 SELECT id, creator_id, slug, name, description, endpoint_url,
        endpoint_auth_header, price_per_call_cents, tags,

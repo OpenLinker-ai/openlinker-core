@@ -80,6 +80,26 @@ SELECT id, creator_id, slug, name, description, endpoint_url,
 FROM agents
 WHERE id = $1 AND creator_id = $2;
 
+-- name: GetAgentByIDForOwnerForUpdate :one
+-- 创作者编辑在同一事务内锁定读取：与 UpdateAgentDraft 相同先取 per-Agent
+-- profile advisory lock 再锁行，省略字段沿用的旧值、连接设置校验和写入因此
+-- 基于同一行版本，并发的可见性 / 连接修改不会被旧值覆盖。
+WITH profile_lock AS MATERIALIZED (
+    SELECT pg_advisory_xact_lock(
+        hashtextextended('runtime-agent-profile:' || ($1::uuid)::text, 0)
+    )
+)
+SELECT agents.id, agents.creator_id, agents.slug, agents.name, agents.description, agents.endpoint_url,
+       agents.endpoint_auth_header, agents.price_per_call_cents, agents.tags,
+       agents.lifecycle_status, agents.visibility, agents.certification_status,
+       agents.rejection_reason, agents.certified_at,
+       agents.total_calls, agents.total_revenue_cents,
+       agents.webhook_url, agents.connection_mode, agents.mcp_tool_name, agents.created_at, agents.updated_at
+FROM agents
+CROSS JOIN profile_lock
+WHERE agents.id = $1 AND agents.creator_id = $2
+FOR NO KEY UPDATE OF agents;
+
 -- name: GetAgentByID :one
 SELECT id, creator_id, slug, name, description, endpoint_url,
        endpoint_auth_header, price_per_call_cents, tags,

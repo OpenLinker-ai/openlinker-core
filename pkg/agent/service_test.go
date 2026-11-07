@@ -64,10 +64,12 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -583,6 +585,125 @@ func TestUpdateAgentNodeVisibilityAndDisabledBoundaries(t *testing.T) {
 
 	_, err = svc.SetVisibility(ctx, agentID, ownerID, "private")
 	assertHTTPStatus(t, err, http.StatusForbidden)
+}
+
+// waitForBlockedBackend waits until some backend of the test database is
+// queued on a heavyweight lock, i.e. the concurrent writer under test is
+// parked behind the transaction the test holds open.
+func waitForBlockedBackend(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var waiting int
+		err := pool.QueryRow(context.Background(), `
+SELECT COUNT(*) FROM pg_stat_activity
+WHERE datname = current_database() AND state = 'active' AND wait_event_type = 'Lock'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	}, 30*time.Second, 10*time.Millisecond)
+}
+
+// updateAgentRacingWith starts UpdateAgent while another transaction holds an
+// uncommitted settings change, commits that change once UpdateAgent is queued
+// behind it, and returns UpdateAgent's result.
+func updateAgentRacingWith(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	svc *agent.Service,
+	agentID, creatorID uuid.UUID,
+	concurrentSQL string,
+	req *agent.UpdateAgentRequest,
+) (*agent.AgentResponse, error) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, concurrentSQL, agentID)
+	require.NoError(t, err)
+
+	type result struct {
+		resp *agent.AgentResponse
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resp, err := svc.UpdateAgent(ctx, agentID, creatorID, req)
+		done <- result{resp: resp, err: err}
+	}()
+	waitForBlockedBackend(t, pool)
+	require.NoError(t, tx.Commit(ctx))
+	select {
+	case got := <-done:
+		return got.resp, got.err
+	case <-time.After(30 * time.Second):
+		t.Fatal("UpdateAgent did not finish after the concurrent change committed")
+		return nil, nil
+	}
+}
+
+func TestUpdateAgentKeepsConcurrentVisibilityChangeWhenOmitted(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	ownerID := insertCreator(t, pool)
+	created, err := svc.CreateAgent(ctx, ownerID, validCreateReq(freshSlug("update-visibility-race")))
+	require.NoError(t, err)
+	require.Equal(t, "public", created.Visibility)
+	agentID := uuid.MustParse(created.ID)
+
+	updated, err := updateAgentRacingWith(t, pool, svc, agentID, ownerID,
+		`UPDATE agents SET visibility = 'private' WHERE id = $1`,
+		&agent.UpdateAgentRequest{
+			Name:              "Renamed While Hidden",
+			Description:       "settings save without visibility",
+			PricePerCallCents: 700,
+			Tags:              []string{"settings"},
+		})
+	require.NoError(t, err)
+	assert.Equal(t, "Renamed While Hidden", updated.Name)
+	assert.Equal(t, int32(700), updated.PricePerCallCents)
+	assert.Equal(t, "private", updated.Visibility, "omitted visibility must not revert a concurrent change")
+
+	var visibility, name, endpoint string
+	var authHeader *string
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT visibility, name, endpoint_url, endpoint_auth_header FROM agents WHERE id = $1`, agentID).
+		Scan(&visibility, &name, &endpoint, &authHeader))
+	assert.Equal(t, "private", visibility)
+	assert.Equal(t, "Renamed While Hidden", name)
+	assert.Equal(t, created.EndpointURL, endpoint)
+	require.NotNil(t, authHeader, "omitted auth header keeps carrying over")
+	assert.Equal(t, "Bearer secret", *authHeader)
+}
+
+func TestUpdateAgentKeepsConcurrentConnectionChangeWhenOmitted(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	ownerID := insertCreator(t, pool)
+	created, err := svc.CreateAgent(ctx, ownerID, validCreateReq(freshSlug("update-connection-race")))
+	require.NoError(t, err)
+	require.Equal(t, "direct_http", created.ConnectionMode)
+	agentID := uuid.MustParse(created.ID)
+
+	updated, err := updateAgentRacingWith(t, pool, svc, agentID, ownerID,
+		`UPDATE agents
+		 SET connection_mode = 'mcp_server', mcp_tool_name = 'search',
+		     endpoint_url = 'https://example.com/mcp'
+		 WHERE id = $1`,
+		&agent.UpdateAgentRequest{
+			Name:              "Moved Endpoint",
+			Description:       "endpoint change without connection mode",
+			EndpointURL:       "https://example.com/mcp-v2",
+			PricePerCallCents: 500,
+			Tags:              []string{"settings"},
+		})
+	require.NoError(t, err)
+	assert.Equal(t, "mcp_server", updated.ConnectionMode, "omitted connection_mode must not revert a concurrent change")
+	require.NotNil(t, updated.MCPToolName)
+	assert.Equal(t, "search", *updated.MCPToolName)
+	assert.Equal(t, "https://example.com/mcp-v2", updated.EndpointURL)
 }
 
 func TestUpdateAgent_ApprovedEditable(t *testing.T) {
@@ -1549,6 +1670,411 @@ func TestRunDueAvailabilityChecksEscalatesAndIsolatesAlerts(t *testing.T) {
 	read, err := svc.MarkAvailabilityAlertRead(ctx, uid, alertID)
 	require.NoError(t, err)
 	assert.NotNil(t, read.ReadAt)
+}
+
+// scriptedDryRunner counts probes per Agent and can run a hook mid-probe.
+type scriptedDryRunner struct {
+	mu     sync.Mutex
+	calls  map[uuid.UUID]int
+	hook   func(ctx context.Context, agentID uuid.UUID)
+	output map[string]interface{}
+	errMsg string
+}
+
+func newScriptedDryRunner(errMsg string) *scriptedDryRunner {
+	return &scriptedDryRunner{
+		calls:  map[uuid.UUID]int{},
+		output: map[string]interface{}{"result": "pong"},
+		errMsg: errMsg,
+	}
+}
+
+func (r *scriptedDryRunner) DryRun(ctx context.Context, a *db.Agent, _ map[string]interface{}) (map[string]interface{}, string) {
+	r.mu.Lock()
+	r.calls[a.ID]++
+	hook := r.hook
+	r.mu.Unlock()
+	if hook != nil {
+		hook(ctx, a.ID)
+	}
+	if r.errMsg != "" {
+		return nil, r.errMsg
+	}
+	return r.output, ""
+}
+
+func (r *scriptedDryRunner) callsFor(agentID uuid.UUID) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls[agentID]
+}
+
+func TestRunDueAvailabilityChecksProbesEachAgentOnceAcrossReplicas(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	const staleSeconds = 3600
+
+	setup := newTestService(t, pool)
+	setup.SetDryRunner(mockDryRunner{output: map[string]interface{}{"result": "pong"}})
+	uid := insertCreator(t, pool)
+	first := createDryRunReadyAgent(t, setup, uid, freshSlug("replica-first"))
+	second := createDryRunReadyAgent(t, setup, uid, freshSlug("replica-second"))
+
+	// Replica B stalls inside its probe of the first Agent while replica A runs
+	// a whole batch, then resumes and reaches the second Agent after A has
+	// already checked it.
+	replicaB := newTestService(t, pool)
+	runnerB := newScriptedDryRunner("endpoint 调用失败: timeout")
+	entered, resume := make(chan struct{}), make(chan struct{})
+	var resumeOnce sync.Once
+	resumeB := func() { resumeOnce.Do(func() { close(resume) }) }
+	t.Cleanup(resumeB)
+	runnerB.hook = func(_ context.Context, agentID uuid.UUID) {
+		if agentID == first {
+			close(entered)
+			<-resume
+		}
+	}
+	replicaB.SetDryRunner(runnerB)
+	type batch struct {
+		resp *agent.AvailabilityCheckBatchResponse
+		err  error
+	}
+	doneB := make(chan batch, 1)
+	go func() {
+		resp, err := replicaB.RunDueAvailabilityChecks(ctx, 10, staleSeconds)
+		doneB <- batch{resp: resp, err: err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("replica B never started probing the first Agent")
+	}
+
+	replicaA := newTestService(t, pool)
+	runnerA := newScriptedDryRunner("endpoint 调用失败: timeout")
+	replicaA.SetDryRunner(runnerA)
+	respA, err := replicaA.RunDueAvailabilityChecks(ctx, 10, staleSeconds)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), respA.Checked, "replica A must skip the Agent replica B is probing")
+	assert.Equal(t, 0, runnerA.callsFor(first))
+	assert.Equal(t, 1, runnerA.callsFor(second))
+
+	resumeB()
+	var gotB batch
+	select {
+	case gotB = <-doneB:
+	case <-time.After(30 * time.Second):
+		t.Fatal("replica B batch did not finish")
+	}
+	require.NoError(t, gotB.err)
+	assert.Equal(t, int32(1), gotB.resp.Checked, "replica B must not re-probe an Agent checked in this window")
+	assert.Equal(t, 1, runnerB.callsFor(first))
+	assert.Equal(t, 0, runnerB.callsFor(second))
+
+	for _, agentID := range []uuid.UUID{first, second} {
+		var failures int32
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT consecutive_failures FROM agent_availability_snapshots WHERE agent_id = $1`, agentID).
+			Scan(&failures))
+		assert.Equal(t, int32(1), failures, "one failed probe per staleness window")
+	}
+
+	// A single replica keeps re-checking once the window has passed.
+	_, err = pool.Exec(ctx,
+		`UPDATE agent_availability_snapshots SET last_checked_at = NOW() - INTERVAL '2 hours'`)
+	require.NoError(t, err)
+	respA, err = replicaA.RunDueAvailabilityChecks(ctx, 10, staleSeconds)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), respA.Checked)
+}
+
+func TestRunDueAvailabilityChecksDiscardsResultWhenAgentChangesDuringProbe(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	uid := insertCreator(t, pool)
+	svc.SetDryRunner(mockDryRunner{output: map[string]interface{}{"result": "pong"}})
+	agentID := createDryRunReadyAgent(t, svc, uid, freshSlug("monitor-edit-race"))
+
+	runner := newScriptedDryRunner("")
+	runner.hook = func(hookCtx context.Context, id uuid.UUID) {
+		_, err := pool.Exec(hookCtx,
+			`UPDATE agents SET endpoint_url = 'https://example.com/agent/moved' WHERE id = $1`, id)
+		require.NoError(t, err)
+	}
+	svc.SetDryRunner(runner)
+	resp, err := svc.RunDueAvailabilityChecks(ctx, 10, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 1, runner.callsFor(agentID))
+	assert.Equal(t, int32(0), resp.Checked, "a probe of the previous endpoint must be discarded")
+	assert.Empty(t, resp.Alerts)
+
+	var snapshots int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM agent_availability_snapshots WHERE agent_id = $1`, agentID).Scan(&snapshots))
+	assert.Equal(t, 0, snapshots, "no stale healthy snapshot after an endpoint change")
+	var dryRunResult string
+	var dryRunAt *time.Time
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT dry_run_last_result, dry_run_at FROM agent_onboarding_status WHERE agent_id = $1`, agentID).
+		Scan(&dryRunResult, &dryRunAt))
+	assert.Equal(t, "pending", dryRunResult)
+	assert.Nil(t, dryRunAt)
+
+	// The Agent stays due and the next pass probes the current endpoint.
+	runner.hook = nil
+	resp, err = svc.RunDueAvailabilityChecks(ctx, 10, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), resp.Checked)
+	assert.Equal(t, int32(1), resp.Passed)
+	var status string
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT availability_status FROM agent_availability_snapshots WHERE agent_id = $1`, agentID).Scan(&status))
+	assert.Equal(t, "healthy", status)
+
+	// The creator-triggered dry-run keeps writing its result unconditionally.
+	runner.hook = func(hookCtx context.Context, id uuid.UUID) {
+		_, err := pool.Exec(hookCtx, `UPDATE agents SET description = 'edited' WHERE id = $1`, id)
+		require.NoError(t, err)
+	}
+	runner.errMsg = "endpoint 调用失败: connection refused"
+	dryRun, err := svc.RunDryRun(ctx, agentID, uid)
+	require.NoError(t, err)
+	assert.Equal(t, "degraded", dryRun.Availability.Status)
+}
+
+// terminateAvailabilityLockHolder terminates the backend holding the Agent's
+// monitor check lock and waits until it has exited.
+func terminateAvailabilityLockHolder(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID uuid.UUID) {
+	t.Helper()
+	var lockPID int32
+	require.NoError(t, pool.QueryRow(ctx, `
+SELECT l.pid
+FROM pg_locks l
+CROSS JOIN (SELECT hashtextextended('agent-availability-check:' || $1::text, 0) AS key) k
+WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
+  AND l.classid::bigint = (k.key >> 32) & 4294967295
+  AND l.objid::bigint = k.key & 4294967295`, agentID).Scan(&lockPID))
+	var signaled bool
+	require.NoError(t, pool.QueryRow(ctx, `SELECT pg_terminate_backend($1)`, lockPID).Scan(&signaled))
+	require.True(t, signaled)
+	require.Eventually(t, func() bool {
+		var gone bool
+		err := pool.QueryRow(ctx,
+			`SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)`, lockPID).Scan(&gone)
+		return err == nil && gone
+	}, 30*time.Second, 10*time.Millisecond)
+}
+
+// assertNoStoredAvailabilityResult checks that a monitor result left no trace.
+func assertNoStoredAvailabilityResult(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
+	t.Helper()
+	ctx := context.Background()
+	var snapshots, alerts int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM agent_availability_snapshots WHERE agent_id = $1`, agentID).Scan(&snapshots))
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM agent_availability_alerts WHERE agent_id = $1`, agentID).Scan(&alerts))
+	assert.Zero(t, snapshots, "no availability snapshot may be stored")
+	assert.Zero(t, alerts, "no availability alert may be sent")
+	var dryRunResult string
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT dry_run_last_result FROM agent_onboarding_status WHERE agent_id = $1`, agentID).Scan(&dryRunResult))
+	assert.Equal(t, "pending", dryRunResult, "no onboarding dry-run result may be stored")
+}
+
+func TestRunDueAvailabilityChecksDiscardsResultWhenLockSessionDiesBeforeCommit(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	uid := insertCreator(t, pool)
+	agentID := createDryRunReadyAgent(t, svc, uid, freshSlug("monitor-lock-commit"))
+	svc.SetDryRunner(newScriptedDryRunner("endpoint 调用失败: timeout"))
+	hookCalls := 0
+	svc.SetAvailabilityResultBeforeCommitHook(func(hookCtx context.Context, id uuid.UUID) {
+		// The guard and the writes already ran; the lock session dies before commit.
+		hookCalls++
+		terminateAvailabilityLockHolder(t, hookCtx, pool, id)
+	})
+
+	resp, err := svc.RunDueAvailabilityChecks(ctx, 10, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 1, hookCalls)
+	assert.Equal(t, int32(0), resp.Checked)
+	assert.Empty(t, resp.Alerts)
+	assertNoStoredAvailabilityResult(t, pool, agentID)
+
+	svc.SetAvailabilityResultBeforeCommitHook(nil)
+	resp, err = svc.RunDueAvailabilityChecks(ctx, 10, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), resp.Checked)
+	assert.Equal(t, int32(1), resp.Failed)
+	require.Len(t, resp.Alerts, 1)
+}
+
+// newShortLockTimeoutService returns a Service on its own pool whose sessions
+// give up on row locks after 200ms.
+func newShortLockTimeoutService(t *testing.T) *agent.Service {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(skipIfNoDB(t))
+	require.NoError(t, err)
+	cfg.ConnConfig.RuntimeParams["lock_timeout"] = "200ms"
+	shortLockPool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(shortLockPool.Close)
+	return agent.NewService(shortLockPool, &config.Config{})
+}
+
+func TestRunDueAvailabilityChecksSendsNothingWhenGuardTimesOut(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	svc := newShortLockTimeoutService(t)
+
+	uid := insertCreator(t, pool)
+	agentID := createDryRunReadyAgent(t, newTestService(t, pool), uid, freshSlug("monitor-guard-timeout"))
+
+	// While the probe runs, an endpoint edit takes the Agent row and has not
+	// committed when the monitor tries to store its result.
+	var editor pgx.Tx
+	runner := newScriptedDryRunner("endpoint 调用失败: connection refused")
+	runner.hook = func(hookCtx context.Context, id uuid.UUID) {
+		var err error
+		editor, err = pool.Begin(hookCtx)
+		require.NoError(t, err)
+		_, err = editor.Exec(hookCtx, `SELECT 1 FROM agents WHERE id = $1 FOR UPDATE`, id)
+		require.NoError(t, err)
+	}
+	svc.SetDryRunner(runner)
+
+	resp, err := svc.RunDueAvailabilityChecks(ctx, 10, 0)
+	require.NotNil(t, editor)
+	require.NoError(t, editor.Rollback(ctx))
+	require.NoError(t, err)
+	assert.Equal(t, 1, runner.callsFor(agentID))
+	assert.Equal(t, int32(0), resp.Checked, "an unvalidated result must not be counted")
+	assert.Empty(t, resp.Alerts, "an unvalidated result must not alert")
+	assertNoStoredAvailabilityResult(t, pool, agentID)
+}
+
+func TestRunDueAvailabilityChecksSendsNothingWhenOnboardingWriteFails(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	svc := newShortLockTimeoutService(t)
+
+	uid := insertCreator(t, pool)
+	agentID := createDryRunReadyAgent(t, newTestService(t, pool), uid, freshSlug("monitor-onboarding-blocked"))
+
+	// While the probe runs, another transaction holds the onboarding row, so
+	// the monitor's dry-run result write times out inside the guarded write.
+	var blocker pgx.Tx
+	runner := newScriptedDryRunner("endpoint 调用失败: connection refused")
+	runner.hook = func(hookCtx context.Context, id uuid.UUID) {
+		var err error
+		blocker, err = pool.Begin(hookCtx)
+		require.NoError(t, err)
+		_, err = blocker.Exec(hookCtx, `SELECT 1 FROM agent_onboarding_status WHERE agent_id = $1 FOR UPDATE`, id)
+		require.NoError(t, err)
+	}
+	svc.SetDryRunner(runner)
+
+	resp, err := svc.RunDueAvailabilityChecks(ctx, 10, 0)
+	require.NotNil(t, blocker)
+	require.NoError(t, blocker.Rollback(ctx))
+	require.NoError(t, err)
+	assert.Equal(t, 1, runner.callsFor(agentID))
+	assert.Equal(t, int32(0), resp.Checked, "a partially stored result must not be counted")
+	assert.Empty(t, resp.Alerts, "a partially stored result must not alert")
+	assertNoStoredAvailabilityResult(t, pool, agentID)
+}
+
+func TestRunDueAvailabilityChecksDiscardsResultWhenCheckLockIsLost(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	uid := insertCreator(t, pool)
+	agentID := createDryRunReadyAgent(t, svc, uid, freshSlug("monitor-lock-lost"))
+
+	runner := newScriptedDryRunner("")
+	runner.hook = func(hookCtx context.Context, id uuid.UUID) {
+		// Another replica could take the lock now, so this probe must not be stored.
+		terminateAvailabilityLockHolder(t, hookCtx, pool, id)
+	}
+	svc.SetDryRunner(runner)
+
+	resp, err := svc.RunDueAvailabilityChecks(ctx, 10, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 1, runner.callsFor(agentID))
+	assert.Equal(t, int32(0), resp.Checked, "a probe whose check lock was lost must be discarded")
+	assert.Empty(t, resp.Alerts)
+	assertNoStoredAvailabilityResult(t, pool, agentID)
+
+	// The next batch opens a fresh lock session and stores its result.
+	runner.hook = nil
+	resp, err = svc.RunDueAvailabilityChecks(ctx, 10, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), resp.Checked)
+	assert.Equal(t, int32(1), resp.Passed)
+}
+
+func TestRunDueAvailabilityChecksGuardsPreflightFailures(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	uid := insertCreator(t, pool)
+	probed := createDryRunReadyAgent(t, svc, uid, freshSlug("preflight-probed"))
+	edited := createDryRunReadyAgent(t, svc, uid, freshSlug("preflight-edited"))
+	mismatched := createDryRunReadyAgent(t, svc, uid, freshSlug("preflight-mismatch"))
+
+	// An unchanged Agent whose example no longer matches its schema still gets
+	// a stored failure and an alert.
+	_, err := pool.Exec(ctx, `
+UPDATE agent_capabilities
+SET input_schema = '{"type":"object","properties":{"other":{"type":"string"}},"required":["other"]}'::jsonb
+WHERE agent_id = $1`, mismatched)
+	require.NoError(t, err)
+
+	// While the first Agent is probed, the second one is edited and loses its
+	// examples, so its later preflight fails against a row the batch did not list.
+	runner := newScriptedDryRunner("")
+	runner.hook = func(hookCtx context.Context, id uuid.UUID) {
+		if id != probed {
+			return
+		}
+		_, err := pool.Exec(hookCtx, `DELETE FROM agent_examples WHERE agent_id = $1`, edited)
+		require.NoError(t, err)
+		_, err = pool.Exec(hookCtx, `UPDATE agents SET description = 'edited mid batch' WHERE id = $1`, edited)
+		require.NoError(t, err)
+	}
+	svc.SetDryRunner(runner)
+
+	resp, err := svc.RunDueAvailabilityChecks(ctx, 10, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), resp.Checked)
+	assert.Equal(t, int32(1), resp.Passed)
+	assert.Equal(t, int32(1), resp.Failed)
+	require.Len(t, resp.Alerts, 1)
+	assert.Equal(t, mismatched.String(), resp.Alerts[0].AgentID)
+
+	var snapshots, alerts int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM agent_availability_snapshots WHERE agent_id = $1`, edited).Scan(&snapshots))
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM agent_availability_alerts WHERE agent_id = $1`, edited).Scan(&alerts))
+	assert.Zero(t, snapshots, "a superseded preflight failure must not be stored")
+	assert.Zero(t, alerts, "a superseded preflight failure must not alert")
+
+	var status string
+	var failures int32
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT availability_status, consecutive_failures FROM agent_availability_snapshots WHERE agent_id = $1`,
+		mismatched).Scan(&status, &failures))
+	assert.Equal(t, "degraded", status)
+	assert.Equal(t, int32(1), failures)
 }
 
 // ────────────────────────────────────────────────────────────

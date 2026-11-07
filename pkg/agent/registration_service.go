@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -244,10 +245,16 @@ func (s *RegistrationService) AgentTokenResource(ctx context.Context, creatorID,
 }
 
 // RegisterAgentViaToken 用 pending Agent Token 完成 Agent 注册。
+//
+// 已兑换的同一枚 token 带同一 slug 重试时（客户端丢失了首次 201 响应），按当前
+// Agent 与 token 重放同形响应，不写库、不签发明文；其他情况保持原有拒绝语义。
 func (s *RegistrationService) RegisterAgentViaToken(ctx context.Context, req *RegisterAgentViaTokenRequest) (*RegisterAgentViaTokenResponse, error) {
-	matched, err := s.verifyPendingAgentToken(ctx, req.AgentToken)
+	matched, replayToken, err := s.verifyPendingAgentToken(ctx, req.AgentToken)
 	if err != nil {
 		return nil, err
+	}
+	if replayToken != nil {
+		return s.replayCompletedRegistration(ctx, *replayToken, req)
 	}
 	if err := s.ensureCreator(ctx, matched.CreatorUserID); err != nil {
 		return nil, err
@@ -342,6 +349,65 @@ func (s *RegistrationService) RegisterAgentViaToken(ctx context.Context, req *Re
 	}, nil
 }
 
+// replayCompletedRegistration answers a retry whose first 201 was lost. It only
+// succeeds when the token was redeemed by the registration that created the
+// creator's Agent, is still bound to it, and the request names that Agent's
+// slug; it performs no writes and never returns a plaintext token. Every other
+// case, including tokens issued directly for an existing Agent, keeps the
+// pre-existing 401.
+func (s *RegistrationService) replayCompletedRegistration(
+	ctx context.Context,
+	token db.AgentToken,
+	req *RegisterAgentViaTokenRequest,
+) (*RegisterAgentViaTokenResponse, error) {
+	rejected := httpx.Unauthorized("Agent Token 无效或已失效")
+	// An omitted slug is derived with a random suffix during registration, so
+	// it can never identify the Agent created by the first attempt.
+	slug := strings.TrimSpace(req.Slug)
+	if slug == "" || token.AgentID == nil {
+		return nil, rejected
+	}
+	if err := s.ensureCreator(ctx, token.CreatorUserID); err != nil {
+		var httpErr *httpx.HTTPError
+		if errors.As(err, &httpErr) && httpErr.Status >= http.StatusInternalServerError {
+			return nil, err
+		}
+		return nil, rejected
+	}
+	registered, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
+		ID:        *token.AgentID,
+		CreatorID: token.CreatorUserID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, rejected
+	}
+	if err != nil {
+		log.Error().Err(err).Str("token_id", token.ID.String()).Msg("registration.RegisterAgentViaToken: replay GetAgentByIDForOwner")
+		return nil, httpx.Internal("查询 Agent 失败")
+	}
+	if registered.Slug != slug || !redeemedByRegistration(token, registered) {
+		return nil, rejected
+	}
+	return &RegisterAgentViaTokenResponse{
+		Agent:      toAgentResponse(&registered),
+		AgentToken: agentTokenResponse(token),
+	}, nil
+}
+
+// redeemedByRegistration reports whether token became active by redeeming a
+// pending registration token that created agent. Registration runs
+// RedeemPendingAgentToken (redeemed_at = NOW()) and the Agent INSERT
+// (created_at DEFAULT now()) in one transaction, so both timestamps are equal,
+// and the pending token was minted in an earlier transaction. A token issued
+// directly for an existing Agent stamps redeemed_at at issue time, after the
+// Agent existed, so it can never satisfy both. The agent_tokens trigger keeps
+// created_at and redeemed_at immutable once a token is active.
+func redeemedByRegistration(token db.AgentToken, agent db.Agent) bool {
+	return token.RedeemedAt != nil &&
+		token.RedeemedAt.Equal(agent.CreatedAt) &&
+		token.CreatedAt.Before(*token.RedeemedAt)
+}
+
 func normalizeAgentTokenListOptions(opts ListAgentTokensOptions) ListAgentTokensOptions {
 	if opts.Limit <= 0 {
 		opts.Limit = 10
@@ -391,15 +457,20 @@ func (s *RegistrationService) ensureCreator(ctx context.Context, userID uuid.UUI
 
 // verifyPendingAgentToken 解析明文 token，按 prefix 拉候选后校验哈希。
 // 不修改状态；调用方在事务里走 RedeemPendingAgentToken 原子兑换。
-func (s *RegistrationService) verifyPendingAgentToken(ctx context.Context, plaintext string) (db.AgentToken, error) {
+// 没有待兑换 token 命中时，再匹配已绑定 Agent、未撤销未过期的 active_runtime
+// token，作为第二个返回值交给调用方判断是否属于注册重放。
+func (s *RegistrationService) verifyPendingAgentToken(ctx context.Context, plaintext string) (db.AgentToken, *db.AgentToken, error) {
 	plaintext = strings.TrimSpace(plaintext)
 	if !credential.HasAnyPrefix(plaintext, credential.AgentTokenPrefix) ||
 		!credential.ValidLengthForPrefix(plaintext, credential.AgentTokenPrefix) {
-		return db.AgentToken{}, httpx.Unauthorized("Agent Token 无效")
+		return db.AgentToken{}, nil, httpx.Unauthorized("Agent Token 无效")
 	}
 	tokens, err := s.queries.ListActiveAgentTokensByPrefix(ctx, plaintext[:agentTokenPrefixLen])
 	if err != nil {
-		return db.AgentToken{}, httpx.Unauthorized("Agent Token 无效")
+		// A lookup outage must not look like a bad credential: clients discard
+		// tokens on 401.
+		log.Error().Err(err).Msg("registration.RegisterAgentViaToken: ListActiveAgentTokensByPrefix")
+		return db.AgentToken{}, nil, httpx.Internal("查询 Agent Token 失败")
 	}
 	now := time.Now()
 	for _, t := range tokens {
@@ -410,10 +481,22 @@ func (s *RegistrationService) verifyPendingAgentToken(ctx context.Context, plain
 			continue
 		}
 		if credential.VerifyTokenHash(t.TokenHash, plaintext) {
-			return t, nil
+			return t, nil, nil
 		}
 	}
-	return db.AgentToken{}, httpx.Unauthorized("Agent Token 无效或已失效")
+	for i := range tokens {
+		t := tokens[i]
+		if t.Status != "active_runtime" || t.AgentID == nil || t.RevokedAt != nil {
+			continue
+		}
+		if t.ExpiresAt != nil && t.ExpiresAt.Before(now) {
+			continue
+		}
+		if credential.VerifyTokenHash(t.TokenHash, plaintext) {
+			return db.AgentToken{}, &t, nil
+		}
+	}
+	return db.AgentToken{}, nil, httpx.Unauthorized("Agent Token 无效或已失效")
 }
 
 func normalizeAgentTokenScopes(scopes []string, agent *db.Agent) ([]string, error) {
