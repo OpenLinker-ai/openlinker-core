@@ -47,6 +47,9 @@ type Service struct {
 	cfg                       *config.Config
 	dryRunner                 DryRunner
 	runtimeAttachReadOnlyMode bool
+	// availabilityResultBeforeCommit is a test hook run inside the monitor's
+	// guarded result transaction just before commit; nil in production.
+	availabilityResultBeforeCommit func(ctx context.Context, agentID uuid.UUID)
 }
 
 // NewRuntimeAttachReadOnlyService constructs the creator inventory reader
@@ -190,68 +193,81 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 //   - disabled → Forbidden
 //
 // Visibility 空串视为不改（默认沿用旧值）；显式传值则按 public/unlisted/private 校验。
+//
+// 读取、沿用省略字段、校验与写入在同一事务内完成，读取时锁定 Agent 行，
+// 并发的可见性 / 连接修改要么先提交并被本次读取看到，要么等待本次提交，
+// 不会被本次请求用旧值覆盖。
 func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID, req *UpdateAgentRequest) (*AgentResponse, error) {
-	existing, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
-		ID:        agentID,
-		CreatorID: creatorID,
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.NotFound("Agent 不存在")
+	var updated db.Agent
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		qtx := s.queries.WithTx(tx)
+		existing, err := qtx.GetAgentByIDForOwnerForUpdate(ctx, db.GetAgentByIDForOwnerParams{
+			ID:        agentID,
+			CreatorID: creatorID,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpx.NotFound("Agent 不存在")
+			}
+			log.Error().Err(err).Msg("agent.UpdateAgent: GetAgentByIDForOwner")
+			return httpx.Internal("查询 Agent 失败")
 		}
-		log.Error().Err(err).Msg("agent.UpdateAgent: GetAgentByIDForOwner")
-		return nil, httpx.Internal("查询 Agent 失败")
-	}
-	if existing.LifecycleStatus == "disabled" {
-		return nil, httpx.Forbidden("已下架的 Agent 不可编辑")
-	}
+		if existing.LifecycleStatus == "disabled" {
+			return httpx.Forbidden("已下架的 Agent 不可编辑")
+		}
 
-	connectionMode := req.ConnectionMode
-	if connectionMode == "" {
-		connectionMode = existing.ConnectionMode
-	}
-	endpointURL := req.EndpointURL
-	if endpointURL == "" {
-		endpointURL = existing.EndpointURL
-	}
-	mcpToolName := req.MCPToolName
-	if mcpToolName == "" && existing.MCPToolName != nil && connectionMode == existing.ConnectionMode {
-		mcpToolName = *existing.MCPToolName
-	}
-	connection, err := normalizeConnectionSettings(
-		existing.Slug,
-		endpointURL,
-		connectionMode,
-		mcpToolName,
-		s.cfg.AllowLocalHTTPEndpoints,
-	)
-	if err != nil {
-		return nil, err
-	}
-	authHeader := nextEndpointAuthHeader(existing.EndpointAuthHeader, req.EndpointAuthHeader, req.ClearEndpointAuth)
-	visibility := strings.TrimSpace(req.Visibility)
-	if visibility == "" {
-		visibility = existing.Visibility
-	}
-	if err := s.requireBrowserAgentPrivateVisibility(ctx, agentID, visibility); err != nil {
-		return nil, err
-	}
-	updated, err := s.queries.UpdateAgentDraft(ctx, db.UpdateAgentDraftParams{
-		ID:                 agentID,
-		Name:               strings.TrimSpace(req.Name),
-		Description:        strings.TrimSpace(req.Description),
-		EndpointURL:        connection.EndpointURL,
-		EndpointAuthHeader: authHeader,
-		PricePerCallCents:  req.PricePerCallCents,
-		Tags:               normalizeTagsForInsert(req.Tags),
-		CreatorID:          creatorID,
-		Visibility:         visibility,
-		ConnectionMode:     connection.Mode,
-		MCPToolName:        connection.MCPToolName,
+		connectionMode := req.ConnectionMode
+		if connectionMode == "" {
+			connectionMode = existing.ConnectionMode
+		}
+		endpointURL := req.EndpointURL
+		if endpointURL == "" {
+			endpointURL = existing.EndpointURL
+		}
+		mcpToolName := req.MCPToolName
+		if mcpToolName == "" && existing.MCPToolName != nil && connectionMode == existing.ConnectionMode {
+			mcpToolName = *existing.MCPToolName
+		}
+		connection, err := normalizeConnectionSettings(
+			existing.Slug,
+			endpointURL,
+			connectionMode,
+			mcpToolName,
+			s.cfg.AllowLocalHTTPEndpoints,
+		)
+		if err != nil {
+			return err
+		}
+		authHeader := nextEndpointAuthHeader(existing.EndpointAuthHeader, req.EndpointAuthHeader, req.ClearEndpointAuth)
+		visibility := strings.TrimSpace(req.Visibility)
+		if visibility == "" {
+			visibility = existing.Visibility
+		}
+		if err := requireBrowserAgentPrivateVisibility(ctx, qtx, agentID, visibility); err != nil {
+			return err
+		}
+		updated, err = qtx.UpdateAgentDraft(ctx, db.UpdateAgentDraftParams{
+			ID:                 agentID,
+			Name:               strings.TrimSpace(req.Name),
+			Description:        strings.TrimSpace(req.Description),
+			EndpointURL:        connection.EndpointURL,
+			EndpointAuthHeader: authHeader,
+			PricePerCallCents:  req.PricePerCallCents,
+			Tags:               normalizeTagsForInsert(req.Tags),
+			CreatorID:          creatorID,
+			Visibility:         visibility,
+			ConnectionMode:     connection.Mode,
+			MCPToolName:        connection.MCPToolName,
+		})
+		return err
 	})
 	if err == nil {
 		resp := s.toAgentResponseWithReadiness(ctx, &updated)
 		return &resp, nil
+	}
+	var httpErr *httpx.HTTPError
+	if errors.As(err, &httpErr) {
+		return nil, err
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		if isBrowserExecutionProfileRuntimeViolation(err) {
@@ -268,7 +284,7 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 	}
 
 	// RETURNING 0 行：可能不存在 / 不属于该 creator / 状态不允许编辑
-	existing, err = s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
+	existing, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
 		ID:        agentID,
 		CreatorID: creatorID,
 	})
@@ -303,7 +319,7 @@ func (s *Service) SetVisibility(ctx context.Context, agentID, creatorID uuid.UUI
 		return nil, httpx.Forbidden("已下架的 Agent 不可编辑")
 	}
 	visibility = strings.TrimSpace(visibility)
-	if err := s.requireBrowserAgentPrivateVisibility(ctx, agentID, visibility); err != nil {
+	if err := requireBrowserAgentPrivateVisibility(ctx, s.queries, agentID, visibility); err != nil {
 		return nil, err
 	}
 	if err := s.queries.SetAgentVisibilityForOwner(ctx, db.SetAgentVisibilityForOwnerParams{
@@ -536,15 +552,16 @@ func equalStringSlices(left, right []string) bool {
 	return true
 }
 
-func (s *Service) requireBrowserAgentPrivateVisibility(
+func requireBrowserAgentPrivateVisibility(
 	ctx context.Context,
+	queries *db.Queries,
 	agentID uuid.UUID,
 	visibility string,
 ) error {
 	if visibility == "private" {
 		return nil
 	}
-	profile, err := s.queries.GetRuntimeAgentExecutionProfile(ctx, agentID)
+	profile, err := queries.GetRuntimeAgentExecutionProfile(ctx, agentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -869,6 +886,18 @@ func (s *Service) DeleteExample(ctx context.Context, agentID, exampleID, creator
 //  4. 把结果写到 agent_onboarding_status.dry_run_*
 //  5. 返回 DryRunResponse
 func (s *Service) RunDryRun(ctx context.Context, agentID, creatorID uuid.UUID) (*DryRunResponse, error) {
+	return s.runDryRun(ctx, agentID, creatorID, nil)
+}
+
+// runDryRun implements RunDryRun. The availability monitor passes a guard so a
+// probe result is stored only while the Agent row is still the version that
+// was probed and the monitor still holds the Agent's check lock; otherwise it
+// returns errAvailabilityResultDiscarded without writing anything.
+func (s *Service) runDryRun(
+	ctx context.Context,
+	agentID, creatorID uuid.UUID,
+	guard *availabilityResultGuard,
+) (*DryRunResponse, error) {
 	if s.dryRunner == nil {
 		return nil, httpx.ServiceUnavailable("dry-run 暂不可用")
 	}
@@ -928,15 +957,24 @@ func (s *Service) RunDryRun(ctx context.Context, agentID, creatorID uuid.UUID) (
 		errPtr = &e
 	}
 
-	if _, dbErr := s.queries.UpdateDryRunResult(ctx, db.UpdateDryRunResultParams{
-		AgentID: agentID,
-		Result:  result,
-		Error:   errPtr,
-	}); dbErr != nil {
-		log.Warn().Err(dbErr).Str("agent_id", agentID.String()).Msg("agent.RunDryRun: UpdateDryRunResult")
+	var availability Availability
+	if guard != nil {
+		var stored bool
+		availability, stored = s.recordGuardedAvailabilityResult(ctx, &agentRow, *guard, result, errMsg,
+			&db.UpdateDryRunResultParams{AgentID: agentID, Result: result, Error: errPtr})
+		if !stored {
+			return nil, errAvailabilityResultDiscarded
+		}
+	} else {
+		if _, dbErr := s.queries.UpdateDryRunResult(ctx, db.UpdateDryRunResultParams{
+			AgentID: agentID,
+			Result:  result,
+			Error:   errPtr,
+		}); dbErr != nil {
+			log.Warn().Err(dbErr).Str("agent_id", agentID.String()).Msg("agent.RunDryRun: UpdateDryRunResult")
+		}
+		availability = s.markAvailabilityAfterDryRun(ctx, &agentRow, result, errMsg)
 	}
-
-	availability := s.markAvailabilityAfterDryRun(ctx, &agentRow, result, errMsg)
 
 	return &DryRunResponse{
 		Result:       result,
@@ -1324,6 +1362,72 @@ func (s *Service) markAvailabilityAfterDryRun(ctx context.Context, agent *db.Age
 		return s.agentAvailability(ctx, agent.ID, agent.ConnectionMode)
 	}
 	return s.runtimeAwareAvailability(ctx, agent.ID, agent.ConnectionMode, availabilityFromSnapshot(snapshot))
+}
+
+// recordGuardedAvailabilityResult writes a monitor result the same way the
+// creator path does (the onboarding dry-run row when dryRunResult is set, then
+// the availability snapshot), in one transaction on the session that holds the
+// Agent's check lock: if that session is lost the transaction cannot commit,
+// so another replica that takes over the lock never races this write. The
+// Agent row must still have the updated_at the check read and stays
+// share-locked until commit. Any guard or persistence failure reports false
+// and writes nothing; the caller then sends no alert.
+func (s *Service) recordGuardedAvailabilityResult(
+	ctx context.Context,
+	agent *db.Agent,
+	guard availabilityResultGuard,
+	result, errMsg string,
+	dryRunResult *db.UpdateDryRunResultParams,
+) (Availability, bool) {
+	var snapshot db.AgentAvailabilitySnapshot
+	var err error
+	if guard.lockConn == nil {
+		err = errors.New("availability check lock connection is closed")
+	} else {
+		err = pgx.BeginFunc(ctx, guard.lockConn, func(tx pgx.Tx) error {
+			q := s.queries.WithTx(tx)
+			if _, err := q.LockAgentIfUnchangedSince(ctx, db.LockAgentIfUnchangedSinceParams{
+				ID:        agent.ID,
+				UpdatedAt: agent.UpdatedAt,
+			}); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return errAvailabilityResultDiscarded
+				}
+				return err
+			}
+			if dryRunResult != nil {
+				// Unlike the creator path, a failed onboarding write aborts the
+				// whole result: nothing is stored and no alert is sent.
+				if _, err := q.UpdateDryRunResult(ctx, *dryRunResult); err != nil {
+					return err
+				}
+			}
+			var err error
+			if result == "pass" {
+				snapshot, err = q.MarkAgentAvailabilitySuccess(ctx, agent.ID)
+			} else {
+				snapshot, err = q.MarkAgentAvailabilityFailure(ctx, agent.ID)
+			}
+			if err != nil {
+				return err
+			}
+			if s.availabilityResultBeforeCommit != nil {
+				s.availabilityResultBeforeCommit(ctx, agent.ID)
+			}
+			return nil
+		})
+	}
+	if errors.Is(err, errAvailabilityResultDiscarded) {
+		log.Info().Str("agent_id", agent.ID.String()).
+			Msg("agent.RunDueAvailabilityChecks: agent changed during check, result discarded")
+		return Availability{}, false
+	}
+	if err != nil {
+		log.Warn().Err(err).Str("agent_id", agent.ID.String()).Str("result", result).Str("error", errMsg).
+			Msg("agent.RunDueAvailabilityChecks: result not stored, discarded")
+		return Availability{}, false
+	}
+	return s.runtimeAwareAvailability(ctx, agent.ID, agent.ConnectionMode, availabilityFromSnapshot(snapshot)), true
 }
 
 func availabilityFromSnapshot(snapshot db.AgentAvailabilitySnapshot) Availability {
