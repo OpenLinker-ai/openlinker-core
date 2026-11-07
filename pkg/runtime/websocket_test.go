@@ -482,6 +482,10 @@ func TestRuntimeWebSocketMaintenanceStopsBeforeUsingReplacementAttachment(t *tes
 
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+	// Ready precedes the attachment probe; let it finish so the injected
+	// conflict is seen by the wake's claim rather than absorbed by the probe.
+	require.Eventually(t, func() bool { return fixture.leases.claimCallCount() == 1 },
+		time.Second, 5*time.Millisecond, "attachment probe")
 	fixture.sessions.replaceAttachment()
 	// ClaimOffer is the authoritative transaction that validates the Session,
 	// attachment and fencing token before assigning durable work. Model the
@@ -506,7 +510,11 @@ func TestRuntimeWebSocketIdleDoesNotContinuouslyPollDatabase(t *testing.T) {
 
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
-	require.Zero(t, fixture.leases.claimCallCount(), "Ready must not probe dispatch per connection")
+	// Attachment queues exactly one coalesced backlog probe; afterwards the
+	// idle Session must stay database-silent.
+	require.Eventually(t, func() bool {
+		return fixture.leases.claimCallCount() == 1
+	}, time.Second, 5*time.Millisecond, "Ready queues one bounded backlog probe")
 	require.Zero(t, fixture.cancellations.nextCallCount(), "fresh Session cannot own a cancellation command")
 
 	claims := fixture.leases.claimCallCount()
@@ -530,7 +538,9 @@ func TestRuntimeWebSocketTypedWakesOnlyQueryTheirOwnWork(t *testing.T) {
 
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
-	require.Zero(t, fixture.leases.claimCallCount())
+	require.Eventually(t, func() bool {
+		return fixture.leases.claimCallCount() == 1
+	}, time.Second, 5*time.Millisecond, "attachment backlog probe")
 	require.Zero(t, fixture.cancellations.nextCallCount())
 
 	claims := fixture.leases.claimCallCount()
@@ -756,7 +766,7 @@ func TestRuntimeWebSocketAssignmentAckContinuesKnownDispatchDemand(t *testing.T)
 
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
-	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
+	// The attachment backlog probe establishes the dispatch demand.
 	firstEnvelope := readRuntimeWSEnvelope(t, conn)
 	firstAssigned, err := DecodeRuntimeMessagePayload[RunAssignedPayload](
 		firstEnvelope, RuntimeMessageRunAssigned,
@@ -820,23 +830,26 @@ func TestRuntimeWebSocketNilDispatchClaimClearsDemandUntilLaterRunWake(t *testin
 
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
-	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
 	require.Eventually(t, func() bool {
 		return fixture.leases.claimCallCount() == 1
+	}, time.Second, 5*time.Millisecond, "attachment backlog probe")
+	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
+	require.Eventually(t, func() bool {
+		return fixture.leases.claimCallCount() == 2
 	}, time.Second, 10*time.Millisecond)
 
 	assignment := fixture.assignment()
 	fixture.leases.setAssignment(&assignment)
 	fixture.wakeHub.WakeNodeDispatch(fixture.principal.NodeID)
 	time.Sleep(20 * time.Millisecond)
-	require.Equal(t, 1, fixture.leases.claimCallCount(), "capacity does not create demand after an empty claim")
+	require.Equal(t, 2, fixture.leases.claimCallCount(), "capacity does not create demand after an empty claim")
 
 	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
 	assignedEnvelope := readRuntimeWSEnvelope(t, conn)
 	assigned, err := DecodeRuntimeMessagePayload[RunAssignedPayload](assignedEnvelope, RuntimeMessageRunAssigned)
 	require.NoError(t, err)
 	require.Equal(t, assignment.AttemptIdentity, assigned.AttemptIdentity)
-	require.Equal(t, 2, fixture.leases.claimCallCount())
+	require.Equal(t, 3, fixture.leases.claimCallCount())
 }
 
 func TestRuntimeWebSocketCapacitySignalContinuesDemandAfterResultRelease(t *testing.T) {
@@ -861,7 +874,7 @@ func TestRuntimeWebSocketCapacitySignalContinuesDemandAfterResultRelease(t *test
 
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
-	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
+	// The attachment backlog probe establishes the dispatch demand.
 	firstEnvelope := readRuntimeWSEnvelope(t, conn)
 	fixture.leases.setPostAckClaimError(newRuntimeLeaseError(RuntimeLeaseErrorNodeAtCapacity, nil))
 	ack, err := NewRuntimeTypedMessage(
@@ -1631,6 +1644,7 @@ type runtimeWSLeaseServiceFake struct {
 	releaseErr      error
 	releaseCode     string
 	claimCalls      int
+	claimTimes      []time.Time
 	ackCalls        int
 	rejectCalls     int
 	renewCalls      int
@@ -1640,6 +1654,7 @@ func (f *runtimeWSLeaseServiceFake) ClaimOffer(context.Context, RuntimeSessionPr
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.claimCalls++
+	f.claimTimes = append(f.claimTimes, time.Now())
 	if f.assignment == nil && len(f.assignmentQueue) > 0 {
 		next := f.assignmentQueue[0]
 		f.assignmentQueue = f.assignmentQueue[1:]
@@ -1660,6 +1675,12 @@ func (f *runtimeWSLeaseServiceFake) claimCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.claimCalls
+}
+
+func (f *runtimeWSLeaseServiceFake) claimTimesSnapshot() []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]time.Time(nil), f.claimTimes...)
 }
 
 func (f *runtimeWSLeaseServiceFake) AckAssignment(_ context.Context, _ RuntimeSessionPrincipal, _ RunAssignmentAckPayload) (RunAssignmentConfirmedPayload, error) {
@@ -1816,6 +1837,9 @@ type runtimeWSCancellationServiceFake struct {
 	ackState     RunCancellationState
 	ackErr       error
 	ackPayloads  []RunCancelAckPayload
+	// nextGate, when set, holds NextCommand (after counting the call) so a
+	// test can keep one Session's maintenance loop busy.
+	nextGate chan struct{}
 }
 
 func (f *runtimeWSCancellationServiceFake) NextCommand(
@@ -1823,8 +1847,14 @@ func (f *runtimeWSCancellationServiceFake) NextCommand(
 	RuntimeSessionPrincipal,
 ) (*PendingCommand, time.Time, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.nextCalls++
+	gate := f.nextGate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.command == nil {
 		return nil, f.databaseTime, f.nextErr
 	}

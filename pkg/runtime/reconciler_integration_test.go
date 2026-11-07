@@ -514,3 +514,36 @@ func TestRuntimeDeadlineReconcilerCoreAttemptDoesNotRequireCapacity(t *testing.T
 	require.Equal(t, "retry_wait", dispatchState)
 	require.Equal(t, "lease_expired", outcome)
 }
+
+// Candidates are processed in due order. One persistently failing candidate
+// must not block every later expiry: it rolls back alone and is reported,
+// while the healthy candidates behind it commit exactly as before.
+func TestRuntimeDeadlineReconcilerContinuesPastFailingCandidate(t *testing.T) {
+	pool := setupTestDB(t)
+	requireRuntimeDeadlineReconcilerSchema(t, pool)
+	failing := insertEventStoreExecutingAttempt(t, pool, 20*time.Millisecond)
+	setFinalizerMaxAttempts(t, pool, failing.identity.RunID, 1)
+	seedFinalizerEffectTargets(t, pool, failing.identity.RunID, failing.identity.AgentID, "run.failed")
+	installFailingFinalizerEffectTrigger(t, pool)
+	healthy := []eventStoreFixture{
+		insertEventStoreExecutingAttempt(t, pool, 80*time.Millisecond),
+		insertEventStoreExecutingAttempt(t, pool, 80*time.Millisecond),
+	}
+	waitForRuntimeLeaseDue(t, pool, failing.identity.AttemptID)
+	for _, fixture := range healthy {
+		waitForRuntimeLeaseDue(t, pool, fixture.identity.AttemptID)
+	}
+
+	result, err := runtime.NewRuntimeDeadlineReconciler(pool, nil).ReconcileBatch(context.Background(), 10)
+	require.ErrorContains(t, err, "forced finalizer effect failure")
+	require.ErrorContains(t, err, failing.identity.RunID.String())
+	require.Equal(t, 3, result.Scanned)
+	require.Equal(t, 2, result.Reconciled)
+	require.Equal(t, 2, result.Requeued)
+	assertFinalizerAttemptStillExecuting(t, pool, failing.identity.RunID, failing.identity.AttemptID)
+	assertFinalizerTerminalCounts(t, pool, failing.identity.RunID, 0, 0, 0)
+	assertRuntimeReconcileCapacity(t, pool, failing, 1, 1, false)
+	for _, fixture := range healthy {
+		assertFinalizerCapacityReleased(t, pool, fixture)
+	}
+}

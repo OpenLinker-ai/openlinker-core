@@ -8,11 +8,67 @@
 package runtime
 
 import (
+	"context"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
+
+// WithRuntimeBackgroundClaimForTest marks ctx the way the WebSocket transport
+// marks a claim that no new dispatch signal asked for.
+func WithRuntimeBackgroundClaimForTest(ctx context.Context) context.Context {
+	return withRuntimeBackgroundClaim(ctx)
+}
+
+// NewRuntimeLeaseServiceWithCandidateHookForTest builds the PostgreSQL lease
+// service and calls afterCandidateLock while a claim transaction holds its
+// freshly locked candidate Run, so tests can force concurrent interleavings.
+func NewRuntimeLeaseServiceWithCandidateHookForTest(
+	pool *pgxpool.Pool,
+	coreInstanceID uuid.UUID,
+	issuer RuntimeInvocationCapabilityIssuer,
+	config RuntimeLeaseConfig,
+	afterCandidateLock func(),
+) *RuntimeLeaseService {
+	return newRuntimeLeaseService(
+		candidateHookLeaseRepository{inner: &postgresRuntimeLeaseRepository{pool: pool}, hook: afterCandidateLock},
+		coreInstanceID, issuer, config,
+	)
+}
+
+type candidateHookLeaseRepository struct {
+	inner runtimeLeaseRepository
+	hook  func()
+}
+
+func (r candidateHookLeaseRepository) WithTransaction(
+	ctx context.Context,
+	fn func(runtimeLeaseTransaction) error,
+) error {
+	return r.inner.WithTransaction(ctx, func(tx runtimeLeaseTransaction) error {
+		return fn(candidateHookLeaseTransaction{runtimeLeaseTransaction: tx, hook: r.hook})
+	})
+}
+
+type candidateHookLeaseTransaction struct {
+	runtimeLeaseTransaction
+	hook func()
+}
+
+func (t candidateHookLeaseTransaction) LockNextClaimableRuntimeRunForAgent(
+	ctx context.Context,
+	params db.LockNextClaimableRuntimeRunForAgentParams,
+) (db.LockNextClaimableRuntimeRunForAgentRow, error) {
+	row, err := t.runtimeLeaseTransaction.LockNextClaimableRuntimeRunForAgent(ctx, params)
+	if err == nil && t.hook != nil {
+		t.hook()
+	}
+	return row, err
+}
 
 // SetHTTPClient 仅供 _test.go 注入 client（如 httptest.NewTLSServer().Client()）。
 // 生产代码不应调用。

@@ -9,11 +9,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog/log"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
-const maxRuntimeReconcileBatch = 1000
+const (
+	maxRuntimeReconcileBatch = 1000
+	// A failing batch is retried every maintenance interval; log only the
+	// first few candidates per batch. The returned error carries the count.
+	maxRuntimeReconcileFailureLogs = 8
+)
 
 var (
 	ErrRuntimeReconcilerNotConfigured = errors.New("Runtime deadline reconciler is not configured")
@@ -73,7 +79,10 @@ const (
 
 // ReconcileBatch discovers at most limit due Runs with PostgreSQL's clock and
 // commits each winner independently. A failed candidate rolls back its entire
-// Attempt/capacity/Run/artifact transaction and stops the batch.
+// Attempt/capacity/Run/artifact transaction; it is logged and the rest of the
+// batch continues, because candidates are ordered by due time and one
+// persistently failing Run must not block every later expiry. The returned
+// error reports the failures after the batch; cancellation stops it at once.
 func (r *RuntimeDeadlineReconciler) ReconcileBatch(
 	ctx context.Context,
 	limit int,
@@ -90,10 +99,31 @@ func (r *RuntimeDeadlineReconciler) ReconcileBatch(
 		return RuntimeReconcileBatchResult{}, err
 	}
 	result := RuntimeReconcileBatchResult{Scanned: len(candidates)}
+	var failed int
+	var firstErr error
+	candidateFailures := func() error {
+		if failed == 0 {
+			return nil
+		}
+		return fmt.Errorf("%d Runtime reconcile candidate(s) failed; first: %w", failed, firstErr)
+	}
 	for _, candidate := range candidates {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, errors.Join(candidateFailures(), ctxErr)
+		}
 		disposition, reconcileErr := r.reconcileCandidate(ctx, candidate)
 		if reconcileErr != nil {
-			return result, reconcileErr
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, errors.Join(candidateFailures(), reconcileErr)
+			}
+			if failed < maxRuntimeReconcileFailureLogs {
+				logRuntimeReconcileCandidateFailure(candidate, reconcileErr)
+			}
+			if failed == 0 {
+				firstErr = fmt.Errorf("Run %s: %w", candidate.RunID, reconcileErr)
+			}
+			failed++
+			continue
 		}
 		switch disposition {
 		case runtimeReconcileSkipped:
@@ -107,11 +137,27 @@ func (r *RuntimeDeadlineReconciler) ReconcileBatch(
 		case runtimeReconcileResultUnknown:
 			result.ResultUnknown++
 		default:
-			return result, errors.New("Runtime reconciler returned an unknown disposition")
+			return result, errors.Join(candidateFailures(), errors.New("Runtime reconciler returned an unknown disposition"))
 		}
 		result.Reconciled++
 	}
-	return result, nil
+	return result, candidateFailures()
+}
+
+func logRuntimeReconcileCandidateFailure(candidate db.ListDueRuntimeReconcileCandidatesRow, err error) {
+	event := log.Warn().Err(err).
+		Str("run_id", candidate.RunID.String()).
+		Time("due_at", candidate.DueAt)
+	if candidate.AttemptID != nil {
+		event = event.Str("attempt_id", candidate.AttemptID.String())
+	}
+	if candidate.ExecutorType != nil {
+		event = event.Str("executor_type", *candidate.ExecutorType)
+	}
+	if candidate.RuntimeSessionID != nil {
+		event = event.Str("runtime_session_id", candidate.RuntimeSessionID.String())
+	}
+	event.Msg("Runtime deadline reconcile candidate failed; continuing batch")
 }
 
 func (r *RuntimeDeadlineReconciler) reconcileCandidate(

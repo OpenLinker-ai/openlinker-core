@@ -9,6 +9,20 @@ runtime protocol, and migration contract are declared stable.
 
 ### Fixed
 
+- Runtime dispatch no longer loses a wake to a WebSocket Session that cannot
+  claim. Wake tokens are coalesced per eligibility class; a Session that is full
+  or still holds an unacknowledged offer hands a real wake to another listening
+  Session of the same class and parks until a capacity wake, progress or its
+  20s heartbeat. A Session makes one bounded claim right after Ready, so work
+  that predates attachment no longer waits for the 1-minute reconciler.
+  Transient claim database errors retry with 100ms–5s backoff instead of
+  closing the WebSocket; authentication, conflict, contract and maintenance
+  closes are unchanged, and claims not driven by a real signal never close.
+  Such background claims check for a free slot before locking a queued Run, so
+  they cannot make a sibling Session skip it; Pull and signalled claims keep
+  their existing path and responses.
+  The deadline reconciler now isolates a failing candidate instead of stopping
+  the batch. No protocol message, API, configuration or migration changed.
 - The availability monitor probes each direct HTTP/MCP Agent once per staleness
   window across Core replicas (per-Agent advisory lock), and stores a result
   only if the Agent was not edited during the probe; any guard or write failure

@@ -139,6 +139,9 @@ type RuntimeHTTPController struct {
 	webSockets         *runtimeWSRegistry
 	webSocketConfig    RuntimeWebSocketConcurrencyConfig
 	webSocketProcesses *runtimeWSProcessLimiter
+	// webSocketHeartbeat overrides the WebSocket maintenance tick in tests;
+	// zero keeps runtimeWSHeartbeatInterval.
+	webSocketHeartbeat time.Duration
 }
 
 const (
@@ -998,23 +1001,44 @@ func (h *RuntimeHTTPController) claimWithWait(
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 	reason := "entry"
+	// Wait on this Session's eligibility class like a WebSocket Session does.
+	// A consumed token whose claim found no free slot is handed to another
+	// listening waiter; this request then ends, so it can never re-consume its
+	// own hint. Other errors keep their existing handling.
+	dispatchClass := runtimeDispatchEligibilityClass(principal.Features)
+	var dispatchWake <-chan struct{}
+	stopListening := func() {}
+	if h.dependencies.WakeHub != nil {
+		if wait > 0 {
+			dispatchWake, stopListening = h.dependencies.WakeHub.listenDispatchClass(principal.AgentID, dispatchClass)
+		} else {
+			dispatchWake = h.dependencies.WakeHub.waitDispatchClass(principal.AgentID, dispatchClass)
+		}
+	}
+	defer stopListening()
+	tokenHeld := false
 	for {
-		var dispatchWake, nodeDispatchWake <-chan struct{}
+		var nodeDispatchWake <-chan struct{}
 		if h.dependencies.WakeHub != nil {
-			dispatchWake = h.dependencies.WakeHub.WaitDispatch(principal.AgentID)
 			nodeDispatchWake = h.dependencies.WakeHub.WaitNodeDispatch(principal.NodeID)
 		}
 		observeWorker(h.dependencies.Observer, "runtime.http.run_claim_query", reason, 1)
 		assignment, err := h.dependencies.Leases.ClaimOffer(ctx, principal)
+		if tokenHeld && IsRuntimeLeaseError(err, RuntimeLeaseErrorNodeAtCapacity) {
+			stopListening()
+			h.dependencies.WakeHub.passDispatchClass(principal.AgentID, dispatchClass)
+		}
 		if err != nil || assignment != nil || wait == 0 {
 			return assignment, err
 		}
+		tokenHeld = false
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-deadline.C:
 			return nil, nil
 		case <-dispatchWake:
+			tokenHeld = true
 		case <-nodeDispatchWake:
 		}
 		reason = "wake"

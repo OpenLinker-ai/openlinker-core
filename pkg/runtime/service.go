@@ -172,6 +172,21 @@ func (s *Service) SetRunEffectHandlers(
 	s.effectWorker.SetHandlers(webhook, delivery)
 }
 
+// runtimeEndpointMaxIdleConnsPerHost raises net/http's default of two idle
+// connections per host, so concurrent direct_http and mcp_server calls to one
+// Agent endpoint reuse validated connections instead of redialing. Pure
+// connection-pool tuning: redirects, headers, timeouts and dial checks are
+// unchanged.
+const runtimeEndpointMaxIdleConnsPerHost = 32
+
+func newRuntimeEndpointHTTPClient(timeout time.Duration, allowLocalHTTP bool) *http.Client {
+	client := endpointurl.NewHTTPClient(timeout, allowLocalHTTP)
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		transport.MaxIdleConnsPerHost = runtimeEndpointMaxIdleConnsPerHost
+	}
+	return client
+}
+
 // NewService 构造 Service。HTTP client timeout 取自 cfg.RunTimeoutSeconds（默认 60s）。
 func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 	timeout := time.Duration(cfg.RunTimeoutSeconds) * time.Second
@@ -185,7 +200,7 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		pool:                     pool,
 		cfg:                      cfg,
 		eventStore:               NewEventStore(pool),
-		httpClient:               endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
+		httpClient:               newRuntimeEndpointHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
 		runtimePrincipalScopeKey: deriveRuntimePrincipalScopeKey(cfg),
 		browserControl:           NewBrowserHumanControl(pool),
 		browserObservation: NewBrowserObservation(

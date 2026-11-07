@@ -198,15 +198,29 @@ func (s *RuntimeLeaseService) ClaimOffer(
 			return err
 		}
 
+		if runtimeBackgroundClaim(ctx) {
+			// A background WebSocket re-attempt (attachment probe, heartbeat
+			// resume, background retry) must not lock a candidate it cannot
+			// take: a sibling claiming concurrently would skip that Run and
+			// drop its demand. Both rows are locked above and any expired offer
+			// has released its slots, so this re-read is current. No free slot
+			// gives the error the slot claims below would give. Pull and
+			// signalled claims keep the unchanged path.
+			free, slotErr := tx.GetRuntimeClaimSlotsFree(ctx, db.GetRuntimeClaimSlotsFreeParams{
+				RuntimeSessionID: principal.RuntimeSessionID,
+				NodeID:           principal.NodeID,
+			})
+			if slotErr != nil && !errors.Is(slotErr, pgx.ErrNoRows) {
+				return slotErr
+			}
+			if slotErr != nil || !free {
+				return newRuntimeLeaseError(RuntimeLeaseErrorNodeAtCapacity, slotErr)
+			}
+		}
+
 		candidate, err := tx.LockNextClaimableRuntimeRunForAgent(
 			ctx,
-			db.LockNextClaimableRuntimeRunForAgentParams{
-				AgentID:                 principal.AgentID,
-				BrowserExecutionProfile: runtimeSessionUsesBrowserProfile(principal.Features),
-				FullBrowserInteraction:  runtimeSessionUsesFullBrowserInteraction(principal.Features),
-				SkillPackageProviders:   skillpackage.CompatibleProviders(principal.Features),
-				MCPBindings:             slices.Contains(principal.Features, mcpbinding.Feature),
-			},
+			runtimeClaimCandidateParams(principal.AgentID, principal.Features),
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -282,6 +296,55 @@ func (s *RuntimeLeaseService) ClaimOffer(
 		return nil, err
 	}
 	return assigned, nil
+}
+
+type runtimeBackgroundClaimKey struct{}
+
+// withRuntimeBackgroundClaim marks a claim that no new dispatch signal asked
+// for. Only the WebSocket transport sets it; HTTP Pull never does.
+func withRuntimeBackgroundClaim(ctx context.Context) context.Context {
+	return context.WithValue(ctx, runtimeBackgroundClaimKey{}, true)
+}
+
+func runtimeBackgroundClaim(ctx context.Context) bool {
+	background, _ := ctx.Value(runtimeBackgroundClaimKey{}).(bool)
+	return background
+}
+
+// runtimeClaimCandidateParams is the Session-feature part of the claim filter.
+// Dispatch wake routing derives its eligibility class from the same value, so
+// Sessions whose claims would see different Runs never share one wake token.
+func runtimeClaimCandidateParams(
+	agentID uuid.UUID,
+	features []string,
+) db.LockNextClaimableRuntimeRunForAgentParams {
+	return db.LockNextClaimableRuntimeRunForAgentParams{
+		AgentID:                 agentID,
+		BrowserExecutionProfile: runtimeSessionUsesBrowserProfile(features),
+		FullBrowserInteraction:  runtimeSessionUsesFullBrowserInteraction(features),
+		SkillPackageProviders:   skillpackage.CompatibleProviders(features),
+		MCPBindings:             slices.Contains(features, mcpbinding.Feature),
+	}
+}
+
+// runtimeDispatchEligibilityClass names the set of Runs a Session can claim.
+// The common Session without optional claim features maps to the default
+// class, which is also the class of the legacy Agent-wide dispatch channel.
+func runtimeDispatchEligibilityClass(features []string) string {
+	params := runtimeClaimCandidateParams(uuid.Nil, features)
+	if !params.BrowserExecutionProfile && !params.FullBrowserInteraction &&
+		len(params.SkillPackageProviders) == 0 && !params.MCPBindings {
+		return ""
+	}
+	providers := slices.Clone(params.SkillPackageProviders)
+	slices.Sort(providers)
+	return fmt.Sprintf(
+		"browser=%t;full=%t;mcp=%t;skills=%s",
+		params.BrowserExecutionProfile,
+		params.FullBrowserInteraction,
+		params.MCPBindings,
+		strings.Join(providers, ","),
+	)
 }
 
 func (s *RuntimeLeaseService) AckAssignment(
@@ -1168,6 +1231,7 @@ type runtimeLeaseTransaction interface {
 	LockRuntimeNodeForPrincipalValidation(context.Context, db.LockRuntimeNodeForPrincipalValidationParams) (db.LockRuntimeNodeForPrincipalValidationRow, error)
 	LockRuntimeCredentialForPrincipalValidation(context.Context, db.LockRuntimeCredentialForPrincipalValidationParams) (db.LockRuntimeCredentialForPrincipalValidationRow, error)
 	GetExistingUnacceptedRunOfferForSession(context.Context, db.GetExistingUnacceptedRunOfferForSessionParams) (db.GetExistingUnacceptedRunOfferForSessionRow, error)
+	GetRuntimeClaimSlotsFree(context.Context, db.GetRuntimeClaimSlotsFreeParams) (bool, error)
 	LockNextClaimableRuntimeRunForAgent(context.Context, db.LockNextClaimableRuntimeRunForAgentParams) (db.LockNextClaimableRuntimeRunForAgentRow, error)
 	ClaimRuntimeSessionSlot(context.Context, db.ClaimRuntimeSessionSlotParams) (db.RuntimeSession, error)
 	ClaimRuntimeNodeSlot(context.Context, uuid.UUID) (db.RuntimeNode, error)
@@ -1237,6 +1301,13 @@ func (t *postgresRuntimeLeaseTransaction) LockRuntimeCredentialForPrincipalValid
 func (t *postgresRuntimeLeaseTransaction) GetExistingUnacceptedRunOfferForSession(ctx context.Context, params db.GetExistingUnacceptedRunOfferForSessionParams) (db.GetExistingUnacceptedRunOfferForSessionRow, error) {
 	return t.queries.GetExistingUnacceptedRunOfferForSession(ctx, params)
 }
+func (t *postgresRuntimeLeaseTransaction) GetRuntimeClaimSlotsFree(
+	ctx context.Context,
+	params db.GetRuntimeClaimSlotsFreeParams,
+) (bool, error) {
+	return t.queries.GetRuntimeClaimSlotsFree(ctx, params)
+}
+
 func (t *postgresRuntimeLeaseTransaction) LockNextClaimableRuntimeRunForAgent(
 	ctx context.Context,
 	params db.LockNextClaimableRuntimeRunForAgentParams,
