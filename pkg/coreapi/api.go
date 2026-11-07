@@ -484,7 +484,7 @@ func (s externalWorkflowService) GetWorkflowRun(
 	ctx context.Context,
 	actorUserID, workflowRunID uuid.UUID,
 ) (*workflow.WorkflowRunResponse, error) {
-	return s.inner.GetWorkflowRun(ctx, actorUserID, workflowRunID)
+	return s.inner.GetWorkflowRunUnprojected(ctx, actorUserID, workflowRunID)
 }
 
 func configureRuntime(

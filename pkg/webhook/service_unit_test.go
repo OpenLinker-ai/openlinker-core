@@ -1015,6 +1015,7 @@ func webhookHTTPClient(status int, body string, err error) *http.Client {
 }
 
 type fakeWebhookQueries struct {
+	agent         *db.Agent
 	setWebhookArg db.SetAgentWebhookParams
 	setRows       int64
 	setErr        error
@@ -1172,6 +1173,13 @@ func (q *fakeWebhookQueries) GetRunByID(context.Context, uuid.UUID) (db.Run, err
 	return q.run, q.runErr
 }
 
+func (q *fakeWebhookQueries) GetAgentByID(context.Context, uuid.UUID) (db.Agent, error) {
+	if q.agent == nil {
+		return db.Agent{}, pgx.ErrNoRows
+	}
+	return *q.agent, nil
+}
+
 func (q *fakeWebhookQueries) CreateTaskCallbackSubscription(_ context.Context, arg db.CreateTaskCallbackSubscriptionParams) (db.TaskCallbackSubscription, error) {
 	q.createSubArg = arg
 	if q.createSub.ID == uuid.Nil {
@@ -1281,4 +1289,43 @@ func (q *fakeWebhookQueries) ResetTaskCallbackSubscriptionFailures(_ context.Con
 
 func (q *fakeWebhookQueries) ListPendingTaskCallbackDeliveries(context.Context) ([]db.TaskCallbackDelivery, error) {
 	return q.pendingRunDeliveries, q.pendingRunErr
+}
+
+func TestTaskCallbackDeliveryStoresPayloadFilteredForOwner(t *testing.T) {
+	const token = "seller-endpoint-token"
+	endpointToken := token
+	creatorID, buyerID := uuid.New(), uuid.New()
+	event := db.RunEvent{
+		ID: uuid.New(), RunID: uuid.New(), EventType: "run.completed", Sequence: 7, CreatedAt: time.Now(),
+		Payload: []byte(`{"output":{"origin":"203.0.113.7","marker":"kept","note":"` + token + `"}}`),
+	}
+	deliver := func(owner uuid.UUID) TaskCallbackPayload {
+		t.Helper()
+		q := &fakeWebhookQueries{agent: &db.Agent{CreatorID: creatorID, EndpointAuthHeader: &endpointToken}}
+		svc := &Service{queries: q, httpClient: http.DefaultClient}
+		sub := db.TaskCallbackSubscription{ID: uuid.New(), RunID: event.RunID, OwnerUserID: owner, TargetURL: "https://client.example/hook"}
+		if err := svc.enqueueTaskCallbackDelivery(context.Background(), sub, event); err != nil {
+			t.Fatalf("enqueueTaskCallbackDelivery error = %v", err)
+		}
+		var payload TaskCallbackPayload
+		if err := json.Unmarshal(q.createRunDeliveryArg.Payload, &payload); err != nil {
+			t.Fatalf("stored payload is invalid: %v", err)
+		}
+		return payload
+	}
+
+	buyer := deliver(buyerID)
+	stored, _ := json.Marshal(buyer)
+	if !buyer.OutputRedacted || strings.Contains(string(stored), token) || strings.Contains(string(stored), "203.0.113.7") {
+		t.Fatalf("buyer delivery leaked or lacks marker: %s", stored)
+	}
+	if !strings.Contains(string(stored), "kept") || buyer.Sequence != 7 || buyer.EventID != event.ID.String() {
+		t.Fatalf("buyer delivery lost business data or event identity: %s", stored)
+	}
+
+	creator := deliver(creatorID)
+	stored, _ = json.Marshal(creator)
+	if creator.OutputRedacted || !strings.Contains(string(stored), token) {
+		t.Fatalf("creator delivery should keep the original: %s", stored)
+	}
 }

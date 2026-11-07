@@ -33,8 +33,8 @@ type runtimeService interface {
 	LookupRunByCreationIdentity(context.Context, uuid.UUID, []byte, []byte) (*runtime.RunResponse, bool, error)
 	StartRun(context.Context, uuid.UUID, *runtime.RunRequest, string) (*runtime.RunResponse, error)
 	StartExternalRun(context.Context, uuid.UUID, *runtime.RunRequest, string, runtime.ExternalExecutionLaunchFence) (*runtime.RunResponse, error)
-	GetRun(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error)
-	ListRunArtifacts(context.Context, uuid.UUID, uuid.UUID) ([]runtime.RunArtifactResponse, error)
+	GetRunUnprojected(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error)
+	ListRunArtifactsUnprojected(context.Context, uuid.UUID, uuid.UUID) ([]runtime.RunArtifactResponse, error)
 	CancelRun(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error)
 	GetRunCancellationEvidence(context.Context, uuid.UUID, uuid.UUID) (runtime.RunCancellationEvidence, error)
 }
@@ -816,7 +816,7 @@ func (s *Service) getExecutionStatus(ctx context.Context, record ExecutionRecord
 	resp.ExecutionID = record.ExecutionID.String()
 	switch *record.ExecutionKind {
 	case "run":
-		run, err := s.runtime.GetRun(ctx, record.ActorUserID, *record.ExecutionID)
+		run, err := s.runtime.GetRunUnprojected(ctx, record.ActorUserID, *record.ExecutionID)
 		if err != nil {
 			return nil, err
 		}
@@ -826,7 +826,7 @@ func (s *Service) getExecutionStatus(ctx context.Context, record ExecutionRecord
 		if resp.Status == "succeeded" {
 			resp.Output = run.Output
 		}
-		artifacts, err := s.runtime.ListRunArtifacts(ctx, record.ActorUserID, *record.ExecutionID)
+		artifacts, err := s.runtime.ListRunArtifactsUnprojected(ctx, record.ActorUserID, *record.ExecutionID)
 		if err != nil {
 			return nil, err
 		}
@@ -855,7 +855,7 @@ func (s *Service) getExecutionStatus(ctx context.Context, record ExecutionRecord
 			if err != nil || childID == uuid.Nil {
 				continue
 			}
-			artifacts, err := s.runtime.ListRunArtifacts(ctx, record.ActorUserID, childID)
+			artifacts, err := s.runtime.ListRunArtifactsUnprojected(ctx, record.ActorUserID, childID)
 			if err != nil {
 				return nil, err
 			}

@@ -26,6 +26,7 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/endpointurl"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runoutput"
 )
 
 // 投递相关常量。
@@ -110,6 +111,7 @@ type Service struct {
 
 type webhookEffectQueries interface {
 	GetRunByID(context.Context, uuid.UUID) (db.Run, error)
+	GetAgentByID(context.Context, uuid.UUID) (db.Agent, error)
 	GetAgentWebhookConfig(context.Context, uuid.UUID) (db.GetAgentWebhookConfigRow, error)
 	CreateWebhookEffectDelivery(context.Context, db.CreateWebhookEffectDeliveryParams) (db.WebhookDelivery, error)
 	GetWebhookDeliveryByID(context.Context, uuid.UUID) (db.GetWebhookDeliveryRow, error)
@@ -134,6 +136,7 @@ type taskCallbackRunCacheEntry struct {
 }
 
 type webhookQueries interface {
+	GetAgentByID(context.Context, uuid.UUID) (db.Agent, error)
 	SetAgentWebhook(context.Context, db.SetAgentWebhookParams) (int64, error)
 	ClearAgentWebhook(context.Context, db.ClearAgentWebhookParams) (int64, error)
 	GetAgentWebhookConfig(context.Context, uuid.UUID) (db.GetAgentWebhookConfigRow, error)
@@ -777,7 +780,10 @@ func (s *Service) rememberTaskCallbackRun(runID uuid.UUID, mayHaveSubscription b
 }
 
 func (s *Service) enqueueTaskCallbackDelivery(ctx context.Context, sub db.TaskCallbackSubscription, event db.RunEvent) error {
-	payload := taskCallbackPayload(sub, event)
+	payload, err := projectedTaskCallbackPayload(ctx, s.queries, sub, event)
+	if err != nil {
+		return err
+	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -1090,6 +1096,33 @@ func parseTaskCallbackSubscriptionIDs(raw []string) ([]uuid.UUID, error) {
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+type taskCallbackAgentLookup interface {
+	GetRunByID(context.Context, uuid.UUID) (db.Run, error)
+	GetAgentByID(context.Context, uuid.UUID) (db.Agent, error)
+}
+
+// 回调目标属于订阅者，不是 Agent 创作者时与读取接口一样过滤；投递行里存的是过滤后的内容。
+func projectedTaskCallbackPayload(ctx context.Context, q taskCallbackAgentLookup, sub db.TaskCallbackSubscription, event db.RunEvent) (TaskCallbackPayload, error) {
+	// 查不到 Run 或 Agent 时无法确认创作者，按非创作者处理；其他查询错误不投递。
+	projection := runoutput.ForNonCreator()
+	run, err := q.GetRunByID(ctx, event.RunID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return TaskCallbackPayload{}, fmt.Errorf("get run for task callback: %w", err)
+	}
+	if err == nil {
+		agent, err := q.GetAgentByID(ctx, run.AgentID)
+		switch {
+		case err == nil:
+			projection = runoutput.ForViewer(sub.OwnerUserID, agent.CreatorID, agent.EndpointAuthHeader)
+		case !errors.Is(err, pgx.ErrNoRows):
+			return TaskCallbackPayload{}, fmt.Errorf("get agent for task callback: %w", err)
+		}
+	}
+	payload := taskCallbackPayload(sub, event)
+	payload.Payload, payload.OutputRedacted = projection.EventPayload(event.EventType, payload.Payload)
+	return payload, nil
 }
 
 func taskCallbackPayload(sub db.TaskCallbackSubscription, event db.RunEvent) TaskCallbackPayload {

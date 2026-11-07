@@ -74,6 +74,7 @@ type WorkflowRunResponse struct {
 	Status          string                    `json:"status"`
 	Input           map[string]interface{}    `json:"input"`
 	Output          map[string]interface{}    `json:"output,omitempty"`
+	OutputRedacted  bool                      `json:"output_redacted,omitempty"`
 	Error           string                    `json:"error_message,omitempty"`
 	Steps           []WorkflowRunStepResponse `json:"steps"`
 	AttemptCount    int32                     `json:"attempt_count"`
@@ -131,16 +132,17 @@ type WorkflowRunStepCompareResponse struct {
 }
 
 type WorkflowRunStepResponse struct {
-	ID         string                 `json:"id"`
-	NodeID     string                 `json:"node_id"`
-	NodeKey    string                 `json:"node_key"`
-	AgentID    string                 `json:"agent_id"`
-	RunID      string                 `json:"run_id,omitempty"`
-	Status     string                 `json:"status"`
-	Input      map[string]interface{} `json:"input"`
-	Output     map[string]interface{} `json:"output,omitempty"`
-	Error      string                 `json:"error_message,omitempty"`
-	Sequence   int32                  `json:"sequence"`
-	StartedAt  string                 `json:"started_at"`
-	FinishedAt string                 `json:"finished_at,omitempty"`
+	ID             string                 `json:"id"`
+	NodeID         string                 `json:"node_id"`
+	NodeKey        string                 `json:"node_key"`
+	AgentID        string                 `json:"agent_id"`
+	RunID          string                 `json:"run_id,omitempty"`
+	Status         string                 `json:"status"`
+	Input          map[string]interface{} `json:"input"`
+	Output         map[string]interface{} `json:"output,omitempty"`
+	OutputRedacted bool                   `json:"output_redacted,omitempty"`
+	Error          string                 `json:"error_message,omitempty"`
+	Sequence       int32                  `json:"sequence"`
+	StartedAt      string                 `json:"started_at"`
+	FinishedAt     string                 `json:"finished_at,omitempty"`
 }

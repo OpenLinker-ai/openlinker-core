@@ -29,6 +29,18 @@ func (s *Service) ReplayRun(
 	userID, sourceRunID uuid.UUID,
 	idempotencyKey, source string,
 ) (*RunResponse, error) {
+	resp, err := s.replayRun(ctx, userID, sourceRunID, idempotencyKey, source)
+	if err != nil {
+		return nil, err
+	}
+	return s.ProjectRunForViewer(ctx, userID, resp)
+}
+
+func (s *Service) replayRun(
+	ctx context.Context,
+	userID, sourceRunID uuid.UUID,
+	idempotencyKey, source string,
+) (*RunResponse, error) {
 	if _, err := HashIdempotencyKey(idempotencyKey); err != nil {
 		return nil, idempotencyHTTPError(err)
 	}

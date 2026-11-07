@@ -60,7 +60,7 @@ func (s *Service) CancelExternalWorkflowRun(
 			return nil, CancellationEvidence{}, err
 		}
 	}
-	resp, err := s.GetWorkflowRun(ctx, actorUserID, workflowRunID)
+	resp, err := s.GetWorkflowRunUnprojected(ctx, actorUserID, workflowRunID)
 	return resp, evidence, err
 }
 
@@ -230,7 +230,7 @@ func (s *Service) reconcileWorkflowCancellation(
 	anyStopping := false
 	anyUnconfirmed := false
 	for _, childID := range childIDs {
-		run, getErr := s.runtime.GetRun(ctx, actorUserID, childID)
+		run, getErr := s.runtime.GetRunUnprojected(ctx, actorUserID, childID)
 		if getErr != nil {
 			return getErr
 		}
@@ -243,7 +243,7 @@ func (s *Service) reconcileWorkflowCancellation(
 			if _, cancelErr := runtimeSvc.CancelRun(ctx, actorUserID, childID); cancelErr != nil {
 				// A terminal transition may have won; re-read before treating it as
 				// infrastructure failure.
-				run, getErr = s.runtime.GetRun(ctx, actorUserID, childID)
+				run, getErr = s.runtime.GetRunUnprojected(ctx, actorUserID, childID)
 				if getErr != nil {
 					return cancelErr
 				}

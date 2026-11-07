@@ -139,6 +139,57 @@ func TestTaskCallbackEffectUsesEffectIDAsDeliveryID(t *testing.T) {
 	require.Equal(t, "success", q.taskDelivery.Status)
 }
 
+// 真实运行里任务回调走这条路径，投递的和落库的都要是过滤后的内容。
+func TestTaskCallbackEffectDeliversPayloadFilteredForOwner(t *testing.T) {
+	const token = "seller-endpoint-token"
+	endpointToken := token
+	creatorID := uuid.New()
+	deliver := func(owner uuid.UUID) (string, string) {
+		t.Helper()
+		effectID, runID, subscriptionID := uuid.New(), uuid.New(), uuid.New()
+		var body string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			body = string(raw)
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer server.Close()
+		q := &fakeWebhookEffectQueries{
+			run:   db.Run{ID: runID, AgentID: uuid.New()},
+			agent: &db.Agent{CreatorID: creatorID, EndpointAuthHeader: &endpointToken},
+			subscription: db.TaskCallbackSubscription{
+				ID: subscriptionID, RunID: runID, OwnerUserID: owner, TargetURL: server.URL, Secret: "secret",
+				Status: "active", EventTypes: []string{"run.completed"},
+			},
+			event: db.RunEvent{
+				ID: effectID, RunID: runID, Sequence: 3, EventType: "run.completed", CreatedAt: time.Now(),
+				Payload: []byte(`{"output":{"origin":"203.0.113.7","marker":"kept","note":"` + token + `"}}`),
+			},
+		}
+		svc := &Service{effectQueries: q, httpClient: server.Client()}
+		leaseOwner := uuid.New()
+		result := svc.AttemptTaskCallbackEffect(context.Background(), db.RunEffectOutbox{
+			ID: effectID, RunID: runID, TerminalEventID: effectID,
+			EffectType: runtimepkg.RunEffectTypeTaskCallback,
+			TargetKey:  "subscription:" + subscriptionID.String(),
+			Status:     "processing", LeaseOwner: &leaseOwner, AttemptCount: 1, MaxAttempts: 3,
+		})
+		require.True(t, result.Succeeded)
+		return body, string(q.taskDelivery.Payload)
+	}
+
+	delivered, stored := deliver(uuid.New())
+	for _, payload := range []string{delivered, stored} {
+		require.NotContains(t, payload, token)
+		require.NotContains(t, payload, "203.0.113.7")
+		require.Contains(t, payload, "kept")
+		require.Contains(t, payload, `"output_redacted":true`)
+	}
+
+	delivered, _ = deliver(creatorID)
+	require.Contains(t, delivered, token, "创作者自己订阅时保留原文")
+}
+
 func TestResetWebhookEffectDeliveryReconcilesCrashWindow(t *testing.T) {
 	effectID := uuid.New()
 	runID := uuid.New()
@@ -197,6 +248,7 @@ type fakeWebhookEffectQueries struct {
 	webhookSecret      string
 	webhookCreateCount int
 
+	agent           *db.Agent
 	subscription    db.TaskCallbackSubscription
 	event           db.RunEvent
 	taskDelivery    db.TaskCallbackDelivery
@@ -211,6 +263,13 @@ func (q *fakeWebhookEffectQueries) GetRunByID(context.Context, uuid.UUID) (db.Ru
 		return db.Run{}, pgx.ErrNoRows
 	}
 	return q.run, nil
+}
+
+func (q *fakeWebhookEffectQueries) GetAgentByID(context.Context, uuid.UUID) (db.Agent, error) {
+	if q.agent == nil {
+		return db.Agent{}, pgx.ErrNoRows
+	}
+	return *q.agent, nil
 }
 
 func (q *fakeWebhookEffectQueries) GetAgentWebhookConfig(context.Context, uuid.UUID) (db.GetAgentWebhookConfigRow, error) {
