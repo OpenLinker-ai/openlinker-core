@@ -200,13 +200,7 @@ func (s *RuntimeLeaseService) ClaimOffer(
 
 		candidate, err := tx.LockNextClaimableRuntimeRunForAgent(
 			ctx,
-			db.LockNextClaimableRuntimeRunForAgentParams{
-				AgentID:                 principal.AgentID,
-				BrowserExecutionProfile: runtimeSessionUsesBrowserProfile(principal.Features),
-				FullBrowserInteraction:  runtimeSessionUsesFullBrowserInteraction(principal.Features),
-				SkillPackageProviders:   skillpackage.CompatibleProviders(principal.Features),
-				MCPBindings:             slices.Contains(principal.Features, mcpbinding.Feature),
-			},
+			runtimeClaimCandidateParams(principal.AgentID, principal.Features),
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -282,6 +276,42 @@ func (s *RuntimeLeaseService) ClaimOffer(
 		return nil, err
 	}
 	return assigned, nil
+}
+
+// runtimeClaimCandidateParams is the Session-feature part of the claim filter.
+// Dispatch wake routing derives its eligibility class from the same value, so
+// Sessions whose claims would see different Runs never share one wake token.
+func runtimeClaimCandidateParams(
+	agentID uuid.UUID,
+	features []string,
+) db.LockNextClaimableRuntimeRunForAgentParams {
+	return db.LockNextClaimableRuntimeRunForAgentParams{
+		AgentID:                 agentID,
+		BrowserExecutionProfile: runtimeSessionUsesBrowserProfile(features),
+		FullBrowserInteraction:  runtimeSessionUsesFullBrowserInteraction(features),
+		SkillPackageProviders:   skillpackage.CompatibleProviders(features),
+		MCPBindings:             slices.Contains(features, mcpbinding.Feature),
+	}
+}
+
+// runtimeDispatchEligibilityClass names the set of Runs a Session can claim.
+// The common Session without optional claim features maps to the default
+// class, which is also the class of the legacy Agent-wide dispatch channel.
+func runtimeDispatchEligibilityClass(features []string) string {
+	params := runtimeClaimCandidateParams(uuid.Nil, features)
+	if !params.BrowserExecutionProfile && !params.FullBrowserInteraction &&
+		len(params.SkillPackageProviders) == 0 && !params.MCPBindings {
+		return ""
+	}
+	providers := slices.Clone(params.SkillPackageProviders)
+	slices.Sort(providers)
+	return fmt.Sprintf(
+		"browser=%t;full=%t;mcp=%t;skills=%s",
+		params.BrowserExecutionProfile,
+		params.FullBrowserInteraction,
+		params.MCPBindings,
+		strings.Join(providers, ","),
+	)
 }
 
 func (s *RuntimeLeaseService) AckAssignment(

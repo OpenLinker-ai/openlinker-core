@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/endpointurl"
 )
 
 const thirdPartyTransportTestMasterSecret = "third-party-transport-test-master-secret"
@@ -288,4 +290,21 @@ func TestNormalizeMCPResultPrefersStructuredContent(t *testing.T) {
 		"content":           []interface{}{map[string]interface{}{"type": "text", "text": "done"}},
 	})
 	assert.Equal(t, "done", out["summary"])
+}
+
+func TestRuntimeEndpointHTTPClientOnlyRaisesIdlePoolPerHost(t *testing.T) {
+	reference := endpointurl.NewHTTPClient(7*time.Second, true)
+	client := newRuntimeEndpointHTTPClient(7*time.Second, true)
+	transport, ok := client.Transport.(*http.Transport)
+	require.True(t, ok)
+	referenceTransport := reference.Transport.(*http.Transport)
+	require.Equal(t, runtimeEndpointMaxIdleConnsPerHost, transport.MaxIdleConnsPerHost)
+	require.Equal(t, reference.Timeout, client.Timeout)
+	require.NotNil(t, client.CheckRedirect)
+	require.NotNil(t, transport.DialContext, "public-address dial validation is kept")
+	require.Equal(t, referenceTransport.MaxIdleConns, transport.MaxIdleConns)
+	require.Equal(t, referenceTransport.IdleConnTimeout, transport.IdleConnTimeout)
+	require.Equal(t, referenceTransport.TLSHandshakeTimeout, transport.TLSHandshakeTimeout)
+	require.Equal(t, referenceTransport.ResponseHeaderTimeout, transport.ResponseHeaderTimeout)
+	require.Equal(t, referenceTransport.MaxConnsPerHost, transport.MaxConnsPerHost)
 }

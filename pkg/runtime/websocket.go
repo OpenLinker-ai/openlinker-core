@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog/log"
 )
@@ -356,12 +357,18 @@ type runtimeWSConnection struct {
 	assignments   map[uuid.UUID]runtimeWSAssignmentCorrelation
 	cancellations map[uuid.UUID]runtimeWSCancellationCorrelation
 
-	dispatchPending  bool
-	dispatchCredits  int64
-	dispatchLimit    int64
-	controlPending   atomic.Bool
-	dispatchContinue chan struct{}
-	controlContinue  chan struct{}
+	dispatchPending bool
+	dispatchCredits int64
+	dispatchLimit   int64
+	attachProbe     bool // guarded by dispatchState; next claim is the attachment probe
+	probeDemandOnly bool // guarded by dispatchState; demand exists only for the probe
+	// dispatchSignalled (guarded by dispatchState) records that a real signal
+	// fed the next drain pass; background re-attempts alone never close.
+	dispatchSignalled bool
+	claimRetrying     bool // guarded by dispatchMu; throttles retry logging
+	controlPending    atomic.Bool
+	dispatchContinue  chan struct{}
+	controlContinue   chan struct{}
 }
 
 type runtimeWSWriteRequest struct {
@@ -1049,7 +1056,11 @@ func (c *runtimeWSConnection) handleDrain(envelope RuntimeEnvelope) error {
 }
 
 func (c *runtimeWSConnection) maintenanceLoop() {
-	heartbeatTicker := time.NewTicker(runtimeWSHeartbeatInterval)
+	heartbeatInterval := runtimeWSHeartbeatInterval
+	if c.controller.webSocketHeartbeat > 0 {
+		heartbeatInterval = c.controller.webSocketHeartbeat
+	}
+	heartbeatTicker := time.NewTicker(heartbeatInterval)
 	defer heartbeatTicker.Stop()
 	if c.controller.dependencies.AttachOnly {
 		for {
@@ -1072,18 +1083,66 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 		defer policyTicker.Stop()
 	}
 
-	var dispatchWake, controlWake, nodeDispatchWake <-chan struct{}
-	if c.controller.dependencies.WakeHub != nil {
-		dispatchWake, _ = c.controller.dependencies.WakeHub.RegisterWebSocketDispatch(
-			c.sessionPrincipal.AgentID,
-		)
-		defer c.controller.dependencies.WakeHub.UnregisterWebSocketDispatch(c.sessionPrincipal.AgentID)
-		controlWake = c.controller.dependencies.WakeHub.WaitControl(c.sessionPrincipal.AgentID)
-		nodeDispatchWake = c.controller.dependencies.WakeHub.WaitNodeDispatch(c.sessionPrincipal.NodeID)
+	wakeHub := c.controller.dependencies.WakeHub
+	agentID := c.sessionPrincipal.AgentID
+	dispatchClass := runtimeDispatchEligibilityClass(c.sessionPrincipal.Features)
+	var dispatchToken, controlWake, nodeDispatchWake <-chan struct{}
+	// The Agent token is shared with sibling Sessions and Pull waiters. A
+	// signalled claim that proves this Session cannot take new work hands the
+	// token on; any such claim parks (dispatchWake=nil) until the Session's own
+	// capacity can change: a Node capacity wake, a pass that makes progress,
+	// or the heartbeat tick. Parked Sessions never consume tokens, so
+	// ineligible siblings cannot ping-pong.
+	var dispatchWake <-chan struct{}
+	setDispatchListening := func(listening bool) {
+		if listening == (dispatchWake != nil) || dispatchToken == nil {
+			return
+		}
+		if listening {
+			dispatchWake = dispatchToken
+		} else {
+			dispatchWake = nil
+		}
+		wakeHub.setDispatchListening(agentID, dispatchClass, listening)
 	}
-	// Ready completes attachment without a per-Session database probe. New work
-	// arrives through a typed dispatch token; work that predates attachment is
-	// recovered by the bounded process-level PostgreSQL reconciliation pass.
+	if wakeHub != nil {
+		dispatchToken, _ = wakeHub.registerWebSocketDispatch(agentID, dispatchClass)
+		dispatchWake = dispatchToken
+		defer func() {
+			wakeHub.unregisterWebSocketDispatch(agentID, dispatchClass, dispatchWake != nil)
+		}()
+		controlWake = wakeHub.WaitControl(c.sessionPrincipal.AgentID)
+		nodeDispatchWake = wakeHub.WaitNodeDispatch(c.sessionPrincipal.NodeID)
+	}
+	// Work that predates attachment (Core restart, added Worker) has no signal
+	// left to announce it. Probe once, like a Pull request's entry claim: the
+	// probe coalesces with any hint already pending for this Session (credits
+	// are capped), so attaching costs at most one bounded claim and idle
+	// Sessions still never poll. It is Session-local rather than a shared Agent
+	// token, so it can never make a sibling claim through a cluster fence, and
+	// it tolerates failure (see claimPendingAndSend). The process-level
+	// reconciliation pass remains the durable backstop.
+	c.requestAttachProbe()
+	// Only a pass fed by a real signal may hand a token on: a background
+	// re-attempt's token would reach a sibling as if it were a real signal.
+	// Residual window: a background claim from a full Session can briefly lock
+	// a candidate Run (ClaimOffer locks it before the slot check) so that a
+	// sibling claiming concurrently skips it and clears its demand. That Run
+	// is then recovered by the next signal or the dispatch wake reconciler.
+	// Signalled claims at HEAD open the same class of window.
+	parkDispatch := func(handOff bool) {
+		setDispatchListening(false)
+		if handOff {
+			wakeHub.passDispatchClass(agentID, dispatchClass)
+		}
+	}
+	var claimRetry runtimeWSClaimRetry
+	defer claimRetry.stop()
+	var claimRetryWake <-chan time.Time
+	resetClaimRetry := func() {
+		claimRetry.reset()
+		claimRetryWake = nil
+	}
 	var retry runtimeCancellationRetry
 	defer retry.stop()
 	var controlRetry <-chan time.Time
@@ -1143,7 +1202,32 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 			c.controlPending.Store(true)
 			sendControl()
 		case <-c.dispatchContinue:
-			c.drainDispatchDemand()
+			if claimRetryWake != nil {
+				// A transient claim failure is backing off. Hints arriving
+				// meanwhile were already recorded as capped credits by
+				// requestDispatch; the retry timer serves them in one pass, so
+				// signal frequency cannot shorten the backoff.
+				break
+			}
+			outcome, signalled := c.drainDispatchDemand()
+			switch outcome {
+			case runtimeDispatchNoDemand:
+			case runtimeDispatchRetry:
+				claimRetryWake = claimRetry.wait()
+			case runtimeDispatchIneligible:
+				resetClaimRetry()
+				parkDispatch(signalled)
+			case runtimeDispatchClaimDeferred:
+				// Unchanged: another error (possibly closing this socket) is
+				// never handed to siblings, so a fenced claim cannot cascade.
+				resetClaimRetry()
+			default:
+				resetClaimRetry()
+				setDispatchListening(true)
+			}
+		case <-claimRetryWake:
+			claimRetryWake = nil
+			c.requestBackgroundDispatch(1, false, "claim_retry")
 		case <-c.controlContinue:
 			sendControl()
 		case <-controlRetry:
@@ -1152,8 +1236,18 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 			if c.controller.dependencies.WakeHub != nil {
 				nodeDispatchWake = c.controller.dependencies.WakeHub.WaitNodeDispatch(c.sessionPrincipal.NodeID)
 			}
+			setDispatchListening(true)
 			c.requestDispatch(1, false, "node_capacity")
 		case <-heartbeatTicker.C:
+			// Bounded safety net for a parked Session whose capacity changed
+			// without a delivered Node capacity hint: resume listening and
+			// retry its parked demand once. The credit only continues existing
+			// demand (never establishes it), and a pending retry backoff still
+			// holds the claim until its timer.
+			if dispatchToken != nil && dispatchWake == nil {
+				setDispatchListening(true)
+				c.requestBackgroundDispatch(1, false, "heartbeat")
+			}
 			if !c.heartbeatMaintenanceSession("ticker") {
 				return
 			}
@@ -1271,7 +1365,74 @@ const (
 	runtimeDispatchClaimDeferred runtimeDispatchClaimOutcome = iota
 	runtimeDispatchClaimed
 	runtimeDispatchEmpty
+	// runtimeDispatchIneligible means this Session cannot take new work until
+	// its own capacity or outstanding offer changes: the Session/Node slot was
+	// unavailable, or Core returned the Session's unacknowledged offer again.
+	runtimeDispatchIneligible
+	// runtimeDispatchRetry means a transient database failure; demand is kept
+	// and the claim is retried with bounded backoff instead of closing.
+	runtimeDispatchRetry
+	// runtimeDispatchNoDemand means a coalesced continuation found no credit.
+	runtimeDispatchNoDemand
 )
+
+const (
+	runtimeWSClaimRetryMin = 100 * time.Millisecond
+	runtimeWSClaimRetryMax = 5 * time.Second
+)
+
+// runtimeWSClaimRetry is owned by the maintenance loop; no callback outlives it.
+type runtimeWSClaimRetry struct {
+	timer *time.Timer
+	delay time.Duration
+}
+
+func (r *runtimeWSClaimRetry) wait() <-chan time.Time {
+	if r.delay < runtimeWSClaimRetryMin {
+		r.delay = runtimeWSClaimRetryMin
+	} else if r.delay < runtimeWSClaimRetryMax {
+		r.delay = min(2*r.delay, runtimeWSClaimRetryMax)
+	}
+	if r.timer == nil {
+		r.timer = time.NewTimer(r.delay)
+	} else {
+		r.timer.Reset(r.delay)
+	}
+	return r.timer.C
+}
+
+func (r *runtimeWSClaimRetry) stop() {
+	if r.timer != nil {
+		r.timer.Stop()
+	}
+}
+
+func (r *runtimeWSClaimRetry) reset() {
+	r.stop()
+	r.delay = 0
+}
+
+// runtimeTransientClaimError reports database failures that say nothing about
+// the Session, credential or protocol: the claim transaction rolled back and
+// can simply be retried. Everything else keeps its existing close mapping.
+func runtimeTransientClaimError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case "40001", // serialization_failure
+		"40P01", // deadlock_detected
+		"55P03", // lock_not_available
+		"57014": // query_canceled (statement or lock timeout)
+		return true
+	default:
+		return false
+	}
+}
 
 func (c *runtimeWSConnection) setDispatchLimit(limit int64) {
 	if limit < 1 {
@@ -1285,13 +1446,31 @@ func (c *runtimeWSConnection) setDispatchLimit(limit int64) {
 	c.dispatchState.Unlock()
 }
 
+// requestDispatch records demand from a real signal: an Agent dispatch hint,
+// a Node capacity hint or an assignment ACK continuation.
 func (c *runtimeWSConnection) requestDispatch(credits int64, establishDemand bool, reason string) {
+	c.addDispatchDemand(credits, establishDemand, true, reason)
+}
+
+// requestBackgroundDispatch re-attempts demand without a new signal (attach
+// probe, heartbeat resume, claim retry). A pass fed only by such credits never
+// closes the connection on a claim error: before these re-attempts existed no
+// claim would have run then, and a session may be finishing accepted work.
+func (c *runtimeWSConnection) requestBackgroundDispatch(credits int64, establishDemand bool, reason string) {
+	c.addDispatchDemand(credits, establishDemand, false, reason)
+}
+
+func (c *runtimeWSConnection) addDispatchDemand(credits int64, establishDemand, signalled bool, reason string) {
 	if credits < 1 {
 		return
 	}
 	c.dispatchState.Lock()
 	if establishDemand {
 		c.dispatchPending = true
+		c.probeDemandOnly = false
+	}
+	if signalled && c.dispatchPending {
+		c.dispatchSignalled = true
 	}
 	if c.dispatchPending {
 		limit := c.dispatchLimit
@@ -1320,6 +1499,44 @@ func (c *runtimeWSConnection) requestDispatch(credits int64, establishDemand boo
 	}
 }
 
+// requestAttachProbe establishes one unit of demand for the claim made right
+// after attachment and marks that claim as the failure-tolerant probe. It runs
+// on the maintenance goroutine before its loop, so no claim can intervene.
+func (c *runtimeWSConnection) requestAttachProbe() {
+	c.requestBackgroundDispatch(1, true, "attach")
+	c.dispatchState.Lock()
+	c.attachProbe = true
+	// Any later hint that establishes demand clears this (requestDispatch).
+	c.probeDemandOnly = true
+	c.dispatchState.Unlock()
+}
+
+func (c *runtimeWSConnection) takeAttachProbe() bool {
+	c.dispatchState.Lock()
+	defer c.dispatchState.Unlock()
+	probe := c.attachProbe
+	c.attachProbe = false
+	return probe
+}
+
+// endAttachProbe settles the probe claim. A failed probe drops the demand it
+// created, including credits that only continued it (a Node capacity hint),
+// so it is neither retried nor resumed later. Demand that a real hint
+// established meanwhile is kept with a credit, so a normal claim serves it.
+func (c *runtimeWSConnection) endAttachProbe(failed bool) {
+	c.dispatchState.Lock()
+	defer c.dispatchState.Unlock()
+	if failed {
+		if c.probeDemandOnly {
+			c.dispatchPending = false
+			c.dispatchCredits = 0
+		} else if c.dispatchPending && c.dispatchCredits < 1 {
+			c.dispatchCredits = 1
+		}
+	}
+	c.probeDemandOnly = false
+}
+
 func (c *runtimeWSConnection) takeDispatchCredit() bool {
 	c.dispatchState.Lock()
 	defer c.dispatchState.Unlock()
@@ -1340,30 +1557,100 @@ func (c *runtimeWSConnection) clearDispatchDemandIfIdle() bool {
 	return true
 }
 
-func (c *runtimeWSConnection) drainDispatchDemand() {
+// drainDispatchDemand returns the outcome that ended the pass, or
+// runtimeDispatchClaimed when the pass used every credit on new assignments,
+// and whether a real signal fed the pass.
+func (c *runtimeWSConnection) drainDispatchDemand() (runtimeDispatchClaimOutcome, bool) {
+	signalled := false
+	outcome := runtimeDispatchNoDemand
 	for c.takeDispatchCredit() {
-		switch c.claimPendingAndSend() {
+		// A real signal recorded before this claim (including one that
+		// arrived mid-pass) gives it the signalled close handling.
+		if c.takeDispatchSignalled() {
+			signalled = true
+		}
+		outcome = c.claimPendingAndSend(signalled)
+		switch outcome {
 		case runtimeDispatchClaimed:
 			continue
 		case runtimeDispatchEmpty:
 			if c.clearDispatchDemandIfIdle() {
-				return
+				return outcome, signalled
 			}
-		case runtimeDispatchClaimDeferred:
-			return
+		case runtimeDispatchRetry:
+			if signalled {
+				// The retry of a signalled claim keeps its error handling.
+				c.markDispatchSignalled()
+			}
+			return outcome, signalled
+		default:
+			return outcome, signalled
 		}
 	}
+	return outcome, signalled
 }
 
-func (c *runtimeWSConnection) claimPendingAndSend() runtimeDispatchClaimOutcome {
+func (c *runtimeWSConnection) takeDispatchSignalled() bool {
+	c.dispatchState.Lock()
+	defer c.dispatchState.Unlock()
+	signalled := c.dispatchSignalled
+	c.dispatchSignalled = false
+	return signalled
+}
+
+func (c *runtimeWSConnection) markDispatchSignalled() {
+	c.dispatchState.Lock()
+	c.dispatchSignalled = true
+	c.dispatchState.Unlock()
+}
+
+func (c *runtimeWSConnection) claimPendingAndSend(signalled bool) (outcome runtimeDispatchClaimOutcome) {
 	c.lifecycleMu.RLock()
 	defer c.lifecycleMu.RUnlock()
 	c.dispatchMu.Lock()
 	defer c.dispatchMu.Unlock()
+	defer func() { c.claimRetrying = outcome == runtimeDispatchRetry }()
+	probe := c.takeAttachProbe()
 	assignment, err := c.controller.dependencies.Leases.ClaimOffer(c.ctx, c.sessionPrincipal)
+	if probe {
+		c.endAttachProbe(err != nil)
+		if err != nil {
+			// The attachment probe is opportunistic and never acts on its own
+			// error: hard_maintenance fences claims but still admits
+			// reattachment so accepted work can finish, so the probe must not
+			// turn that fence into a disconnect, a retry loop or a parked
+			// Session. Report it as empty; endAttachProbe kept only the demand
+			// a real hint established, which the next credit serves normally.
+			log.Debug().Err(err).
+				Str("runtime_session_id", c.sessionPrincipal.RuntimeSessionID.String()).
+				Msg("Runtime websocket attachment probe found no claimable work")
+			return runtimeDispatchEmpty
+		}
+	}
 	if err != nil {
+		if IsRuntimeLeaseError(err, RuntimeLeaseErrorNodeAtCapacity) {
+			return runtimeDispatchIneligible
+		}
+		if c.ctx.Err() == nil && runtimeTransientClaimError(err) {
+			if !c.claimRetrying {
+				log.Warn().Err(err).
+					Str("runtime_session_id", c.sessionPrincipal.RuntimeSessionID.String()).
+					Msg("Runtime websocket claim hit a transient database error; retrying with backoff")
+			}
+			return runtimeDispatchRetry
+		}
 		mapped := mapRuntimeHTTPError(err)
 		if _, fatal := RuntimeWebSocketCloseCode(mapped.Body.Code); fatal {
+			if !signalled {
+				// Only a background re-attempt asked for this claim (e.g. a
+				// heartbeat resume during hard_maintenance). Keep the demand
+				// and the connection; a real signal claims with the existing
+				// close handling.
+				log.Debug().Err(err).
+					Str("runtime_session_id", c.sessionPrincipal.RuntimeSessionID.String()).
+					Msg("Runtime websocket background claim deferred")
+				return runtimeDispatchClaimDeferred
+			}
 			c.closeForError(mapped)
 		}
 		return runtimeDispatchClaimDeferred
@@ -1372,7 +1659,9 @@ func (c *runtimeWSConnection) claimPendingAndSend() runtimeDispatchClaimOutcome 
 		return runtimeDispatchEmpty
 	}
 	if c.assignmentAlreadySent(assignment.AttemptIdentity) {
-		return runtimeDispatchClaimed
+		// Core returns an outstanding unacknowledged offer before considering
+		// new work, so this Session cannot claim again until it is resolved.
+		return runtimeDispatchIneligible
 	}
 	message, envelope, err := newRuntimeWSTypedMessage(RuntimeMessageRunAssigned, nil, *assignment)
 	if err != nil {

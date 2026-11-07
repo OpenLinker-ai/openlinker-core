@@ -27,9 +27,64 @@ var allowedRuntimeSignalTypes = map[string]struct{}{
 }
 
 type runtimeWakeChannels struct {
-	dispatch  chan struct{}
+	// dispatch is the token of the default eligibility class. classes holds
+	// one coalesced token per other class (see runtimeDispatchEligibilityClass)
+	// so a Session whose claim filter cannot see a Run never consumes the only
+	// hint an eligible sibling would have acted on.
+	dispatch chan struct{}
+	classes  map[string]chan struct{}
+	// listening counts waiters per class that currently consume tokens: WS
+	// Sessions that are not parked and Pull requests inside a long-poll wait.
+	// A handed-on token is only queued when someone can act on it.
+	listening map[string]int
 	control   chan struct{}
 	wsWaiters int
+}
+
+func (c *runtimeWakeChannels) addListening(class string, delta int) {
+	if c.listening == nil {
+		c.listening = make(map[string]int)
+	}
+	c.listening[class] += delta
+	if c.listening[class] <= 0 {
+		delete(c.listening, class)
+	}
+}
+
+func (c *runtimeWakeChannels) dispatchFor(class string) chan struct{} {
+	if class == "" {
+		return c.dispatch
+	}
+	if c.classes == nil {
+		c.classes = make(map[string]chan struct{})
+	}
+	token := c.classes[class]
+	if token == nil {
+		token = make(chan struct{}, 1)
+		c.classes[class] = token
+	}
+	return token
+}
+
+// queueDispatch offers one token to every eligibility class and reports
+// whether any class gained a token rather than coalescing into a pending one.
+func (c *runtimeWakeChannels) queueDispatch() bool {
+	queued := offerRuntimeDispatchToken(c.dispatch)
+	for _, token := range c.classes {
+		if offerRuntimeDispatchToken(token) {
+			queued = true
+		}
+	}
+	return queued
+}
+
+func offerRuntimeDispatchToken(token chan struct{}) bool {
+	select {
+	case token <- struct{}{}:
+		return true
+	default:
+		return false
+	}
 }
 
 type runtimeConnectionWake struct {
@@ -239,6 +294,10 @@ func (h *RuntimeWakeHub) Wait(agentID uuid.UUID) <-chan struct{} {
 }
 
 func (h *RuntimeWakeHub) WaitDispatch(agentID uuid.UUID) <-chan struct{} {
+	return h.waitDispatchClass(agentID, "")
+}
+
+func (h *RuntimeWakeHub) waitDispatchClass(agentID uuid.UUID, class string) <-chan struct{} {
 	if h == nil || agentID == uuid.Nil {
 		return nil
 	}
@@ -249,7 +308,7 @@ func (h *RuntimeWakeHub) WaitDispatch(agentID uuid.UUID) <-chan struct{} {
 		channels = newRuntimeWakeChannels()
 		h.channels[agentID] = channels
 	}
-	return channels.dispatch
+	return channels.dispatchFor(class)
 }
 
 // RegisterWebSocketDispatch registers one persistent WebSocket waiter and
@@ -257,6 +316,13 @@ func (h *RuntimeWakeHub) WaitDispatch(agentID uuid.UUID) <-chan struct{} {
 // are coalesced tokens, so one waiter claims durable work without waking every
 // sibling Session on the same Agent.
 func (h *RuntimeWakeHub) RegisterWebSocketDispatch(agentID uuid.UUID) (<-chan struct{}, bool) {
+	return h.registerWebSocketDispatch(agentID, "")
+}
+
+// registerWebSocketDispatch registers a listening WebSocket waiter for one
+// eligibility class. The caller reports parking with setDispatchListening and
+// must unregister with the same class and its final listening state.
+func (h *RuntimeWakeHub) registerWebSocketDispatch(agentID uuid.UUID, class string) (<-chan struct{}, bool) {
 	if h == nil || agentID == uuid.Nil {
 		return nil, false
 	}
@@ -268,10 +334,15 @@ func (h *RuntimeWakeHub) RegisterWebSocketDispatch(agentID uuid.UUID) (<-chan st
 		h.channels[agentID] = channels
 	}
 	channels.wsWaiters++
-	return channels.dispatch, channels.wsWaiters == 1
+	channels.addListening(class, 1)
+	return channels.dispatchFor(class), channels.wsWaiters == 1
 }
 
 func (h *RuntimeWakeHub) UnregisterWebSocketDispatch(agentID uuid.UUID) {
+	h.unregisterWebSocketDispatch(agentID, "", true)
+}
+
+func (h *RuntimeWakeHub) unregisterWebSocketDispatch(agentID uuid.UUID, class string, listening bool) {
 	if h == nil || agentID == uuid.Nil {
 		return
 	}
@@ -280,7 +351,65 @@ func (h *RuntimeWakeHub) UnregisterWebSocketDispatch(agentID uuid.UUID) {
 	channels := h.channels[agentID]
 	if channels != nil && channels.wsWaiters > 0 {
 		channels.wsWaiters--
+		if listening {
+			channels.addListening(class, -1)
+		}
 	}
+}
+
+// setDispatchListening records that a registered waiter stopped (parked) or
+// resumed consuming its class token. Callers only report real transitions.
+func (h *RuntimeWakeHub) setDispatchListening(agentID uuid.UUID, class string, listening bool) {
+	if h == nil || agentID == uuid.Nil {
+		return
+	}
+	delta := -1
+	if listening {
+		delta = 1
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if channels := h.channels[agentID]; channels != nil {
+		channels.addListening(class, delta)
+	}
+}
+
+// listenDispatchClass is the Pull form of registration: the request counts as
+// a listener for its class until release is called.
+func (h *RuntimeWakeHub) listenDispatchClass(agentID uuid.UUID, class string) (<-chan struct{}, func()) {
+	if h == nil || agentID == uuid.Nil {
+		return nil, func() {}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	channels := h.channels[agentID]
+	if channels == nil {
+		channels = newRuntimeWakeChannels()
+		h.channels[agentID] = channels
+	}
+	channels.addListening(class, 1)
+	var once sync.Once
+	return channels.dispatchFor(class), func() {
+		once.Do(func() { h.setDispatchListening(agentID, class, false) })
+	}
+}
+
+// passDispatchClass hands a hint the caller could not act on to its own
+// eligibility class only. It is dropped when no other waiter of the class is
+// listening: every such waiter keeps its own demand and retries on its
+// capacity change, and handing the token back to the caller would only cost
+// it an extra claim later.
+func (h *RuntimeWakeHub) passDispatchClass(agentID uuid.UUID, class string) bool {
+	if h == nil || agentID == uuid.Nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	channels := h.channels[agentID]
+	if channels == nil || channels.listening[class] <= 0 {
+		return false
+	}
+	return offerRuntimeDispatchToken(channels.dispatchFor(class))
 }
 
 func (h *RuntimeWakeHub) WaitControl(agentID uuid.UUID) <-chan struct{} {
@@ -327,12 +456,7 @@ func (h *RuntimeWakeHub) wakeDispatchIfRegistered(agentID uuid.UUID) (registered
 	if channels == nil {
 		return false, false
 	}
-	select {
-	case channels.dispatch <- struct{}{}:
-		return true, true
-	default:
-		return true, false
-	}
+	return true, channels.queueDispatch()
 }
 
 func (h *RuntimeWakeHub) WakeControl(agentID uuid.UUID) {
@@ -380,10 +504,7 @@ func (h *RuntimeWakeHub) wake(agentID uuid.UUID, dispatch, control bool) {
 		h.channels[agentID] = channels
 	}
 	if dispatch {
-		select {
-		case channels.dispatch <- struct{}{}:
-		default:
-		}
+		channels.queueDispatch()
 	}
 	if control {
 		close(channels.control)
@@ -401,10 +522,7 @@ func (h *RuntimeWakeHub) WakeAll() {
 	}
 	h.mu.Lock()
 	for _, channels := range h.channels {
-		select {
-		case channels.dispatch <- struct{}{}:
-		default:
-		}
+		channels.queueDispatch()
 		close(channels.control)
 		channels.control = make(chan struct{})
 	}
