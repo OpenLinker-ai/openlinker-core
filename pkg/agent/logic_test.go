@@ -584,7 +584,7 @@ func TestRegistrationApprovalAndMetricHelpers(t *testing.T) {
 	}
 
 	regSvc := &RegistrationService{}
-	if _, err := regSvc.verifyPendingAgentToken(context.Background(), "bad-token"); err == nil {
+	if _, _, err := regSvc.verifyPendingAgentToken(context.Background(), "bad-token"); err == nil {
 		t.Fatalf("verifyPendingAgentToken should reject malformed token before database lookup")
 	} else {
 		requireHTTPStatus(t, err, http.StatusUnauthorized)

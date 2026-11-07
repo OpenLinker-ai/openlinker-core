@@ -48,7 +48,7 @@ jobs:
   runtime-dispatch:
     name: Runtime dispatch PostgreSQL and WebSocket regression
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16-alpine
@@ -135,6 +135,18 @@ jobs:
             exit 1
           fi
           grep -q -- '--- PASS: TestAgentTokenLastUsedTracksRuntimeAuthenticationAndHeartbeat ' /tmp/agent-token-last-used.log
+      - name: Prove Agent registry coordination against PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race -v ./pkg/agent -run '^(TestRunDueAvailabilityChecksProbesEachAgentOnceAcrossReplicas|TestRunDueAvailabilityChecksDiscardsResultWhenAgentChangesDuringProbe|TestRunDueAvailabilityChecksDiscardsResultWhenCheckLockIsLost|TestRunDueAvailabilityChecksDiscardsResultWhenLockSessionDiesBeforeCommit|TestRunDueAvailabilityChecksSendsNothingWhenGuardTimesOut|TestRunDueAvailabilityChecksSendsNothingWhenOnboardingWriteFails|TestRunDueAvailabilityChecksGuardsPreflightFailures|TestUpdateAgentKeepsConcurrentVisibilityChangeWhenOmitted|TestUpdateAgentKeepsConcurrentConnectionChangeWhenOmitted|TestRegistrationService_RegisterAgentViaToken_ReplayAfterSuccess|TestRegistrationService_RegisterAgentViaToken_ReplayRejectedForDisabledCreator|TestRegistrationService_RegisterAgentViaToken_DirectlyIssuedTokenIsNotReplayed|TestRegistrationService_RegisterAgentViaToken_ConcurrentFirstRegistrationSingleUse|TestRegistrationService_RegisterAgentViaToken_LookupOutageIsNotUnauthorized|TestRegistrationHandler_ReplaysCompletedRegistrationOverBearer)$' -count=1 -timeout=5m | tee /tmp/agent-registry.log
+          if grep -q -- '--- SKIP:' /tmp/agent-registry.log; then
+            echo "Agent registry PostgreSQL regressions must not skip" >&2
+            exit 1
+          fi
+          for name in TestRunDueAvailabilityChecksProbesEachAgentOnceAcrossReplicas TestRunDueAvailabilityChecksDiscardsResultWhenAgentChangesDuringProbe TestRunDueAvailabilityChecksDiscardsResultWhenCheckLockIsLost TestRunDueAvailabilityChecksDiscardsResultWhenLockSessionDiesBeforeCommit TestRunDueAvailabilityChecksSendsNothingWhenGuardTimesOut TestRunDueAvailabilityChecksSendsNothingWhenOnboardingWriteFails TestRunDueAvailabilityChecksGuardsPreflightFailures TestUpdateAgentKeepsConcurrentVisibilityChangeWhenOmitted TestUpdateAgentKeepsConcurrentConnectionChangeWhenOmitted TestRegistrationService_RegisterAgentViaToken_ReplayAfterSuccess TestRegistrationService_RegisterAgentViaToken_ReplayRejectedForDisabledCreator TestRegistrationService_RegisterAgentViaToken_DirectlyIssuedTokenIsNotReplayed TestRegistrationService_RegisterAgentViaToken_ConcurrentFirstRegistrationSingleUse TestRegistrationService_RegisterAgentViaToken_LookupOutageIsNotUnauthorized TestRegistrationHandler_ReplaysCompletedRegistrationOverBearer; do
+            grep -q -- "--- PASS: ${name} " /tmp/agent-registry.log
+          done
 
 
   node-upgrade:

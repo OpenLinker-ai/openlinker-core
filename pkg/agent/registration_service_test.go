@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
@@ -112,6 +113,212 @@ func TestRegistrationService_RegisterAgentViaToken_RevokedRejected(t *testing.T)
 		Tags:              []string{"data"},
 	})
 	assertHTTPStatus(t, err, 401)
+}
+
+func registrationReplayRequest(token, slug string) *agent.RegisterAgentViaTokenRequest {
+	return &agent.RegisterAgentViaTokenRequest{
+		AgentToken:        token,
+		Slug:              slug,
+		Name:              "Replay Registered Agent",
+		Description:       "Registration replay test",
+		EndpointURL:       "https://example.com/agent/" + slug,
+		PricePerCallCents: 25,
+		Tags:              []string{"data"},
+	}
+}
+
+type agentTokenRowSnapshot struct {
+	status     string
+	agentID    *uuid.UUID
+	scopes     []string
+	tokenHash  string
+	redeemedAt *time.Time
+	expiresAt  *time.Time
+	lastUsedAt *time.Time
+	revokedAt  *time.Time
+}
+
+func readAgentTokenRow(t *testing.T, pool *pgxpool.Pool, tokenID uuid.UUID) agentTokenRowSnapshot {
+	t.Helper()
+	var row agentTokenRowSnapshot
+	err := pool.QueryRow(context.Background(), `
+SELECT status, agent_id, scopes, token_hash, redeemed_at, expires_at, last_used_at, revoked_at
+FROM agent_tokens WHERE id = $1`, tokenID).Scan(
+		&row.status, &row.agentID, &row.scopes, &row.tokenHash,
+		&row.redeemedAt, &row.expiresAt, &row.lastUsedAt, &row.revokedAt,
+	)
+	require.NoError(t, err)
+	return row
+}
+
+func countCreatorAgents(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID) int {
+	t.Helper()
+	var count int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM agents WHERE creator_id = $1`, creatorID).Scan(&count))
+	return count
+}
+
+func TestRegistrationService_RegisterAgentViaToken_ReplayAfterSuccess(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "Replay Agent Token Creator")
+	ctx := context.Background()
+
+	svc := agent.NewRegistrationService(pool)
+	minted, err := svc.CreateAgentToken(ctx, creatorID, &agent.CreateAgentTokenRequest{Name: "replay"})
+	require.NoError(t, err)
+	slug := freshSlug("replay-agent")
+
+	first, err := svc.RegisterAgentViaToken(ctx, registrationReplayRequest(minted.PlaintextToken, slug))
+	require.NoError(t, err)
+	tokenID := uuid.MustParse(minted.ID)
+	before := readAgentTokenRow(t, pool, tokenID)
+	require.Equal(t, 1, countCreatorAgents(t, pool, creatorID))
+
+	replayed, err := svc.RegisterAgentViaToken(ctx, registrationReplayRequest(minted.PlaintextToken, "  "+slug+" "))
+	require.NoError(t, err, "a retry after a lost 201 must be answered with the same registration")
+	require.Equal(t, first, replayed)
+	require.Equal(t, first.Agent.ID, replayed.Agent.ID)
+	require.Empty(t, replayed.AgentToken.PlaintextToken, "replay must never return a plaintext token")
+	firstJSON, err := json.Marshal(first)
+	require.NoError(t, err)
+	replayJSON, err := json.Marshal(replayed)
+	require.NoError(t, err)
+	require.JSONEq(t, string(firstJSON), string(replayJSON))
+
+	bearerOnly := registrationReplayRequest(minted.PlaintextToken, slug)
+	bearerOnly.Name = "Different Name Is Ignored"
+	bearerOnly.EndpointURL = "https://example.com/agent/other"
+	replayed, err = svc.RegisterAgentViaToken(ctx, bearerOnly)
+	require.NoError(t, err)
+	require.Equal(t, first.Agent, replayed.Agent, "replay reflects the stored Agent, not the retried body")
+
+	require.Equal(t, before, readAgentTokenRow(t, pool, tokenID), "replay must not write the token row")
+	require.Equal(t, 1, countCreatorAgents(t, pool, creatorID), "replay must not create another Agent")
+
+	_, err = svc.RegisterAgentViaToken(ctx, registrationReplayRequest(minted.PlaintextToken, freshSlug("other-agent")))
+	assertHTTPStatus(t, err, 401)
+	derived := registrationReplayRequest(minted.PlaintextToken, slug)
+	derived.Slug = ""
+	_, err = svc.RegisterAgentViaToken(ctx, derived)
+	assertHTTPStatus(t, err, 401)
+	require.Equal(t, 1, countCreatorAgents(t, pool, creatorID))
+
+	require.NoError(t, svc.RevokeAgentToken(ctx, creatorID, tokenID))
+	_, err = svc.RegisterAgentViaToken(ctx, registrationReplayRequest(minted.PlaintextToken, slug))
+	assertHTTPStatus(t, err, 401)
+}
+
+func TestRegistrationService_RegisterAgentViaToken_ReplayRejectedForDisabledCreator(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "Replay Owner")
+	ctx := context.Background()
+	svc := agent.NewRegistrationService(pool)
+
+	minted, err := svc.CreateAgentToken(ctx, creatorID, &agent.CreateAgentTokenRequest{Name: "replay"})
+	require.NoError(t, err)
+	slug := freshSlug("replay-disabled-user")
+	_, err = svc.RegisterAgentViaToken(ctx, registrationReplayRequest(minted.PlaintextToken, slug))
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx, `UPDATE users SET disabled_at = NOW() WHERE id = $1`, creatorID)
+	require.NoError(t, err)
+	_, err = svc.RegisterAgentViaToken(ctx, registrationReplayRequest(minted.PlaintextToken, slug))
+	assertHTTPStatus(t, err, 401)
+}
+
+func TestRegistrationService_RegisterAgentViaToken_DirectlyIssuedTokenIsNotReplayed(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "Direct Token Creator")
+	ctx := context.Background()
+	svc := agent.NewRegistrationService(pool)
+
+	// A runtime token issued directly for an existing Agent never registered
+	// anything, so posting it with that Agent's slug keeps today's 401.
+	slug := freshSlug("direct-token-agent")
+	agentID := createApprovedAgent(t, pool, creatorID, slug)
+	direct, err := svc.CreateAgentToken(ctx, creatorID, &agent.CreateAgentTokenRequest{
+		Name:    "direct runtime",
+		AgentID: agentID.String(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "active_runtime", direct.Status)
+	_, err = svc.RegisterAgentViaToken(ctx, registrationReplayRequest(direct.PlaintextToken, slug))
+	assertHTTPStatus(t, err, 401)
+
+	// The same holds for a token issued later for an Agent that registration
+	// created; only the registering token itself replays.
+	pending, err := svc.CreateAgentToken(ctx, creatorID, &agent.CreateAgentTokenRequest{Name: "registering"})
+	require.NoError(t, err)
+	registeredSlug := freshSlug("registered-agent")
+	registered, err := svc.RegisterAgentViaToken(ctx, registrationReplayRequest(pending.PlaintextToken, registeredSlug))
+	require.NoError(t, err)
+	rotated, err := svc.CreateAgentToken(ctx, creatorID, &agent.CreateAgentTokenRequest{
+		Name:    "issued after registration",
+		AgentID: registered.Agent.ID,
+	})
+	require.NoError(t, err)
+	_, err = svc.RegisterAgentViaToken(ctx, registrationReplayRequest(rotated.PlaintextToken, registeredSlug))
+	assertHTTPStatus(t, err, 401)
+	replayed, err := svc.RegisterAgentViaToken(ctx, registrationReplayRequest(pending.PlaintextToken, registeredSlug))
+	require.NoError(t, err)
+	require.Equal(t, registered.Agent.ID, replayed.Agent.ID)
+	require.Equal(t, 2, countCreatorAgents(t, pool, creatorID))
+}
+
+func TestRegistrationService_RegisterAgentViaToken_ConcurrentFirstRegistrationSingleUse(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "Concurrent Agent Token Creator")
+	ctx := context.Background()
+
+	svc := agent.NewRegistrationService(pool)
+	minted, err := svc.CreateAgentToken(ctx, creatorID, &agent.CreateAgentTokenRequest{Name: "concurrent"})
+	require.NoError(t, err)
+
+	const attempts = 6
+	type outcome struct {
+		resp *agent.RegisterAgentViaTokenResponse
+		err  error
+	}
+	results := make(chan outcome, attempts)
+	start := make(chan struct{})
+	for i := 0; i < attempts; i++ {
+		slug := freshSlug("concurrent-agent")
+		go func() {
+			<-start
+			resp, err := svc.RegisterAgentViaToken(ctx, registrationReplayRequest(minted.PlaintextToken, slug))
+			results <- outcome{resp: resp, err: err}
+		}()
+	}
+	close(start)
+
+	var winner *agent.RegisterAgentViaTokenResponse
+	for i := 0; i < attempts; i++ {
+		got := <-results
+		if got.err == nil {
+			require.Nil(t, winner, "only one registration may redeem a token")
+			winner = got.resp
+			continue
+		}
+		assertHTTPStatus(t, got.err, 401)
+	}
+	require.NotNil(t, winner)
+	require.Equal(t, 1, countCreatorAgents(t, pool, creatorID))
+	row := readAgentTokenRow(t, pool, uuid.MustParse(minted.ID))
+	require.NotNil(t, row.agentID)
+	require.Equal(t, winner.Agent.ID, row.agentID.String())
+}
+
+func TestRegistrationService_RegisterAgentViaToken_LookupOutageIsNotUnauthorized(t *testing.T) {
+	pool, err := pgxpool.New(context.Background(), "postgres://openlinker@127.0.0.1:1/unreachable?sslmode=disable&connect_timeout=1")
+	require.NoError(t, err)
+	pool.Close()
+	token, _, err := credential.GenerateAgentToken()
+	require.NoError(t, err)
+
+	svc := agent.NewRegistrationService(pool)
+	_, err = svc.RegisterAgentViaToken(context.Background(), registrationReplayRequest(token, freshSlug("outage-agent")))
+	assertHTTPStatus(t, err, 500)
 }
 
 func TestRegistrationService_RevokeAgentToken_ClosesOnlyCredentialSessions(t *testing.T) {

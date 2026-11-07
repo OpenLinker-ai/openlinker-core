@@ -5,6 +5,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -168,6 +169,72 @@ func scanAgentAvailabilityAlert(row interface {
 		&a.CreatedAt,
 		&a.UpdatedAt,
 	)
+}
+
+const tryLockAgentAvailabilityCheck = `-- name: TryLockAgentAvailabilityCheck :one
+SELECT pg_try_advisory_lock(
+    hashtextextended('agent-availability-check:' || ($1::uuid)::text, 0)
+)`
+
+// TryLockAgentAvailabilityCheck takes the session-level per-Agent monitor
+// lock. It must run on a dedicated connection that later unlocks or closes.
+func (q *Queries) TryLockAgentAvailabilityCheck(ctx context.Context, agentID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, tryLockAgentAvailabilityCheck, agentID)
+	var locked bool
+	err := row.Scan(&locked)
+	return locked, err
+}
+
+const unlockAgentAvailabilityCheck = `-- name: UnlockAgentAvailabilityCheck :one
+SELECT pg_advisory_unlock(
+    hashtextextended('agent-availability-check:' || ($1::uuid)::text, 0)
+)`
+
+func (q *Queries) UnlockAgentAvailabilityCheck(ctx context.Context, agentID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, unlockAgentAvailabilityCheck, agentID)
+	var released bool
+	err := row.Scan(&released)
+	return released, err
+}
+
+const isAgentAvailabilityCheckDue = `-- name: IsAgentAvailabilityCheckDue :one
+SELECT NOT EXISTS (
+    SELECT 1
+    FROM agent_availability_snapshots s
+    WHERE s.agent_id = $1
+      AND s.last_checked_at >= NOW() - ($2::int * INTERVAL '1 second')
+)`
+
+type IsAgentAvailabilityCheckDueParams struct {
+	AgentID      uuid.UUID `db:"agent_id" json:"agent_id"`
+	StaleSeconds int32     `db:"stale_seconds" json:"stale_seconds"`
+}
+
+func (q *Queries) IsAgentAvailabilityCheckDue(ctx context.Context, arg IsAgentAvailabilityCheckDueParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isAgentAvailabilityCheckDue, arg.AgentID, arg.StaleSeconds)
+	var due bool
+	err := row.Scan(&due)
+	return due, err
+}
+
+const lockAgentIfUnchangedSince = `-- name: LockAgentIfUnchangedSince :one
+SELECT id
+FROM agents
+WHERE id = $1 AND updated_at = $2
+FOR SHARE`
+
+type LockAgentIfUnchangedSinceParams struct {
+	ID        uuid.UUID `db:"id" json:"id"`
+	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+}
+
+// LockAgentIfUnchangedSince returns pgx.ErrNoRows when the Agent row changed.
+// It must run inside the transaction that writes the dependent result.
+func (q *Queries) LockAgentIfUnchangedSince(ctx context.Context, arg LockAgentIfUnchangedSinceParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, lockAgentIfUnchangedSince, arg.ID, arg.UpdatedAt)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const upsertAgentAvailabilityAlert = `-- name: UpsertAgentAvailabilityAlert :one

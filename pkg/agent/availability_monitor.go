@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
@@ -17,7 +18,13 @@ const (
 	defaultAvailabilityMonitorInterval = 5 * time.Minute
 	defaultAvailabilityMonitorStale    = 15 * time.Minute
 	defaultAvailabilityMonitorBatch    = 20
+	availabilityClaimCleanupTimeout    = 5 * time.Second
 )
+
+// errAvailabilityResultDiscarded marks a monitor result that was not stored:
+// the Agent row changed, the check lock session was lost, or the guarded write
+// failed. Nothing is written and no alert is sent; the next pass re-checks.
+var errAvailabilityResultDiscarded = errors.New("availability check result discarded")
 
 // AvailabilityMonitorConfig controls the background platform health checker.
 type AvailabilityMonitorConfig struct {
@@ -109,48 +116,155 @@ func (s *Service) RunDueAvailabilityChecks(ctx context.Context, limit, staleSeco
 	resp := &AvailabilityCheckBatchResponse{
 		Alerts: []AvailabilityAlertResponse{},
 	}
+	claims := availabilityCheckClaims{pool: s.pool}
+	defer claims.close()
 	for i := range agents {
 		agentRow := agents[i]
-		before := s.agentAvailability(ctx, agentRow.ID, agentRow.ConnectionMode)
-		dryRun, err := s.RunDryRun(ctx, agentRow.ID, agentRow.CreatorID)
-		resp.Checked++
+		claimed, err := claims.claim(ctx, agentRow.ID, staleSeconds)
 		if err != nil {
-			errMsg := err.Error()
-			availability := s.markAvailabilityAfterDryRun(ctx, &agentRow, "fail", errMsg)
-			resp.Failed++
-			alert, alertErr := s.createAvailabilityFailureAlert(ctx, &agentRow, availability, errMsg, nil)
-			if alertErr != nil {
-				log.Warn().Err(alertErr).Str("agent_id", agentRow.ID.String()).Msg("agent.RunDueAvailabilityChecks: create failure alert")
-			} else {
-				resp.Alerts = append(resp.Alerts, *alert)
-			}
+			log.Warn().Err(err).Str("agent_id", agentRow.ID.String()).Msg("agent.RunDueAvailabilityChecks: claim check")
 			continue
 		}
-		if dryRun.Result == "fail" {
-			resp.Failed++
-			errMsg := ""
-			if dryRun.Error != nil {
-				errMsg = *dryRun.Error
-			}
-			alert, alertErr := s.createAvailabilityFailureAlert(ctx, &agentRow, dryRun.Availability, errMsg, dryRun.RepairHints)
-			if alertErr != nil {
-				log.Warn().Err(alertErr).Str("agent_id", agentRow.ID.String()).Msg("agent.RunDueAvailabilityChecks: create failure alert")
-			} else {
-				resp.Alerts = append(resp.Alerts, *alert)
-			}
+		if !claimed {
 			continue
 		}
-		resp.Passed++
-		if before.Status == "degraded" || before.Status == "unreachable" {
-			alert, alertErr := s.createAvailabilityRecoveredAlert(ctx, &agentRow, dryRun.Availability)
-			if alertErr != nil {
-				log.Warn().Err(alertErr).Str("agent_id", agentRow.ID.String()).Msg("agent.RunDueAvailabilityChecks: create recovery alert")
-			} else {
-				resp.Alerts = append(resp.Alerts, *alert)
-			}
-		}
+		s.checkDueAgentAvailability(ctx, &agentRow, availabilityResultGuard{lockConn: claims.conn}, resp)
+		claims.release(agentRow.ID)
 	}
 	return resp, nil
+}
+
+func (s *Service) checkDueAgentAvailability(
+	ctx context.Context,
+	agentRow *db.Agent,
+	guard availabilityResultGuard,
+	resp *AvailabilityCheckBatchResponse,
+) {
+	before := s.agentAvailability(ctx, agentRow.ID, agentRow.ConnectionMode)
+	dryRun, err := s.runDryRun(ctx, agentRow.ID, agentRow.CreatorID, &guard)
+	var preflightAvailability Availability
+	if err != nil && !errors.Is(err, errAvailabilityResultDiscarded) {
+		// A preflight failure (missing example / capability, schema mismatch)
+		// is stored through the same guard, against the row this batch listed.
+		var stored bool
+		preflightAvailability, stored = s.recordGuardedAvailabilityResult(ctx, agentRow, guard, "fail", err.Error(), nil)
+		if !stored {
+			err = errAvailabilityResultDiscarded
+		}
+	}
+	if errors.Is(err, errAvailabilityResultDiscarded) {
+		return
+	}
+	resp.Checked++
+	if err != nil {
+		errMsg := err.Error()
+		resp.Failed++
+		alert, alertErr := s.createAvailabilityFailureAlert(ctx, agentRow, preflightAvailability, errMsg, nil)
+		if alertErr != nil {
+			log.Warn().Err(alertErr).Str("agent_id", agentRow.ID.String()).Msg("agent.RunDueAvailabilityChecks: create failure alert")
+		} else {
+			resp.Alerts = append(resp.Alerts, *alert)
+		}
+		return
+	}
+	if dryRun.Result == "fail" {
+		resp.Failed++
+		errMsg := ""
+		if dryRun.Error != nil {
+			errMsg = *dryRun.Error
+		}
+		alert, alertErr := s.createAvailabilityFailureAlert(ctx, agentRow, dryRun.Availability, errMsg, dryRun.RepairHints)
+		if alertErr != nil {
+			log.Warn().Err(alertErr).Str("agent_id", agentRow.ID.String()).Msg("agent.RunDueAvailabilityChecks: create failure alert")
+		} else {
+			resp.Alerts = append(resp.Alerts, *alert)
+		}
+		return
+	}
+	resp.Passed++
+	if before.Status == "degraded" || before.Status == "unreachable" {
+		alert, alertErr := s.createAvailabilityRecoveredAlert(ctx, agentRow, dryRun.Availability)
+		if alertErr != nil {
+			log.Warn().Err(alertErr).Str("agent_id", agentRow.ID.String()).Msg("agent.RunDueAvailabilityChecks: create recovery alert")
+		} else {
+			resp.Alerts = append(resp.Alerts, *alert)
+		}
+	}
+}
+
+// availabilityCheckClaims coordinates the monitor across Core replicas: every
+// replica runs it, so each Agent is probed only by the replica holding its
+// session-level advisory lock, and only if its snapshot is still stale once
+// the lock is held. A replica that finished a check wrote last_checked_at
+// before unlocking, so one replica probes a given Agent per staleness window.
+// The locks live on one connection taken out of the pool for the batch: it
+// never pins pool capacity the probe itself needs, and closing it releases any
+// lock that could not be released explicitly.
+type availabilityCheckClaims struct {
+	pool *pgxpool.Pool
+	conn *pgx.Conn
+}
+
+// availabilityResultGuard routes a monitor result write through the session
+// that holds the Agent's check lock. The write commits only while that
+// session, and therefore the lock, is alive; the Agent row version comes from
+// the row the check read. The connection is used only by the batch goroutine.
+type availabilityResultGuard struct {
+	lockConn *pgx.Conn
+}
+
+func (c *availabilityCheckClaims) claim(ctx context.Context, agentID uuid.UUID, staleSeconds int32) (bool, error) {
+	if c.conn == nil {
+		pooled, err := c.pool.Acquire(ctx)
+		if err != nil {
+			return false, err
+		}
+		c.conn = pooled.Hijack()
+	}
+	locks := db.New(c.conn)
+	locked, err := locks.TryLockAgentAvailabilityCheck(ctx, agentID)
+	if err != nil {
+		c.close()
+		return false, err
+	}
+	if !locked {
+		return false, nil
+	}
+	due, err := locks.IsAgentAvailabilityCheckDue(ctx, db.IsAgentAvailabilityCheckDueParams{
+		AgentID:      agentID,
+		StaleSeconds: staleSeconds,
+	})
+	if err != nil || !due {
+		c.release(agentID)
+		return false, err
+	}
+	return true, nil
+}
+
+func (c *availabilityCheckClaims) release(agentID uuid.UUID) {
+	if c.conn == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), availabilityClaimCleanupTimeout)
+	defer cancel()
+	released, err := db.New(c.conn).UnlockAgentAvailabilityCheck(ctx, agentID)
+	if err != nil || !released {
+		log.Warn().Err(err).Str("agent_id", agentID.String()).
+			Msg("agent.RunDueAvailabilityChecks: unlock check; closing lock connection")
+		c.close()
+	}
+}
+
+func (c *availabilityCheckClaims) close() {
+	if c.conn == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), availabilityClaimCleanupTimeout)
+	defer cancel()
+	if err := c.conn.Close(ctx); err != nil {
+		log.Warn().Err(err).Msg("agent.RunDueAvailabilityChecks: close lock connection")
+	}
+	c.conn = nil
 }
 
 func (s *Service) ListAvailabilityAlerts(ctx context.Context, creatorID uuid.UUID, limit int32) (*AvailabilityAlertListResponse, error) {

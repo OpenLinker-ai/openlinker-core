@@ -51,3 +51,43 @@ func TestRegistrationHandler_AcceptsBearerDesignContract(t *testing.T) {
 	require.Equal(t, "active_runtime", resp.AgentToken.Status)
 	require.Empty(t, resp.AgentToken.PlaintextToken)
 }
+
+func TestRegistrationHandler_ReplaysCompletedRegistrationOverBearer(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "Bearer Replay Creator")
+	svc := agent.NewRegistrationService(pool)
+	minted, err := svc.CreateAgentToken(context.Background(), creatorID, &agent.CreateAgentTokenRequest{
+		Name: "bearer-replay",
+	})
+	require.NoError(t, err)
+
+	e := echo.New()
+	e.HTTPErrorHandler = func(err error, c echo.Context) { _ = httpx.SendError(c, err) }
+	agent.NewRegistrationHandler(svc).RegisterPublic(e.Group("/api/v1"))
+	slug := freshSlug("bearer-replay")
+	post := func(slug string) *httptest.ResponseRecorder {
+		body, err := json.Marshal(map[string]any{
+			"slug":         slug,
+			"name":         "Bearer Replay Agent",
+			"endpoint_url": "https://example.com/bearer-replay",
+			"ability_tags": []string{"research"},
+		})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agent-registration/agents", bytes.NewReader(body))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		req.Header.Set(echo.HeaderAuthorization, "Bearer "+minted.PlaintextToken)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		return rec
+	}
+
+	first := post(slug)
+	require.Equal(t, http.StatusCreated, first.Code, first.Body.String())
+	replayed := post(slug)
+	require.Equal(t, http.StatusCreated, replayed.Code, replayed.Body.String())
+	require.JSONEq(t, first.Body.String(), replayed.Body.String())
+	require.NotContains(t, replayed.Body.String(), "plaintext_token")
+
+	mismatch := post(freshSlug("bearer-other"))
+	require.Equal(t, http.StatusUnauthorized, mismatch.Code, mismatch.Body.String())
+}
