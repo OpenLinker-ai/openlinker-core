@@ -1125,11 +1125,8 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 	c.requestAttachProbe()
 	// Only a pass fed by a real signal may hand a token on: a background
 	// re-attempt's token would reach a sibling as if it were a real signal.
-	// Residual window: a background claim from a full Session can briefly lock
-	// a candidate Run (ClaimOffer locks it before the slot check) so that a
-	// sibling claiming concurrently skips it and clears its demand. That Run
-	// is then recovered by the next signal or the dispatch wake reconciler.
-	// Signalled claims at HEAD open the same class of window.
+	// A background claim checks for a free slot before locking any candidate,
+	// so parking silently cannot hide a Run from a sibling.
 	parkDispatch := func(handOff bool) {
 		setDispatchListening(false)
 		if handOff {
@@ -1611,7 +1608,14 @@ func (c *runtimeWSConnection) claimPendingAndSend(signalled bool) (outcome runti
 	defer c.dispatchMu.Unlock()
 	defer func() { c.claimRetrying = outcome == runtimeDispatchRetry }()
 	probe := c.takeAttachProbe()
-	assignment, err := c.controller.dependencies.Leases.ClaimOffer(c.ctx, c.sessionPrincipal)
+	claimCtx := c.ctx
+	if !signalled {
+		// Background claims stop before locking a candidate when this Session
+		// has no free slot (see ClaimOffer), so they never hide a Run from a
+		// sibling that holds the real hint.
+		claimCtx = withRuntimeBackgroundClaim(c.ctx)
+	}
+	assignment, err := c.controller.dependencies.Leases.ClaimOffer(claimCtx, c.sessionPrincipal)
 	if probe {
 		c.endAttachProbe(err != nil)
 		if err != nil {

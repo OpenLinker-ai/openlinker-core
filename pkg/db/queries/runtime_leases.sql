@@ -182,6 +182,21 @@ WHERE r.active_attempt_id = a.id
   AND r.run_deadline_at > clock_timestamp()
 FOR UPDATE OF a;
 
+-- name: GetRuntimeClaimSlotsFree :one
+-- Background WebSocket claims re-read both slots inside the claim transaction,
+-- after the principal rows are locked and any expired offer has released its
+-- slots, and stop before locking a candidate Run when no slot is free.
+SELECT (
+    s.status = 'active'
+    AND s.inflight < s.capacity
+    AND n.status = 'active'
+    AND n.inflight < n.capacity
+)::boolean AS free
+FROM runtime_sessions s
+JOIN runtime_nodes n ON n.node_id = s.node_id
+WHERE s.runtime_session_id = $1
+  AND n.node_id = $2;
+
 -- A queued Run may be referenced by a Workflow step/message concurrently.
 -- KEY SHARE from that FK must not make the Run look absent to SKIP LOCKED.
 -- We never mutate the referenced (id, agent_id) key; NO KEY UPDATE still

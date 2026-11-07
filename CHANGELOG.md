@@ -18,6 +18,9 @@ runtime protocol, and migration contract are declared stable.
   Transient claim database errors retry with 100ms–5s backoff instead of
   closing the WebSocket; authentication, conflict, contract and maintenance
   closes are unchanged, and claims not driven by a real signal never close.
+  Such background claims check for a free slot before locking a queued Run, so
+  they cannot make a sibling Session skip it; Pull and signalled claims keep
+  their existing path and responses.
   The deadline reconciler now isolates a failing candidate instead of stopping
   the batch. No protocol message, API, configuration or migration changed.
 - Agent Token `last_used_at` is recorded again for Runtime v2. It stopped

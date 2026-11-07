@@ -415,3 +415,136 @@ func (l *countingRuntimeLeases) snapshot() map[uuid.UUID]int {
 	defer l.mu.Unlock()
 	return maps.Clone(l.claims)
 }
+
+// A full Session's background claim must not lock a queued Run: an idle
+// sibling claiming with the real hint would skip it and drop its demand. Both
+// claims are real ClaimOffer transactions; the full Session's background claim
+// is held at the point where it would hold the candidate lock.
+func TestRuntimeDispatchWakeBackgroundClaimDoesNotHideRunFromSibling(t *testing.T) {
+	pool := setupTestDB(t)
+	resetRuntimeNodeAdminTables(t, pool)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	coreID := uuid.New()
+	service := runtime.NewService(pool, newTestConfig())
+	service.ConfigureCoreRuntime(coreID)
+	ownerID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, ownerID, "openlinker-runtime://claim-precheck", 0, "approved")
+	_, err := pool.Exec(ctx, `UPDATE agents SET connection_mode='runtime' WHERE id=$1`, agentID)
+	require.NoError(t, err)
+	full := insertDispatchClaimSession(ctx, t, pool, agentID, ownerID, coreID)
+	idle := insertDispatchClaimSession(ctx, t, pool, agentID, ownerID, coreID)
+	signer, err := runtime.NewRuntimeInvocationSigner(strings.Repeat("integration-only-", 4))
+	require.NoError(t, err)
+	leases := runtime.NewRuntimeLeaseService(pool, coreID, signer, runtime.RuntimeLeaseConfig{})
+	startRun := func() uuid.UUID {
+		t.Helper()
+		run, startErr := service.StartRun(ctx, ownerID, &runtime.RunRequest{
+			AgentID: agentID.String(), Input: map[string]any{"text": "claim pre-check"},
+			IdempotencyKey: uuid.NewString(),
+		}, "api")
+		require.NoError(t, startErr)
+		return uuid.MustParse(run.RunID)
+	}
+
+	// The full Session accepts the Run that occupies its only slot.
+	held := startRun()
+	offer, err := leases.ClaimOffer(ctx, full)
+	require.NoError(t, err)
+	require.NotNil(t, offer)
+	require.Equal(t, held, offer.AttemptIdentity.RunID)
+	_, err = leases.AckAssignment(ctx, full, runtime.RunAssignmentAckPayload{AttemptIdentity: offer.AttemptIdentity})
+	require.NoError(t, err)
+
+	queued := startRun()
+	reached, release := make(chan struct{}), make(chan struct{})
+	var reachedOnce sync.Once
+	hooked := runtime.NewRuntimeLeaseServiceWithCandidateHookForTest(
+		pool, coreID, signer, runtime.RuntimeLeaseConfig{},
+		func() {
+			reachedOnce.Do(func() { close(reached) })
+			<-release
+		},
+	)
+	type claimResult struct {
+		assignment *runtime.RunAssignedPayload
+		err        error
+	}
+	background := make(chan claimResult, 1)
+	go func() {
+		assignment, claimErr := hooked.ClaimOffer(runtime.WithRuntimeBackgroundClaimForTest(ctx), full)
+		background <- claimResult{assignment, claimErr}
+	}()
+	var fullResult *claimResult
+	select {
+	case <-reached: // only possible if the background claim locked the queued Run
+	case result := <-background:
+		fullResult = &result
+	case <-ctx.Done():
+		t.Fatal("background claim did not progress")
+	}
+
+	// The idle sibling claims with the real hint while the full Session's
+	// background claim is in flight or already finished.
+	got, err := leases.ClaimOffer(ctx, idle)
+	close(release)
+	if fullResult == nil {
+		result := <-background
+		fullResult = &result
+	}
+	require.NoError(t, err)
+	require.NotNil(t, got, "the idle sibling must not skip a Run the full Session cannot take")
+	require.Equal(t, queued, got.AttemptIdentity.RunID)
+	require.Nil(t, fullResult.assignment)
+	require.True(t, runtime.IsRuntimeLeaseError(fullResult.err, runtime.RuntimeLeaseErrorNodeAtCapacity), "%v", fullResult.err)
+
+	// Pull and signalled claims keep today's answer for a full Session with
+	// nothing claimable: no assignment (HTTP 204), not NODE_AT_CAPACITY.
+	none, err := leases.ClaimOffer(ctx, full)
+	require.NoError(t, err)
+	require.Nil(t, none)
+}
+
+func insertDispatchClaimSession(
+	ctx context.Context,
+	t *testing.T,
+	pool *pgxpool.Pool,
+	agentID, ownerID, coreID uuid.UUID,
+) runtime.RuntimeSessionPrincipal {
+	t.Helper()
+	tokenID, nodeID, sessionID, attachmentID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	workerID := "claim-precheck-" + sessionID.String()[:8]
+	serial := strings.ReplaceAll(nodeID.String(), "-", "")
+	thumbprint := fmt.Sprintf("%x", sha256.Sum256([]byte("claim-precheck/"+nodeID.String())))
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `INSERT INTO agent_tokens (id,agent_id,creator_user_id,name,prefix,token_hash,scopes,status,redeemed_at)
+     VALUES ($1,$2,$3,'claim pre-check',$4,$4,ARRAY['agent:pull']::text[],'active_runtime',clock_timestamp())`,
+		tokenID, agentID, ownerID, "ol_agent_"+tokenID.String()[:8])
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `INSERT INTO runtime_nodes
+    (node_id,display_name,device_certificate_serial,device_public_key_thumbprint,node_version,protocol_version,runtime_contract_id,runtime_contract_digest,features,capacity,inflight,status,last_seen_at)
+    VALUES ($1,'claim pre-check',$2,$3,'claim-precheck-v1',2,$4,$5,$6,1,0,'active',clock_timestamp())`,
+		nodeID, serial, thumbprint, runtime.RuntimeContractID, runtime.RuntimeContractDigest, runtime.RuntimeRequiredFeatures())
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `INSERT INTO runtime_sessions (
+        runtime_session_id, node_id, agent_id, credential_id, worker_id,
+        session_epoch, device_certificate_serial, node_version,
+        protocol_version, runtime_contract_id, runtime_contract_digest,
+        features, capacity, attached_core_instance_id
+    ) VALUES ($1, $2, $3, $4, $5, 1, $6, 'claim-precheck-v1', 2, $7, $8, $9, 1, $10)`,
+		sessionID, nodeID, agentID, tokenID, workerID, serial,
+		runtime.RuntimeContractID, runtime.RuntimeContractDigest, runtime.RuntimeRequiredFeatures(), coreID)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `INSERT INTO runtime_session_attachments (id, runtime_session_id, core_instance_id, attachment_kind)
+     VALUES ($1, $2, $3, 'connected')`, attachmentID, sessionID, coreID)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+	return runtime.RuntimeSessionPrincipal{
+		RuntimeSessionID: sessionID, NodeID: nodeID, AgentID: agentID, CredentialID: tokenID,
+		WorkerID: workerID, SessionEpoch: 1, RuntimeContractDigest: runtime.RuntimeContractDigest,
+		CoreInstanceID: coreID, AttachmentID: attachmentID, DeviceCertificateSerial: serial,
+		DevicePublicKeyThumbprintSHA256: thumbprint, Status: "active",
+	}
+}

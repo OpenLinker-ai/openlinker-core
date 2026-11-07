@@ -647,6 +647,31 @@ func (q *Queries) LockRuntimeRunAttemptForLeaseMutation(ctx context.Context, arg
 	return i, err
 }
 
+const getRuntimeClaimSlotsFree = `-- name: GetRuntimeClaimSlotsFree :one
+SELECT (
+    s.status = 'active'
+    AND s.inflight < s.capacity
+    AND n.status = 'active'
+    AND n.inflight < n.capacity
+)::boolean AS free
+FROM runtime_sessions s
+JOIN runtime_nodes n ON n.node_id = s.node_id
+WHERE s.runtime_session_id = $1
+  AND n.node_id = $2`
+
+type GetRuntimeClaimSlotsFreeParams struct {
+	RuntimeSessionID uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`
+	NodeID           uuid.UUID `db:"node_id" json:"node_id"`
+}
+
+// GetRuntimeClaimSlotsFree re-reads the Session and Node slots inside a claim
+// transaction, matching the status and capacity guards of the slot claims.
+func (q *Queries) GetRuntimeClaimSlotsFree(ctx context.Context, arg GetRuntimeClaimSlotsFreeParams) (bool, error) {
+	var free bool
+	err := q.db.QueryRow(ctx, getRuntimeClaimSlotsFree, arg.RuntimeSessionID, arg.NodeID).Scan(&free)
+	return free, err
+}
+
 const lockNextClaimableRuntimeRunForAgent = `-- name: LockNextClaimableRuntimeRunForAgent :one
 SELECT r.id, r.user_id, r.agent_id, r.input, (r.request_metadata - '_openlinker_skill_packages' - '_openlinker_mcp_bindings' - '_openlinker_mcp_binding') || jsonb_build_object('_openlinker_skill_packages', COALESCE((SELECT jsonb_build_object('schema_version',1,'bundles',jsonb_agg(jsonb_build_object('binding_id',sp.binding_id,'package_id',sp.package_id,'version_id',sp.version_id,'version',v.version,'digest',sp.digest,'payload',v.payload) ORDER BY sp.package_id)) FROM run_skill_package_snapshots sp JOIN skill_package_versions v ON v.id=sp.version_id WHERE sp.run_id=r.id HAVING count(*)>0), '{"schema_version":1,"bundles":[]}'::jsonb)) || jsonb_build_object('_openlinker_mcp_bindings',jsonb_build_object('schema_version',1,'tools',COALESCE((SELECT jsonb_agg(ms.tool ORDER BY ms.target_agent_id) FROM run_mcp_binding_snapshots ms WHERE ms.run_id=r.id),'[]'::jsonb))) AS request_metadata,
        r.connection_mode_snapshot, r.dispatch_state, r.offer_count,
