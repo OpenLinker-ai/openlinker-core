@@ -7,6 +7,17 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+### Changed
+
+- **Behaviour change:** a new Agent whose request omits `visibility` is now
+  `private`, both for `POST /creator/agents` and for self-registration
+  (`POST /agent-registration/agents`, which used to force `public`). The Hub
+  already tells creators new Agents are private, the docs say to verify while
+  private, and the SDKs already send `private`; an unverified Agent should not
+  be listed or callable by others by default. Explicit `public`, `unlisted` and
+  `private` are unchanged, and so are existing Agents and updates that omit
+  `visibility`. Callers that need a public Agent must send `visibility: "public"`.
+
 ### Fixed
 
 - Runtime dispatch no longer loses a wake to a WebSocket Session that cannot
@@ -30,6 +41,21 @@ runtime protocol, and migration contract are declared stable.
 - Saving Agent settings no longer reverts a concurrent visibility or connection
   change made elsewhere; the read, carry-over, validation and update run in one
   transaction.
+- Repointing an Agent no longer keeps evidence about the old target. When
+  `connection_mode`, the normalized `endpoint_url` or the MCP tool changes, the
+  same transaction:
+  - resets the availability snapshot to `unknown` with `last_checked_at`
+    cleared, so the monitor re-checks on its next pass;
+  - resets the dry-run / health-check result to `pending`;
+  - moves a `certified` Agent back to `pending` review with `certified_at`
+    cleared;
+  - resets Skill Benchmark scores to `pending`.
+- A changed or cleared endpoint credential resets only availability and dry-run;
+  certification and benchmark scores are kept. Other edits leave all evidence
+  intact. Run history, benchmark case results and alerts are never deleted.
+- Creator dry-runs and benchmark batches that probed the previous target no
+  longer store their result after the Agent is repointed. A dry-run in that
+  case returns 409.
 - Retrying self-registration with the same Agent Token and slug after a lost
   response returns the original `{agent, agent_token}` (201) instead of 401.
   This applies only to tokens redeemed by that registration; every other case is
@@ -51,6 +77,17 @@ runtime protocol, and migration contract are declared stable.
 
 ### Added
 
+- Self-registration accepts optional `capability` and `examples` with the same
+  shapes, validation and limits as the creator endpoints. They are written in
+  the registration transaction; an invalid declaration creates nothing and
+  leaves the token unredeemed.
+- The registration response adds `agent.availability` / `agent.readiness`,
+  `onboarding`, and `next_actions`: up to five ordered steps (declare
+  capability, add example, start runtime worker, run health check, make public)
+  in the existing Run next-action shape.
+- Registration replay neither applies nor compares `capability` / `examples`,
+  and reports the stored state.
+
 - Expose lifecycle, binding limit, and host compatibility hints on the owner-only
   Skill binding read response without changing binding admission or Run snapshots.
 
@@ -64,6 +101,11 @@ runtime protocol, and migration contract are declared stable.
 
 ### Compatibility
 
+- Registration response fields are additive; the Go, JS and Python SDK
+  registration clients ignore unknown fields. No migration is needed for
+  evidence invalidation. A Run already executing against the previous target
+  when the change commits can still record its terminal outcome in the fresh
+  availability snapshot.
 - Schemas 096/097 are forward-only. Coordinate Core and Web rollout; legacy empty
   publication requests remain valid and freeze empty display information.
   Currently published versions receive empty declarations, while historically

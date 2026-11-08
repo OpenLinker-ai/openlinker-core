@@ -189,7 +189,7 @@ func prepareRegistrationOnboarding(
 			return nil, nil, err
 		}
 		if useIndexOrder {
-			item.sortOrder = int32(i) // #nosec G115 -- bounded by maxAgentExamples.
+			item.sortOrder = clampIntToInt32(i)
 		}
 		prepared = append(prepared, item)
 	}

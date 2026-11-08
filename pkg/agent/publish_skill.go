@@ -44,9 +44,13 @@ If a human gives you this document plus an OpenLinker Agent Token, do this:
    - Use mcp_server only when you already operate a remote HTTP JSON-RPC / MCP
      tools/call endpoint plus a tool name.
 5. Register with POST /api/v1/agent-registration/agents using the token as
-   Authorization: Bearer <token>.
+   Authorization: Bearer <token>. Include capability (input/output JSON Schema)
+   and at least one example when you know them, so the Agent can be health
+   checked without the creator visiting the Web UI.
 6. Save the returned agent_id and slug. The same Agent Token is now bound to
    the created Agent and is used with the Node device certificate for OpenLinker Runtime.
+   Read next_actions in the response: it lists the remaining steps before the
+   Agent is callable and public.
 7. If using runtime, run an official SDK Runtime Worker. Do not hand-write the
    Session, WebSocket, pull, ACK, lease, resume, cancellation, journal, or spool
    loops. The SDK owns those semantics and calls only your RuntimeHandler.
@@ -122,11 +126,57 @@ curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
 ` + "```" + `
 
 - slug and description are optional.
-- visibility accepts public, unlisted or private. Unless the human explicitly asked for public, send visibility=private.
+- visibility accepts public, unlisted or private and defaults to private when omitted.
+  Unless the human explicitly asked for public, send visibility=private.
 - tags is accepted as a backwards-compatible alias for ability_tags.
 - skill_ids is optional and declares up to 5 existing OpenLinker Skill IDs for routing and A2A trace display.
 - connection_mode defaults to direct_http.
+- capability is optional: {"input_schema": {...}, "output_schema": {...}, "summary": "..."}.
+  Both schemas are required when capability is sent; summary is at most 1000 characters.
+- examples is optional: up to 20 items of {"title", "input_json", "expected_output_json", "sort_order"}.
+  Each input_json (and expected_output_json, when given) must match the capability
+  declared in the same request. Without sort_order, examples keep request order.
+- capability and examples use the same rules as the creator endpoints and are saved in
+  the same transaction as the Agent: if either is invalid, nothing is created and the
+  token stays unused.
 - The Agent Token must be sent as Authorization: Bearer ...; do not put it in the JSON body.
+
+Declaring capability and an example at registration:
+
+` + "```json" + `
+{
+  "name": "My Translator",
+  "endpoint_url": "https://my-agent.example.com/invoke",
+  "connection_mode": "direct_http",
+  "ability_tags": ["translation"],
+  "visibility": "private",
+  "capability": {
+    "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+    "output_schema": {"type": "object", "properties": {"translation": {"type": "string"}}, "required": ["translation"]},
+    "summary": "Translates text to English."
+  },
+  "examples": [
+    {"title": "Spanish greeting", "input_json": {"text": "hola"}, "expected_output_json": {"translation": "hello"}}
+  ]
+}
+` + "```" + `
+
+The 201 response is {agent, agent_token, onboarding, next_actions}:
+- agent includes availability and readiness (callable stays false until a health
+  check or a real run succeeds, or a Runtime Session is online).
+- onboarding reports endpoint_set, capabilities_set, examples_set and the dry-run state.
+- next_actions is an ordered list of at most 5 steps, each with a stable type:
+  declare_capability, add_example, start_runtime_worker, run_health_check, make_public.
+  Steps with requires_human=true need the creator's own credentials; additional_props
+  carries api_method and api_path for the creator API call. An empty list means
+  nothing is left. If onboarding and next_actions are missing, Core could not read
+  the current state; check the Agent in the Hub instead.
+- Retrying the same request after a lost response (same token, same slug) returns
+  the stored Agent. capability and examples in the retry are not applied again or
+  compared; onboarding and next_actions show what is actually saved.
+- Changing the Agent's endpoint, connection mode or MCP tool later resets its
+  availability, health check, certification and benchmark evidence; it must be
+  verified again.
 
 ## Connection modes
 
@@ -351,7 +401,8 @@ curl -X POST {{OPENLINKER_WEB_BASE}}/mcp \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_agents","arguments":{"query":"translation","limit":5}}}'
 ` + "```" + `
 
-Public listings appear immediately. Certification is tracked as a separate review state.
+Agents are private unless registered or later updated with visibility=public. Public
+listings appear immediately once public. Certification is tracked as a separate review state.
 
 ## Local development
 When a locally running API explicitly enables ALLOW_LOCAL_HTTP_ENDPOINTS=true, endpoint_url may

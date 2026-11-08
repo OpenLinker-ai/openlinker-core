@@ -105,6 +105,26 @@ func TestServePublishAgentSkillIncludesDiscoveredCanonicalRuntimeOnboarding(t *t
 	assertNotContains(t, body, "run.result_ack")
 }
 
+func TestPublishAgentSkillDocumentsRegistrationReadiness(t *testing.T) {
+	body := PublishAgentSkillMarkdown
+
+	assertContains(t, body, "defaults to private when omitted")
+	assertContains(t, body, `"capability": {`)
+	assertContains(t, body, `"examples": [`)
+	assertContains(t, body, "{agent, agent_token, onboarding, next_actions}")
+	for _, step := range []string{
+		RegistrationNextActionDeclareCapability,
+		RegistrationNextActionAddExample,
+		RegistrationNextActionStartRuntimeWorker,
+		RegistrationNextActionRunHealthCheck,
+		RegistrationNextActionMakePublic,
+	} {
+		assertContains(t, body, step)
+	}
+	assertContains(t, body, "not applied again or")
+	assertNotContains(t, body, "Public listings appear immediately. Certification")
+}
+
 func TestConsumeAgentSkillKeepsTasksPrivate(t *testing.T) {
 	body := ConsumeAgentSkillMarkdown
 
