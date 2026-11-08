@@ -203,7 +203,15 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 	// machine. This prevents concurrent callers from disagreeing about a target
 	// while one of them is already authorized to create the execution.
 	record, err := s.store.Get(ctx, parsed.callerServiceID, parsed.externalRequestID)
+	inputValidated := false
 	if errors.Is(err, pgx.ErrNoRows) {
+		// A new request must satisfy its own input_schema before anything is
+		// reserved. Replays of an existing record skip this check: the record
+		// already binds the input, and an attached execution stays readable.
+		if inputErr := validateExternalExecutionInput(parsed.input, parsed.inputSchema); inputErr != nil {
+			return nil, s.unreservedInputRejection(ctx, parsed, inputErr)
+		}
+		inputValidated = true
 		record, err = s.store.Reserve(ctx, ExecutionRecord{
 			CallerServiceID:           parsed.callerServiceID,
 			ExternalRequestID:         parsed.externalRequestID,
@@ -258,11 +266,20 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 			return nil, httpx.ServiceUnavailable("外部执行正在启动，请重试")
 		}
 	case startStatePending, startStateEvaluating:
+		// A record reserved before input_schema enforcement existed is checked
+		// before it can be authorized; the check has no side effects.
+		if !inputValidated {
+			if inputErr := validateExternalExecutionInput(parsed.input, parsed.inputSchema); inputErr != nil {
+				return nil, inputErr
+			}
+		}
 	default:
 		return nil, httpx.Internal("外部执行启动状态无效")
 	}
 
-	if record.StartState != startStateAuthorized {
+	// An expired launch fence was already authorized (launching requires the
+	// target owner snapshot); ClaimLaunch reclaims it below.
+	if record.StartState != startStateAuthorized && record.StartState != startStateLaunching {
 		var response *ExecutionStartResponse
 		record, response, err = s.ensureExecutionStartAuthorized(ctx, record, parsed, fingerprint)
 		if err != nil || response != nil {
@@ -311,6 +328,12 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 			if errors.Is(err, runtime.ErrExternalExecutionLaunchFenceRejected) {
 				return nil, s.launchFenceFailure(ctx, parsed)
 			}
+			// Runtime validates the input against the capability before it
+			// creates anything, so this rejection is final for this input.
+			// The launch fence lease simply expires; a retry re-validates.
+			if inputErr, rejected := capabilityInputInvalidError(err); rejected {
+				return nil, inputErr
+			}
 			return nil, httpx.ServiceUnavailable("Runtime 启动状态正在确认，请重试")
 		}
 		executionID, err = uuid.Parse(started.RunID)
@@ -340,6 +363,29 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 	}
 
 	return s.attachLaunchedExecution(ctx, parsed, launchToken, executionKind, executionID)
+}
+
+// unreservedInputRejection keeps the answers Reserve would have given for an
+// identity that already exists without an execution record (another actor's
+// key, or a cancellation recorded before start); otherwise the input error
+// stands. It only reads.
+func (s *Service) unreservedInputRejection(ctx context.Context, parsed parsedExecution, inputErr error) error {
+	key, err := s.store.GetKey(ctx, parsed.callerServiceID, parsed.externalRequestID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return inputErr
+	}
+	if err != nil {
+		return httpx.Internal("查询外部执行 identity 失败")
+	}
+	if key.ActorUserID != parsed.actorUserID {
+		return httpx.Conflict("external_request_id 已绑定其他 actor")
+	}
+	if _, err := s.store.GetCancellation(ctx, parsed.callerServiceID, parsed.externalRequestID); err == nil {
+		return externalExecutionCanceledError()
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return httpx.Internal("查询外部执行取消 evidence 失败")
+	}
+	return inputErr
 }
 
 const startEvaluationLease = 30 * time.Second

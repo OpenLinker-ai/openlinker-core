@@ -31,16 +31,21 @@ func TestValidateTargetReturnsSchemaIncompatibilityDetailToOwnerOnly(t *testing.
 		OutputSchema: map[string]interface{}{"type": "object"},
 	}}
 	svc := newTestService(agents, ownerID)
-	listing := json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","maxLength":2000}},"required":["prompt"]}`)
+	stricter := json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","maxLength":2000}},"required":["prompt"]}`)
+	bounded, err := svc.ValidateTarget(context.Background(), testPrincipal(ownerID), &TargetValidationRequest{
+		TargetType: TargetTypeAgent, TargetID: targetID.String(), InputSchema: stricter,
+	})
+	if err != nil || !bounded.Executable || bounded.UnavailableDetail != nil || bounded.ContractHash == "" {
+		t.Fatalf("stricter bounded listing ValidateTarget() = %#v, %v", bounded, err)
+	}
 
+	listing := json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","maxLength":5000}},"required":["prompt"]}`)
 	resp, err := svc.ValidateTarget(context.Background(), testPrincipal(ownerID), &TargetValidationRequest{
 		TargetType: TargetTypeAgent, TargetID: targetID.String(), InputSchema: listing,
 	})
 	if err != nil || resp.Executable || resp.UnavailableReason != "input_schema_incompatible" || resp.ContractHash != "" {
 		t.Fatalf("ValidateTarget() = %#v, %v", resp, err)
 	}
-	// Core's run-time validator does not enforce maxLength, so the bound
-	// cannot be proven even though the listing declares a stricter one.
 	requireDetail(t, resp.UnavailableDetail, "prompt", SchemaRuleMaxLength, `4000`)
 	encoded, err := json.Marshal(resp)
 	if err != nil {

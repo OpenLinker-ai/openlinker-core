@@ -16,10 +16,15 @@ import (
 // schema. It is a bounded subset proof: anything it cannot prove fails closed,
 // and the first unproven capability rule is reported to the target owner.
 //
-// The listing is read as a closed form. Only its declared properties can be
-// present; the calling service's intake rejects undeclared keys, and Core's
-// run-time validator enforces capability additionalProperties:false. Extra
-// listing keywords only narrow the listing and are therefore ignored.
+// The listing is read as a closed form: the check covers the properties the
+// listing declares. Undeclared input keys are left to the capability itself,
+// which Core's run-time validator enforces for type, enum, required,
+// properties, additionalProperties and items. Extra listing keywords only
+// narrow the listing and are therefore ignored.
+//
+// Scalar constraint proofs (const, lengths, pattern, numeric bounds,
+// multipleOf) rely on the listing's own keywords, which Core enforces on the
+// actual input at External Execution start (validateExternalExecutionInput).
 //
 // Properties and required keys are walked in sorted order so the reported
 // incompatibility is deterministic.
@@ -30,25 +35,17 @@ const maxCapabilityValueBytes = 2048
 
 // unsupportedObjectKeywords are capability keywords at the top level of the
 // input schema that the checker cannot prove. They are checked in this order.
+// The set matches the pre-diagnostics checker so no target that was
+// executable before becomes unavailable.
 var unsupportedObjectKeywords = []string{
-	"$dynamicRef", "$ref", "allOf", "anyOf", "const", "dependencies",
-	"dependentRequired", "dependentSchemas", "else", "enum", "if", "items",
-	"maxProperties", "minProperties", "not", "oneOf", "patternProperties",
-	"prefixItems", "propertyNames", "then", "unevaluatedProperties",
+	"allOf", "anyOf", "dependentRequired", "dependentSchemas", "else", "if",
+	"maxProperties", "minProperties", "not", "oneOf", "propertyNames", "then",
 }
 
 // unsupportedPropertyKeywords are capability property keywords the checker
-// cannot prove. Nested object and array constraints are included: Core's
-// run-time validator enforces properties, required, additionalProperties and
-// items, so a listing that cannot prove them would fail at run time.
+// cannot prove, beyond the scalar constraints below. Same pre-diagnostics set.
 var unsupportedPropertyKeywords = []string{
-	"$dynamicRef", "$ref", "additionalItems", "additionalProperties", "allOf",
-	"anyOf", "contains", "dependencies", "dependentRequired", "dependentSchemas",
-	"else", "if", "items", "maxContains", "maxItems", "maxProperties",
-	"minContains", "minItems", "minProperties", "not", "oneOf",
-	"patternProperties", "prefixItems", "properties", "propertyNames",
-	"required", "then", "unevaluatedItems", "unevaluatedProperties",
-	"uniqueItems",
+	"allOf", "anyOf", "else", "if", "not", "oneOf", "then",
 }
 
 // scalarConstraint is a capability property keyword with a subset proof.
@@ -62,15 +59,13 @@ type scalarConstraint struct {
 
 // scalarConstraints are checked in this order.
 //
-// A proof only holds end to end when Core also enforces the capability
-// keyword at run time, because the listing schema itself is enforced outside
-// Core. Core's run-time input validator (pkg/inputschema, the source of
-// RUN_INPUT_SCHEMA_MISMATCH) enforces none of these keywords today, so the
-// production checker keeps failing closed for all of them and reports the
-// keyword's rule. A proof may be enabled only together with run-time
-// enforcement of the same keyword with the same semantics: Unicode code-point
-// (rune) lengths, Go RE2 patterns that compile, and exact decimal numbers.
-// TestProductionSchemaCheckerMatchesRuntimeValidator pins the two together.
+// A proof only holds end to end when Core enforces the listing keywords it
+// relies on against the actual input; Core's ordinary run-time validator
+// ignores these keywords. validateExternalExecutionInput enforces the listing
+// with the same semantics the proofs use: Unicode code-point (rune) lengths,
+// Go RE2 patterns that must compile, and exact rational numbers. The
+// production gate is that enforcer's keyword set;
+// TestProductionSchemaGateMatchesStartInputEnforcement pins the two together.
 var scalarConstraints = []scalarConstraint{
 	{keyword: "const", rule: SchemaRuleConst, prove: proveConst},
 	{keyword: "minLength", rule: SchemaRuleMinLength, prove: proveMinLength},
@@ -86,12 +81,12 @@ var scalarConstraints = []scalarConstraint{
 // schemaChecker holds the set of scalar constraint keywords whose subset
 // proofs are enabled. A keyword that is not enabled always fails closed.
 type schemaChecker struct {
-	runtimeEnforced map[string]bool
+	enforced map[string]bool
 }
 
-// productionSchemaChecker enables no scalar constraint proof: Core's run-time
-// validator does not enforce any of them (see scalarConstraints).
-var productionSchemaChecker = schemaChecker{runtimeEnforced: map[string]bool{}}
+// productionSchemaChecker enables exactly the scalar proofs whose listing
+// keywords are enforced on the input at External Execution start.
+var productionSchemaChecker = schemaChecker{enforced: externalInputEnforcedKeywords}
 
 // externalInputSchemaIncompatibility returns the first reason the external
 // schema is not provably accepted by the capability schema, or nil when it is.
@@ -189,7 +184,7 @@ func (c schemaChecker) propertyIncompatibility(property string, external, capabi
 		if !constrained {
 			continue
 		}
-		if !c.runtimeEnforced[constraint.keyword] {
+		if !c.enforced[constraint.keyword] {
 			return schemaIncompatibility(property, constraint.rule, capabilityValue)
 		}
 		if rule := constraint.prove(external, capabilityValue); rule != "" {

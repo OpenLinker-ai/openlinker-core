@@ -1,7 +1,6 @@
 package externalexecution
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -115,7 +114,7 @@ func TestExternalInputSchemaIncompatibilityReportsFirstRule(t *testing.T) {
 		{name: "capability not an object", listing: objectSchema(nil), capability: map[string]interface{}{"type": "string"}, rule: SchemaRuleType, value: `"string"`},
 		{name: "listing not an object", listing: map[string]interface{}{"type": "array"}, capability: objectSchema(nil), rule: SchemaRuleType, value: `"object"`},
 		{name: "object keyword", listing: objectSchema(nil), capability: objectSchema(nil, "anyOf", []interface{}{}), rule: SchemaRuleUnsupportedKeyword, value: `"anyOf"`},
-		{name: "object enum", listing: objectSchema(nil), capability: objectSchema(nil, "enum", []interface{}{map[string]interface{}{}}), rule: SchemaRuleUnsupportedKeyword, value: `"enum"`},
+		{name: "object dependentSchemas", listing: objectSchema(nil), capability: objectSchema(nil, "dependentSchemas", map[string]interface{}{}), rule: SchemaRuleUnsupportedKeyword, value: `"dependentSchemas"`},
 		{name: "additionalProperties schema", listing: objectSchema(nil), capability: objectSchema(nil, "additionalProperties", prop("type", "string")), rule: SchemaRuleUnsupportedKeyword, value: `"additionalProperties"`},
 		{name: "capability properties malformed", listing: objectSchema(nil), capability: map[string]interface{}{"type": "object", "properties": []interface{}{}}, rule: SchemaRuleSchemaInvalid},
 		{name: "listing properties malformed", listing: map[string]interface{}{"type": "object", "properties": "x"}, capability: objectSchema(nil), rule: SchemaRuleSchemaInvalid},
@@ -148,18 +147,6 @@ func TestExternalInputSchemaIncompatibilityReportsFirstRule(t *testing.T) {
 			listing:    objectSchema(map[string]interface{}{"count": prop("type", "number")}),
 			capability: objectSchema(map[string]interface{}{"count": prop()}),
 			property:   "count", rule: SchemaRuleType,
-		},
-		{
-			name:       "nested object constraints",
-			listing:    objectSchema(map[string]interface{}{"doc": prop("type", "object")}),
-			capability: objectSchema(map[string]interface{}{"doc": prop("type", "object", "required", []interface{}{"x"})}),
-			property:   "doc", rule: SchemaRuleUnsupportedKeyword, value: `"required"`,
-		},
-		{
-			name:       "array items",
-			listing:    objectSchema(map[string]interface{}{"tags": prop("type", []interface{}{"string", "array"})}),
-			capability: objectSchema(map[string]interface{}{"tags": prop("type", []interface{}{"string", "array"}, "items", str)}),
-			property:   "tags", rule: SchemaRuleUnsupportedKeyword, value: `"items"`,
 		},
 		{
 			name:       "composition",
@@ -199,95 +186,111 @@ func TestExternalInputSchemaIncompatibilityReportsFirstRule(t *testing.T) {
 	}
 }
 
-// Core's run-time validator does not enforce any scalar constraint keyword,
-// so production keeps failing closed for each of them even when the listing
-// declares a provably stricter bound.
-func TestProductionSchemaCheckerFailsClosedForScalarConstraints(t *testing.T) {
+// The pre-diagnostics checker ignored nested object/array keywords and
+// unknown keywords; Core's run-time validator backstops the structural ones.
+// They must not make an executable target unavailable.
+func TestExternalInputSchemaKeepsPreviouslyExecutableTargets(t *testing.T) {
+	str := prop("type", "string")
 	cases := []struct {
-		keyword    string
-		listing    map[string]interface{}
-		capability map[string]interface{}
-		rule       string
-		value      string
+		name                string
+		listing, capability map[string]interface{}
 	}{
-		{"const", prop("type", "string", "const", "x"), prop("type", "string", "const", "x"), SchemaRuleConst, `"x"`},
-		{"minLength", prop("type", "string", "minLength", 10.0), prop("type", "string", "minLength", 1.0), SchemaRuleMinLength, `1`},
-		{"maxLength", prop("type", "string", "maxLength", 100.0), prop("type", "string", "maxLength", 4000.0), SchemaRuleMaxLength, `4000`},
-		{"pattern", prop("type", "string", "pattern", "^a+$"), prop("type", "string", "pattern", "^a+$"), SchemaRulePattern, `"^a+$"`},
-		{"minimum", prop("type", "number", "minimum", 5.0), prop("type", "number", "minimum", 0.0), SchemaRuleMinimum, `0`},
-		{"exclusiveMinimum", prop("type", "number", "minimum", 5.0), prop("type", "number", "exclusiveMinimum", 0.0), SchemaRuleExclusiveMinimum, `0`},
-		{"maximum", prop("type", "number", "maximum", 5.0), prop("type", "number", "maximum", 10.0), SchemaRuleMaximum, `10`},
-		{"exclusiveMaximum", prop("type", "number", "maximum", 5.0), prop("type", "number", "exclusiveMaximum", 10.0), SchemaRuleExclusiveMaximum, `10`},
-		{"multipleOf", prop("type", "integer", "multipleOf", 2.0), prop("type", "integer", "multipleOf", 1.0), SchemaRuleMultipleOf, `1`},
+		{"nested required", objectSchema(map[string]interface{}{"doc": prop("type", "object")}), objectSchema(map[string]interface{}{"doc": prop("type", "object", "required", []interface{}{"x"})})},
+		{"array items", objectSchema(map[string]interface{}{"tags": prop("type", "array")}), objectSchema(map[string]interface{}{"tags": prop("type", "array", "items", str, "minItems", 1.0)})},
+		{"vacuous keywords on a string", objectSchema(map[string]interface{}{"topic": str}), objectSchema(map[string]interface{}{"topic": prop("type", "string", "uniqueItems", true, "additionalProperties", false, "$ref", "#/$defs/x")})},
+		{"top-level enum and ref", objectSchema(nil), objectSchema(nil, "enum", []interface{}{map[string]interface{}{}}, "$ref", "#/$defs/x", "patternProperties", map[string]interface{}{})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if detail := externalInputSchemaIncompatibility(tc.listing, tc.capability); detail != nil {
+				t.Fatalf("previously executable target became unavailable: %#v", detail)
+			}
+		})
+	}
+}
+
+// Production proves each scalar constraint from a stricter listing keyword,
+// and reports the rule with the capability's value when the listing is looser.
+func TestProductionSchemaCheckerProvesEnforcedScalarConstraints(t *testing.T) {
+	cases := []struct {
+		keyword                   string
+		listing, looser, capabity map[string]interface{}
+		rule, value               string
+	}{
+		{"const", prop("type", "string", "const", "x"), prop("type", "string", "const", "y"), prop("type", "string", "const", "x"), SchemaRuleConst, `"x"`},
+		{"minLength", prop("type", "string", "minLength", 10.0), prop("type", "string"), prop("type", "string", "minLength", 1.0), SchemaRuleMinLength, `1`},
+		{"maxLength", prop("type", "string", "maxLength", 100.0), prop("type", "string", "maxLength", 4001.0), prop("type", "string", "maxLength", 4000.0), SchemaRuleMaxLength, `4000`},
+		{"pattern", prop("type", "string", "pattern", "^a+$"), prop("type", "string", "pattern", "^a*$"), prop("type", "string", "pattern", "^a+$"), SchemaRulePattern, `"^a+$"`},
+		{"minimum", prop("type", "number", "minimum", 5.0), prop("type", "number", "minimum", -1.0), prop("type", "number", "minimum", 0.0), SchemaRuleMinimum, `0`},
+		{"exclusiveMinimum", prop("type", "number", "minimum", 5.0), prop("type", "number", "minimum", 0.0), prop("type", "number", "exclusiveMinimum", 0.0), SchemaRuleExclusiveMinimum, `0`},
+		{"maximum", prop("type", "number", "maximum", 5.0), prop("type", "number", "maximum", 11.0), prop("type", "number", "maximum", 10.0), SchemaRuleMaximum, `10`},
+		{"exclusiveMaximum", prop("type", "number", "maximum", 5.0), prop("type", "number", "maximum", 10.0), prop("type", "number", "exclusiveMaximum", 10.0), SchemaRuleExclusiveMaximum, `10`},
+		{"multipleOf", prop("type", "number", "multipleOf", 4.0), prop("type", "number", "multipleOf", 3.0), prop("type", "number", "multipleOf", 2.0), SchemaRuleMultipleOf, `2`},
 	}
 	if len(cases) != len(scalarConstraints) {
 		t.Fatalf("cases cover %d of %d scalar constraints", len(cases), len(scalarConstraints))
 	}
 	for _, tc := range cases {
 		t.Run(tc.keyword, func(t *testing.T) {
-			enabled := schemaChecker{runtimeEnforced: map[string]bool{tc.keyword: true}}
-			listing := objectSchema(map[string]interface{}{"v": tc.listing})
-			capability := objectSchema(map[string]interface{}{"v": tc.capability})
-			if detail := enabled.incompatibility(listing, capability); detail != nil {
-				t.Fatalf("fixture should be provable once enforced, got %#v", detail)
+			capability := objectSchema(map[string]interface{}{"v": tc.capabity})
+			if detail := externalInputSchemaIncompatibility(objectSchema(map[string]interface{}{"v": tc.listing}), capability); detail != nil {
+				t.Fatalf("stricter listing should be compatible, got %#v", detail)
 			}
-			requireDetail(t, externalInputSchemaIncompatibility(listing, capability), "v", tc.rule, tc.value)
+			requireDetail(t, externalInputSchemaIncompatibility(objectSchema(map[string]interface{}{"v": tc.looser}), capability), "v", tc.rule, tc.value)
+			disabled := schemaChecker{enforced: map[string]bool{}}
+			requireDetail(t, disabled.incompatibility(objectSchema(map[string]interface{}{"v": tc.listing}), capability), "v", tc.rule, tc.value)
 		})
 	}
 }
 
-// The production gate must match what Core's run-time validator actually
-// enforces. If pkg/inputschema starts enforcing a keyword, this test fails
-// until the proof is reviewed against the run-time semantics and enabled.
-func TestProductionSchemaCheckerMatchesRuntimeValidator(t *testing.T) {
+// The production proof gate must be exactly the set of keywords the start
+// input enforcer rejects. Ordinary Runs keep the unchanged run-time validator,
+// which still ignores these keywords.
+func TestProductionSchemaGateMatchesStartInputEnforcement(t *testing.T) {
 	probes := map[string]struct {
-		schema string
-		input  string
+		schema, violating, satisfying string
 	}{
-		"const":            {`{"const":"x"}`, `"y"`},
-		"minLength":        {`{"type":"string","minLength":3}`, `"a"`},
-		"maxLength":        {`{"type":"string","maxLength":1}`, `"abc"`},
-		"pattern":          {`{"type":"string","pattern":"^a$"}`, `"b"`},
-		"minimum":          {`{"type":"number","minimum":5}`, `1`},
-		"exclusiveMinimum": {`{"type":"number","exclusiveMinimum":5}`, `5`},
-		"maximum":          {`{"type":"number","maximum":5}`, `9`},
-		"exclusiveMaximum": {`{"type":"number","exclusiveMaximum":5}`, `5`},
-		"multipleOf":       {`{"type":"number","multipleOf":2}`, `3`},
+		"const":            {`{"const":"x"}`, `"y"`, `"x"`},
+		"minLength":        {`{"type":"string","minLength":3}`, `"ab"`, `"abc"`},
+		"maxLength":        {`{"type":"string","maxLength":2}`, `"abc"`, `"日本"`},
+		"pattern":          {`{"type":"string","pattern":"^a+$"}`, `"b"`, `"aa"`},
+		"minimum":          {`{"type":"number","minimum":5}`, `4.5`, `5`},
+		"exclusiveMinimum": {`{"type":"number","exclusiveMinimum":5}`, `5`, `5.5`},
+		"maximum":          {`{"type":"number","maximum":5}`, `5.5`, `5`},
+		"exclusiveMaximum": {`{"type":"number","exclusiveMaximum":5}`, `5`, `4.5`},
+		"multipleOf":       {`{"type":"number","multipleOf":2}`, `3`, `4`},
+	}
+	if len(productionSchemaChecker.enforced) != len(scalarConstraints) {
+		t.Fatalf("production gate enables %d keywords, want all %d", len(productionSchemaChecker.enforced), len(scalarConstraints))
+	}
+	decode := func(raw string) interface{} {
+		var value interface{}
+		if err := json.Unmarshal([]byte(raw), &value); err != nil {
+			t.Fatal(err)
+		}
+		return value
 	}
 	for _, constraint := range scalarConstraints {
 		probe, ok := probes[constraint.keyword]
 		if !ok {
-			t.Fatalf("no run-time probe for %s", constraint.keyword)
+			t.Fatalf("no enforcement probe for %s", constraint.keyword)
 		}
-		var schema map[string]interface{}
-		decoder := json.NewDecoder(bytes.NewReader([]byte(`{"type":"object","properties":{"v":` + probe.schema + `}}`)))
-		decoder.UseNumber()
-		if err := decoder.Decode(&schema); err != nil {
-			t.Fatal(err)
-		}
-		if err := inputschema.ValidateInputSchema(schema); err != nil {
-			t.Fatalf("%s probe schema rejected at registration: %v", constraint.keyword, err)
-		}
-		var value interface{}
-		decoder = json.NewDecoder(bytes.NewReader([]byte(probe.input)))
-		decoder.UseNumber()
-		if err := decoder.Decode(&value); err != nil {
-			t.Fatal(err)
-		}
-		enforced := inputschema.ValidateInput(map[string]interface{}{"v": value}, schema) != nil
-		if enforced != productionSchemaChecker.runtimeEnforced[constraint.keyword] {
-			t.Fatalf("%s: run-time validator enforced=%v, production proof enabled=%v",
-				constraint.keyword, enforced, productionSchemaChecker.runtimeEnforced[constraint.keyword])
-		}
-	}
-}
+		schema := decode(`{"type":"object","properties":{"v":` + probe.schema + `}}`).(map[string]interface{})
+		violating := map[string]interface{}{"v": decode(probe.violating)}
+		satisfying := map[string]interface{}{"v": decode(probe.satisfying)}
 
-func allScalarProofsEnabled() schemaChecker {
-	enabled := map[string]bool{}
-	for _, constraint := range scalarConstraints {
-		enabled[constraint.keyword] = true
+		rejected := validateExternalExecutionInput(violating, schema) != nil
+		if rejected != productionSchemaChecker.enforced[constraint.keyword] {
+			t.Fatalf("%s: start enforcer rejects=%v, production proof enabled=%v",
+				constraint.keyword, rejected, productionSchemaChecker.enforced[constraint.keyword])
+		}
+		if err := validateExternalExecutionInput(satisfying, schema); err != nil {
+			t.Fatalf("%s: satisfying input rejected: %v", constraint.keyword, err)
+		}
+		if err := inputschema.ValidateInput(violating, schema); err != nil {
+			t.Fatalf("%s: ordinary run-time validation changed: %v", constraint.keyword, err)
+		}
 	}
-	return schemaChecker{runtimeEnforced: enabled}
 }
 
 func TestScalarConstraintProofs(t *testing.T) {
@@ -377,7 +380,7 @@ func TestScalarConstraintProofs(t *testing.T) {
 		{"multipleOf rejects non-JSON number syntax", prop("type", "number", "multipleOf", n("1/3")), prop("type", "number", "multipleOf", n("1e1")), SchemaRuleMultipleOf},
 		{"multipleOf rejects huge exponent", prop("type", "number", "multipleOf", n("1e100000")), prop("type", "number", "multipleOf", 1.0), SchemaRuleMultipleOf},
 	}
-	checker := allScalarProofsEnabled()
+	checker := productionSchemaChecker
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			listing := objectSchema(map[string]interface{}{"v": tc.listing})
@@ -397,8 +400,8 @@ func TestScalarConstraintProofs(t *testing.T) {
 }
 
 // Soundness check of the inclusive/exclusive bound logic: whenever the proof
-// accepts a listing, every sampled value inside the listing range must also be
-// inside the capability range.
+// accepts a listing, every sampled value the start enforcer accepts for that
+// listing must also be inside the capability range.
 func TestNumericBoundProofsAreSound(t *testing.T) {
 	type bound struct {
 		key   string
@@ -437,7 +440,7 @@ func TestNumericBoundProofsAreSound(t *testing.T) {
 		}
 		return true
 	}
-	checker := allScalarProofsEnabled()
+	checker := productionSchemaChecker
 	proven := 0
 	for _, l1 := range options {
 		for _, l2 := range options {
@@ -457,8 +460,13 @@ func TestNumericBoundProofsAreSound(t *testing.T) {
 					continue
 				}
 				proven++
+				listingSchema := objectSchema(map[string]interface{}{"v": listing})
 				for _, sample := range samples {
-					if satisfies(sample, []*bound{l1, l2}) && !satisfies(sample, []*bound{c}) {
+					accepted := validateExternalExecutionInput(map[string]interface{}{"v": sample}, listingSchema) == nil
+					if accepted != satisfies(sample, []*bound{l1, l2}) {
+						t.Fatalf("start enforcer for %v accepts %v = %v", listing, sample, accepted)
+					}
+					if accepted && !satisfies(sample, []*bound{c}) {
 						t.Fatalf("unsound: listing %v accepts %v but capability %v rejects it", listing, sample, capability)
 					}
 				}
