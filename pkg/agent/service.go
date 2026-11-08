@@ -92,7 +92,7 @@ func (s *Service) SetDryRunner(r DryRunner) {
 //  1. 校验用户存在且 is_creator=true → 否则 Forbidden
 //  2. 校验 slug 格式 → 否则 Unprocessable
 //  3. CheckSlugAvailable → 否则 Conflict
-//  4. INSERT agents（默认 public，可显式选择 unlisted/private）；UNIQUE 兜底再次 Conflict
+//  4. INSERT agents（省略 visibility 时默认 private，可显式选择 public/unlisted）；UNIQUE 兜底再次 Conflict
 func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *CreateAgentRequest) (*AgentResponse, error) {
 	user, err := s.queries.GetUserByID(ctx, creatorID)
 	if err != nil {
@@ -140,7 +140,9 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 	authHeader := normalizeAuthHeader(req.EndpointAuthHeader)
 	visibility := strings.TrimSpace(req.Visibility)
 	if visibility == "" {
-		visibility = "public"
+		// New Agents start private: they are listed only after the owner
+		// verifies them and publishes explicitly.
+		visibility = "private"
 	}
 	var created db.Agent
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {

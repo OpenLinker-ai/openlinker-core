@@ -160,9 +160,8 @@ func (h *RegistrationHandler) RegisterAgentViaToken(c echo.Context) error {
 	if len(req.Tags) == 0 {
 		req.Tags = req.AbilityTags
 	}
-	if req.Visibility == "" {
-		req.Visibility = "public"
-	}
+	// An omitted visibility is left empty: the service defaults it to private
+	// so a self-registered Agent is never listed before its owner verifies it.
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
 	}
