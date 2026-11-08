@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
@@ -141,4 +143,58 @@ func requireBenchmarkSkillHTTPStatus(t *testing.T, err error, status int) {
 	var httpErr *httpx.HTTPError
 	require.Truef(t, errors.As(err, &httpErr), "expected *httpx.HTTPError, got %T (%v)", err, err)
 	require.Equal(t, status, httpErr.Status)
+}
+
+// repointingEndpointRunner moves the Agent to another endpoint while the
+// batch is probing the old one, as an owner edit racing a benchmark would.
+type repointingEndpointRunner struct {
+	pool *pgxpool.Pool
+	once sync.Once
+}
+
+func (r *repointingEndpointRunner) DryRun(ctx context.Context, agent *db.Agent, _ map[string]interface{}) (map[string]interface{}, string) {
+	r.once.Do(func() {
+		_, _ = r.pool.Exec(ctx, `UPDATE agents SET endpoint_url = 'https://example.com/agent/repointed' WHERE id = $1`, agent.ID)
+	})
+	return map[string]interface{}{"translation": "hola"}, ""
+}
+
+func TestBenchmarkServiceDiscardsScoreWhenAgentRepointedDuringBatch(t *testing.T) {
+	pool := setupBenchmarkSkillDB(t)
+	parent := NewService(pool)
+	benchLLM := &fakeBenchmarkLLM{response: `{"score":95,"reason":"great"}`}
+	bench := NewBenchmarkService(parent, &repointingEndpointRunner{pool: pool}, benchLLM)
+	ctx := context.Background()
+
+	creatorID := insertBenchmarkSkillCreator(t, pool)
+	agentID := insertBenchmarkSkillAgent(t, pool, creatorID, "bench-repoint-"+uuid.NewString()[:8])
+	require.NoError(t, parent.SetAgentSkills(ctx, agentID, []string{"content/translation"}))
+
+	resp, err := bench.RunBenchmark(ctx, agentID, creatorID, "content/translation")
+	require.NoError(t, err)
+	key := agentID.String() + "|content/translation"
+	require.Eventually(t, func() bool {
+		_, running := bench.inflight.Load(key)
+		return !running
+	}, 10*time.Second, 20*time.Millisecond)
+
+	scores, err := bench.ListAgentScores(ctx, agentID)
+	require.NoError(t, err)
+	require.Len(t, scores, 1)
+	require.Equal(t, BenchmarkStatusPending, scores[0].Status, "a score measured on the old endpoint must not verify the new one")
+	require.Nil(t, scores[0].LastBatchID)
+	require.Nil(t, scores[0].AverageScore)
+
+	batchID, err := uuid.Parse(resp.BatchID)
+	require.NoError(t, err)
+	var caseRows int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM agent_skill_benchmark_runs WHERE batch_id = $1 AND status = 'success'`, batchID).
+		Scan(&caseRows))
+	require.Positive(t, caseRows, "per-case results stay as history")
+}
+
+func TestBenchmarkAggregateFailsClosedWithoutTransactionalStore(t *testing.T) {
+	bench := NewBenchmarkService(&Service{}, fakeEndpointRunner{}, &fakeBenchmarkLLM{})
+	require.Error(t, bench.withTx(context.Background(), func(*db.Queries) error { return nil }))
 }
