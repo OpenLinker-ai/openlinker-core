@@ -637,6 +637,12 @@ func configureRuntime(
 			eventWake,
 		)
 	}
+	// Retention deletes only published rows past the window and needs no bus.
+	go runtime.StartRuntimeSignalOutboxRetentionWorker(
+		rootCtx,
+		db.New(pool),
+		runtime.RuntimeSignalOutboxRetentionConfig{},
+	)
 	return presence
 }
 

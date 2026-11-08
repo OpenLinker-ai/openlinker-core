@@ -163,3 +163,44 @@ func (q *Queries) NextRuntimeSignalDue(ctx context.Context) (NextRuntimeSignalDu
 	err := q.db.QueryRow(ctx, nextRuntimeSignalDue).Scan(&row.NextDueAt, &row.DatabaseNow)
 	return row, err
 }
+
+const deletePublishedRuntimeSignals = `-- name: DeletePublishedRuntimeSignals :execrows
+WITH candidates AS (
+    SELECT id
+    FROM runtime_signal_outbox
+    WHERE status = 'published'
+      AND published_at < statement_timestamp() - ($1::bigint * INTERVAL '1 millisecond')
+    ORDER BY published_at, id
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+DELETE FROM runtime_signal_outbox s
+USING candidates
+WHERE s.id = candidates.id
+  AND s.status = 'published'`
+
+type DeletePublishedRuntimeSignalsParams struct {
+	RetentionMs int64 `db:"retention_ms" json:"retention_ms"`
+	Limit       int32 `db:"limit" json:"limit"`
+}
+
+func (q *Queries) DeletePublishedRuntimeSignals(ctx context.Context, arg DeletePublishedRuntimeSignalsParams) (int64, error) {
+	tag, err := q.db.Exec(ctx, deletePublishedRuntimeSignals, arg.RetentionMs, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+const runtimeSignalRetentionIndexReady = `-- name: RuntimeSignalRetentionIndexReady :one
+SELECT COALESCE((
+    SELECT index_metadata.indisvalid AND index_metadata.indisready
+    FROM pg_catalog.pg_index index_metadata
+    WHERE index_metadata.indexrelid = to_regclass('public.idx_runtime_signal_outbox_published_retention')
+), FALSE)::boolean AS ready`
+
+func (q *Queries) RuntimeSignalRetentionIndexReady(ctx context.Context) (bool, error) {
+	var ready bool
+	err := q.db.QueryRow(ctx, runtimeSignalRetentionIndexReady).Scan(&ready)
+	return ready, err
+}

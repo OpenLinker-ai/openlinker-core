@@ -7,6 +7,22 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+### Security
+
+- Outbound redirects no longer forward credentials to another origin. Agent
+  endpoint (direct HTTP, MCP, dry-run, availability), webhook / task callback /
+  A2A push, delivery, registry and LLM clients drop `X-OpenLinker-Token`,
+  `X-OpenLinker-Internal-Token`, `Authorization`, `Proxy-Authorization`,
+  `Cookie` and `Referer` once a redirect leaves the first request's scheme,
+  host and port, for the rest of the chain. Hosts are compared after the IDNA
+  conversions net/http dials and sends (an internationalized host whose dial
+  and Host forms disagree, or that cannot be converted, counts as another
+  origin) and ports as numbers. Same-origin redirects are
+  unchanged; every hop is still re-validated (public addresses only, no plain
+  HTTP outside opt-in loopback development). An endpoint that redirects to
+  another origin now receives the request without its token; register the
+  final URL.
+
 ### Fixed
 
 - Runtime dispatch no longer loses a wake to a WebSocket Session that cannot
@@ -64,6 +80,14 @@ runtime protocol, and migration contract are declared stable.
 
 ### Compatibility
 
+- Migration 101 adds a concurrent partial index on published
+  `runtime_signal_outbox` rows. Core deletes published signals older than seven
+  days in batches of 1,000 (oldest first, `SKIP LOCKED`, safe on every
+  replica); pending and in-flight signals are never deleted, and nothing is
+  deleted until the index is valid. The Runtime schema contract stays at 100,
+  so Nodes and readiness are unaffected; Core schema version becomes 101 with
+  100 as a supported predecessor. Cloud must adopt this Core before running
+  its migration against a version 101 database.
 - Schemas 096/097 are forward-only. Coordinate Core and Web rollout; legacy empty
   publication requests remain valid and freeze empty display information.
   Currently published versions receive empty declarations, while historically

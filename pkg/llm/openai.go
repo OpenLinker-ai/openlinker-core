@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/OpenLinker-ai/openlinker-core/pkg/endpointurl"
 )
 
 const defaultOpenAITimeout = 30 * time.Second
@@ -66,7 +68,9 @@ func NewOpenAIClient(baseURL, apiKey, model string) *OpenAIClient {
 		baseURL: baseURL,
 		apiKey:  strings.TrimSpace(apiKey),
 		model:   model,
-		http:    &http.Client{Timeout: defaultOpenAITimeout},
+		// The API key stays on the configured base URL's origin; net/http
+		// alone would forward it to a subdomain, another port or plain HTTP.
+		http: &http.Client{Timeout: defaultOpenAITimeout, CheckRedirect: endpointurl.CredentialRedirectPolicy()},
 	}
 }
 

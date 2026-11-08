@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY public.idx_runtime_signal_outbox_published_retention;

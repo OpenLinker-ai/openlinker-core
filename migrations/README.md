@@ -8,11 +8,11 @@ canonical seed data for a fresh database. The migration runner then applies
 `091_browser_interaction_policy.up.sql`,
 `092_browser_observation_audit.up.sql`,
 `093_skill_packages.up.sql`, `094_cli_login.up.sql`, `095_runtime_node_upgrade.up.sql`,
-`096_skill_package_publication.up.sql` `097_resource_metadata.up.sql` `098_agent_mcp_bindings.up.sql` `099_runtime_node_upgrade_features.up.sql` and `100_runtime_mtls_transition.up.sql`. Supported exact clean predecessors are
-`099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `100`.
+`096_skill_package_publication.up.sql` `097_resource_metadata.up.sql` `098_agent_mcp_bindings.up.sql` `099_runtime_node_upgrade_features.up.sql`, `100_runtime_mtls_transition.up.sql` and `101_runtime_signal_outbox_retention.up.sql`. Supported exact clean predecessors are
+`100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `101`.
 `086_current_schema_init_verify.sql` is the PostgreSQL 16 current-catalog and
 seed fingerprint used after the complete migration chain. Fresh and predecessor
-paths therefore execute the same `100` DDL and converge on one version `100`
+paths therefore execute the same `101` DDL and converge on one version `101`
 catalog fingerprint without an idempotent duplicate schema definition.
 
 Migration `093` adds private skill packages, immutable versions, Agent bindings
@@ -32,8 +32,8 @@ standard Sessions, publication and connection-mode changes therefore cannot
 race past the initial policy decision.
 
 The migration command accepts only a truly empty database, an exact clean
-supported predecessor (`099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
-version `100` current schema.
+supported predecessor (`100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
+version `101` current schema.
 Exactness is enforced with catalog object counts and a SHA-256 fingerprint over
 table, column/default, constraint, index, trigger, and function definitions.
 Legacy, dirty, partial, or malformed databases are rejected before the
@@ -146,3 +146,40 @@ PostgreSQL 16 measured shape: 91 tables, 728 constraints, 308 indexes, 80 trigge
 13 Runtime schema records; digest
 `64a634ba38a93340806555751838772e0534341d4306920eb1ccbb7b0ab4910a`.
 The exact 099 predecessor retains its 88/714/303/75 fingerprint above.
+
+## Runtime signal outbox retention index (101)
+
+Migration `101` adds `idx_runtime_signal_outbox_published_retention`, a partial
+index on `runtime_signal_outbox (published_at, id) WHERE status = 'published'`.
+Core uses it to delete published signals older than seven days in batches of at
+most 1,000 rows, oldest first, with `FOR UPDATE SKIP LOCKED` so every replica can
+run retention. `pending` and `processing` rows are never deleted. Until the
+index exists and is valid, Core skips each pass with a warning instead of
+scanning the table. The migration
+adds no table, column or constraint and leaves the Runtime schema contract at
+`100`, so Runtime readiness, Nodes and cutover identity are unchanged. Core
+releases that predate the retention worker run unchanged against this schema;
+their `api migrate` preflight rejects version `101`, so roll back the schema with
+the down script before running an older migration command.
+
+Like `090`, it uses `CREATE INDEX CONCURRENTLY`, so it does not block signal
+inserts on a large table. If PostgreSQL interrupts the build, the index remains
+with `pg_index.indisvalid = false`, `schema_migrations` is dirty at `101`, and both
+`api migrate check` and the current-schema verifier reject the database (the
+verifier now rejects any invalid index). On a reviewed maintenance connection,
+confirm the index is invalid, then run:
+
+```sql
+DROP INDEX CONCURRENTLY IF EXISTS public.idx_runtime_signal_outbox_published_retention;
+```
+
+Then force the migration state back to version `100` with the deployment's pinned
+`golang-migrate`, rerun exactly one migration, and finish with `api migrate check`.
+A version forced to `100` while the leftover index still exists does not match
+the `100` fingerprint and is rejected. The down script drops only this index and
+restores the exact `100` fingerprint; rollback and reapplication are tested.
+
+PostgreSQL 16 measured shape: 91 tables, 728 constraints, 309 indexes, 80 triggers,
+13 Runtime schema records; digest
+`d85f44ea4e5381bf8708bc6d3f1a0f14c10dc42206270e6da2da8858a70ceb7a`.
+The exact 100 predecessor retains its 91/728/308/80 fingerprint above.
