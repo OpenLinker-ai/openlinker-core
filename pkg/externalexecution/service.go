@@ -253,6 +253,11 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 		if recovered {
 			return response, nil
 		}
+		// Recovery of committed work wins; only a miss is checked. A record
+		// authorized before input_schema enforcement existed is caught here.
+		if inputErr := validateExternalExecutionInput(parsed.input, parsed.inputSchema); inputErr != nil {
+			return nil, inputErr
+		}
 	case startStateLaunching:
 		response, recovered, recoveryErr := s.lookupAndAttachLaunchingExecution(ctx, record, parsed)
 		if recoveryErr != nil {
@@ -264,14 +269,17 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 		if record.StartLeaseUntil != nil && record.StartLeaseUntil.After(time.Now()) {
 			return nil, httpx.ServiceUnavailable("外部执行正在启动，请重试")
 		}
+		// An expired launch with no recovered work is checked before the
+		// existing expired-launch handling below.
+		if inputErr := validateExternalExecutionInput(parsed.input, parsed.inputSchema); inputErr != nil {
+			return nil, inputErr
+		}
 	case startStatePending, startStateEvaluating:
 	default:
 		return nil, httpx.Internal("外部执行启动状态无效")
 	}
 
-	// An expired launch fence was already authorized (launching requires the
-	// target owner snapshot); ClaimLaunch reclaims it below.
-	if record.StartState != startStateAuthorized && record.StartState != startStateLaunching {
+	if record.StartState != startStateAuthorized {
 		var response *ExecutionStartResponse
 		record, response, err = s.ensureExecutionStartAuthorized(ctx, record, parsed, fingerprint)
 		if err != nil || response != nil {

@@ -78,6 +78,10 @@ func TestValidateExternalExecutionInput(t *testing.T) {
 		{"multipleOf tenths", `{"type":"object","properties":{"x":{"type":"number","multipleOf":0.1}}}`, `{"x":0.3}`, "", ""},
 		{"multipleOf finer than allowed", `{"type":"object","properties":{"x":{"type":"number","multipleOf":0.01}}}`, `{"x":1.005}`, "x", SchemaRuleMultipleOf},
 		{"maximum decimal text", `{"type":"object","properties":{"x":{"type":"number","maximum":0.3}}}`, `{"x":0.3}`, "", ""},
+		// Documented boundary: each JSON number is its nearest double.
+		{"same double as the bound", `{"type":"object","properties":{"x":{"type":"number","maximum":0.1}}}`, `{"x":0.10000000000000001}`, "", ""},
+		{"next double above the bound", `{"type":"object","properties":{"x":{"type":"number","maximum":0.1}}}`, `{"x":0.10000000000000002}`, "x", SchemaRuleMaximum},
+		{"same double as an exclusive bound", `{"type":"object","properties":{"x":{"type":"number","exclusiveMaximum":0.1}}}`, `{"x":0.10000000000000001}`, "x", SchemaRuleExclusiveMaximum},
 		{"multipleOf mismatch", `{"type":"object","properties":{"x":{"type":"number","multipleOf":2}}}`, `{"x":3}`, "x", SchemaRuleMultipleOf},
 		{"multipleOf zero fails closed", `{"type":"object","properties":{"x":{"type":"number","multipleOf":0}}}`, `{"x":3}`, "x", SchemaRuleMultipleOf},
 		{"bounds ignore non-numbers", `{"type":"object","properties":{"x":{"type":["number","boolean"],"maximum":1}}}`, `{"x":true}`, "", ""},
@@ -140,6 +144,33 @@ func TestIsCapabilityInputRejection(t *testing.T) {
 	} {
 		if isCapabilityInputRejection(other) {
 			t.Fatalf("%v must not be treated as a capability rejection", other)
+		}
+	}
+}
+
+// Comparisons use the double nearest to each JSON number, read through its
+// shortest round-trip decimal, whichever decode path produced it.
+func TestSchemaNumberUsesNearestDoubleDecimal(t *testing.T) {
+	cases := []struct {
+		name  string
+		value interface{}
+		want  string
+	}{
+		{"float hundredth", 0.01, "1/100"},
+		{"float tenth", 0.1, "1/10"},
+		{"json.Number below double precision", json.Number("0.10000000000000001"), "1/10"},
+		{"json.Number exponent", json.Number("1e21"), "1000000000000000000000"},
+		{"int beyond 2^53 rounds like a JSON number", int64(9007199254740993), "9007199254740992"},
+	}
+	for _, tc := range cases {
+		got, ok := schemaNumber(tc.value)
+		if !ok || got.RatString() != tc.want {
+			t.Fatalf("%s: schemaNumber(%v) = %v, %v; want %s", tc.name, tc.value, got, ok, tc.want)
+		}
+	}
+	for _, invalid := range []interface{}{json.Number("0x10"), json.Number("Inf"), json.Number("1e400"), json.Number("1/3"), "1", true} {
+		if _, ok := schemaNumber(invalid); ok {
+			t.Fatalf("schemaNumber(%#v) accepted", invalid)
 		}
 	}
 }

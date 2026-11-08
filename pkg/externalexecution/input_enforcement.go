@@ -42,9 +42,9 @@ var externalInputEnforcedKeywords = map[string]bool{
 //   - const, minLength/maxLength (Unicode code points), pattern (Go RE2,
 //     unanchored, a pattern that does not compile rejects every string),
 //     minimum/maximum, exclusiveMinimum/exclusiveMaximum (numeric form, or the
-//     draft-04 boolean form on minimum/maximum) and multipleOf (exact decimal
-//     arithmetic on the JSON number text, see schemaNumber) are enforced here,
-//     wherever they appear in the schema.
+//     draft-04 boolean form on minimum/maximum) and multipleOf (exact
+//     arithmetic on the shortest decimal of each number's nearest double, see
+//     schemaNumber) are enforced here, wherever they appear in the schema.
 //   - A keyword whose value is malformed rejects every value it applies to.
 //
 // The error names only a property the schema itself declares and a rule; it

@@ -31,8 +31,6 @@ runtime protocol, and migration contract are declared stable.
   - Before, it returned a 503 that the caller kept retrying.
   - Every later Start and GetExecution returns the same rejection. The
     request never launches, even after the capability changes.
-  - A retry after an expired launch fence now re-launches instead of
-    returning 500.
 - Runtime dispatch no longer loses a wake to a WebSocket Session that cannot
   claim. Wake tokens are coalesced per eligibility class; a Session that is full
   or still holds an unacknowledged offer hands a real wake to another listening
@@ -100,13 +98,16 @@ runtime protocol, and migration contract are declared stable.
     Core's run-time semantics. It also checks the keywords above: lengths in
     code points, Go RE2 patterns (one that does not compile rejects), and
     numbers.
-  - Numbers compare by their exact decimal JSON text, so `1` is a multiple of
-    `0.01`.
+  - Each JSON number is read as its nearest IEEE-754 double, the value
+    Agents receive. Comparisons then use that double's shortest round-trip
+    decimal, so `1` is a multiple of `0.01`. Numbers that round to the same
+    double are equal: `0.10000000000000001` satisfies `"maximum": 0.1`.
   - A violation returns 422 `EXECUTION_INPUT_INVALID`. `details` has
     `source: input_schema`, `rule` and, when the schema declares it,
     `property`. The input is never echoed.
-  - Attached executions replay unchanged. An existing reservation is checked
-    only after its downstream recovery finds no committed work.
+  - Attached executions replay unchanged. An existing pending, authorized or
+    expired-launching reservation is checked only after its downstream
+    recovery finds no committed work.
 - Failed External Executions return a bounded `failure_category`. It is mapped
   from Core run statuses and an explicit allowlist of run error codes:
   - unlisted codes map to `unknown`;

@@ -285,3 +285,87 @@ func TestStartExecutionRecoversCommittedWorkBeforeInputEnforcement(t *testing.T)
 		t.Fatalf("rejected legacy reservation changed: %#v (start calls %d)", stored, runtimeSvc.startCalls)
 	}
 }
+
+// Authorized and expired-launching reservations from before input_schema
+// enforcement are checked after their recovery misses; committed work is
+// still recovered first.
+func TestStartExecutionChecksAuthorizedAndExpiredLaunchingReservations(t *testing.T) {
+	svc, runtimeSvc, store, targetID, listing, contractHash := boundedListingFixture(t)
+	principal := testPrincipal(uuid.New())
+	ownerID := store.defaultOwner
+	expired := time.Now().Add(-time.Second)
+	token := uuid.New()
+	seed := func(state, prompt string) (*ExecutionRequest, string) {
+		t.Helper()
+		req := boundedRequest(targetID, listing, contractHash, prompt)
+		record := currentExecutionRecord(t, principal, req)
+		record.StartState = state
+		record.AuthorizedTargetOwnerID = &ownerID
+		if state == startStateLaunching {
+			record.StartToken, record.StartLeaseUntil = &token, &expired
+		}
+		key := executionStoreKey(principal.CallerServiceID, record.ExternalRequestID)
+		store.records[key] = record
+		return req, key
+	}
+	tooLong := "longer than ten runes"
+
+	for _, state := range []string{startStateAuthorized, startStateLaunching} {
+		t.Run(state, func(t *testing.T) {
+			startCalls := runtimeSvc.startCalls
+			req, key := seed(state, tooLong)
+			before := store.records[key]
+			_, err := svc.StartExecution(context.Background(), principal, req)
+			requireInputInvalid(t, err, executionInputSourceInputSchema, "prompt", SchemaRuleMaxLength)
+			if after := store.records[key]; after.StartState != before.StartState || after.ExecutionID != nil || runtimeSvc.startCalls != startCalls {
+				t.Fatalf("rejected %s reservation changed: %#v (start calls %d)", state, after, runtimeSvc.startCalls)
+			}
+		})
+	}
+
+	// Committed work is recovered before the input is checked.
+	recoveredRun := uuid.New()
+	runtimeSvc.lookupResponse = &runtime.RunResponse{RunID: recoveredRun.String(), Status: "running", StartedAt: time.Now()}
+	runtimeSvc.lookupFound = true
+	authorizedReq, _ := seed(startStateAuthorized, tooLong)
+	if response, err := svc.StartExecution(context.Background(), principal, authorizedReq); err != nil || response.ExecutionID != recoveredRun.String() {
+		t.Fatalf("authorized recovery = %#v, %v", response, err)
+	}
+	launchingReq, launchingKey := seed(startStateLaunching, tooLong)
+	launching := store.records[launchingKey]
+	launching.DownstreamKeyHash, launching.DownstreamFingerprint = make([]byte, 32), make([]byte, 32)
+	store.records[launchingKey] = launching
+	if response, err := svc.StartExecution(context.Background(), principal, launchingReq); err != nil || response.ExecutionID != recoveredRun.String() {
+		t.Fatalf("launching recovery = %#v, %v", response, err)
+	}
+}
+
+// Outside the capability-rejection path, an expired launch keeps main's
+// behaviour: Core does not reclaim it and answers 500, so a generic Runtime
+// failure never turns into new work on a later retry.
+func TestStartExecutionExpiredLaunchAfterGenericFailureKeepsMainBehaviour(t *testing.T) {
+	svc, runtimeSvc, store, targetID, listing, contractHash := boundedListingFixture(t)
+	principal := testPrincipal(uuid.New())
+	runtimeSvc.startErr = httpx.Internal("runtime unavailable")
+	req := boundedRequest(targetID, listing, contractHash, "ok")
+	key := executionStoreKey(principal.CallerServiceID, uuid.MustParse(req.ExternalRequestID))
+
+	_, err := svc.StartExecution(context.Background(), principal, req)
+	assertHTTPStatus(t, err, http.StatusServiceUnavailable)
+	if stored := store.records[key]; stored.StartState != startStateLaunching || runtimeSvc.startCalls != 1 {
+		t.Fatalf("after generic failure record=%#v start calls=%d", stored, runtimeSvc.startCalls)
+	}
+	_, err = svc.StartExecution(context.Background(), principal, req)
+	assertHTTPStatus(t, err, http.StatusServiceUnavailable)
+
+	runtimeSvc.startErr = nil
+	stored := store.records[key]
+	expired := time.Now().Add(-time.Second)
+	stored.StartLeaseUntil = &expired
+	store.records[key] = stored
+	_, err = svc.StartExecution(context.Background(), principal, req)
+	assertHTTPStatusAndCode(t, err, http.StatusInternalServerError, httpx.CodeInternal)
+	if after := store.records[key]; after.StartState != startStateLaunching || after.ExecutionID != nil || runtimeSvc.startCalls != 1 {
+		t.Fatalf("expired generic launch created work: %#v (start calls %d)", after, runtimeSvc.startCalls)
+	}
+}

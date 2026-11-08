@@ -84,7 +84,7 @@ func TestHandlerDecodedNumbersUseDecimalSemantics(t *testing.T) {
 				`","input_schema":`+listing+`}`, handler.StartExecution)
 		return err
 	}
-	for _, price := range []string{"1", "19.99", "0.07", "1e2"} {
+	for _, price := range []string{"1", "19.99", "0.07", "1e2", "0.010000000000000001"} {
 		if err := start(price); err != nil {
 			t.Fatalf("price %s rejected: %v", price, err)
 		}

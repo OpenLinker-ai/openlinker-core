@@ -381,35 +381,49 @@ func proveMultipleOf(listing map[string]interface{}, capabilityValue interface{}
 
 var schemaJSONNumberPattern = regexp.MustCompile(`^-?(?:0|[1-9][0-9]{0,99})(?:\.[0-9]{1,100})?(?:[eE][+-]?[0-9]{1,3})?$`)
 
-// schemaNumber reads a JSON number as the exact value of its decimal text, so
-// 0.01 means one hundredth whichever decode path produced it. A json.Number is
-// its own text. A float64 from encoding/json uses its shortest round-trip
-// decimal (strconv 'g', -1), which reproduces the JSON text for any number
-// that float64 can carry; its binary value would turn rounding artifacts into
-// constraints (1 would not be a multiple of 0.01).
+// schemaNumber reads a JSON number for comparison. Core decodes External
+// Execution input and stored schemas with encoding/json, which parses every
+// JSON number to the nearest IEEE-754 double; that double is also what
+// Agents receive. Comparisons therefore use the double nearest to each JSON
+// number, read exactly through its shortest round-trip decimal
+// (strconv 'g', -1):
+//
+//   - 0.01 is one hundredth, not its binary value, so 1 is a multiple of
+//     0.01 and 0.3 of 0.1;
+//   - numbers that round to the same double are equal: an input of
+//     0.10000000000000001 satisfies "maximum": 0.1. Distinctions below double
+//     precision are out of scope; keeping lexemes would change input decoding
+//     and request fingerprints.
+//
+// A json.Number (from a UseNumber decode) gets the same treatment, so the
+// result never depends on the decode path.
 func schemaNumber(raw interface{}) (*big.Rat, bool) {
+	var double float64
 	switch value := raw.(type) {
 	case float64:
-		if math.IsNaN(value) || math.IsInf(value, 0) {
-			return nil, false
-		}
-		return new(big.Rat).SetString(strconv.FormatFloat(value, 'g', -1, 64))
+		double = value
 	case json.Number:
-		// Accept only JSON number syntax with a bounded exponent, so a
-		// json.Number can neither use big.Rat's extra syntax (fractions, hex)
-		// nor force a huge exact expansion.
+		// JSON number syntax only, so ParseFloat's extra forms (hex, inf,
+		// underscores) are rejected.
 		if !schemaJSONNumberPattern.MatchString(value.String()) {
 			return nil, false
 		}
-		parsed, ok := new(big.Rat).SetString(value.String())
-		return parsed, ok
+		parsed, err := strconv.ParseFloat(value.String(), 64)
+		if err != nil {
+			return nil, false
+		}
+		double = parsed
 	case int:
-		return big.NewRat(int64(value), 1), true
+		double = float64(value)
 	case int64:
-		return big.NewRat(value, 1), true
+		double = float64(value)
 	default:
 		return nil, false
 	}
+	if math.IsNaN(double) || math.IsInf(double, 0) {
+		return nil, false
+	}
+	return new(big.Rat).SetString(strconv.FormatFloat(double, 'g', -1, 64))
 }
 
 func schemaNonNegativeInteger(raw interface{}) (*big.Rat, bool) {
