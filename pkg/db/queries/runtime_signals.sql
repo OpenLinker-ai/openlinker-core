@@ -97,3 +97,12 @@ DELETE FROM runtime_signal_outbox s
 USING candidates
 WHERE s.id = candidates.id
   AND s.status = 'published';
+
+-- name: RuntimeSignalRetentionIndexReady :one
+-- Retention runs only once migration 101 has built a valid index; without it
+-- every batch would scan and sort the whole outbox.
+SELECT COALESCE((
+    SELECT index_metadata.indisvalid AND index_metadata.indisready
+    FROM pg_catalog.pg_index index_metadata
+    WHERE index_metadata.indexrelid = to_regclass('public.idx_runtime_signal_outbox_published_retention')
+), FALSE)::boolean AS ready;

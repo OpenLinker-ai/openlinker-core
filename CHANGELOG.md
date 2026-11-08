@@ -80,10 +80,11 @@ runtime protocol, and migration contract are declared stable.
 - Migration 101 adds a concurrent partial index on published
   `runtime_signal_outbox` rows. Core deletes published signals older than seven
   days in batches of 1,000 (oldest first, `SKIP LOCKED`, safe on every
-  replica); pending and in-flight signals are never deleted. The Runtime schema
-  contract stays at 100, so Nodes and readiness are unaffected; Core schema
-  version becomes 101 with 100 as a supported predecessor. Cloud must adopt
-  this Core before running its migration against a version 101 database.
+  replica); pending and in-flight signals are never deleted, and nothing is
+  deleted until the index is valid. The Runtime schema contract stays at 100,
+  so Nodes and readiness are unaffected; Core schema version becomes 101 with
+  100 as a supported predecessor. Cloud must adopt this Core before running
+  its migration against a version 101 database.
 - Schemas 096/097 are forward-only. Coordinate Core and Web rollout; legacy empty
   publication requests remain valid and freeze empty display information.
   Currently published versions receive empty declarations, while historically

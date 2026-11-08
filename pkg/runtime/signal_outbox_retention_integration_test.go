@@ -276,3 +276,30 @@ func TestRuntimeSignalOutboxRetentionUsesPublicationTime(t *testing.T) {
 	require.Zero(t, result.Deleted)
 	require.Equal(t, map[uuid.UUID]string{created.ID: "published"}, f.remaining(t, ctx, created.ID))
 }
+
+// Without a valid migration 101 index (a Core started before the concurrent
+// build finished) retention must not run a single batch.
+func TestRuntimeSignalOutboxRetentionWaitsForMigration101Index(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	f := newSignalRetentionFixture(t, ctx)
+	expired := f.insert(t, ctx, "published", 9*24*time.Hour, 8*24*time.Hour)
+
+	tx, err := f.pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	_, err = tx.Exec(ctx, `DROP INDEX public.idx_runtime_signal_outbox_published_retention`)
+	require.NoError(t, err)
+	result, err := PruneRuntimeSignalOutbox(ctx, db.New(tx), RuntimeSignalOutboxRetentionConfig{})
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSignalOutboxRetentionResult{IndexMissing: true}, result)
+	var exists bool
+	require.NoError(t, tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM runtime_signal_outbox WHERE id = $1)`, expired).Scan(&exists))
+	require.True(t, exists)
+	require.NoError(t, tx.Rollback(ctx))
+
+	result, err = PruneRuntimeSignalOutbox(ctx, db.New(f.pool), RuntimeSignalOutboxRetentionConfig{})
+	require.NoError(t, err)
+	require.False(t, result.IndexMissing)
+	require.Equal(t, int64(1), result.Deleted)
+}

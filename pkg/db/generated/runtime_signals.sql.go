@@ -191,3 +191,16 @@ func (q *Queries) DeletePublishedRuntimeSignals(ctx context.Context, arg DeleteP
 	}
 	return tag.RowsAffected(), nil
 }
+
+const runtimeSignalRetentionIndexReady = `-- name: RuntimeSignalRetentionIndexReady :one
+SELECT COALESCE((
+    SELECT index_metadata.indisvalid AND index_metadata.indisready
+    FROM pg_catalog.pg_index index_metadata
+    WHERE index_metadata.indexrelid = to_regclass('public.idx_runtime_signal_outbox_published_retention')
+), FALSE)::boolean AS ready`
+
+func (q *Queries) RuntimeSignalRetentionIndexReady(ctx context.Context) (bool, error) {
+	var ready bool
+	err := q.db.QueryRow(ctx, runtimeSignalRetentionIndexReady).Scan(&ready)
+	return ready, err
+}

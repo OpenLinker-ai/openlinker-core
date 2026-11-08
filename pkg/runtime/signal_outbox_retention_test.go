@@ -13,11 +13,13 @@ import (
 )
 
 type fakeSignalRetentionStore struct {
-	mu      sync.Mutex
-	results []int64
-	err     error
-	calls   []db.DeletePublishedRuntimeSignalsParams
-	called  chan struct{}
+	mu       sync.Mutex
+	noIndex  bool
+	indexErr error
+	results  []int64
+	err      error
+	calls    []db.DeletePublishedRuntimeSignalsParams
+	called   chan struct{}
 }
 
 func (f *fakeSignalRetentionStore) DeletePublishedRuntimeSignals(
@@ -42,6 +44,13 @@ func (f *fakeSignalRetentionStore) DeletePublishedRuntimeSignals(
 	next := f.results[0]
 	f.results = f.results[1:]
 	return next, nil
+}
+
+func (f *fakeSignalRetentionStore) RuntimeSignalRetentionIndexReady(context.Context) (bool, error) {
+	if f.indexErr != nil {
+		return false, f.indexErr
+	}
+	return !f.noIndex, nil
 }
 
 func (f *fakeSignalRetentionStore) callCount() int {
@@ -109,6 +118,19 @@ func TestPruneRuntimeSignalOutboxStopsOnPartialBatchOrLimit(t *testing.T) {
 
 	_, err = PruneRuntimeSignalOutbox(context.Background(), nil, RuntimeSignalOutboxRetentionConfig{})
 	require.Error(t, err)
+}
+
+func TestPruneRuntimeSignalOutboxWaitsForRetentionIndex(t *testing.T) {
+	store := &fakeSignalRetentionStore{noIndex: true, results: []int64{5}}
+	result, err := PruneRuntimeSignalOutbox(context.Background(), store, RuntimeSignalOutboxRetentionConfig{})
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSignalOutboxRetentionResult{IndexMissing: true}, result)
+	require.Zero(t, store.callCount(), "without the index a batch would scan the whole outbox")
+
+	store = &fakeSignalRetentionStore{indexErr: errors.New("catalog unavailable")}
+	_, err = PruneRuntimeSignalOutbox(context.Background(), store, RuntimeSignalOutboxRetentionConfig{})
+	require.ErrorContains(t, err, "catalog unavailable")
+	require.Zero(t, store.callCount())
 }
 
 func TestStartRuntimeSignalOutboxRetentionWorkerCatchesUpThenWaitsForInterval(t *testing.T) {

@@ -177,3 +177,33 @@ SELECT NOT EXISTS (
 		t.Fatal("retention did not delete the oldest published rows first")
 	}
 }
+
+func TestRuntimeSignalRetentionIndexReadyTracksMigration101Index(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	ready, err := New(pool).RuntimeSignalRetentionIndexReady(ctx)
+	if err != nil || !ready {
+		t.Fatalf("migrated schema retention index ready = %t, %v", ready, err)
+	}
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `DROP INDEX public.idx_runtime_signal_outbox_published_retention`); err != nil {
+		t.Fatal(err)
+	}
+	ready, err = New(tx).RuntimeSignalRetentionIndexReady(ctx)
+	if err != nil || ready {
+		t.Fatalf("dropped retention index ready = %t, %v", ready, err)
+	}
+}

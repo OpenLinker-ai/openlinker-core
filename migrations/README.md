@@ -153,7 +153,9 @@ Migration `101` adds `idx_runtime_signal_outbox_published_retention`, a partial
 index on `runtime_signal_outbox (published_at, id) WHERE status = 'published'`.
 Core uses it to delete published signals older than seven days in batches of at
 most 1,000 rows, oldest first, with `FOR UPDATE SKIP LOCKED` so every replica can
-run retention. `pending` and `processing` rows are never deleted. The migration
+run retention. `pending` and `processing` rows are never deleted. Until the
+index exists and is valid, Core skips each pass with a warning instead of
+scanning the table. The migration
 adds no table, column or constraint and leaves the Runtime schema contract at
 `100`, so Runtime readiness, Nodes and cutover identity are unchanged. Core
 releases that predate the retention worker run unchanged against this schema;

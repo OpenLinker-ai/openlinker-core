@@ -29,6 +29,7 @@ const (
 )
 
 type runtimeSignalOutboxRetentionStore interface {
+	RuntimeSignalRetentionIndexReady(context.Context) (bool, error)
 	DeletePublishedRuntimeSignals(context.Context, db.DeletePublishedRuntimeSignalsParams) (int64, error)
 }
 
@@ -44,8 +45,11 @@ type RuntimeSignalOutboxRetentionConfig struct {
 }
 
 type RuntimeSignalOutboxRetentionResult struct {
-	Batches int
-	Deleted int64
+	// IndexMissing reports that the pass deleted nothing because the
+	// migration 101 retention index is absent or not yet valid.
+	IndexMissing bool
+	Batches      int
+	Deleted      int64
 	// Backlog reports that the pass stopped at MaxBatches with a full last
 	// batch, so more eligible rows probably remain.
 	Backlog bool
@@ -73,7 +77,9 @@ func normalizeRuntimeSignalOutboxRetentionConfig(cfg RuntimeSignalOutboxRetentio
 // PruneRuntimeSignalOutbox deletes published signals older than the retention
 // window in bounded batches, oldest first. Each batch is its own statement, so
 // no transaction or row lock outlives one batch. Undelivered (pending) and
-// leased (processing) rows are never eligible.
+// leased (processing) rows are never eligible. A pass does nothing until the
+// retention index is valid, so a Core that starts before migration 101 has
+// finished, or after an interrupted concurrent build, never scans the table.
 func PruneRuntimeSignalOutbox(
 	ctx context.Context,
 	store runtimeSignalOutboxRetentionStore,
@@ -84,6 +90,17 @@ func PruneRuntimeSignalOutbox(
 		return result, errors.New("runtime signal outbox retention is not configured")
 	}
 	cfg = normalizeRuntimeSignalOutboxRetentionConfig(cfg)
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	ready, err := store.RuntimeSignalRetentionIndexReady(ctx)
+	if err != nil {
+		return result, fmt.Errorf("check runtime signal retention index: %w", err)
+	}
+	if !ready {
+		result.IndexMissing = true
+		return result, nil
+	}
 	params := db.DeletePublishedRuntimeSignalsParams{
 		RetentionMs: cfg.Retention.Milliseconds(),
 		Limit:       cfg.BatchSize,
@@ -133,6 +150,8 @@ func StartRuntimeSignalOutboxRetentionWorker(
 		result, err := PruneRuntimeSignalOutbox(ctx, store, cfg)
 		if err != nil && ctx.Err() == nil {
 			log.Error().Err(err).Int64("deleted", result.Deleted).Msg("runtime signal outbox retention pass failed")
+		} else if result.IndexMissing {
+			log.Warn().Msg("runtime signal outbox retention skipped: idx_runtime_signal_outbox_published_retention is missing or invalid; apply migration 101")
 		} else if result.Deleted > 0 {
 			log.Info().Int64("deleted", result.Deleted).Bool("backlog", result.Backlog).
 				Msg("runtime signal outbox retention pruned published signals")
