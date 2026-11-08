@@ -9,6 +9,10 @@ runtime protocol, and migration contract are declared stable.
 
 ### Fixed
 
+- An External Execution start whose input fails the target capability now
+  returns 422 `EXECUTION_INPUT_INVALID` (`details.source: capability`) instead
+  of a 503 that the caller kept retrying. A retry after an expired launch
+  fence re-launches instead of returning 500.
 - Runtime dispatch no longer loses a wake to a WebSocket Session that cannot
   claim. Wake tokens are coalesced per eligibility class; a Session that is full
   or still holds an unacknowledged offer hands a real wake to another listening
@@ -66,6 +70,20 @@ runtime protocol, and migration contract are declared stable.
   - It names the first capability rule the check could not prove.
   - It is returned to the target owner only. Start rejections keep
     `TARGET_CONTRACT_CHANGED` and carry no detail.
+- External Execution targets whose capability uses `const`, `minLength`,
+  `maxLength`, `pattern`, numeric bounds or `multipleOf` are executable when
+  the caller's `input_schema` declares an equal or stricter keyword. Some
+  rules can also be proven from a listing `enum`.
+- External Execution start enforces the caller's own `input_schema` on the
+  input before anything is reserved.
+  - It covers type, enum, required, additionalProperties and items with
+    Core's run-time semantics. It also checks the keywords above: lengths in
+    code points, Go RE2 patterns (one that does not compile rejects), and
+    exact numbers.
+  - A violation returns 422 `EXECUTION_INPUT_INVALID`. `details` has
+    `source`, `rule` and, when the schema declares it, `property`. The input
+    is never echoed.
+  - Replays of an existing request are unchanged.
 - Failed External Executions return a bounded `failure_category`. It is mapped
   from Core run statuses and an explicit allowlist of run error codes:
   - unlisted codes map to `unknown`;
@@ -83,15 +101,13 @@ runtime protocol, and migration contract are declared stable.
 - Publisher declarations are unverified and excluded from bundle SHA-256 and
   imported private copies. Existing runtime, identity and session scopes remain
   unchanged. Public MCP metadata excludes private upstream configuration.
-- The External Execution schema check still fails closed for `minLength`,
-  `maxLength`, `pattern`, numeric bounds, `multipleOf` and `const`.
-  - Core's run-time input validator does not enforce these keywords, so a
-    listing bound cannot be relied on. Subset proofs exist but stay disabled
-    until run-time enforcement uses the same semantics.
-  - The check now also fails closed for nested object/array constraints and
-    other restrictive keywords it previously ignored. Examples: `properties`,
-    `items` and `required` inside a property, or a top-level `enum`.
-    Flat string/number/boolean capability fields are unaffected.
+- Ordinary Run, A2A, MCP and Workflow input validation is unchanged. The new
+  enforcement applies only to External Execution starts.
+- No External Execution target that was executable before becomes
+  unavailable.
+- New External Execution starts now fail if their input breaks their own
+  `input_schema`. Before, Core passed that input on to Runtime. Example: `null`
+  or `""` for an optional enum field.
 
 
 ## 0.3.0 - 2026-10-05

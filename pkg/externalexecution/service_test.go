@@ -1049,6 +1049,8 @@ type fakeRuntimeService struct {
 	cancelErr      error
 	cancelEvidence runtime.RunCancellationEvidence
 	evidenceErr    error
+	// startErr makes StartRun fail after counting the call.
+	startErr error
 	// runs and runErrs answer GetRun per run id before getResponse.
 	runs     map[uuid.UUID]*runtime.RunResponse
 	runErrs  map[uuid.UUID]error
@@ -1081,6 +1083,9 @@ func (f *fakeRuntimeService) StartRun(_ context.Context, actorID uuid.UUID, requ
 	f.startCalls++
 	f.startActors = append(f.startActors, actorID)
 	f.startRequests = append(f.startRequests, request)
+	if f.startErr != nil {
+		return nil, f.startErr
+	}
 	if f.startResponse == nil {
 		return nil, errors.New("unexpected StartRun")
 	}
