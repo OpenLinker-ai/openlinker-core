@@ -7,8 +7,12 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/net/idna"
 )
 
 var errHTTPSRequired = errors.New("endpoint_url 必须使用 HTTPS；本地开发仅可在开启 ALLOW_LOCAL_HTTP_ENDPOINTS 后使用 loopback HTTP")
@@ -109,13 +113,193 @@ func NewHTTPClient(timeout time.Duration, allowLocalHTTP bool) *http.Client {
 	}
 }
 
+// maxRedirects matches net/http's default redirect limit.
+const maxRedirects = 10
+
+// crossOriginCredentialHeaders carry credentials (or, for Referer, the
+// previous URL, whose query string may hold a key) that must not follow a
+// redirect to another origin. net/http drops Authorization, Proxy-Authorization
+// and Cookie only when the host leaves the original domain and its subdomains
+// (a port or scheme change keeps them), and never drops custom headers such
+// as X-OpenLinker-Token.
+var crossOriginCredentialHeaders = []string{
+	"X-OpenLinker-Token",
+	"X-OpenLinker-Internal-Token",
+	"Authorization",
+	"Proxy-Authorization",
+	"Cookie",
+	"Cookie2",
+	"Referer",
+}
+
+// RedirectPolicy is the CheckRedirect for outbound Agent, webhook and registry
+// calls. Every hop is re-validated against the public-endpoint policy (so an
+// https endpoint can never be downgraded to plain HTTP outside opt-in loopback
+// development), and credential headers are removed once the chain leaves the
+// origin of the first request.
 func RedirectPolicy(allowLocalHTTP bool) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 10 {
+		if len(via) >= maxRedirects {
 			return errors.New("stopped after 10 redirects")
 		}
-		return Validate(req.URL.String(), allowLocalHTTP)
+		if err := Validate(req.URL.String(), allowLocalHTTP); err != nil {
+			return err
+		}
+		StripCrossOriginCredentials(req, via)
+		return nil
 	}
+}
+
+// CredentialRedirectPolicy is the CheckRedirect for operator-configured
+// endpoints (for example internal LLM services) that may legitimately live on
+// a private network. It keeps net/http's redirect limit and removes credential
+// headers once the chain leaves the first request's origin, but does not
+// apply the public-endpoint policy. Use RedirectPolicy for any URL supplied
+// by a user or an Agent.
+func CredentialRedirectPolicy() func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return errors.New("stopped after 10 redirects")
+		}
+		StripCrossOriginCredentials(req, via)
+		return nil
+	}
+}
+
+// StripCrossOriginCredentials removes credential headers from a redirect hop
+// when that hop, or any earlier hop, targets a different origin (scheme, host
+// and effective port) than the first request in via. net/http copies the
+// first request's headers onto every hop before calling CheckRedirect, so the
+// check covers the whole chain: once a chain has crossed origins it stays
+// stripped, even if a later hop returns to the original origin, because that
+// hop was chosen by the other origin.
+func StripCrossOriginCredentials(req *http.Request, via []*http.Request) {
+	if req == nil || len(via) == 0 {
+		return
+	}
+	if !redirectChainCrossesOrigin(req, via) {
+		return
+	}
+	for _, name := range crossOriginCredentialHeaders {
+		req.Header.Del(name)
+	}
+}
+
+func redirectChainCrossesOrigin(req *http.Request, via []*http.Request) bool {
+	if via[0] == nil || via[0].URL == nil || req.URL == nil {
+		return true
+	}
+	initial, ok := originOf(via[0].URL)
+	if !ok {
+		return true
+	}
+	if next, ok := originOf(req.URL); !ok || next != initial {
+		return true
+	}
+	for _, hop := range via[1:] {
+		if hop == nil || hop.URL == nil {
+			return true
+		}
+		if previous, ok := originOf(hop.URL); !ok || previous != initial {
+			return true
+		}
+	}
+	return false
+}
+
+type urlOrigin struct {
+	scheme string
+	host   string
+	// port is the numeric effective port, or -1 for a scheme without a
+	// default port and no explicit one.
+	port int
+}
+
+// originOf returns the RFC 6454 origin tuple as the HTTP transport will
+// connect to it: the host goes through the IDNA conversions net/http applies
+// before dialing and sending Host, then ASCII case folding, and the port is
+// compared as a number with the scheme default filled in. ok is false
+// when any part cannot be normalized; callers then treat the URL as another
+// origin, which can only strip credentials, never forward them.
+func originOf(u *url.URL) (urlOrigin, bool) {
+	scheme, ok := asciiLower(u.Scheme)
+	if !ok || scheme == "" {
+		return urlOrigin{}, false
+	}
+	host, ok := transportHost(u.Hostname())
+	if !ok {
+		return urlOrigin{}, false
+	}
+	port, ok := effectivePort(scheme, u.Port())
+	if !ok {
+		return urlOrigin{}, false
+	}
+	return urlOrigin{scheme: scheme, host: host, port: port}, true
+}
+
+// transportHost mirrors net/http, which converts a non-ASCII host twice: the
+// dial address and TLS name use idna.Lookup.ToASCII, while the Host header
+// uses the Punycode profile (idna.ToASCII, via httpguts.PunycodeHostPort). An
+// ASCII host is used as written by both. A non-ASCII host is accepted only
+// when both conversions agree, so the connection and the virtual host are
+// the same; confusable spellings such as "\u0130.example" (Lookup
+// "xn--i-9bb.example", Host "xn--bfa.example", while strings.ToLower gives
+// "i.example") are treated as another origin.
+func transportHost(host string) (string, bool) {
+	if host == "" {
+		return "", false
+	}
+	if lowered, ok := asciiLower(host); ok {
+		return lowered, true
+	}
+	dialHost, err := idna.Lookup.ToASCII(host)
+	if err != nil {
+		return "", false
+	}
+	headerHost, err := idna.ToASCII(host)
+	if err != nil {
+		return "", false
+	}
+	dialHost, dialOK := asciiLower(dialHost)
+	headerHost, headerOK := asciiLower(headerHost)
+	if !dialOK || !headerOK || dialHost != headerHost {
+		return "", false
+	}
+	return dialHost, true
+}
+
+func effectivePort(scheme, port string) (int, bool) {
+	if port == "" {
+		switch scheme {
+		case "https":
+			return 443, true
+		case "http":
+			return 80, true
+		default:
+			return -1, true
+		}
+	}
+	// net/url accepts only digits here; anything outside 0..65535 is not a
+	// port the transport could dial.
+	value, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return 0, false
+	}
+	return int(value), true
+}
+
+// asciiLower folds A-Z only and reports false for any non-ASCII byte.
+func asciiLower(value string) (string, bool) {
+	out := []byte(value)
+	for i, c := range out {
+		if c >= utf8.RuneSelf {
+			return "", false
+		}
+		if 'A' <= c && c <= 'Z' {
+			out[i] = c + ('a' - 'A')
+		}
+	}
+	return string(out), true
 }
 
 func parseEndpointURL(raw string) (*url.URL, error) {

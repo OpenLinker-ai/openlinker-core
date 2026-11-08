@@ -81,6 +81,9 @@ jobs:
           go test -v ./pkg/migrationinit -count=1 | tee /tmp/migrationinit.log
           if grep -q -- '--- SKIP:' /tmp/migrationinit.log; then exit 1; fi
           grep -q -- '--- PASS: TestCLILoginRollbackAndReapplyIntegration' /tmp/migrationinit.log
+          grep -q -- '--- PASS: TestRuntimeSignalRetentionIndexRollbackAndReapply ' /tmp/migrationinit.log
+          grep -q -- '--- PASS: TestRuntimeSignalRetentionIndexRejectsInterruptedBuild ' /tmp/migrationinit.log
+          grep -q -- '--- PASS: TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91/version-100 ' /tmp/migrationinit.log
       - name: Prove CLI authorization against PostgreSQL
         shell: bash
         run: |
@@ -146,6 +149,19 @@ jobs:
           fi
           for name in TestRunDueAvailabilityChecksProbesEachAgentOnceAcrossReplicas TestRunDueAvailabilityChecksDiscardsResultWhenAgentChangesDuringProbe TestRunDueAvailabilityChecksDiscardsResultWhenCheckLockIsLost TestRunDueAvailabilityChecksDiscardsResultWhenLockSessionDiesBeforeCommit TestRunDueAvailabilityChecksSendsNothingWhenGuardTimesOut TestRunDueAvailabilityChecksSendsNothingWhenOnboardingWriteFails TestRunDueAvailabilityChecksGuardsPreflightFailures TestUpdateAgentKeepsConcurrentVisibilityChangeWhenOmitted TestUpdateAgentKeepsConcurrentConnectionChangeWhenOmitted TestRegistrationService_RegisterAgentViaToken_ReplayAfterSuccess TestRegistrationService_RegisterAgentViaToken_ReplayRejectedForDisabledCreator TestRegistrationService_RegisterAgentViaToken_DirectlyIssuedTokenIsNotReplayed TestRegistrationService_RegisterAgentViaToken_ConcurrentFirstRegistrationSingleUse TestRegistrationService_RegisterAgentViaToken_LookupOutageIsNotUnauthorized TestRegistrationHandler_ReplaysCompletedRegistrationOverBearer; do
             grep -q -- "--- PASS: ${name} " /tmp/agent-registry.log
+          done
+      - name: Prove runtime signal outbox retention against PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${TEST_DATABASE_URL:?TEST_DATABASE_URL is required for the signal retention PostgreSQL contract}"
+          go test -p 1 -race -v ./pkg/runtime ./pkg/db/generated -run '^(TestRuntimeSignalOutboxRetentionDeletesOnlyExpiredPublishedRows|TestRuntimeSignalOutboxRetentionSkipsLockedRowsAcrossReplicas|TestRuntimeSignalOutboxRetentionUsesPublicationTime|TestRuntimeSignalOutboxRetentionWaitsForMigration101Index|TestDeletePublishedRuntimeSignalsTouchesOnlyExpiredPublishedRows|TestDeletePublishedRuntimeSignalsUsesRetentionIndexWithoutSort|TestDeletePublishedRuntimeSignalsRangeScansDrainedTable|TestRuntimeSignalRetentionIndexReadyTracksMigration101Index)$' -count=1 -timeout=5m | tee /tmp/signal-retention.log
+          if grep -q -- '--- SKIP:' /tmp/signal-retention.log; then
+            echo "Signal retention PostgreSQL contracts must not skip" >&2
+            exit 1
+          fi
+          for name in TestRuntimeSignalOutboxRetentionDeletesOnlyExpiredPublishedRows TestRuntimeSignalOutboxRetentionSkipsLockedRowsAcrossReplicas TestRuntimeSignalOutboxRetentionUsesPublicationTime TestRuntimeSignalOutboxRetentionWaitsForMigration101Index TestDeletePublishedRuntimeSignalsTouchesOnlyExpiredPublishedRows TestDeletePublishedRuntimeSignalsUsesRetentionIndexWithoutSort TestDeletePublishedRuntimeSignalsRangeScansDrainedTable TestRuntimeSignalRetentionIndexReadyTracksMigration101Index; do
+            grep -q -- "--- PASS: ${name} " /tmp/signal-retention.log
           done
 
 
