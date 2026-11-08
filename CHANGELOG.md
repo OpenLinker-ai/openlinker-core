@@ -112,7 +112,8 @@ runtime protocol, and migration contract are declared stable.
   from Core run statuses and an explicit allowlist of run error codes:
   - unlisted codes map to `unknown`;
   - a workflow uses the first failed step whose child run failed, timed out
-    or was canceled;
+    or was canceled; if a child run cannot be read, the category is `unknown`
+    and the status response is otherwise unchanged;
   - an unconfirmed cancellation maps to `result_unknown`.
   `error_code` and `error_message` are unchanged.
 

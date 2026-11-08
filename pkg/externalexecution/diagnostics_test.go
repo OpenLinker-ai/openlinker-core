@@ -301,8 +301,9 @@ func TestGetWorkflowExecutionReportsFirstFailedChildCategory(t *testing.T) {
 	broken := uuid.New()
 	runtimeSvc.runErrs[broken] = httpx.Internal("查询调用记录失败")
 	run.Steps = []workflow.WorkflowRunStepResponse{{Sequence: 0, Status: "failed", RunID: broken.String()}}
-	if resp, err = svc.GetExecution(context.Background(), testPrincipal(actorID), record.ExternalRequestID.String()); err == nil {
-		t.Fatalf("transient child read error must not record a category: %#v", resp)
+	resp, err = svc.GetExecution(context.Background(), testPrincipal(actorID), record.ExternalRequestID.String())
+	if err != nil || resp.Status != "failed" || resp.ErrorCode != "WORKFLOW_EXECUTION_FAILED" || resp.FailureCategory != FailureCategoryUnknown {
+		t.Fatalf("child read error must keep the terminal status with an unknown category: %#v, %v", resp, err)
 	}
 
 	runtimeSvc.getCalls = 0

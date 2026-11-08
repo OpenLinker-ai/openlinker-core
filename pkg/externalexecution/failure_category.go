@@ -160,8 +160,8 @@ func runStatusIsTerminalFailure(status string) bool {
 // its siblings, which then also fail without a terminal child run; the first
 // failed step whose child run ended failed, timeout or canceled is taken as the
 // cause. Child runs are read as the actor, like the artifact aggregation. A
-// child that is not visible is skipped; any other read error is returned so
-// the caller retries instead of recording a wrong category.
+// child that is not visible is skipped; any other read error is returned and
+// the status response falls back to unknown instead of failing.
 func (s *Service) workflowFailureCategory(ctx context.Context, actorUserID uuid.UUID, run *workflow.WorkflowRunResponse) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(run.Status)) {
 	case "canceled":

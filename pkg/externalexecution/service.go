@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog/log"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/executioncontract"
@@ -947,9 +948,14 @@ func (s *Service) executionStatus(ctx context.Context, record ExecutionRecord, w
 		if resp.Status == "failed" {
 			resp.FailureCategory = FailureCategoryUnknown
 			if withWorkflowFailureCategory {
+				// The category is an additive diagnostic. A failed child read
+				// must not turn main's readable terminal status into an error,
+				// so it falls back to unknown.
 				category, err := s.workflowFailureCategory(ctx, record.ActorUserID, run)
 				if err != nil {
-					return nil, err
+					log.Warn().Err(err).Str("workflow_run_id", record.ExecutionID.String()).
+						Msg("externalexecution: workflow failure category unavailable")
+					category = FailureCategoryUnknown
 				}
 				resp.FailureCategory = category
 			}
