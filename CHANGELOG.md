@@ -61,6 +61,18 @@ runtime protocol, and migration contract are declared stable.
 - Publisher-supplied source, license and release notes, stored separately from
   execution bundles. Skill declarations freeze on first publication; MCP owner
   edits use revision conflicts. Catalog filters run before pagination.
+- External Execution target validation returns `unavailable_detail`
+  (`property`, `rule`, `capability_value`) with `input_schema_incompatible`.
+  - It names the first capability rule the check could not prove.
+  - It is returned to the target owner only. Start rejections keep
+    `TARGET_CONTRACT_CHANGED` and carry no detail.
+- Failed External Executions return a bounded `failure_category`. It is mapped
+  from Core run statuses and an explicit allowlist of run error codes:
+  - unlisted codes map to `unknown`;
+  - a workflow uses the first failed step whose child run failed, timed out
+    or was canceled;
+  - an unconfirmed cancellation maps to `result_unknown`.
+  `error_code` and `error_message` are unchanged.
 
 ### Compatibility
 
@@ -71,6 +83,15 @@ runtime protocol, and migration contract are declared stable.
 - Publisher declarations are unverified and excluded from bundle SHA-256 and
   imported private copies. Existing runtime, identity and session scopes remain
   unchanged. Public MCP metadata excludes private upstream configuration.
+- The External Execution schema check still fails closed for `minLength`,
+  `maxLength`, `pattern`, numeric bounds, `multipleOf` and `const`.
+  - Core's run-time input validator does not enforce these keywords, so a
+    listing bound cannot be relied on. Subset proofs exist but stay disabled
+    until run-time enforcement uses the same semantics.
+  - The check now also fails closed for nested object/array constraints and
+    other restrictive keywords it previously ignored. Examples: `properties`,
+    `items` and `required` inside a property, or a top-level `enum`.
+    Flat string/number/boolean capability fields are unaffected.
 
 
 ## 0.3.0 - 2026-10-05
