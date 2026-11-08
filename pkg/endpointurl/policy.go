@@ -109,13 +109,115 @@ func NewHTTPClient(timeout time.Duration, allowLocalHTTP bool) *http.Client {
 	}
 }
 
+// maxRedirects matches net/http's default redirect limit.
+const maxRedirects = 10
+
+// crossOriginCredentialHeaders carry credentials (or, for Referer, the
+// previous URL, whose query string may hold a key) that must not follow a
+// redirect to another origin. net/http drops Authorization, Proxy-Authorization
+// and Cookie only when the host leaves the original domain and its subdomains
+// (a port or scheme change keeps them), and never drops custom headers such
+// as X-OpenLinker-Token.
+var crossOriginCredentialHeaders = []string{
+	"X-OpenLinker-Token",
+	"X-OpenLinker-Internal-Token",
+	"Authorization",
+	"Proxy-Authorization",
+	"Cookie",
+	"Cookie2",
+	"Referer",
+}
+
+// RedirectPolicy is the CheckRedirect for outbound Agent, webhook and registry
+// calls. Every hop is re-validated against the public-endpoint policy (so an
+// https endpoint can never be downgraded to plain HTTP outside opt-in loopback
+// development), and credential headers are removed once the chain leaves the
+// origin of the first request.
 func RedirectPolicy(allowLocalHTTP bool) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 10 {
+		if len(via) >= maxRedirects {
 			return errors.New("stopped after 10 redirects")
 		}
-		return Validate(req.URL.String(), allowLocalHTTP)
+		if err := Validate(req.URL.String(), allowLocalHTTP); err != nil {
+			return err
+		}
+		StripCrossOriginCredentials(req, via)
+		return nil
 	}
+}
+
+// CredentialRedirectPolicy is the CheckRedirect for operator-configured
+// endpoints (for example internal LLM services) that may legitimately live on
+// a private network. It keeps net/http's redirect limit and removes credential
+// headers once the chain leaves the first request's origin, but does not
+// apply the public-endpoint policy. Use RedirectPolicy for any URL supplied
+// by a user or an Agent.
+func CredentialRedirectPolicy() func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return errors.New("stopped after 10 redirects")
+		}
+		StripCrossOriginCredentials(req, via)
+		return nil
+	}
+}
+
+// StripCrossOriginCredentials removes credential headers from a redirect hop
+// when that hop, or any earlier hop, targets a different origin (scheme, host
+// and effective port) than the first request in via. net/http copies the
+// first request's headers onto every hop before calling CheckRedirect, so the
+// check covers the whole chain: once a chain has crossed origins it stays
+// stripped, even if a later hop returns to the original origin, because that
+// hop was chosen by the other origin.
+func StripCrossOriginCredentials(req *http.Request, via []*http.Request) {
+	if req == nil || len(via) == 0 {
+		return
+	}
+	if !redirectChainCrossesOrigin(req, via) {
+		return
+	}
+	for _, name := range crossOriginCredentialHeaders {
+		req.Header.Del(name)
+	}
+}
+
+func redirectChainCrossesOrigin(req *http.Request, via []*http.Request) bool {
+	if via[0] == nil || via[0].URL == nil || req.URL == nil {
+		return true
+	}
+	initial := originOf(via[0].URL)
+	if originOf(req.URL) != initial {
+		return true
+	}
+	for _, hop := range via[1:] {
+		if hop == nil || hop.URL == nil || originOf(hop.URL) != initial {
+			return true
+		}
+	}
+	return false
+}
+
+type urlOrigin struct {
+	scheme string
+	host   string
+	port   string
+}
+
+// originOf returns the RFC 6454 origin tuple. Hosts are compared after ASCII
+// case folding only; any other spelling difference is treated as another
+// origin, which can only strip credentials, never forward them.
+func originOf(u *url.URL) urlOrigin {
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		switch scheme {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		}
+	}
+	return urlOrigin{scheme: scheme, host: strings.ToLower(u.Hostname()), port: port}
 }
 
 func parseEndpointURL(raw string) (*url.URL, error) {

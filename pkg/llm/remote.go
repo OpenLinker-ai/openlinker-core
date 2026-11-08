@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/OpenLinker-ai/openlinker-core/pkg/endpointurl"
 )
 
 const defaultRemoteTimeout = 15 * time.Second
@@ -41,8 +43,14 @@ func NewRemoteClient(endpoint, internalToken string) *RemoteClient {
 	return &RemoteClient{
 		endpoint:      endpoint,
 		internalToken: strings.TrimSpace(internalToken),
-		http:          &http.Client{Timeout: defaultRemoteTimeout},
+		http:          newRemoteHTTPClient(),
 	}
+}
+
+// newRemoteHTTPClient keeps the internal token on the configured service's
+// origin: a redirect elsewhere is still followed, without credentials.
+func newRemoteHTTPClient() *http.Client {
+	return &http.Client{Timeout: defaultRemoteTimeout, CheckRedirect: endpointurl.CredentialRedirectPolicy()}
 }
 
 func (c *RemoteClient) Complete(ctx context.Context, system, user string) (string, error) {
@@ -64,7 +72,7 @@ func (c *RemoteClient) Complete(ctx context.Context, system, user string) (strin
 
 	client := c.http
 	if client == nil {
-		client = &http.Client{Timeout: defaultRemoteTimeout}
+		client = newRemoteHTTPClient()
 	}
 	resp, err := client.Do(req)
 	if err != nil {
