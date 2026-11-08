@@ -199,6 +199,11 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 // 读取、沿用省略字段、校验与写入在同一事务内完成，读取时锁定 Agent 行，
 // 并发的可见性 / 连接修改要么先提交并被本次读取看到，要么等待本次提交，
 // 不会被本次请求用旧值覆盖。
+//
+// 连接目标（connection_mode / endpoint_url / mcp_tool_name）变化时，同一事务内
+// 让旧目标的就绪证据失效：可用性快照与 dry-run 回到未验证，已认证回到 pending，
+// Skill Benchmark 汇总回到 pending。仅调用凭据（endpoint_auth_header）变化时
+// 只重置可用性与 dry-run。其他字段的编辑不触碰任何证据。
 func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID, req *UpdateAgentRequest) (*AgentResponse, error) {
 	var updated db.Agent
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -248,6 +253,7 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 		if err := requireBrowserAgentPrivateVisibility(ctx, qtx, agentID, visibility); err != nil {
 			return err
 		}
+		invalidation := evidenceInvalidationForUpdate(&existing, connection, authHeader)
 		updated, err = qtx.UpdateAgentDraft(ctx, db.UpdateAgentDraftParams{
 			ID:                 agentID,
 			Name:               strings.TrimSpace(req.Name),
@@ -261,6 +267,32 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 			ConnectionMode:     connection.Mode,
 			MCPToolName:        connection.MCPToolName,
 		})
+		if err != nil || !invalidation.any() {
+			return err
+		}
+		// Evidence describes the previous connection target; supersede it in
+		// this transaction so no reader sees the new target with old evidence.
+		if err := invalidateAgentEvidence(ctx, qtx, agentID, invalidation); err != nil {
+			log.Error().Err(err).Str("agent_id", agentID.String()).Msg("agent.UpdateAgent: invalidate evidence")
+			return httpx.Internal("更新 Agent 失败")
+		}
+		event := log.Info().Str("agent_id", agentID.String()).
+			Bool("reachability_evidence_reset", invalidation.Reachability).
+			Bool("trust_evidence_reset", invalidation.Trust)
+		if invalidation.Trust && existing.CertificationStatus == "certified" {
+			event = event.Str("previous_certification_status", existing.CertificationStatus)
+			if existing.CertifiedAt != nil {
+				event = event.Time("previous_certified_at", *existing.CertifiedAt)
+			}
+		}
+		event.Msg("agent.UpdateAgent: connection change superseded readiness evidence")
+		if invalidation.Trust {
+			// Certification may have been reopened; return the committed row.
+			updated, err = qtx.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
+				ID:        agentID,
+				CreatorID: creatorID,
+			})
+		}
 		return err
 	})
 	if err == nil {
@@ -745,33 +777,13 @@ func (s *Service) UpsertCapability(ctx context.Context, agentID, creatorID uuid.
 	if err := s.ensureAgentOwner(ctx, agentID, creatorID); err != nil {
 		return nil, err
 	}
-	summary := strings.TrimSpace(req.Summary)
-	if len(summary) > 1000 {
-		return nil, httpx.Unprocessable("summary 不能超过 1000 字符")
-	}
-	if err := validateCapabilitySchema(req.InputSchema, "input_schema"); err != nil {
-		return nil, httpx.Unprocessable(err.Error())
-	}
-	if err := validateCapabilitySchema(req.OutputSchema, "output_schema"); err != nil {
-		return nil, httpx.Unprocessable(err.Error())
-	}
-	inputJSON, err := json.Marshal(req.InputSchema)
+	prepared, err := prepareCapability(req)
 	if err != nil {
-		return nil, httpx.BadRequest("input_schema 不是合法 JSON")
-	}
-	outputJSON, err := json.Marshal(req.OutputSchema)
-	if err != nil {
-		return nil, httpx.BadRequest("output_schema 不是合法 JSON")
+		return nil, err
 	}
 
 	s.ensureOnboardingStatusBestEffort(ctx, agentID)
-	row, err := s.queries.UpsertAgentCapability(ctx, db.UpsertAgentCapabilityParams{
-		AgentID:      agentID,
-		CreatorID:    creatorID,
-		InputSchema:  inputJSON,
-		OutputSchema: outputJSON,
-		Summary:      summary,
-	})
+	row, err := s.queries.UpsertAgentCapability(ctx, prepared.upsertParams(agentID, creatorID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, httpx.NotFound("Agent 不存在")
@@ -788,12 +800,8 @@ func (s *Service) UpsertCapability(ctx context.Context, agentID, creatorID uuid.
 
 // CreateExample 新增 Agent 输入/输出示例。
 func (s *Service) CreateExample(ctx context.Context, agentID, creatorID uuid.UUID, req *CreateExampleRequest) (*ExampleResponse, error) {
-	if req == nil || req.InputJSON == nil {
-		return nil, httpx.Unprocessable("input_json 必填")
-	}
-	title := strings.TrimSpace(req.Title)
-	if title == "" || len(title) > 120 {
-		return nil, httpx.Unprocessable("title 长度需在 1-120 字符之间")
+	if err := validateExampleShape(req); err != nil {
+		return nil, err
 	}
 	if err := s.ensureAgentOwner(ctx, agentID, creatorID); err != nil {
 		return nil, err
@@ -804,33 +812,18 @@ func (s *Service) CreateExample(ctx context.Context, agentID, creatorID uuid.UUI
 		return nil, httpx.Internal("查询示例数量失败")
 	}
 	if count >= maxAgentExamples {
-		return nil, httpx.BadRequest("每个 Agent 最多 20 条示例")
+		return nil, errAgentExampleLimit()
 	}
 	if err := s.validateExampleWithCapability(ctx, agentID, req.InputJSON, req.ExpectedOutputJSON); err != nil {
 		return nil, err
 	}
-
-	inputJSON, err := json.Marshal(req.InputJSON)
+	prepared, err := prepareExample(req)
 	if err != nil {
-		return nil, httpx.BadRequest("input_json 不是合法 JSON")
-	}
-	var expectedJSON []byte
-	if req.ExpectedOutputJSON != nil {
-		expectedJSON, err = json.Marshal(req.ExpectedOutputJSON)
-		if err != nil {
-			return nil, httpx.BadRequest("expected_output_json 不是合法 JSON")
-		}
+		return nil, err
 	}
 
 	s.ensureOnboardingStatusBestEffort(ctx, agentID)
-	row, err := s.queries.CreateAgentExample(ctx, db.CreateAgentExampleParams{
-		AgentID:            agentID,
-		CreatorID:          creatorID,
-		Title:              title,
-		InputJSON:          inputJSON,
-		ExpectedOutputJSON: expectedJSON,
-		SortOrder:          req.SortOrder,
-	})
+	row, err := s.queries.CreateAgentExample(ctx, prepared.createParams(agentID, creatorID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, httpx.NotFound("Agent 不存在")
@@ -968,14 +961,10 @@ func (s *Service) runDryRun(
 			return nil, errAvailabilityResultDiscarded
 		}
 	} else {
-		if _, dbErr := s.queries.UpdateDryRunResult(ctx, db.UpdateDryRunResultParams{
-			AgentID: agentID,
-			Result:  result,
-			Error:   errPtr,
-		}); dbErr != nil {
-			log.Warn().Err(dbErr).Str("agent_id", agentID.String()).Msg("agent.RunDryRun: UpdateDryRunResult")
+		availability, err = s.recordCreatorDryRunResult(ctx, &agentRow, result, errMsg, errPtr)
+		if err != nil {
+			return nil, err
 		}
-		availability = s.markAvailabilityAfterDryRun(ctx, &agentRow, result, errMsg)
 	}
 
 	return &DryRunResponse{
@@ -1001,17 +990,12 @@ func (s *Service) validateExampleWithCapability(
 		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("agent.validateExampleWithCapability")
 		return httpx.Internal("查询能力声明失败")
 	}
-	inputSchema := decodeJSONMap(capability.InputSchema)
-	if err := validateJSONAgainstSchema(input, inputSchema, "input_json"); err != nil {
-		return httpx.Unprocessable("input_json 不匹配 input_schema：" + err.Error())
-	}
-	if expectedOutput != nil {
-		outputSchema := decodeJSONMap(capability.OutputSchema)
-		if err := validateJSONAgainstSchema(expectedOutput, outputSchema, "expected_output_json"); err != nil {
-			return httpx.Unprocessable("expected_output_json 不匹配 output_schema：" + err.Error())
-		}
-	}
-	return nil
+	return validateExampleAgainstSchemas(
+		input,
+		expectedOutput,
+		decodeJSONMap(capability.InputSchema),
+		decodeJSONMap(capability.OutputSchema),
+	)
 }
 
 // CheckSlug 提交前实时校验 slug 是否可用。
@@ -1348,22 +1332,52 @@ func deriveLegacyStatus(a *db.Agent) string {
 	}
 }
 
-func (s *Service) markAvailabilityAfterDryRun(ctx context.Context, agent *db.Agent, result, errMsg string) Availability {
-	var (
-		snapshot db.AgentAvailabilitySnapshot
-		err      error
-	)
-	if result == "pass" {
-		snapshot, err = s.queries.MarkAgentAvailabilitySuccess(ctx, agent.ID)
-	} else {
-		snapshot, err = s.queries.MarkAgentAvailabilityFailure(ctx, agent.ID)
+// recordCreatorDryRunResult stores a creator-triggered dry-run result (the
+// onboarding dry-run row, then the availability snapshot) in one transaction
+// that first share-locks the Agent while it still has the probed connection
+// target and endpoint credential. If the owner repointed the Agent while the
+// probe ran, nothing is stored and the caller gets a Conflict: the result
+// describes a target the Agent no longer uses. Other persistence failures stay
+// best-effort as before: they are logged and the current availability is
+// returned.
+func (s *Service) recordCreatorDryRunResult(
+	ctx context.Context,
+	agent *db.Agent,
+	result, errMsg string,
+	errPtr *string,
+) (Availability, error) {
+	var snapshot db.AgentAvailabilitySnapshot
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		q := s.queries.WithTx(tx)
+		if err := lockReachabilityEvidenceTarget(ctx, q, agent); err != nil {
+			return err
+		}
+		if _, err := q.UpdateDryRunResult(ctx, db.UpdateDryRunResultParams{
+			AgentID: agent.ID,
+			Result:  result,
+			Error:   errPtr,
+		}); err != nil {
+			return err
+		}
+		var err error
+		if result == "pass" {
+			snapshot, err = q.MarkAgentAvailabilitySuccess(ctx, agent.ID)
+		} else {
+			snapshot, err = q.MarkAgentAvailabilityFailure(ctx, agent.ID)
+		}
+		return err
+	})
+	if errors.Is(err, errEvidenceTargetChanged) {
+		log.Info().Str("agent_id", agent.ID.String()).
+			Msg("agent.RunDryRun: connection changed during dry-run, result discarded")
+		return Availability{}, httpx.Conflict("Agent 连接设置在 dry-run 期间已变化，结果未保存，请重新执行 dry-run")
 	}
 	if err != nil {
 		log.Warn().Err(err).Str("agent_id", agent.ID.String()).Str("result", result).Str("error", errMsg).
-			Msg("agent.markAvailabilityAfterDryRun")
-		return s.agentAvailability(ctx, agent.ID, agent.ConnectionMode)
+			Msg("agent.RunDryRun: record result")
+		return s.agentAvailability(ctx, agent.ID, agent.ConnectionMode), nil
 	}
-	return s.runtimeAwareAvailability(ctx, agent.ID, agent.ConnectionMode, availabilityFromSnapshot(snapshot))
+	return s.runtimeAwareAvailability(ctx, agent.ID, agent.ConnectionMode, availabilityFromSnapshot(snapshot)), nil
 }
 
 // recordGuardedAvailabilityResult writes a monitor result the same way the
@@ -1443,21 +1457,35 @@ func availabilityFromSnapshot(snapshot db.AgentAvailabilitySnapshot) Availabilit
 }
 
 func (s *Service) agentAvailability(ctx context.Context, agentID uuid.UUID, connectionMode string) Availability {
-	snapshot, err := s.queries.GetAgentAvailabilitySnapshot(ctx, agentID)
+	return currentAgentAvailability(ctx, s.queries, agentID, connectionMode)
+}
+
+func (s *Service) runtimeAwareAvailability(ctx context.Context, agentID uuid.UUID, connectionMode string, availability Availability) Availability {
+	return runtimeAwareAvailabilityFor(ctx, s.queries, agentID, connectionMode, availability)
+}
+
+func (s *Service) toAgentResponseWithReadiness(ctx context.Context, a *db.Agent) AgentResponse {
+	return agentResponseWithReadiness(ctx, s.queries, a)
+}
+
+// currentAgentAvailability reads the stored availability snapshot (unknown
+// when absent) and applies the live Runtime Session signal.
+func currentAgentAvailability(ctx context.Context, q *db.Queries, agentID uuid.UUID, connectionMode string) Availability {
+	snapshot, err := q.GetAgentAvailabilitySnapshot(ctx, agentID)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.agentAvailability")
 		}
-		return s.runtimeAwareAvailability(ctx, agentID, connectionMode, availabilityResponse("unknown", nil, nil, nil, 0))
+		return runtimeAwareAvailabilityFor(ctx, q, agentID, connectionMode, availabilityResponse("unknown", nil, nil, nil, 0))
 	}
-	return s.runtimeAwareAvailability(ctx, agentID, connectionMode, availabilityFromSnapshot(snapshot))
+	return runtimeAwareAvailabilityFor(ctx, q, agentID, connectionMode, availabilityFromSnapshot(snapshot))
 }
 
-func (s *Service) runtimeAwareAvailability(ctx context.Context, agentID uuid.UUID, connectionMode string, availability Availability) Availability {
+func runtimeAwareAvailabilityFor(ctx context.Context, q *db.Queries, agentID uuid.UUID, connectionMode string, availability Availability) Availability {
 	if !isQueuedRuntimeConnectionMode(connectionMode) {
 		return availability
 	}
-	hasRuntime, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, agentID)
+	hasRuntime, err := q.HasActiveRuntimeSessionForAgent(ctx, agentID)
 	if err != nil {
 		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.runtimeAwareAvailability")
 		return availability
@@ -1465,9 +1493,11 @@ func (s *Service) runtimeAwareAvailability(ctx context.Context, agentID uuid.UUI
 	return availabilityForRuntimeSession(availability, hasRuntime)
 }
 
-func (s *Service) toAgentResponseWithReadiness(ctx context.Context, a *db.Agent) AgentResponse {
+// agentResponseWithReadiness is the owner-facing Agent DTO with current
+// availability, readiness and declared skill IDs (best effort).
+func agentResponseWithReadiness(ctx context.Context, q *db.Queries, a *db.Agent) AgentResponse {
 	resp := toAgentResponse(a)
-	availability := s.agentAvailability(ctx, a.ID, a.ConnectionMode)
+	availability := currentAgentAvailability(ctx, q, a.ID, a.ConnectionMode)
 	readiness := readinessForAgent(
 		a.Slug,
 		a.LifecycleStatus,
@@ -1479,12 +1509,12 @@ func (s *Service) toAgentResponseWithReadiness(ctx context.Context, a *db.Agent)
 	)
 	resp.Availability = &availability
 	resp.Readiness = &readiness
-	s.attachAgentSkillIDsBestEffort(ctx, &resp, a.ID)
+	attachAgentSkillIDsBestEffort(ctx, q, &resp, a.ID)
 	return resp
 }
 
-func (s *Service) attachAgentSkillIDsBestEffort(ctx context.Context, resp *AgentResponse, agentID uuid.UUID) {
-	skills, err := s.queries.ListAgentSkills(ctx, agentID)
+func attachAgentSkillIDsBestEffort(ctx context.Context, q *db.Queries, resp *AgentResponse, agentID uuid.UUID) {
+	skills, err := q.ListAgentSkills(ctx, agentID)
 	if err != nil {
 		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.attachAgentSkillIDs")
 		return

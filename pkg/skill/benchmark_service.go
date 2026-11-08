@@ -188,7 +188,7 @@ func (b *BenchmarkService) runBatch(agent db.Agent, skillID string, batchID uuid
 		}
 	}
 
-	b.aggregate(ctx, agent.ID, skillID, batchID, scores, len(cases))
+	b.aggregate(ctx, &agent, skillID, batchID, scores, len(cases))
 }
 
 // runCase 执行单条 case：调 endpoint → LLM judge → 写结果。返回 score + 是否成功。
@@ -271,7 +271,13 @@ func (b *BenchmarkService) markFailed(ctx context.Context, runID uuid.UUID, msg 
 }
 
 // aggregate 把单次 batch 的全部分数聚合到 agent_skill_scores。
-func (b *BenchmarkService) aggregate(ctx context.Context, agentID uuid.UUID, skillID string, batchID uuid.UUID, scores []int32, totalCases int) {
+//
+// 汇总只在 Agent 仍指向本 batch 探测的连接目标时写入：创作者在 batch 运行期间
+// 改了 endpoint / 连接方式 / MCP tool 时，UpdateAgent 已把汇总重置为 pending，
+// 旧目标的分数不能再把新目标标成 verified。确认与写入在同一事务内，确认时
+// FOR SHARE 锁住 Agent 行直到提交。逐用例结果仍保留在 agent_skill_benchmark_runs。
+func (b *BenchmarkService) aggregate(ctx context.Context, agent *db.Agent, skillID string, batchID uuid.UUID, scores []int32, totalCases int) {
+	agentID := agent.ID
 	status := BenchmarkStatusFailed
 	var avgPtr *int32
 	var verifiedAt *time.Time
@@ -295,18 +301,53 @@ func (b *BenchmarkService) aggregate(ctx context.Context, agentID uuid.UUID, ski
 	}
 
 	bid := batchID
-	if _, err := b.q.UpsertAgentSkillScore(ctx, db.UpsertAgentSkillScoreParams{
-		AgentID:      agentID,
-		SkillID:      skillID,
-		Status:       status,
-		AverageScore: avgPtr,
-		PassCount:    passCount,
-		TotalCount:   clampIntToInt32(totalCases),
-		LastBatchID:  &bid,
-		VerifiedAt:   verifiedAt,
-	}); err != nil {
+	err := b.withTx(ctx, func(q *db.Queries) error {
+		if _, err := q.LockAgentEvidenceTarget(ctx, db.LockAgentEvidenceTargetParams{
+			ID:             agentID,
+			ConnectionMode: agent.ConnectionMode,
+			EndpointURL:    agent.EndpointURL,
+			MCPToolName:    agent.MCPToolName,
+		}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errBenchmarkTargetChanged
+			}
+			return err
+		}
+		_, err := q.UpsertAgentSkillScore(ctx, db.UpsertAgentSkillScoreParams{
+			AgentID:      agentID,
+			SkillID:      skillID,
+			Status:       status,
+			AverageScore: avgPtr,
+			PassCount:    passCount,
+			TotalCount:   clampIntToInt32(totalCases),
+			LastBatchID:  &bid,
+			VerifiedAt:   verifiedAt,
+		})
+		return err
+	})
+	if errors.Is(err, errBenchmarkTargetChanged) {
+		log.Info().Str("agent_id", agentID.String()).Str("skill_id", skillID).Str("batch_id", batchID.String()).
+			Msg("benchmark.aggregate: Agent connection changed during batch, score discarded")
+		return
+	}
+	if err != nil {
 		log.Error().Err(err).Str("agent_id", agentID.String()).Str("skill_id", skillID).Msg("benchmark.aggregate: UpsertAgentSkillScore")
 	}
+}
+
+// errBenchmarkTargetChanged marks a batch whose Agent was repointed before
+// its score could be stored.
+var errBenchmarkTargetChanged = errors.New("benchmark agent connection target changed")
+
+// withTx runs fn in one transaction. Without a pool the guarded write cannot
+// be made atomic, so it fails closed instead of writing unguarded.
+func (b *BenchmarkService) withTx(ctx context.Context, fn func(q *db.Queries) error) error {
+	if b.parent == nil || b.parent.pool == nil || b.q == nil {
+		return errors.New("benchmark score store is not configured")
+	}
+	return pgx.BeginFunc(ctx, b.parent.pool, func(tx pgx.Tx) error {
+		return fn(b.q.WithTx(tx))
+	})
 }
 
 // ListAgentScores 创作者中心 / 内部用：列出某 agent 全部 skill 评分。
