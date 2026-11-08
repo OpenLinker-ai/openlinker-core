@@ -239,3 +239,71 @@ func TestSQLStoreCancelStartBarrierAndActorTombstone(t *testing.T) {
 		t.Fatalf("cancel-winner unexpectedly attached execution: %#v", final)
 	}
 }
+
+func TestSQLStoreRejectLaunchIsFencedByLaunchToken(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	actorID := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO users (id,email,password_hash,display_name) VALUES ($1,$2,'x','External Reject Launch')`, actorID, actorID.String()+"@external-reject-launch.test"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM external_execution_cancellations WHERE caller_service_id='reject-launch'`)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM external_executions WHERE caller_service_id='reject-launch'`)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM external_execution_keys WHERE caller_service_id='reject-launch'`)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id=$1`, actorID)
+	})
+	store := NewSQLStore(pool)
+	contractHash := "hct:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	launching := func(trace string) (uuid.UUID, uuid.UUID) {
+		t.Helper()
+		requestID, evaluationToken, launchToken := uuid.New(), uuid.New(), uuid.New()
+		if _, err := store.Reserve(ctx, ExecutionRecord{
+			CallerServiceID: "reject-launch", ExternalRequestID: requestID, ActorUserID: actorID,
+			RequestFingerprintVersion: currentRequestFingerprintVersion, TargetType: TargetTypeAgent, TargetID: uuid.New(),
+			InputFingerprint: make([]byte, 32), ExpectedContractHash: &contractHash, InputSchemaFingerprint: make([]byte, 32), TraceID: trace,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, claimed, err := store.ClaimStartEvaluation(ctx, "reject-launch", requestID, evaluationToken, time.Minute); err != nil || !claimed {
+			t.Fatalf("evaluation claim = %v, %v", claimed, err)
+		}
+		if _, authorized, err := store.AuthorizeStart(ctx, "reject-launch", requestID, evaluationToken, actorID); err != nil || !authorized {
+			t.Fatalf("authorize = %v, %v", authorized, err)
+		}
+		if _, claimed, err := store.ClaimLaunch(ctx, "reject-launch", requestID, launchToken, time.Minute); err != nil || !claimed {
+			t.Fatalf("launch claim = %v, %v", claimed, err)
+		}
+		return requestID, launchToken
+	}
+
+	requestID, launchToken := launching("reject-launch-token")
+	if record, rejected, err := store.RejectLaunch(ctx, "reject-launch", requestID, uuid.New(), "TARGET_CONTRACT_CHANGED"); err != nil || rejected || record.StartState != startStateLaunching {
+		t.Fatalf("stale token rejection = %#v, %v, %v", record, rejected, err)
+	}
+	record, rejected, err := store.RejectLaunch(ctx, "reject-launch", requestID, launchToken, "TARGET_CONTRACT_CHANGED")
+	if err != nil || !rejected || record.StartState != startStateRejected || record.RejectionCode == nil ||
+		*record.RejectionCode != "TARGET_CONTRACT_CHANGED" || record.AuthorizedTargetOwnerID != nil || record.StartToken != nil {
+		t.Fatalf("launch rejection = %#v, %v, %v", record, rejected, err)
+	}
+	if _, claimed, err := store.ClaimLaunch(ctx, "reject-launch", requestID, uuid.New(), time.Millisecond); err != nil || claimed {
+		t.Fatalf("rejected launch was reclaimed: %v, %v", claimed, err)
+	}
+
+	canceledID, canceledToken := launching("reject-launch-canceled")
+	if _, _, err := store.RequestCancel(ctx, "reject-launch", canceledID, actorID, "CALLER_REQUESTED"); err != nil {
+		t.Fatal(err)
+	}
+	if record, rejected, err := store.RejectLaunch(ctx, "reject-launch", canceledID, canceledToken, "TARGET_CONTRACT_CHANGED"); err != nil || rejected || record.RejectionCode != nil {
+		t.Fatalf("rejection overrode a cancellation: %#v, %v, %v", record, rejected, err)
+	}
+}

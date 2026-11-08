@@ -3,6 +3,7 @@ package externalexecution
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -149,8 +150,10 @@ func TestStartExecutionInputRejectionKeepsIdentityAnswers(t *testing.T) {
 }
 
 // Runtime rejects input that fails the capability before it creates a Run.
-// That must reach the caller as a final 4xx, not a retried 503.
-func TestStartExecutionRuntimeInputRejectionIsTerminal(t *testing.T) {
+// The request is then rejected durably under the launch token: every later
+// Start and GetExecution returns the same terminal answer and nothing ever
+// launches, even after the capability becomes permissive.
+func TestStartExecutionRuntimeInputRejectionIsDurable(t *testing.T) {
 	svc, runtimeSvc, store, targetID, listing, contractHash := boundedListingFixture(t)
 	principal := testPrincipal(uuid.New())
 	runtimeSvc.startErr = &httpx.HTTPError{
@@ -159,32 +162,126 @@ func TestStartExecutionRuntimeInputRejectionIsTerminal(t *testing.T) {
 	}
 	req := boundedRequest(targetID, listing, contractHash, "ok")
 	req.Input["buyer-secret-key"] = "x"
+	recordKey := executionStoreKey(principal.CallerServiceID, uuid.MustParse(req.ExternalRequestID))
+
+	requireTerminal := func(step string, err error) {
+		t.Helper()
+		assertHTTPCode(t, err, httpx.ErrorCode("TARGET_CONTRACT_CHANGED"))
+		var httpErr *httpx.HTTPError
+		if errors.As(err, &httpErr) && (httpErr.Details != nil || strings.Contains(httpErr.Message, "buyer-secret")) {
+			t.Fatalf("%s: rejection leaks Runtime detail: %#v", step, httpErr)
+		}
+		stored := store.records[recordKey]
+		if stored.StartState != startStateRejected || stored.RejectionCode == nil || *stored.RejectionCode != "TARGET_CONTRACT_CHANGED" ||
+			stored.ExecutionID != nil || stored.StartToken != nil || stored.AuthorizedTargetOwnerID != nil {
+			t.Fatalf("%s: record = %#v", step, stored)
+		}
+		if runtimeSvc.startCalls != 1 {
+			t.Fatalf("%s: Runtime start calls = %d, want the single original launch", step, runtimeSvc.startCalls)
+		}
+	}
 
 	_, err := svc.StartExecution(context.Background(), principal, req)
-	requireInputInvalid(t, err, executionInputSourceCapability, "", SchemaRuleAdditionalProperties)
-	if strings.Contains(err.Error(), "buyer-secret") {
-		t.Fatalf("rejection echoes input: %v", err)
-	}
-	recordKey := executionStoreKey(principal.CallerServiceID, uuid.MustParse(req.ExternalRequestID))
-	if stored := store.records[recordKey]; stored.StartState != startStateLaunching || stored.ExecutionID != nil || runtimeSvc.startCalls != 1 {
-		t.Fatalf("after rejection record=%#v start calls=%d", stored, runtimeSvc.startCalls)
-	}
-
-	// Once the launch lease lapses a retry re-launches and gets the same
-	// final answer instead of an internal error.
-	stored := store.records[recordKey]
-	expired := time.Now().Add(-time.Second)
-	stored.StartLeaseUntil = &expired
-	store.records[recordKey] = stored
+	requireTerminal("first start", err)
 	_, err = svc.StartExecution(context.Background(), principal, req)
-	requireInputInvalid(t, err, executionInputSourceCapability, "", SchemaRuleAdditionalProperties)
-	if runtimeSvc.startCalls != 2 {
-		t.Fatalf("Runtime start calls = %d, want a single re-launch", runtimeSvc.startCalls)
+	requireTerminal("immediate retry", err)
+
+	// No lease remains to expire, and a permissive capability changes nothing.
+	runtimeSvc.startErr = nil
+	store.now = func() time.Time { return time.Now().Add(time.Hour) }
+	_, err = svc.StartExecution(context.Background(), principal, req)
+	requireTerminal("retry after the lease and a permissive capability", err)
+
+	_, err = svc.GetExecution(context.Background(), principal, req.ExternalRequestID)
+	requireTerminal("GetExecution", err)
+}
+
+func TestStartExecutionRuntimeInputRejectionRespectsLaunchFence(t *testing.T) {
+	svc, runtimeSvc, store, targetID, listing, contractHash := boundedListingFixture(t)
+	principal := testPrincipal(uuid.New())
+	runtimeSvc.startErr = &httpx.HTTPError{Status: http.StatusUnprocessableEntity, Code: httpx.ErrorCode("RUN_INPUT_SCHEMA_MISMATCH")}
+	req := boundedRequest(targetID, listing, contractHash, "ok")
+	requestID := uuid.MustParse(req.ExternalRequestID)
+	recordKey := executionStoreKey(principal.CallerServiceID, requestID)
+
+	// A cancellation that arrived during the launch keeps its own outcome.
+	runtimeSvc.startHook = func() {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		memoryCancellationState(store).cancellations[recordKey] = CancellationRecord{
+			ID: uuid.New(), CallerServiceID: principal.CallerServiceID, ExternalRequestID: requestID, ActorUserID: principal.ActorUserID,
+			State: "requested", ReasonCode: "CALLER_REQUESTED", RequestedAt: time.Now(),
+		}
+	}
+	_, err := svc.StartExecution(context.Background(), principal, req)
+	assertHTTPStatus(t, err, http.StatusServiceUnavailable)
+	if stored := store.records[recordKey]; stored.StartState != startStateLaunching || stored.RejectionCode != nil {
+		t.Fatalf("canceled launch was rejected: %#v", stored)
 	}
 
-	// Other Runtime failures stay transient.
-	runtimeSvc.startErr = httpx.Internal("db down")
-	other := boundedRequest(targetID, listing, contractHash, "ok")
-	_, err = svc.StartExecution(context.Background(), principal, other)
-	assertHTTPStatus(t, err, http.StatusServiceUnavailable)
+	// A stale launch token never overwrites the current launch.
+	stored := store.records[recordKey]
+	other := uuid.New()
+	stored.StartToken = &other
+	store.records[recordKey] = stored
+	if _, rejected, err := store.RejectLaunch(context.Background(), principal.CallerServiceID, requestID, uuid.New(), "TARGET_CONTRACT_CHANGED"); err != nil || rejected {
+		t.Fatalf("stale token rejected the launch: %v, %v", rejected, err)
+	}
+}
+
+// A reservation from before input_schema enforcement that already has a
+// committed Run is recovered first; its input is only checked on a miss.
+func TestStartExecutionRecoversCommittedWorkBeforeInputEnforcement(t *testing.T) {
+	requestID, actorID, ownerID, targetID, runID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	listing := json.RawMessage(`{"type":"object","properties":{"channel":{"type":"string","enum":["email","web"]}}}`)
+	store := newMemoryStore(ownerID)
+	runtimeSvc := &fakeRuntimeService{
+		lookupResponse: &runtime.RunResponse{RunID: runID.String(), Status: "running", StartedAt: time.Now()},
+		lookupFound:    true,
+		getResponse:    &runtime.RunResponse{RunID: runID.String(), Status: "running", StartedAt: time.Now()},
+	}
+	svc := NewService(callableAgent(targetID), runtimeSvc, &fakeWorkflowService{}, store)
+	contractHash := "hct:v1:" + strings.Repeat("a", 64)
+	store.records[executionStoreKey("openlinker-cloud", requestID)] = ExecutionRecord{
+		CallerServiceID: "openlinker-cloud", ExternalRequestID: requestID, RequestFingerprintVersion: legacyRequestFingerprintVersion,
+		ActorUserID: actorID, TargetType: TargetTypeAgent, TargetID: targetID,
+		ExpectedContractHash: &contractHash, TraceID: "trace-legacy-recovery",
+		DownstreamReplayIdentity: legacyReplayIdentity(t, requestID, ownerID, "trace-legacy-recovery"),
+	}
+	req := &ExecutionRequest{
+		ExternalRequestID: requestID.String(), TargetType: TargetTypeAgent, TargetID: targetID.String(),
+		Input:    map[string]interface{}{"channel": ""},
+		Metadata: map[string]interface{}{"external_order_id": requestID.String(), "seller_user_id": ownerID.String()},
+		TraceID:  "trace-legacy-recovery", ExpectedContractHash: contractHash, InputSchema: listing,
+	}
+	if err := validateExternalExecutionInput(req.Input, decodeJSONObject(t, string(listing))); err == nil {
+		t.Fatal("fixture input must violate the listing")
+	}
+
+	response, err := svc.StartExecution(context.Background(), testPrincipal(actorID), req)
+	if err != nil || response.ExecutionID != runID.String() {
+		t.Fatalf("legacy recovery = %#v, %v", response, err)
+	}
+	attached := store.records[executionStoreKey("openlinker-cloud", requestID)]
+	if attached.ExecutionID == nil || *attached.ExecutionID != runID || runtimeSvc.startCalls != 0 {
+		t.Fatalf("committed work was not recovered: record=%#v start calls=%d", attached, runtimeSvc.startCalls)
+	}
+
+	// Without committed work the same reservation is rejected and stays pending.
+	missID := uuid.New()
+	store.records[executionStoreKey("openlinker-cloud", missID)] = ExecutionRecord{
+		CallerServiceID: "openlinker-cloud", ExternalRequestID: missID, RequestFingerprintVersion: legacyRequestFingerprintVersion,
+		ActorUserID: actorID, TargetType: TargetTypeAgent, TargetID: targetID,
+		ExpectedContractHash: &contractHash, TraceID: "trace-legacy-recovery",
+		DownstreamReplayIdentity: legacyReplayIdentity(t, missID, ownerID, "trace-legacy-recovery"),
+	}
+	runtimeSvc.lookupFound = false
+	miss := *req
+	miss.ExternalRequestID = missID.String()
+	miss.Metadata = map[string]interface{}{"external_order_id": missID.String(), "seller_user_id": ownerID.String()}
+	_, err = svc.StartExecution(context.Background(), testPrincipal(actorID), &miss)
+	requireInputInvalid(t, err, executionInputSourceInputSchema, "channel", SchemaRuleEnum)
+	if stored := store.records[executionStoreKey("openlinker-cloud", missID)]; stored.StartState != startStatePending || stored.StartToken != nil || runtimeSvc.startCalls != 0 {
+		t.Fatalf("rejected legacy reservation changed: %#v (start calls %d)", stored, runtimeSvc.startCalls)
+	}
 }

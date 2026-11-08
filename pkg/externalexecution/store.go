@@ -68,6 +68,7 @@ type Store interface {
 	ClaimStartEvaluation(context.Context, string, uuid.UUID, uuid.UUID, time.Duration) (ExecutionRecord, bool, error)
 	AuthorizeStart(context.Context, string, uuid.UUID, uuid.UUID, uuid.UUID) (ExecutionRecord, bool, error)
 	RejectStart(context.Context, string, uuid.UUID, uuid.UUID, string) (ExecutionRecord, bool, error)
+	RejectLaunch(context.Context, string, uuid.UUID, uuid.UUID, string) (ExecutionRecord, bool, error)
 	ReleaseStartEvaluation(context.Context, string, uuid.UUID, uuid.UUID) error
 	Attach(context.Context, string, uuid.UUID, string, uuid.UUID) (ExecutionRecord, error)
 	ClaimLaunch(context.Context, string, uuid.UUID, uuid.UUID, time.Duration) (ExecutionRecord, bool, error)
@@ -316,6 +317,56 @@ func (s *SQLStore) RejectStart(
 			  AND start_state = 'evaluating'
 			  AND start_token = $3
 			  AND start_lease_until > clock_timestamp()
+			RETURNING `+executionRecordColumns+`
+		`, callerServiceID, externalRequestID, token, rejectionCode)
+		var err error
+		record, err = scanExecutionRecord(row)
+		if errors.Is(err, pgx.ErrNoRows) {
+			record, err = getExecutionTx(ctx, tx, callerServiceID, externalRequestID, false)
+			return err
+		}
+		rejected = err == nil
+		return err
+	})
+	return record, rejected, err
+}
+
+// RejectLaunch durably rejects a launch that Runtime refused before creating
+// anything. It applies only while the caller still holds the launch token and
+// no downstream creation identity or cancellation exists, so a reclaimed or
+// already-created launch is never overwritten.
+func (s *SQLStore) RejectLaunch(
+	ctx context.Context,
+	callerServiceID string,
+	externalRequestID, token uuid.UUID,
+	rejectionCode string,
+) (ExecutionRecord, bool, error) {
+	if s.pool == nil {
+		return ExecutionRecord{}, false, errors.New("external execution database is not configured")
+	}
+	var record ExecutionRecord
+	rejected := false
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := lockExternalExecutionKey(ctx, tx, callerServiceID, externalRequestID); err != nil {
+			return err
+		}
+		row := tx.QueryRow(ctx, `
+			UPDATE external_executions e
+			SET start_state = 'rejected', start_token = NULL, start_lease_until = NULL,
+			    authorized_target_owner_id = NULL, rejection_code = $4,
+			    updated_at = clock_timestamp()
+			WHERE e.caller_service_id = $1
+			  AND e.external_request_id = $2
+			  AND e.execution_id IS NULL
+			  AND e.start_state = 'launching'
+			  AND e.start_token = $3
+			  AND e.downstream_idempotency_key_hash IS NULL
+			  AND e.downstream_creation_fingerprint IS NULL
+			  AND NOT EXISTS (
+			      SELECT 1 FROM external_execution_cancellations c
+			      WHERE c.caller_service_id = e.caller_service_id
+			        AND c.external_request_id = e.external_request_id
+			  )
 			RETURNING `+executionRecordColumns+`
 		`, callerServiceID, externalRequestID, token, rejectionCode)
 		var err error

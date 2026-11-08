@@ -13,15 +13,15 @@ import (
 )
 
 // executionInputInvalidCode rejects an External Execution start whose input
-// does not satisfy a schema: the caller-declared input_schema (checked by Core
-// before anything is reserved) or the target capability (reported by Runtime
-// at launch). The response carries a bounded rule, never the input.
+// does not satisfy the caller-declared input_schema. Core checks it before
+// anything is reserved, from immutable request data only, so a retry of the
+// same request always gets the same answer. The response carries a bounded
+// rule, never the input. A later capability rejection by Runtime is recorded
+// as TARGET_CONTRACT_CHANGED instead (see Service.rejectLaunch).
 const executionInputInvalidCode = httpx.ErrorCode("EXECUTION_INPUT_INVALID")
 
-const (
-	executionInputSourceInputSchema = "input_schema"
-	executionInputSourceCapability  = "capability"
-)
+// executionInputSourceInputSchema is details.source of EXECUTION_INPUT_INVALID.
+const executionInputSourceInputSchema = "input_schema"
 
 // externalInputEnforcedKeywords are the scalar constraint keywords
 // validateExternalExecutionInput enforces on top of Core's run-time
@@ -42,8 +42,9 @@ var externalInputEnforcedKeywords = map[string]bool{
 //   - const, minLength/maxLength (Unicode code points), pattern (Go RE2,
 //     unanchored, a pattern that does not compile rejects every string),
 //     minimum/maximum, exclusiveMinimum/exclusiveMaximum (numeric form, or the
-//     draft-04 boolean form on minimum/maximum) and multipleOf (exact rational
-//     arithmetic) are enforced here, wherever they appear in the schema.
+//     draft-04 boolean form on minimum/maximum) and multipleOf (exact decimal
+//     arithmetic on the JSON number text, see schemaNumber) are enforced here,
+//     wherever they appear in the schema.
 //   - A keyword whose value is malformed rejects every value it applies to.
 //
 // The error names only a property the schema itself declares and a rule; it
@@ -104,20 +105,12 @@ func executionInputInvalidError(source, property, rule string) *httpx.HTTPError 
 	}
 }
 
-// capabilityInputInvalidError maps Runtime's RUN_INPUT_SCHEMA_MISMATCH at
-// launch. Runtime's path may name an undeclared input key, so only the bounded
-// reason is kept.
-func capabilityInputInvalidError(err error) (*httpx.HTTPError, bool) {
+// isCapabilityInputRejection reports Runtime's RUN_INPUT_SCHEMA_MISMATCH at
+// launch: the input failed the target capability and nothing was created.
+func isCapabilityInputRejection(err error) bool {
 	var httpErr *httpx.HTTPError
-	if !errors.As(err, &httpErr) || httpErr.Code != httpx.ErrorCode("RUN_INPUT_SCHEMA_MISMATCH") ||
-		httpErr.Status != http.StatusUnprocessableEntity {
-		return nil, false
-	}
-	reason := ""
-	if details, ok := httpErr.Details.(map[string]interface{}); ok {
-		reason, _ = details["reason"].(string)
-	}
-	return executionInputInvalidError(executionInputSourceCapability, "", inputschemaViolationRule(reason)), true
+	return errors.As(err, &httpErr) && httpErr.Code == httpx.ErrorCode("RUN_INPUT_SCHEMA_MISMATCH") &&
+		httpErr.Status == http.StatusUnprocessableEntity
 }
 
 func inputschemaViolationRule(reason string) string {

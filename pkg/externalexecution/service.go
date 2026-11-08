@@ -203,15 +203,14 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 	// machine. This prevents concurrent callers from disagreeing about a target
 	// while one of them is already authorized to create the execution.
 	record, err := s.store.Get(ctx, parsed.callerServiceID, parsed.externalRequestID)
-	inputValidated := false
 	if errors.Is(err, pgx.ErrNoRows) {
 		// A new request must satisfy its own input_schema before anything is
-		// reserved. Replays of an existing record skip this check: the record
-		// already binds the input, and an attached execution stays readable.
+		// reserved. An existing record is checked only after its read-only
+		// downstream recovery misses (ensureExecutionStartAuthorized), so
+		// committed work is always recovered and attached executions replay.
 		if inputErr := validateExternalExecutionInput(parsed.input, parsed.inputSchema); inputErr != nil {
 			return nil, s.unreservedInputRejection(ctx, parsed, inputErr)
 		}
-		inputValidated = true
 		record, err = s.store.Reserve(ctx, ExecutionRecord{
 			CallerServiceID:           parsed.callerServiceID,
 			ExternalRequestID:         parsed.externalRequestID,
@@ -266,13 +265,6 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 			return nil, httpx.ServiceUnavailable("外部执行正在启动，请重试")
 		}
 	case startStatePending, startStateEvaluating:
-		// A record reserved before input_schema enforcement existed is checked
-		// before it can be authorized; the check has no side effects.
-		if !inputValidated {
-			if inputErr := validateExternalExecutionInput(parsed.input, parsed.inputSchema); inputErr != nil {
-				return nil, inputErr
-			}
-		}
 	default:
 		return nil, httpx.Internal("外部执行启动状态无效")
 	}
@@ -329,10 +321,12 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 				return nil, s.launchFenceFailure(ctx, parsed)
 			}
 			// Runtime validates the input against the capability before it
-			// creates anything, so this rejection is final for this input.
-			// The launch fence lease simply expires; a retry re-validates.
-			if inputErr, rejected := capabilityInputInvalidError(err); rejected {
-				return nil, inputErr
+			// creates anything. The caller's listing passed its own check and
+			// was proven against the pinned capability contract, so the
+			// target no longer accepts this request: reject it durably under
+			// the launch token so it is never retried or launched later.
+			if isCapabilityInputRejection(err) {
+				return s.rejectLaunch(ctx, parsed, launchToken)
 			}
 			return nil, httpx.ServiceUnavailable("Runtime 启动状态正在确认，请重试")
 		}
@@ -363,6 +357,25 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 	}
 
 	return s.attachLaunchedExecution(ctx, parsed, launchToken, executionKind, executionID)
+}
+
+// rejectLaunch records a terminal TARGET_CONTRACT_CHANGED for a launch that
+// Runtime refused. If the launch token is no longer current, the authoritative
+// record answers instead.
+func (s *Service) rejectLaunch(ctx context.Context, parsed parsedExecution, launchToken uuid.UUID) (*ExecutionStartResponse, error) {
+	record, _, err := s.store.RejectLaunch(
+		ctx, parsed.callerServiceID, parsed.externalRequestID, launchToken, "TARGET_CONTRACT_CHANGED",
+	)
+	if err != nil {
+		return nil, httpx.Internal("保存外部执行拒绝状态失败")
+	}
+	if rejectionErr := executionStartRejection(record); rejectionErr != nil {
+		return nil, rejectionErr
+	}
+	if response, complete, replayErr := s.responseForReservedRecord(ctx, record); complete || replayErr != nil {
+		return response, replayErr
+	}
+	return nil, s.launchFenceFailure(ctx, parsed)
 }
 
 // unreservedInputRejection keeps the answers Reserve would have given for an
@@ -478,6 +491,13 @@ func (s *Service) ensureExecutionStartAuthorized(
 	if recovered {
 		claimActive = false
 		return ExecutionRecord{}, response, nil
+	}
+	// Only after the read-only recovery missed: a reservation that already
+	// has committed work is recovered above even if its input predates
+	// input_schema enforcement. The deferred release returns the record to
+	// pending, so the same request keeps getting the same answer.
+	if inputErr := validateExternalExecutionInput(parsed.input, parsed.inputSchema); inputErr != nil {
+		return ExecutionRecord{}, nil, inputErr
 	}
 
 	if claimedRecord.RequestFingerprintVersion == legacyRequestFingerprintVersion &&

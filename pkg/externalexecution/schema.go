@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -380,15 +381,19 @@ func proveMultipleOf(listing map[string]interface{}, capabilityValue interface{}
 
 var schemaJSONNumberPattern = regexp.MustCompile(`^-?(?:0|[1-9][0-9]{0,99})(?:\.[0-9]{1,100})?(?:[eE][+-]?[0-9]{1,3})?$`)
 
-// schemaNumber reads a JSON number as an exact rational. Both decode paths are
-// accepted: encoding/json float64 and json.Number.
+// schemaNumber reads a JSON number as the exact value of its decimal text, so
+// 0.01 means one hundredth whichever decode path produced it. A json.Number is
+// its own text. A float64 from encoding/json uses its shortest round-trip
+// decimal (strconv 'g', -1), which reproduces the JSON text for any number
+// that float64 can carry; its binary value would turn rounding artifacts into
+// constraints (1 would not be a multiple of 0.01).
 func schemaNumber(raw interface{}) (*big.Rat, bool) {
 	switch value := raw.(type) {
 	case float64:
 		if math.IsNaN(value) || math.IsInf(value, 0) {
 			return nil, false
 		}
-		return new(big.Rat).SetFloat64(value), true
+		return new(big.Rat).SetString(strconv.FormatFloat(value, 'g', -1, 64))
 	case json.Number:
 		// Accept only JSON number syntax with a bounded exponent, so a
 		// json.Number can neither use big.Rat's extra syntax (fractions, hex)

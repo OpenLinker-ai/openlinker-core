@@ -9,10 +9,14 @@ runtime protocol, and migration contract are declared stable.
 
 ### Fixed
 
-- An External Execution start whose input fails the target capability now
-  returns 422 `EXECUTION_INPUT_INVALID` (`details.source: capability`) instead
-  of a 503 that the caller kept retrying. A retry after an expired launch
-  fence re-launches instead of returning 500.
+- When Runtime rejects an External Execution input against the target
+  capability at launch, the start is now rejected durably, under its launch
+  token, as `TARGET_CONTRACT_CHANGED`.
+  - Before, it returned a 503 that the caller kept retrying.
+  - Every later Start and GetExecution returns the same rejection. The
+    request never launches, even after the capability changes.
+  - A retry after an expired launch fence now re-launches instead of
+    returning 500.
 - Runtime dispatch no longer loses a wake to a WebSocket Session that cannot
   claim. Wake tokens are coalesced per eligibility class; a Session that is full
   or still holds an unacknowledged offer hands a real wake to another listening
@@ -79,11 +83,14 @@ runtime protocol, and migration contract are declared stable.
   - It covers type, enum, required, additionalProperties and items with
     Core's run-time semantics. It also checks the keywords above: lengths in
     code points, Go RE2 patterns (one that does not compile rejects), and
-    exact numbers.
+    numbers.
+  - Numbers compare by their exact decimal JSON text, so `1` is a multiple of
+    `0.01`.
   - A violation returns 422 `EXECUTION_INPUT_INVALID`. `details` has
-    `source`, `rule` and, when the schema declares it, `property`. The input
-    is never echoed.
-  - Replays of an existing request are unchanged.
+    `source: input_schema`, `rule` and, when the schema declares it,
+    `property`. The input is never echoed.
+  - Attached executions replay unchanged. An existing reservation is checked
+    only after its downstream recovery finds no committed work.
 - Failed External Executions return a bounded `failure_category`. It is mapped
   from Core run statuses and an explicit allowlist of run error codes:
   - unlisted codes map to `unknown`;

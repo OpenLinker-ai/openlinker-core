@@ -62,7 +62,8 @@ VALUES($1,'{"type":"object","required":["text"],"properties":{"text":{"type":"st
 
 // Starts through the production stores and Runtime: a listing bound is
 // enforced before anything is reserved, and a capability rejection from
-// Runtime is a final 422 instead of a retried 503.
+// Runtime is persisted as a terminal rejection that is replayed by every later
+// Start and GetExecution, even after the capability becomes permissive.
 func TestExternalExecutionStartRejectsInvalidInputTerminally(t *testing.T) {
 	pool, svc, _, _, target := dryRunReadyFixture(t)
 	ctx := context.Background()
@@ -89,20 +90,21 @@ VALUES($1,'{"type":"object","required":["text"],"properties":{"text":{"type":"st
 		})
 		return requestID, err
 	}
-	requireInputInvalid := func(err error, source string) {
+	requireCode := func(err error, status int, code string) *httpx.HTTPError {
 		t.Helper()
 		var httpErr *httpx.HTTPError
 		require.ErrorAs(t, err, &httpErr)
-		require.Equal(t, 422, httpErr.Status)
-		require.Equal(t, httpx.ErrorCode("EXECUTION_INPUT_INVALID"), httpErr.Code)
-		require.Equal(t, source, httpErr.Details.(map[string]interface{})["source"])
-		encoded, marshalErr := json.Marshal(httpErr.Details)
+		require.Equal(t, status, httpErr.Status)
+		require.Equal(t, httpx.ErrorCode(code), httpErr.Code)
+		encoded, marshalErr := json.Marshal(httpErr)
 		require.NoError(t, marshalErr)
 		require.NotContains(t, string(encoded), "buyer-secret")
+		return httpErr
 	}
 
 	requestID, err := start(map[string]any{"text": "buyer-secret too long"})
-	requireInputInvalid(err, "input_schema")
+	rejected := requireCode(err, 422, "EXECUTION_INPUT_INVALID")
+	require.Equal(t, "input_schema", rejected.Details.(map[string]interface{})["source"])
 	var keys, executions int
 	require.NoError(t, pool.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM external_execution_keys WHERE caller_service_id='openlinker-cloud' AND external_request_id=$1),
@@ -110,17 +112,41 @@ VALUES($1,'{"type":"object","required":["text"],"properties":{"text":{"type":"st
 	require.Zero(t, keys+executions, "a rejected input must not reserve anything")
 
 	// The listing allows an undeclared key; the capability forbids it.
-	requestID, err = start(map[string]any{"text": "ok", "buyer-secret-key": 1})
-	requireInputInvalid(err, "capability")
-	var state string
-	var runs int
-	require.NoError(t, pool.QueryRow(ctx, `SELECT start_state, (SELECT count(*) FROM runs WHERE user_id=$2)
-		FROM external_executions WHERE caller_service_id='openlinker-cloud' AND external_request_id=$1`, requestID, buyer.ActorUserID).Scan(&state, &runs))
-	require.Equal(t, "launching", state)
-	require.Zero(t, runs, "Runtime must not have created a Run")
+	input := map[string]any{"text": "ok", "buyer-secret-key": 1}
+	traceID := "trace-capability-reject"
+	requestID = uuid.NewString()
+	startSame := func() error {
+		_, err := external.StartExecution(ctx, buyer, &externalexecution.ExecutionRequest{
+			ExternalRequestID: requestID, TargetType: "agent", TargetID: target.ID.String(), Input: input,
+			TraceID: traceID, ExpectedContractHash: validation.ContractHash, InputSchema: schema,
+		})
+		return err
+	}
+	requireRejected := func(step string) {
+		t.Helper()
+		var state, code string
+		var owner *uuid.UUID
+		var runs int
+		require.NoError(t, pool.QueryRow(ctx, `SELECT start_state, rejection_code, authorized_target_owner_id,
+			(SELECT count(*) FROM runs WHERE user_id=$2)
+			FROM external_executions WHERE caller_service_id='openlinker-cloud' AND external_request_id=$1`,
+			requestID, buyer.ActorUserID).Scan(&state, &code, &owner, &runs), step)
+		require.Equal(t, "rejected", state, step)
+		require.Equal(t, "TARGET_CONTRACT_CHANGED", code, step)
+		require.Nil(t, owner, step)
+		require.Zero(t, runs, "%s: Runtime must not have created a Run", step)
+	}
+	requireCode(startSame(), 409, "TARGET_CONTRACT_CHANGED")
+	requireRejected("first start")
+	requireCode(startSame(), 409, "TARGET_CONTRACT_CHANGED")
+	requireRejected("immediate retry")
 
-	_, err = start(map[string]any{"text": "fine"})
+	_, err = pool.Exec(ctx, `UPDATE agent_capabilities SET input_schema='{"type":"object","properties":{"text":{"type":"string"}}}'::jsonb WHERE agent_id=$1`, target.ID)
 	require.NoError(t, err)
+	requireCode(startSame(), 409, "TARGET_CONTRACT_CHANGED")
+	requireRejected("retry after the capability became permissive")
+	_, err = external.GetExecution(ctx, buyer, requestID)
+	requireCode(err, 409, "TARGET_CONTRACT_CHANGED")
 }
 
 // A Runtime Worker failure committed by the production result finalizer

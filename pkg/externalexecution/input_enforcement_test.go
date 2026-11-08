@@ -73,6 +73,11 @@ func TestValidateExternalExecutionInput(t *testing.T) {
 		{"draft-04 false is inclusive", `{"type":"object","properties":{"x":{"type":"number","maximum":5,"exclusiveMaximum":false}}}`, `{"x":5}`, "", ""},
 		{"mixed range", `{"type":"object","properties":{"x":{"type":"number","exclusiveMinimum":0,"maximum":10}}}`, `{"x":10}`, "", ""},
 		{"multipleOf ok", `{"type":"object","properties":{"x":{"type":"number","multipleOf":0.5}}}`, `{"x":2.5}`, "", ""},
+		{"multipleOf hundredths of an integer", `{"type":"object","properties":{"x":{"type":"number","multipleOf":0.01}}}`, `{"x":1}`, "", ""},
+		{"multipleOf hundredths of a price", `{"type":"object","properties":{"x":{"type":"number","multipleOf":0.01}}}`, `{"x":19.99}`, "", ""},
+		{"multipleOf tenths", `{"type":"object","properties":{"x":{"type":"number","multipleOf":0.1}}}`, `{"x":0.3}`, "", ""},
+		{"multipleOf finer than allowed", `{"type":"object","properties":{"x":{"type":"number","multipleOf":0.01}}}`, `{"x":1.005}`, "x", SchemaRuleMultipleOf},
+		{"maximum decimal text", `{"type":"object","properties":{"x":{"type":"number","maximum":0.3}}}`, `{"x":0.3}`, "", ""},
 		{"multipleOf mismatch", `{"type":"object","properties":{"x":{"type":"number","multipleOf":2}}}`, `{"x":3}`, "x", SchemaRuleMultipleOf},
 		{"multipleOf zero fails closed", `{"type":"object","properties":{"x":{"type":"number","multipleOf":0}}}`, `{"x":3}`, "x", SchemaRuleMultipleOf},
 		{"bounds ignore non-numbers", `{"type":"object","properties":{"x":{"type":["number","boolean"],"maximum":1}}}`, `{"x":true}`, "", ""},
@@ -123,26 +128,18 @@ func TestValidateExternalExecutionInputNeverEchoesInput(t *testing.T) {
 	}
 }
 
-func TestCapabilityInputInvalidErrorMapsRuntimeMismatch(t *testing.T) {
-	runtimeErr := &httpx.HTTPError{
-		Status: http.StatusUnprocessableEntity, Code: httpx.ErrorCode("RUN_INPUT_SCHEMA_MISMATCH"), Message: "input 不匹配 Agent input_schema",
-		Details: map[string]interface{}{"agent_id": "a", "capability_version": int32(1), "path": "input.buyer-secret-key", "reason": "additional_property"},
-	}
-	mapped, ok := capabilityInputInvalidError(runtimeErr)
-	if !ok {
-		t.Fatal("RUN_INPUT_SCHEMA_MISMATCH was not mapped")
-	}
-	requireInputInvalid(t, mapped, executionInputSourceCapability, "", SchemaRuleAdditionalProperties)
-	if strings.Contains(strings.Join([]string{mapped.Message}, ""), "buyer-secret") {
-		t.Fatal("mapped error echoes the Runtime path")
+func TestIsCapabilityInputRejection(t *testing.T) {
+	if !isCapabilityInputRejection(&httpx.HTTPError{Status: http.StatusUnprocessableEntity, Code: httpx.ErrorCode("RUN_INPUT_SCHEMA_MISMATCH")}) {
+		t.Fatal("RUN_INPUT_SCHEMA_MISMATCH 422 must be recognized")
 	}
 	for _, other := range []error{
 		httpx.ServiceUnavailable("busy"),
 		&httpx.HTTPError{Status: http.StatusConflict, Code: httpx.ErrorCode("RUN_INPUT_SCHEMA_MISMATCH")},
+		&httpx.HTTPError{Status: http.StatusUnprocessableEntity, Code: httpx.CodeUnprocessable},
 		errors.New("plain"),
 	} {
-		if _, ok := capabilityInputInvalidError(other); ok {
-			t.Fatalf("%v must not be treated as an input rejection", other)
+		if isCapabilityInputRejection(other) {
+			t.Fatalf("%v must not be treated as a capability rejection", other)
 		}
 	}
 }
