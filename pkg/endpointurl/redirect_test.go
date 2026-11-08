@@ -163,6 +163,22 @@ func TestNewHTTPClientKeepsCredentialsOnSameOriginRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertCredentials(t, rec2.find(t, "/landing"))
+
+	// A leading-zero spelling of the same port is the same effective origin.
+	rec3 := &hitRecorder{}
+	var zeroPortURL string
+	zero := redirectServer(t, rec3, func() map[string]string {
+		return map[string]string{"/start": zeroPortURL + "/landing"}
+	})
+	parsed, err := url.Parse(zero.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroPortURL = "http://" + parsed.Hostname() + ":0" + parsed.Port()
+	if _, err := postWithCredentials(t, NewHTTPClient(5*time.Second, true), zero.URL+"/start"); err != nil {
+		t.Fatal(err)
+	}
+	assertCredentials(t, rec3.find(t, "/landing"))
 }
 
 func TestNewHTTPClientKeepsCredentialsStrippedAfterReturningToOrigin(t *testing.T) {
@@ -290,33 +306,50 @@ func TestCredentialRedirectPolicyStripsWithoutEndpointValidation(t *testing.T) {
 	assertNoCredentials(t, hit{path: other.URL.Path, header: other.Header})
 }
 
-func TestOriginOfUsesEffectivePort(t *testing.T) {
+// Each case goes through StripCrossOriginCredentials, the decision the
+// production CheckRedirect makes: same=true means the credentials are kept.
+func TestCrossOriginDecisionMatchesTransportOrigin(t *testing.T) {
 	cases := []struct {
+		name string
 		a, b string
 		same bool
 	}{
-		{"https://agent.example.com/a", "https://agent.example.com:443/b", true},
-		{"http://agent.example.com/a", "http://agent.example.com:80/b", true},
-		{"https://Agent.Example.com/a", "HTTPS://agent.example.com/b?x=1", true},
-		{"https://[::1]:8443/a", "https://[::1]:8443/b", true},
-		{"https://agent.example.com/a", "http://agent.example.com/a", false},
-		{"https://agent.example.com/a", "https://agent.example.com:8443/a", false},
-		{"https://agent.example.com/a", "https://sub.agent.example.com/a", false},
-		{"https://agent.example.com/a", "https://agent.example.com./a", false},
-		{"https://agent.example.com:443/a", "http://agent.example.com:443/a", false},
+		{"implicit https port", "https://agent.example.com/a", "https://agent.example.com:443/b", true},
+		{"implicit http port", "http://agent.example.com/a", "http://agent.example.com:80/b", true},
+		{"leading-zero port", "https://agent.example.com:443/a", "https://agent.example.com:0443/b", true},
+		{"leading-zero default port", "https://agent.example.com/a", "https://agent.example.com:00443/b", true},
+		{"leading-zero custom port", "http://127.0.0.1:8080/a", "http://127.0.0.1:08080/b", true},
+		{"ascii case", "https://Agent.Example.com/a", "HTTPS://agent.example.com/b?x=1", true},
+		{"ipv6 literal", "https://[::1]:8443/a", "https://[::1]:8443/b", true},
+		{"unicode and punycode spelling", "https://b\u00fccher.example/a", "https://xn--bcher-kva.example/b", true},
+		{"punycode ascii case", "https://XN--BCHER-KVA.example/a", "https://b\u00fccher.example/b", true},
+		// The Host header keeps Unicode case, so a different virtual host may answer.
+		{"unicode case", "https://B\u00dcCHER.example/a", "https://b\u00fccher.example/b", false},
+		{"lookup and host header disagree", "https://xn--i-9bb.example/a", "https://\u0130.example/b", false},
+		{"compatibility mapping", "https://k.example/a", "https://\u212a.example/b", false},
+		{"dotted capital I is not i", "https://i.example/a", "https://\u0130.example/b", false},
+		{"dotted capital I is not I", "https://I.example/a", "https://\u0130.example/b", false},
+		{"scheme", "https://agent.example.com/a", "http://agent.example.com/a", false},
+		{"port", "https://agent.example.com/a", "https://agent.example.com:8443/a", false},
+		{"subdomain", "https://agent.example.com/a", "https://sub.agent.example.com/a", false},
+		{"trailing dot", "https://agent.example.com/a", "https://agent.example.com./a", false},
+		{"scheme with explicit port", "https://agent.example.com:443/a", "http://agent.example.com:443/a", false},
+		{"port out of range", "https://agent.example.com:443/a", "https://agent.example.com:65979/a", false},
+		{"port overflow", "https://agent.example.com/a", "https://agent.example.com:4294967739/a", false},
+		{"invalid IDN even when identical", "https://\u2488.example/a", "https://\u2488.example/b", false},
+		{"invalid IDN target", "https://agent.example.com/a", "https://\u0080.example/b", false},
 	}
 	for _, tc := range cases {
-		a, err := url.Parse(tc.a)
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, err := url.Parse(tc.b)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := originOf(a) == originOf(b); got != tc.same {
-			t.Fatalf("same origin(%s, %s) = %v, want %v", tc.a, tc.b, got, tc.same)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			first := mustRequest(t, tc.a)
+			next := withCredentialHeaders(mustRequest(t, tc.b))
+			StripCrossOriginCredentials(next, []*http.Request{first})
+			if tc.same {
+				assertCredentials(t, hit{path: tc.b, header: next.Header})
+			} else {
+				assertNoCredentials(t, hit{path: tc.b, header: next.Header})
+			}
+		})
 	}
 }
 

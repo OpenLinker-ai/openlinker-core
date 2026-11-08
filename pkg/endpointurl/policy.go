@@ -7,8 +7,12 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/net/idna"
 )
 
 var errHTTPSRequired = errors.New("endpoint_url 必须使用 HTTPS；本地开发仅可在开启 ALLOW_LOCAL_HTTP_ENDPOINTS 后使用 loopback HTTP")
@@ -185,12 +189,18 @@ func redirectChainCrossesOrigin(req *http.Request, via []*http.Request) bool {
 	if via[0] == nil || via[0].URL == nil || req.URL == nil {
 		return true
 	}
-	initial := originOf(via[0].URL)
-	if originOf(req.URL) != initial {
+	initial, ok := originOf(via[0].URL)
+	if !ok {
+		return true
+	}
+	if next, ok := originOf(req.URL); !ok || next != initial {
 		return true
 	}
 	for _, hop := range via[1:] {
-		if hop == nil || hop.URL == nil || originOf(hop.URL) != initial {
+		if hop == nil || hop.URL == nil {
+			return true
+		}
+		if previous, ok := originOf(hop.URL); !ok || previous != initial {
 			return true
 		}
 	}
@@ -200,24 +210,96 @@ func redirectChainCrossesOrigin(req *http.Request, via []*http.Request) bool {
 type urlOrigin struct {
 	scheme string
 	host   string
-	port   string
+	// port is the numeric effective port, or -1 for a scheme without a
+	// default port and no explicit one.
+	port int
 }
 
-// originOf returns the RFC 6454 origin tuple. Hosts are compared after ASCII
-// case folding only; any other spelling difference is treated as another
+// originOf returns the RFC 6454 origin tuple as the HTTP transport will
+// connect to it: the host goes through the IDNA conversions net/http applies
+// before dialing and sending Host, then ASCII case folding, and the port is
+// compared as a number with the scheme default filled in. ok is false
+// when any part cannot be normalized; callers then treat the URL as another
 // origin, which can only strip credentials, never forward them.
-func originOf(u *url.URL) urlOrigin {
-	scheme := strings.ToLower(u.Scheme)
-	port := u.Port()
+func originOf(u *url.URL) (urlOrigin, bool) {
+	scheme, ok := asciiLower(u.Scheme)
+	if !ok || scheme == "" {
+		return urlOrigin{}, false
+	}
+	host, ok := transportHost(u.Hostname())
+	if !ok {
+		return urlOrigin{}, false
+	}
+	port, ok := effectivePort(scheme, u.Port())
+	if !ok {
+		return urlOrigin{}, false
+	}
+	return urlOrigin{scheme: scheme, host: host, port: port}, true
+}
+
+// transportHost mirrors net/http, which converts a non-ASCII host twice: the
+// dial address and TLS name use idna.Lookup.ToASCII, while the Host header
+// uses the Punycode profile (idna.ToASCII, via httpguts.PunycodeHostPort). An
+// ASCII host is used as written by both. A non-ASCII host is accepted only
+// when both conversions agree, so the connection and the virtual host are
+// the same; confusable spellings such as "\u0130.example" (Lookup
+// "xn--i-9bb.example", Host "xn--bfa.example", while strings.ToLower gives
+// "i.example") are treated as another origin.
+func transportHost(host string) (string, bool) {
+	if host == "" {
+		return "", false
+	}
+	if lowered, ok := asciiLower(host); ok {
+		return lowered, true
+	}
+	dialHost, err := idna.Lookup.ToASCII(host)
+	if err != nil {
+		return "", false
+	}
+	headerHost, err := idna.ToASCII(host)
+	if err != nil {
+		return "", false
+	}
+	dialHost, dialOK := asciiLower(dialHost)
+	headerHost, headerOK := asciiLower(headerHost)
+	if !dialOK || !headerOK || dialHost != headerHost {
+		return "", false
+	}
+	return dialHost, true
+}
+
+func effectivePort(scheme, port string) (int, bool) {
 	if port == "" {
 		switch scheme {
 		case "https":
-			port = "443"
+			return 443, true
 		case "http":
-			port = "80"
+			return 80, true
+		default:
+			return -1, true
 		}
 	}
-	return urlOrigin{scheme: scheme, host: strings.ToLower(u.Hostname()), port: port}
+	// net/url accepts only digits here; anything outside 0..65535 is not a
+	// port the transport could dial.
+	value, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return 0, false
+	}
+	return int(value), true
+}
+
+// asciiLower folds A-Z only and reports false for any non-ASCII byte.
+func asciiLower(value string) (string, bool) {
+	out := []byte(value)
+	for i, c := range out {
+		if c >= utf8.RuneSelf {
+			return "", false
+		}
+		if 'A' <= c && c <= 'Z' {
+			out[i] = c + ('a' - 'A')
+		}
+	}
+	return string(out), true
 }
 
 func parseEndpointURL(raw string) (*url.URL, error) {
