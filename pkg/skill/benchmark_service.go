@@ -302,13 +302,10 @@ func (b *BenchmarkService) aggregate(ctx context.Context, agent *db.Agent, skill
 
 	bid := batchID
 	err := b.withTx(ctx, func(q *db.Queries) error {
-		if _, err := q.LockAgentEvidenceTarget(ctx, db.LockAgentEvidenceTargetParams{
-			ID:             agentID,
-			ConnectionMode: agent.ConnectionMode,
-			EndpointURL:    agent.EndpointURL,
-			MCPToolName:    agent.MCPToolName,
-		}); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
+		// Benchmarks describe the service behind the target, so a rotated
+		// endpoint credential alone does not discard them.
+		if err := q.LockAgentEvidenceTargetUnchanged(ctx, agentID, db.AgentEvidenceTargetOf(*agent), false); err != nil {
+			if errors.Is(err, db.ErrAgentEvidenceTargetChanged) {
 				return errBenchmarkTargetChanged
 			}
 			return err

@@ -42,7 +42,8 @@ runtime protocol, and migration contract are declared stable.
   change made elsewhere; the read, carry-over, validation and update run in one
   transaction.
 - Repointing an Agent no longer keeps evidence about the old target. When
-  `connection_mode`, the normalized `endpoint_url` or the MCP tool changes, the
+  `connection_mode`, the normalized `endpoint_url` or the MCP tool changes (a
+  Runtime Agent's target is its mode; its display endpoint is not one), the
   same transaction:
   - resets the availability snapshot to `unknown` with `last_checked_at`
     cleared, so the monitor re-checks on its next pass;
@@ -56,6 +57,15 @@ runtime protocol, and migration contract are declared stable.
 - Creator dry-runs and benchmark batches that probed the previous target no
   longer store their result after the Agent is repointed. A dry-run in that
   case returns 409.
+- Run results, including Runtime dry-runs and benchmark cases, update
+  availability only if the Agent still has the target the Run used. The check
+  runs under a share lock in the finalization transaction.
+  - Runtime Runs are matched by their stored connection mode.
+  - Core-executed Runs are matched by the endpoint, MCP tool and credential
+    they called.
+  - Core attempts that the reconciler finalizes without seeing the endpoint's
+    outcome no longer change availability.
+  - Call statistics are unchanged.
 - Retrying self-registration with the same Agent Token and slug after a lost
   response returns the original `{agent, agent_token}` (201) instead of 401.
   This applies only to tokens redeemed by that registration; every other case is
@@ -102,10 +112,8 @@ runtime protocol, and migration contract are declared stable.
 ### Compatibility
 
 - Registration response fields are additive; the Go, JS and Python SDK
-  registration clients ignore unknown fields. No migration is needed for
-  evidence invalidation. A Run already executing against the previous target
-  when the change commits can still record its terminal outcome in the fresh
-  availability snapshot.
+  registration clients ignore unknown fields. Evidence invalidation and the
+  finalizer guard use existing columns; no migration.
 - Schemas 096/097 are forward-only. Coordinate Core and Web rollout; legacy empty
   publication requests remain valid and freeze empty display information.
   Currently published versions receive empty declarations, while historically

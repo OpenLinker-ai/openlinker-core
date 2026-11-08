@@ -96,6 +96,17 @@ func TestEvidenceInvalidationForUpdate(t *testing.T) {
 			auth:     header("Bearer new"),
 		},
 		{
+			name:     "runtime display endpoint is not part of the target",
+			existing: db.Agent{ConnectionMode: ConnectionModeRuntime, EndpointURL: "openlinker-runtime://a"},
+			next:     connectionSettings{Mode: ConnectionModeRuntime, EndpointURL: "openlinker-runtime://renamed"},
+		},
+		{
+			name:     "runtime to direct_http",
+			existing: db.Agent{ConnectionMode: ConnectionModeRuntime, EndpointURL: "openlinker-runtime://a"},
+			next:     connectionSettings{Mode: ConnectionModeDirectHTTP, EndpointURL: "https://a.example/x"},
+			want:     evidenceInvalidation{Reachability: true, Trust: true},
+		},
+		{
 			name:     "legacy tool name on direct_http is not part of the target",
 			existing: db.Agent{ConnectionMode: ConnectionModeDirectHTTP, EndpointURL: "https://a.example/x", MCPToolName: &tool},
 			next:     connectionSettings{Mode: ConnectionModeDirectHTTP, EndpointURL: "https://a.example/x"},

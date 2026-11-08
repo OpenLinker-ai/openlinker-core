@@ -7,8 +7,11 @@ package db
 
 import (
 	"context"
+	"errors"
+	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 const lockAgentEvidenceTarget = `-- name: LockAgentEvidenceTarget :one
@@ -45,6 +48,74 @@ func (q *Queries) LockAgentEvidenceTarget(ctx context.Context, arg LockAgentEvid
 	var id uuid.UUID
 	err := row.Scan(&id)
 	return id, err
+}
+
+const lockAgentConnectionModeForEvidence = `-- name: LockAgentConnectionModeForEvidence :one
+SELECT id
+FROM agents
+WHERE id = $1 AND connection_mode = $2
+FOR SHARE`
+
+func (q *Queries) LockAgentConnectionModeForEvidence(ctx context.Context, agentID uuid.UUID, connectionMode string) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, lockAgentConnectionModeForEvidence, agentID, connectionMode)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
+// ErrAgentEvidenceTargetChanged reports that an Agent no longer has the
+// connection target a probe or Run used, so its outcome is not evidence about
+// the Agent's current target.
+var ErrAgentEvidenceTargetChanged = errors.New("agent connection target changed")
+
+// AgentEvidenceTarget is the connection target an outcome was produced
+// against, exactly as stored on the Agent row that was used.
+type AgentEvidenceTarget struct {
+	ConnectionMode     string
+	EndpointURL        string
+	MCPToolName        *string
+	EndpointAuthHeader *string
+}
+
+// AgentEvidenceTargetOf captures the connection target of an Agent row.
+func AgentEvidenceTargetOf(agent Agent) AgentEvidenceTarget {
+	return AgentEvidenceTarget{
+		ConnectionMode:     agent.ConnectionMode,
+		EndpointURL:        agent.EndpointURL,
+		MCPToolName:        agent.MCPToolName,
+		EndpointAuthHeader: agent.EndpointAuthHeader,
+	}
+}
+
+// LockAgentEvidenceTargetUnchanged share-locks the Agent row, until the
+// caller's transaction ends, only while the Agent still has target. A Runtime
+// Agent's target is its own Runtime queue, so only the connection mode is
+// compared. For direct_http and mcp_server the endpoint and MCP tool are
+// compared exactly, and compareCredential also requires the same
+// endpoint_auth_header. It returns ErrAgentEvidenceTargetChanged otherwise.
+func (q *Queries) LockAgentEvidenceTargetUnchanged(
+	ctx context.Context,
+	agentID uuid.UUID,
+	target AgentEvidenceTarget,
+	compareCredential bool,
+) error {
+	var err error
+	if strings.TrimSpace(target.ConnectionMode) == "runtime" {
+		_, err = q.LockAgentConnectionModeForEvidence(ctx, agentID, "runtime")
+	} else {
+		_, err = q.LockAgentEvidenceTarget(ctx, LockAgentEvidenceTargetParams{
+			ID:                 agentID,
+			ConnectionMode:     target.ConnectionMode,
+			EndpointURL:        target.EndpointURL,
+			MCPToolName:        target.MCPToolName,
+			CompareAuthHeader:  compareCredential,
+			EndpointAuthHeader: target.EndpointAuthHeader,
+		})
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAgentEvidenceTargetChanged
+	}
+	return err
 }
 
 const resetAgentAvailabilityEvidence = `-- name: ResetAgentAvailabilityEvidence :execrows

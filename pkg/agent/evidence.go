@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
@@ -16,7 +15,9 @@ import (
 var errEvidenceTargetChanged = errors.New("agent connection target changed while collecting evidence")
 
 // connectionTarget is what readiness evidence is collected against: the
-// connection mode, the normalized endpoint and, for MCP servers, the tool.
+// connection mode, the normalized endpoint and, for MCP servers, the tool. A
+// Runtime Agent's target is its own Runtime queue: its endpoint_url is only a
+// display value, so the mode alone identifies it.
 type connectionTarget struct {
 	Mode        string
 	EndpointURL string
@@ -34,6 +35,9 @@ func storedConnectionTarget(a *db.Agent) connectionTarget {
 	if target.Mode == ConnectionModeMCPServer && a.MCPToolName != nil {
 		target.MCPToolName = strings.TrimSpace(*a.MCPToolName)
 	}
+	if target.Mode == ConnectionModeRuntime {
+		target.EndpointURL = ""
+	}
 	return target
 }
 
@@ -41,6 +45,9 @@ func (c connectionSettings) target() connectionTarget {
 	target := connectionTarget{Mode: c.Mode, EndpointURL: c.EndpointURL}
 	if c.Mode == ConnectionModeMCPServer && c.MCPToolName != nil {
 		target.MCPToolName = strings.TrimSpace(*c.MCPToolName)
+	}
+	if c.Mode == ConnectionModeRuntime {
+		target.EndpointURL = ""
 	}
 	return target
 }
@@ -112,17 +119,11 @@ func invalidateAgentEvidence(ctx context.Context, q *db.Queries, agentID uuid.UU
 
 // lockReachabilityEvidenceTarget share-locks the Agent row for a reachability
 // write only while it still has the connection target and endpoint credential
-// that were probed. It returns errEvidenceTargetChanged otherwise.
+// that were probed. It returns errEvidenceTargetChanged otherwise. Run
+// finalization applies the same rule (db.LockAgentEvidenceTargetUnchanged).
 func lockReachabilityEvidenceTarget(ctx context.Context, q *db.Queries, probed *db.Agent) error {
-	_, err := q.LockAgentEvidenceTarget(ctx, db.LockAgentEvidenceTargetParams{
-		ID:                 probed.ID,
-		ConnectionMode:     probed.ConnectionMode,
-		EndpointURL:        probed.EndpointURL,
-		MCPToolName:        probed.MCPToolName,
-		CompareAuthHeader:  usesEndpointCredential(probed.ConnectionMode),
-		EndpointAuthHeader: probed.EndpointAuthHeader,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
+	err := q.LockAgentEvidenceTargetUnchanged(ctx, probed.ID, db.AgentEvidenceTargetOf(*probed), true)
+	if errors.Is(err, db.ErrAgentEvidenceTargetChanged) {
 		return errEvidenceTargetChanged
 	}
 	return err

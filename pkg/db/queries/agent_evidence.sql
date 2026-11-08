@@ -24,6 +24,14 @@ WHERE id = $1
   AND (NOT $5::boolean OR endpoint_auth_header IS NOT DISTINCT FROM $6::text)
 FOR SHARE;
 
+-- name: LockAgentConnectionModeForEvidence :one
+-- Runtime Agent 的连接目标就是它自己的 Runtime 队列（endpoint_url 只是展示值，
+-- Runtime Worker 不使用 endpoint_auth_header），因此只比较 connection_mode。
+SELECT id
+FROM agents
+WHERE id = $1 AND connection_mode = $2
+FOR SHARE;
+
 -- name: ResetAgentAvailabilityEvidence :execrows
 -- 可用性快照回到 unknown，并清空 last_checked_at，让巡检下一轮立即重新探测新目标。
 UPDATE agent_availability_snapshots

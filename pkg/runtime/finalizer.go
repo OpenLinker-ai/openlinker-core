@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog/log"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
@@ -333,6 +334,27 @@ func (f *ResultFinalizer) Finalize(
 	principal RuntimeResultPrincipal,
 	request RuntimeResultRequest,
 ) (RuntimeResultAck, error) {
+	return f.finalize(ctx, principal, request, nil)
+}
+
+// finalizeCore finalizes a Core-executed (direct_http / mcp_server) Result.
+// Only the executing Core process knows which Agent connection target the
+// endpoint call used, so it passes that target for the availability guard.
+func (f *ResultFinalizer) finalizeCore(
+	ctx context.Context,
+	principal RuntimeResultPrincipal,
+	request RuntimeResultRequest,
+	target db.AgentEvidenceTarget,
+) (RuntimeResultAck, error) {
+	return f.finalize(ctx, principal, request, &target)
+}
+
+func (f *ResultFinalizer) finalize(
+	ctx context.Context,
+	principal RuntimeResultPrincipal,
+	request RuntimeResultRequest,
+	coreTarget *db.AgentEvidenceTarget,
+) (RuntimeResultAck, error) {
 	if f == nil || f.pool == nil {
 		return RuntimeResultAck{}, errNilResultFinalizer
 	}
@@ -347,7 +369,7 @@ func (f *ResultFinalizer) Finalize(
 	var ack RuntimeResultAck
 	err = pgx.BeginTxFunc(ctx, f.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
 		var finalizeErr error
-		ack, finalizeErr = f.finalizeTx(ctx, db.New(tx), principal, request, fingerprint)
+		ack, finalizeErr = f.finalizeTx(ctx, db.New(tx), principal, request, fingerprint, coreTarget)
 		return finalizeErr
 	})
 	if err != nil {
@@ -364,6 +386,7 @@ func (f *ResultFinalizer) finalizeTx(
 	principal RuntimeResultPrincipal,
 	request RuntimeResultRequest,
 	fingerprint []byte,
+	coreTarget *db.AgentEvidenceTarget,
 ) (RuntimeResultAck, error) {
 	lockedPrincipal, err := lockRuntimePrincipal(ctx, queries, principal)
 	if err != nil {
@@ -650,6 +673,7 @@ func (f *ResultFinalizer) finalizeTx(
 	}
 	if err := insertRuntimeResultLedgerAndStats(
 		ctx, queries, run, terminalEvent.ID, successDelta, revenueDelta,
+		runtimeResultEvidenceFor(run, coreTarget),
 	); err != nil {
 		return RuntimeResultAck{}, err
 	}
@@ -1011,6 +1035,75 @@ func ensureRuntimeResultDeadLetter(
 	return nil
 }
 
+// runtimeResultEvidence decides whether a terminal outcome may update the
+// Agent's availability snapshot. The snapshot describes the Agent's current
+// connection target, so an outcome counts only when it is known to come from
+// that target.
+type runtimeResultEvidence struct {
+	// legacy marks pre-v2 Runs without a connection snapshot: they keep the
+	// unconditional write they always had.
+	legacy bool
+	// target is the connection target that produced the outcome, or nil when
+	// Core cannot attribute the outcome to a target.
+	target *db.AgentEvidenceTarget
+}
+
+// runtimeResultEvidenceFor attributes a Run's outcome to a target. A Runtime
+// Run was served by the Agent's own Runtime queue, which its immutable
+// connection_mode_snapshot identifies. A Core-executed Run used the Agent row
+// captured when the Run was created; only the executing process holds it and
+// passes it as coreTarget. When the reconciler finalizes a Core Attempt Core
+// never observed, no target is known and no availability is recorded.
+func runtimeResultEvidenceFor(run runtimeResultRun, coreTarget *db.AgentEvidenceTarget) runtimeResultEvidence {
+	if run.connectionMode == nil {
+		return runtimeResultEvidence{legacy: true}
+	}
+	mode := *run.connectionMode
+	if mode == connectionModeRuntime {
+		return runtimeResultEvidence{target: &db.AgentEvidenceTarget{ConnectionMode: connectionModeRuntime}}
+	}
+	if coreTarget == nil || coreTarget.ConnectionMode != mode {
+		return runtimeResultEvidence{}
+	}
+	target := *coreTarget
+	return runtimeResultEvidence{target: &target}
+}
+
+// recordRuntimeResultAvailability writes the availability snapshot in the
+// finalization transaction only while the Agent still has the target that
+// produced the outcome; the share lock holds until commit, so a connection
+// change cannot commit between the check and the write. A repointed Agent
+// keeps the unknown snapshot its update left for the new target.
+func recordRuntimeResultAvailability(
+	ctx context.Context,
+	queries *db.Queries,
+	run runtimeResultRun,
+	success bool,
+	evidence runtimeResultEvidence,
+) error {
+	if !evidence.legacy {
+		if evidence.target == nil {
+			return nil
+		}
+		err := queries.LockAgentEvidenceTargetUnchanged(ctx, run.agentID, *evidence.target, true)
+		if errors.Is(err, db.ErrAgentEvidenceTargetChanged) {
+			log.Info().Str("run_id", run.id.String()).Str("agent_id", run.agentID.String()).
+				Msg("runtime: Agent connection changed during Run; availability not recorded")
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+	var err error
+	if success {
+		_, err = queries.MarkAgentAvailabilitySuccess(ctx, run.agentID)
+	} else {
+		_, err = queries.MarkAgentAvailabilityFailure(ctx, run.agentID)
+	}
+	return err
+}
+
 func insertRuntimeResultLedgerAndStats(
 	ctx context.Context,
 	queries *db.Queries,
@@ -1018,6 +1111,7 @@ func insertRuntimeResultLedgerAndStats(
 	terminalEventID uuid.UUID,
 	successDelta int32,
 	revenueDelta int64,
+	evidence runtimeResultEvidence,
 ) error {
 	created, err := queries.InsertRunAccountingLedger(ctx, db.InsertRunAccountingLedgerParams{
 		RunID:             run.id,
@@ -1052,11 +1146,8 @@ func insertRuntimeResultLedgerAndStats(
 		}); err != nil {
 			return err
 		}
-		_, err = queries.MarkAgentAvailabilitySuccess(ctx, run.agentID)
-		return err
 	}
-	_, err = queries.MarkAgentAvailabilityFailure(ctx, run.agentID)
-	return err
+	return recordRuntimeResultAvailability(ctx, queries, run, successDelta == 1, evidence)
 }
 
 func ensureRuntimeResultEffect(
