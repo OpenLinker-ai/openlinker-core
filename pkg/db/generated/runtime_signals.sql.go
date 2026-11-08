@@ -169,7 +169,7 @@ WITH candidates AS (
     SELECT id
     FROM runtime_signal_outbox
     WHERE status = 'published'
-      AND published_at < clock_timestamp() - ($1::bigint * INTERVAL '1 millisecond')
+      AND published_at < statement_timestamp() - ($1::bigint * INTERVAL '1 millisecond')
     ORDER BY published_at, id
     LIMIT $2
     FOR UPDATE SKIP LOCKED

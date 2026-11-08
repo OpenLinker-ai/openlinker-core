@@ -84,11 +84,15 @@ FROM (
 -- undelivered or leased and never match; published is terminal, so a locked
 -- candidate cannot change state before it is deleted. SKIP LOCKED lets every
 -- Core replica run retention without blocking another replica's batch.
+-- The cutoff uses statement_timestamp(), which is stable within the statement,
+-- so PostgreSQL can turn it into an index range bound; a volatile
+-- clock_timestamp() would only filter, and a drained table would be read
+-- through the whole retained range on every pass.
 WITH candidates AS (
     SELECT id
     FROM runtime_signal_outbox
     WHERE status = 'published'
-      AND published_at < clock_timestamp() - ($1::bigint * INTERVAL '1 millisecond')
+      AND published_at < statement_timestamp() - ($1::bigint * INTERVAL '1 millisecond')
     ORDER BY published_at, id
     LIMIT $2
     FOR UPDATE SKIP LOCKED
