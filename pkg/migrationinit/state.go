@@ -598,6 +598,11 @@ func (s Snapshot) ValidateCoreUp() (bool, error) {
 		if s.Core.Version >= CoreCLILoginPredecessorVersion && (!s.CallbackOwnerIndexValid || s.UnclassifiedBrowserAgents != 0) {
 			return false, errors.New("Core predecessor has invalid callback index or incomplete Browser profile backfill")
 		}
+		// The postflight requires zero invalid indexes and no migration
+		// rebuilds an existing one, so reject before mutating anything.
+		if s.InvalidCoreIndexes != 0 {
+			return false, fmt.Errorf("Core predecessor has %d invalid indexes; drop and rebuild them before migrating", s.InvalidCoreIndexes)
+		}
 		if err := validateCorePredecessorShape(s.CoreShape, s.Core.Version); err != nil {
 			return false, err
 		}
@@ -656,6 +661,11 @@ func (s Snapshot) ValidateCloudUp() (bool, error) {
 	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion, CorePackagePublicationPredecessorVersion, CoreResourceMetadataPredecessorVersion, CoreMCPBindingPredecessorVersion, CoreFeatureUpgradePredecessorVersion, CoreAuthenticationPredecessorVersion, CoreSignalRetentionPredecessorVersion:
 		if s.Core.Version >= CoreCLILoginPredecessorVersion && (!s.CallbackOwnerIndexValid || s.UnclassifiedBrowserAgents != 0) {
 			return false, errors.New("Core predecessor has invalid callback index or incomplete Browser profile backfill")
+		}
+		// The postflight requires zero invalid indexes and no migration
+		// rebuilds an existing one, so reject before mutating anything.
+		if s.InvalidCoreIndexes != 0 {
+			return false, fmt.Errorf("Core predecessor has %d invalid indexes; drop and rebuild them before migrating", s.InvalidCoreIndexes)
 		}
 		if err := validateCorePredecessorShape(s.CoreShape, s.Core.Version); err != nil {
 			return false, fmt.Errorf(
