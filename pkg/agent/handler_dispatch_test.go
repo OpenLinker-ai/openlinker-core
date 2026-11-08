@@ -338,7 +338,9 @@ func TestRegistrationApprovalAndMetricHandlersDispatchServices(t *testing.T) {
 	if regSvc.lastRegisterReq == nil || regSvc.lastRegisterReq.AgentToken != bearer {
 		t.Fatalf("agent token was not pulled from Authorization header: %#v", regSvc.lastRegisterReq)
 	}
-	if !reflect.DeepEqual(regSvc.lastRegisterReq.Tags, []string{"ai"}) || regSvc.lastRegisterReq.Visibility != "public" {
+	// An omitted visibility reaches the service unchanged; the service owns
+	// the private default rather than the handler forcing public.
+	if !reflect.DeepEqual(regSvc.lastRegisterReq.Tags, []string{"ai"}) || regSvc.lastRegisterReq.Visibility != "" {
 		t.Fatalf("registration defaults were not normalized before dispatch: %#v", regSvc.lastRegisterReq)
 	}
 

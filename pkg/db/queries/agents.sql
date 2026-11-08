@@ -18,7 +18,7 @@
 -- ## 模块 2（Agent 注册 + 公开状态 + 创作者列表）
 
 -- name: CreateAgent :one
--- 创作者新建 Agent：默认 lifecycle=active, visibility=public, certification=unreviewed。
+-- 创作者新建 Agent：默认 lifecycle=active, certification=unreviewed；visibility 由 service 传入（省略时为 private）。
 INSERT INTO agents (
     creator_id, slug, name, description, endpoint_url,
     endpoint_auth_header, price_per_call_cents, tags, visibility,
