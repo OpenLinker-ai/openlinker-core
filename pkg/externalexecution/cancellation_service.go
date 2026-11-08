@@ -237,6 +237,8 @@ func (s *Service) cancellationStatusResponse(
 		resp.Status = "failed"
 		resp.ErrorCode = "CANCEL_UNCONFIRMED"
 		resp.ErrorMessage = "Execution cancellation could not be confirmed."
+		// Whether the downstream execution stopped is not known.
+		resp.FailureCategory = FailureCategoryResultUnknown
 	case "not_applied":
 		// not_applied proves only that cancellation lost to a downstream
 		// terminal; it does not snapshot that terminal's output/error. Never
@@ -249,6 +251,9 @@ func (s *Service) cancellationStatusResponse(
 		resp.ErrorCode, resp.ErrorMessage = "", ""
 	default:
 		return nil, httpx.Internal("外部执行取消 evidence 无效")
+	}
+	if resp.Status != "failed" {
+		resp.FailureCategory = ""
 	}
 	if resp.Artifacts == nil {
 		resp.Artifacts = []runtime.RunArtifactResponse{}

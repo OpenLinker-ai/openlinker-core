@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog/log"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/executioncontract"
@@ -130,9 +131,20 @@ func (s *Service) validateTarget(ctx context.Context, targetOwnerID uuid.UUID, t
 		if err != nil {
 			return nil, err
 		}
-		if onboarding.Capability == nil || (inputSchema != nil && !externalInputSchemaCompatible(inputSchema, onboarding.Capability.InputSchema)) {
+		// The detail describes the target owner's own capability. Only the
+		// owner-scoped ValidateTarget response carries it; Start authorization
+		// reads only UnavailableReason.
+		if onboarding.Capability == nil {
 			resp.UnavailableReason = "input_schema_incompatible"
+			resp.UnavailableDetail = &TargetUnavailableDetail{Rule: SchemaRuleCapabilityMissing}
 			return resp, nil
+		}
+		if inputSchema != nil {
+			if detail := externalInputSchemaIncompatibility(inputSchema, onboarding.Capability.InputSchema); detail != nil {
+				resp.UnavailableReason = "input_schema_incompatible"
+				resp.UnavailableDetail = detail
+				return resp, nil
+			}
 		}
 		connectionMode := strings.TrimSpace(target.ConnectionMode)
 		if connectionMode == "" {
@@ -193,6 +205,13 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 	// while one of them is already authorized to create the execution.
 	record, err := s.store.Get(ctx, parsed.callerServiceID, parsed.externalRequestID)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// A new request must satisfy its own input_schema before anything is
+		// reserved. An existing record is checked only after its read-only
+		// downstream recovery misses (ensureExecutionStartAuthorized), so
+		// committed work is always recovered and attached executions replay.
+		if inputErr := validateExternalExecutionInput(parsed.input, parsed.inputSchema); inputErr != nil {
+			return nil, s.unreservedInputRejection(ctx, parsed, inputErr)
+		}
 		record, err = s.store.Reserve(ctx, ExecutionRecord{
 			CallerServiceID:           parsed.callerServiceID,
 			ExternalRequestID:         parsed.externalRequestID,
@@ -235,6 +254,11 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 		if recovered {
 			return response, nil
 		}
+		// Recovery of committed work wins; only a miss is checked. A record
+		// authorized before input_schema enforcement existed is caught here.
+		if inputErr := validateExternalExecutionInput(parsed.input, parsed.inputSchema); inputErr != nil {
+			return nil, inputErr
+		}
 	case startStateLaunching:
 		response, recovered, recoveryErr := s.lookupAndAttachLaunchingExecution(ctx, record, parsed)
 		if recoveryErr != nil {
@@ -245,6 +269,11 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 		}
 		if record.StartLeaseUntil != nil && record.StartLeaseUntil.After(time.Now()) {
 			return nil, httpx.ServiceUnavailable("外部执行正在启动，请重试")
+		}
+		// An expired launch with no recovered work is checked before the
+		// existing expired-launch handling below.
+		if inputErr := validateExternalExecutionInput(parsed.input, parsed.inputSchema); inputErr != nil {
+			return nil, inputErr
 		}
 	case startStatePending, startStateEvaluating:
 	default:
@@ -300,6 +329,14 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 			if errors.Is(err, runtime.ErrExternalExecutionLaunchFenceRejected) {
 				return nil, s.launchFenceFailure(ctx, parsed)
 			}
+			// Runtime validates the input against the capability before it
+			// creates anything. The caller's listing passed its own check and
+			// was proven against the pinned capability contract, so the
+			// target no longer accepts this request: reject it durably under
+			// the launch token so it is never retried or launched later.
+			if isCapabilityInputRejection(err) {
+				return s.rejectLaunch(ctx, parsed, launchToken)
+			}
 			return nil, httpx.ServiceUnavailable("Runtime 启动状态正在确认，请重试")
 		}
 		executionID, err = uuid.Parse(started.RunID)
@@ -329,6 +366,48 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 	}
 
 	return s.attachLaunchedExecution(ctx, parsed, launchToken, executionKind, executionID)
+}
+
+// rejectLaunch records a terminal TARGET_CONTRACT_CHANGED for a launch that
+// Runtime refused. If the launch token is no longer current, the authoritative
+// record answers instead.
+func (s *Service) rejectLaunch(ctx context.Context, parsed parsedExecution, launchToken uuid.UUID) (*ExecutionStartResponse, error) {
+	record, _, err := s.store.RejectLaunch(
+		ctx, parsed.callerServiceID, parsed.externalRequestID, launchToken, "TARGET_CONTRACT_CHANGED",
+	)
+	if err != nil {
+		return nil, httpx.Internal("保存外部执行拒绝状态失败")
+	}
+	if rejectionErr := executionStartRejection(record); rejectionErr != nil {
+		return nil, rejectionErr
+	}
+	if response, complete, replayErr := s.responseForReservedRecord(ctx, record); complete || replayErr != nil {
+		return response, replayErr
+	}
+	return nil, s.launchFenceFailure(ctx, parsed)
+}
+
+// unreservedInputRejection keeps the answers Reserve would have given for an
+// identity that already exists without an execution record (another actor's
+// key, or a cancellation recorded before start); otherwise the input error
+// stands. It only reads.
+func (s *Service) unreservedInputRejection(ctx context.Context, parsed parsedExecution, inputErr error) error {
+	key, err := s.store.GetKey(ctx, parsed.callerServiceID, parsed.externalRequestID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return inputErr
+	}
+	if err != nil {
+		return httpx.Internal("查询外部执行 identity 失败")
+	}
+	if key.ActorUserID != parsed.actorUserID {
+		return httpx.Conflict("external_request_id 已绑定其他 actor")
+	}
+	if _, err := s.store.GetCancellation(ctx, parsed.callerServiceID, parsed.externalRequestID); err == nil {
+		return externalExecutionCanceledError()
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return httpx.Internal("查询外部执行取消 evidence 失败")
+	}
+	return inputErr
 }
 
 const startEvaluationLease = 30 * time.Second
@@ -421,6 +500,13 @@ func (s *Service) ensureExecutionStartAuthorized(
 	if recovered {
 		claimActive = false
 		return ExecutionRecord{}, response, nil
+	}
+	// Only after the read-only recovery missed: a reservation that already
+	// has committed work is recovered above even if its input predates
+	// input_schema enforcement. The deferred release returns the record to
+	// pending, so the same request keeps getting the same answer.
+	if inputErr := validateExternalExecutionInput(parsed.input, parsed.inputSchema); inputErr != nil {
+		return ExecutionRecord{}, nil, inputErr
 	}
 
 	if claimedRecord.RequestFingerprintVersion == legacyRequestFingerprintVersion &&
@@ -753,7 +839,9 @@ func (s *Service) responseForReservedRecord(ctx context.Context, record Executio
 	if !attachmentComplete {
 		return nil, false, nil
 	}
-	status, err := s.getExecutionStatus(ctx, record)
+	// A Start replay reports only the status, so it skips the workflow
+	// child-run reads that failure_category needs.
+	status, err := s.executionStatus(ctx, record, false)
 	if err != nil {
 		return nil, true, httpx.ServiceUnavailable("外部执行状态正在确认，请重试")
 	}
@@ -801,6 +889,13 @@ func (s *Service) GetExecution(ctx context.Context, principal *Principal, extern
 }
 
 func (s *Service) getExecutionStatus(ctx context.Context, record ExecutionRecord) (*ExecutionStatusResponse, error) {
+	return s.executionStatus(ctx, record, true)
+}
+
+// executionStatus reads the downstream status. failure_category is set only
+// for a failed status; withWorkflowFailureCategory controls the extra child
+// run reads a failed workflow run needs for it.
+func (s *Service) executionStatus(ctx context.Context, record ExecutionRecord, withWorkflowFailureCategory bool) (*ExecutionStatusResponse, error) {
 	if rejectionErr := executionStartRejection(record); rejectionErr != nil {
 		return nil, rejectionErr
 	}
@@ -826,6 +921,9 @@ func (s *Service) getExecutionStatus(ctx context.Context, record ExecutionRecord
 		if resp.Status == "succeeded" {
 			resp.Output = run.Output
 		}
+		if resp.Status == "failed" {
+			resp.FailureCategory = runFailureCategory(run.Status, run.ErrorCode)
+		}
 		artifacts, err := s.runtime.ListRunArtifacts(ctx, record.ActorUserID, *record.ExecutionID)
 		if err != nil {
 			return nil, err
@@ -846,6 +944,21 @@ func (s *Service) getExecutionStatus(ctx context.Context, record ExecutionRecord
 		setSafeExecutionError(resp, safeError)
 		if resp.Status == "succeeded" {
 			resp.Output = run.Output
+		}
+		if resp.Status == "failed" {
+			resp.FailureCategory = FailureCategoryUnknown
+			if withWorkflowFailureCategory {
+				// The category is an additive diagnostic. A failed child read
+				// must not turn main's readable terminal status into an error,
+				// so it falls back to unknown.
+				category, err := s.workflowFailureCategory(ctx, record.ActorUserID, run)
+				if err != nil {
+					log.Warn().Err(err).Str("workflow_run_id", record.ExecutionID.String()).
+						Msg("externalexecution: workflow failure category unavailable")
+					category = FailureCategoryUnknown
+				}
+				resp.FailureCategory = category
+			}
 		}
 		resp.StartedAt = run.StartedAt
 		resp.FinishedAt = run.FinishedAt

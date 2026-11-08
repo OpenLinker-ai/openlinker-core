@@ -1049,6 +1049,14 @@ type fakeRuntimeService struct {
 	cancelErr      error
 	cancelEvidence runtime.RunCancellationEvidence
 	evidenceErr    error
+	// startErr makes StartRun fail after counting the call; startHook runs
+	// inside StartRun before it returns.
+	startErr  error
+	startHook func()
+	// runs and runErrs answer GetRun per run id before getResponse.
+	runs     map[uuid.UUID]*runtime.RunResponse
+	runErrs  map[uuid.UUID]error
+	getCalls int
 }
 
 func (f *fakeRuntimeService) LookupRunByCreationRequest(_ context.Context, _ uuid.UUID, request *runtime.RunRequest, _ string) (*runtime.RunResponse, bool, error) {
@@ -1077,6 +1085,12 @@ func (f *fakeRuntimeService) StartRun(_ context.Context, actorID uuid.UUID, requ
 	f.startCalls++
 	f.startActors = append(f.startActors, actorID)
 	f.startRequests = append(f.startRequests, request)
+	if f.startHook != nil {
+		f.startHook()
+	}
+	if f.startErr != nil {
+		return nil, f.startErr
+	}
 	if f.startResponse == nil {
 		return nil, errors.New("unexpected StartRun")
 	}
@@ -1110,7 +1124,17 @@ func (f *fakeRuntimeService) GetRunCancellationEvidence(context.Context, uuid.UU
 	return runtime.RunCancellationEvidence{CancellationID: uuid.New(), State: "stopped"}, nil
 }
 
-func (f *fakeRuntimeService) GetRun(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error) {
+func (f *fakeRuntimeService) GetRun(_ context.Context, _ uuid.UUID, runID uuid.UUID) (*runtime.RunResponse, error) {
+	f.lookupMu.Lock()
+	f.getCalls++
+	run, runErr := f.runs[runID], f.runErrs[runID]
+	f.lookupMu.Unlock()
+	if runErr != nil {
+		return nil, runErr
+	}
+	if run != nil {
+		return run, nil
+	}
 	if f.getResponse == nil {
 		return nil, errors.New("unexpected GetRun")
 	}
@@ -1367,6 +1391,34 @@ func (m *memoryStore) RejectStart(
 		return record, true, nil
 	}
 	m.records[key] = record
+	return record, false, nil
+}
+
+func (m *memoryStore) RejectLaunch(
+	_ context.Context,
+	callerServiceID string,
+	id, token uuid.UUID,
+	rejectionCode string,
+) (ExecutionRecord, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := executionStoreKey(callerServiceID, id)
+	record, ok := m.records[key]
+	if !ok {
+		return ExecutionRecord{}, false, pgx.ErrNoRows
+	}
+	record = memoryExecutionRecordDefaults(record)
+	_, canceled := memoryCancellationState(m).cancellations[key]
+	if !canceled && record.ExecutionID == nil && record.StartState == startStateLaunching && record.StartToken != nil &&
+		*record.StartToken == token && len(record.DownstreamKeyHash) == 0 && len(record.DownstreamFingerprint) == 0 {
+		record.StartState = startStateRejected
+		record.StartToken = nil
+		record.StartLeaseUntil = nil
+		record.AuthorizedTargetOwnerID = nil
+		record.RejectionCode = &rejectionCode
+		m.records[key] = record
+		return record, true, nil
+	}
 	return record, false, nil
 }
 

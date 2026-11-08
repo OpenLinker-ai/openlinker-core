@@ -36,6 +36,12 @@ runtime protocol, and migration contract are declared stable.
 
 ### Fixed
 
+- When Runtime rejects an External Execution input against the target
+  capability at launch, the start is now rejected durably, under its launch
+  token, as `TARGET_CONTRACT_CHANGED`.
+  - Before, it returned a 503 that the caller kept retrying.
+  - Every later Start and GetExecution returns the same rejection. The
+    request never launches, even after the capability changes.
 - Runtime dispatch no longer loses a wake to a WebSocket Session that cannot
   claim. Wake tokens are coalesced per eligibility class; a Session that is full
   or still holds an unacknowledged offer hands a real wake to another listening
@@ -124,6 +130,39 @@ runtime protocol, and migration contract are declared stable.
 - Publisher-supplied source, license and release notes, stored separately from
   execution bundles. Skill declarations freeze on first publication; MCP owner
   edits use revision conflicts. Catalog filters run before pagination.
+- External Execution target validation returns `unavailable_detail`
+  (`property`, `rule`, `capability_value`) with `input_schema_incompatible`.
+  - It names the first capability rule the check could not prove.
+  - It is returned to the target owner only. Start rejections keep
+    `TARGET_CONTRACT_CHANGED` and carry no detail.
+- External Execution targets whose capability uses `const`, `minLength`,
+  `maxLength`, `pattern`, numeric bounds or `multipleOf` are executable when
+  the caller's `input_schema` declares an equal or stricter keyword. Some
+  rules can also be proven from a listing `enum`.
+- External Execution start enforces the caller's own `input_schema` on the
+  input before anything is reserved.
+  - It covers type, enum, required, additionalProperties and items with
+    Core's run-time semantics. It also checks the keywords above: lengths in
+    code points, Go RE2 patterns (one that does not compile rejects), and
+    numbers.
+  - Each JSON number is read as its nearest IEEE-754 double, the value
+    Agents receive. Comparisons then use that double's shortest round-trip
+    decimal, so `1` is a multiple of `0.01`. Numbers that round to the same
+    double are equal: `0.10000000000000001` satisfies `"maximum": 0.1`.
+  - A violation returns 422 `EXECUTION_INPUT_INVALID`. `details` has
+    `source: input_schema`, `rule` and, when the schema declares it,
+    `property`. The input is never echoed.
+  - Attached executions replay unchanged. An existing pending, authorized or
+    expired-launching reservation is checked only after its downstream
+    recovery finds no committed work.
+- Failed External Executions return a bounded `failure_category`. It is mapped
+  from Core run statuses and an explicit allowlist of run error codes:
+  - unlisted codes map to `unknown`;
+  - a workflow uses the first failed step whose child run failed, timed out
+    or was canceled; if a child run cannot be read, the category is `unknown`
+    and the status response is otherwise unchanged;
+  - an unconfirmed cancellation maps to `result_unknown`.
+  `error_code` and `error_message` are unchanged.
 
 ### Compatibility
 
@@ -145,6 +184,13 @@ runtime protocol, and migration contract are declared stable.
 - Publisher declarations are unverified and excluded from bundle SHA-256 and
   imported private copies. Existing runtime, identity and session scopes remain
   unchanged. Public MCP metadata excludes private upstream configuration.
+- Ordinary Run, A2A, MCP and Workflow input validation is unchanged. The new
+  enforcement applies only to External Execution starts.
+- No External Execution target that was executable before becomes
+  unavailable.
+- New External Execution starts now fail if their input breaks their own
+  `input_schema`. Before, Core passed that input on to Runtime. Example: `null`
+  or `""` for an optional enum field.
 
 
 ## 0.3.0 - 2026-10-05
