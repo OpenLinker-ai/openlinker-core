@@ -564,7 +564,9 @@ func finalizeRuntimeReconciledTerminal(
 		finalized.TerminalEventID == nil || *finalized.TerminalEventID != event.ID {
 		return errors.New("Runtime terminal reconcile produced inconsistent Run facts")
 	}
-	if err = insertRuntimeResultLedgerAndStats(ctx, queries, run, event.ID, 0, 0); err != nil {
+	if err = insertRuntimeResultLedgerAndStats(
+		ctx, queries, run, event.ID, 0, 0, runtimeResultEvidenceFor(run, nil),
+	); err != nil {
 		return err
 	}
 	for _, effect := range effectPlan.effects {

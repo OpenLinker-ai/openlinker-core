@@ -281,9 +281,9 @@ func TestCreateAgent_HappyPath(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, req.Slug, resp.Slug)
 	assert.Equal(t, req.Name, resp.Name)
-	assert.Equal(t, "approved", resp.Status, "new agent should be public immediately (derived)")
+	assert.Equal(t, "approved", resp.Status, "legacy derived status stays approved")
 	assert.Equal(t, "active", resp.LifecycleStatus)
-	assert.Equal(t, "public", resp.Visibility)
+	assert.Equal(t, "private", resp.Visibility, "omitted visibility defaults to private")
 	assert.Equal(t, "unreviewed", resp.CertificationStatus)
 	assert.Equal(t, req.PricePerCallCents, resp.PricePerCallCents)
 	assert.ElementsMatch(t, req.Tags, resp.Tags)
@@ -646,7 +646,9 @@ func TestUpdateAgentKeepsConcurrentVisibilityChangeWhenOmitted(t *testing.T) {
 	ctx := context.Background()
 
 	ownerID := insertCreator(t, pool)
-	created, err := svc.CreateAgent(ctx, ownerID, validCreateReq(freshSlug("update-visibility-race")))
+	createReq := validCreateReq(freshSlug("update-visibility-race"))
+	createReq.Visibility = "public"
+	created, err := svc.CreateAgent(ctx, ownerID, createReq)
 	require.NoError(t, err)
 	require.Equal(t, "public", created.Visibility)
 	agentID := uuid.MustParse(created.ID)
@@ -1081,7 +1083,7 @@ func TestGetMyAgentOnboardingAndDeleteExample(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, slug, owned.Slug)
 	assert.Equal(t, "direct_http", owned.ConnectionMode)
-	assert.Equal(t, "public", owned.Visibility)
+	assert.Equal(t, "private", owned.Visibility)
 
 	_, err = svc.GetMyAgent(ctx, agentID, otherCreatorID)
 	assertHTTPStatus(t, err, http.StatusNotFound)

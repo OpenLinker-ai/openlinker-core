@@ -23,6 +23,17 @@ runtime protocol, and migration contract are declared stable.
   another origin now receives the request without its token; register the
   final URL.
 
+### Changed
+
+- **Behaviour change:** a new Agent whose request omits `visibility` is now
+  `private`, both for `POST /creator/agents` and for self-registration
+  (`POST /agent-registration/agents`, which used to force `public`). The Hub
+  already tells creators new Agents are private, the docs say to verify while
+  private, and the SDKs already send `private`; an unverified Agent should not
+  be listed or callable by others by default. Explicit `public`, `unlisted` and
+  `private` are unchanged, and so are existing Agents and updates that omit
+  `visibility`. Callers that need a public Agent must send `visibility: "public"`.
+
 ### Fixed
 
 - Runtime dispatch no longer loses a wake to a WebSocket Session that cannot
@@ -46,6 +57,31 @@ runtime protocol, and migration contract are declared stable.
 - Saving Agent settings no longer reverts a concurrent visibility or connection
   change made elsewhere; the read, carry-over, validation and update run in one
   transaction.
+- Repointing an Agent no longer keeps evidence about the old target. When
+  `connection_mode`, the normalized `endpoint_url` or the MCP tool changes (a
+  Runtime Agent's target is its mode; its display endpoint is not one), the
+  same transaction:
+  - resets the availability snapshot to `unknown` with `last_checked_at`
+    cleared, so the monitor re-checks on its next pass;
+  - resets the dry-run / health-check result to `pending`;
+  - moves a `certified` Agent back to `pending` review with `certified_at`
+    cleared;
+  - resets Skill Benchmark scores to `pending`.
+- A changed or cleared endpoint credential resets only availability and dry-run;
+  certification and benchmark scores are kept. Other edits leave all evidence
+  intact. Run history, benchmark case results and alerts are never deleted.
+- Creator dry-runs and benchmark batches that probed the previous target no
+  longer store their result after the Agent is repointed. A dry-run in that
+  case returns 409.
+- Run results, including Runtime dry-runs and benchmark cases, update
+  availability only if the Agent still has the target the Run used. The check
+  runs under a share lock in the finalization transaction.
+  - Runtime Runs are matched by their stored connection mode.
+  - Core-executed Runs are matched by the endpoint, MCP tool and credential
+    they called.
+  - Core attempts that the reconciler finalizes without seeing the endpoint's
+    outcome no longer change availability.
+  - Call statistics are unchanged.
 - Retrying self-registration with the same Agent Token and slug after a lost
   response returns the original `{agent, agent_token}` (201) instead of 401.
   This applies only to tokens redeemed by that registration; every other case is
@@ -67,6 +103,17 @@ runtime protocol, and migration contract are declared stable.
 
 ### Added
 
+- Self-registration accepts optional `capability` and `examples` with the same
+  shapes, validation and limits as the creator endpoints. They are written in
+  the registration transaction; an invalid declaration creates nothing and
+  leaves the token unredeemed.
+- The registration response adds `agent.availability` / `agent.readiness`,
+  `onboarding`, and `next_actions`: up to five ordered steps (declare
+  capability, add example, start runtime worker, run health check, make public)
+  in the existing Run next-action shape.
+- Registration replay neither applies nor compares `capability` / `examples`,
+  and reports the stored state.
+
 - Expose lifecycle, binding limit, and host compatibility hints on the owner-only
   Skill binding read response without changing binding admission or Run snapshots.
 
@@ -80,6 +127,9 @@ runtime protocol, and migration contract are declared stable.
 
 ### Compatibility
 
+- Registration response fields are additive; the Go, JS and Python SDK
+  registration clients ignore unknown fields. Evidence invalidation and the
+  finalizer guard use existing columns; no migration.
 - Migration 101 adds a concurrent partial index on published
   `runtime_signal_outbox` rows. Core deletes published signals older than seven
   days in batches of 1,000 (oldest first, `SKIP LOCKED`, safe on every

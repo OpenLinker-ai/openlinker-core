@@ -93,7 +93,7 @@ type CreateAgentParams struct {
 	MCPToolName        *string   `db:"mcp_tool_name" json:"mcp_tool_name"`
 }
 
-// CreateAgent 创作者新建 Agent。默认 lifecycle=active, visibility=public, certification=unreviewed。
+// CreateAgent 创作者新建 Agent。默认 lifecycle=active, certification=unreviewed；visibility 由 service 传入（省略时为 private）。
 func (q *Queries) CreateAgent(ctx context.Context, arg CreateAgentParams) (Agent, error) {
 	row := q.db.QueryRow(ctx, createAgent,
 		arg.CreatorID,

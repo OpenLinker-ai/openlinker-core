@@ -366,6 +366,13 @@ func insertEventStoreExecutingAttempt(
 	userID := insertRuntimeUser(t, pool)
 	creatorID := insertCreator(t, pool)
 	agentID := insertAgent(t, pool, creatorID, "https://example.com/event-store", 0, "approved")
+	// The fixture Run is a queued Runtime Run, so its Agent is a Runtime Agent:
+	// availability from its Result is recorded only while the Agent still
+	// uses the connection mode the Run snapshotted.
+	_, agentErr := pool.Exec(context.Background(), `
+		UPDATE agents SET connection_mode = 'runtime', endpoint_url = 'openlinker-runtime://' || slug
+		WHERE id = $1`, agentID)
+	require.NoError(t, agentErr)
 
 	runID := uuid.New()
 	attemptID := uuid.New()

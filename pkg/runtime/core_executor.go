@@ -352,7 +352,7 @@ func (s *Service) executeCoreAttempt(ctx context.Context, invocation *runInvocat
 	}
 
 	finalizeCtx, finalizeCancel := context.WithTimeout(context.Background(), coreFinalizationTimeout)
-	_, finalizeErr := s.finalizeCoreResult(finalizeCtx, principal, request)
+	_, finalizeErr := s.finalizeCoreResult(finalizeCtx, principal, request, invocation)
 	finalizeCancel()
 	if finalizeErr != nil {
 		if IsRuntimeResultError(finalizeErr, RuntimeResultErrorRunAlreadyTerminal) ||
@@ -379,7 +379,7 @@ func (s *Service) finalizeCoreSetupFailure(
 		DurationMS: 0, FinalClientEventSeq: 0,
 	}
 	finalizeCtx, cancel := context.WithTimeout(context.Background(), coreFinalizationTimeout)
-	_, err := s.finalizeCoreResult(finalizeCtx, principal, request)
+	_, err := s.finalizeCoreResult(finalizeCtx, principal, request, invocation)
 	cancel()
 	if err != nil {
 		log.Error().Err(errors.Join(cause, err)).Str("run_id", invocation.runID.String()).
@@ -427,14 +427,19 @@ func (s *Service) appendCoreRuntimeEvent(
 	return lastErr
 }
 
+// finalizeCoreResult persists a Core-executed Result. The endpoint call used
+// invocation.agent, the Agent row captured when the Run was created, so that
+// row's connection target is what the outcome is evidence about.
 func (s *Service) finalizeCoreResult(
 	ctx context.Context,
 	principal RuntimeResultPrincipal,
 	request RuntimeResultRequest,
+	invocation *runInvocation,
 ) (RuntimeResultAck, error) {
+	target := db.AgentEvidenceTargetOf(invocation.agent)
 	var lastErr error
 	for attempt := 0; attempt < corePersistenceAttempts; attempt++ {
-		ack, err := s.resultFinalizer.Finalize(ctx, principal, request)
+		ack, err := s.resultFinalizer.finalizeCore(ctx, principal, request, target)
 		if err == nil {
 			return ack, nil
 		}

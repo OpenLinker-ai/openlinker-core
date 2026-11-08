@@ -246,6 +246,9 @@ func (s *RegistrationService) AgentTokenResource(ctx context.Context, creatorID,
 
 // RegisterAgentViaToken 用 pending Agent Token 完成 Agent 注册。
 //
+// visibility 省略时为 private。可选的 capability / examples 与创作者端同样校验，
+// 和 Agent、skill 绑定、token 兑换在同一事务内写入；任一失败整体回滚。
+//
 // 已兑换的同一枚 token 带同一 slug 重试时（客户端丢失了首次 201 响应），按当前
 // Agent 与 token 重放同形响应，不写库、不签发明文；其他情况保持原有拒绝语义。
 func (s *RegistrationService) RegisterAgentViaToken(ctx context.Context, req *RegisterAgentViaTokenRequest) (*RegisterAgentViaTokenResponse, error) {
@@ -278,6 +281,10 @@ func (s *RegistrationService) RegisterAgentViaToken(ctx context.Context, req *Re
 		return nil, err
 	}
 	skillIDs, err := s.normalizeRegistrationSkillIDs(ctx, req.SkillIDs)
+	if err != nil {
+		return nil, err
+	}
+	capability, examples, err := prepareRegistrationOnboarding(req.Capability, req.Examples)
 	if err != nil {
 		return nil, err
 	}
@@ -324,6 +331,9 @@ func (s *RegistrationService) RegisterAgentViaToken(ctx context.Context, req *Re
 			return nil, httpx.Internal("绑定 Agent skill 失败")
 		}
 	}
+	if err := applyRegistrationOnboarding(ctx, q, created.ID, matched.CreatorUserID, capability, examples); err != nil {
+		return nil, err
+	}
 	redeemed, err := q.RedeemPendingAgentToken(ctx, db.RedeemPendingAgentTokenParams{
 		ID:            matched.ID,
 		AgentID:       created.ID,
@@ -343,10 +353,51 @@ func (s *RegistrationService) RegisterAgentViaToken(ctx context.Context, req *Re
 		return nil, httpx.Internal("提交注册事务失败")
 	}
 
-	return &RegisterAgentViaTokenResponse{
-		Agent:      toAgentResponse(&created),
-		AgentToken: agentTokenResponse(redeemed),
-	}, nil
+	return s.registrationResponse(ctx, &created, redeemed), nil
+}
+
+// applyRegistrationOnboarding writes the onboarding row and the optional
+// capability and examples inside the registration transaction, with the same
+// queries the creator endpoints use. Any failure aborts the registration, so
+// a registered Agent never has a partial declaration and the token is not
+// redeemed.
+func applyRegistrationOnboarding(
+	ctx context.Context,
+	q *db.Queries,
+	agentID, creatorID uuid.UUID,
+	capability *preparedCapability,
+	examples []*preparedExample,
+) error {
+	if err := q.EnsureOnboardingStatus(ctx, agentID); err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registration.RegisterAgentViaToken: ensure onboarding status")
+		return httpx.Internal("初始化接入状态失败")
+	}
+	if capability != nil {
+		if _, err := q.UpsertAgentCapability(ctx, capability.upsertParams(agentID, creatorID)); err != nil {
+			log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registration.RegisterAgentViaToken: upsert capability")
+			return httpx.Internal("保存能力声明失败")
+		}
+		if _, err := q.MarkCapabilitiesSet(ctx, agentID); err != nil {
+			log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registration.RegisterAgentViaToken: mark capabilities set")
+			return httpx.Internal("保存能力声明失败")
+		}
+	}
+	for _, example := range examples {
+		if _, err := q.CreateAgentExample(ctx, example.createParams(agentID, creatorID)); err != nil {
+			if isCheckViolation(err) {
+				return httpx.Unprocessable("示例字段不符合约束")
+			}
+			log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registration.RegisterAgentViaToken: create example")
+			return httpx.Internal("创建示例失败")
+		}
+	}
+	if len(examples) > 0 {
+		if _, err := q.MarkExamplesSet(ctx, db.MarkExamplesSetParams{AgentID: agentID, ExamplesSet: true}); err != nil {
+			log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registration.RegisterAgentViaToken: mark examples set")
+			return httpx.Internal("创建示例失败")
+		}
+	}
+	return nil
 }
 
 // replayCompletedRegistration answers a retry whose first 201 was lost. It only
@@ -388,10 +439,11 @@ func (s *RegistrationService) replayCompletedRegistration(
 	if registered.Slug != slug || !redeemedByRegistration(token, registered) {
 		return nil, rejected
 	}
-	return &RegisterAgentViaTokenResponse{
-		Agent:      toAgentResponse(&registered),
-		AgentToken: agentTokenResponse(token),
-	}, nil
+	// capability / examples in the retried body are neither compared nor
+	// applied: the first attempt wrote them atomically with the Agent, and
+	// the owner may have edited them since. The response reports the stored
+	// state, so onboarding and next_actions show what actually exists.
+	return s.registrationResponse(ctx, &registered, token), nil
 }
 
 // redeemedByRegistration reports whether token became active by redeeming a
