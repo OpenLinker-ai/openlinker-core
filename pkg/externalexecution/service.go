@@ -130,9 +130,20 @@ func (s *Service) validateTarget(ctx context.Context, targetOwnerID uuid.UUID, t
 		if err != nil {
 			return nil, err
 		}
-		if onboarding.Capability == nil || (inputSchema != nil && !externalInputSchemaCompatible(inputSchema, onboarding.Capability.InputSchema)) {
+		// The detail describes the target owner's own capability. Only the
+		// owner-scoped ValidateTarget response carries it; Start authorization
+		// reads only UnavailableReason.
+		if onboarding.Capability == nil {
 			resp.UnavailableReason = "input_schema_incompatible"
+			resp.UnavailableDetail = &TargetUnavailableDetail{Rule: SchemaRuleCapabilityMissing}
 			return resp, nil
+		}
+		if inputSchema != nil {
+			if detail := externalInputSchemaIncompatibility(inputSchema, onboarding.Capability.InputSchema); detail != nil {
+				resp.UnavailableReason = "input_schema_incompatible"
+				resp.UnavailableDetail = detail
+				return resp, nil
+			}
 		}
 		connectionMode := strings.TrimSpace(target.ConnectionMode)
 		if connectionMode == "" {
@@ -753,7 +764,9 @@ func (s *Service) responseForReservedRecord(ctx context.Context, record Executio
 	if !attachmentComplete {
 		return nil, false, nil
 	}
-	status, err := s.getExecutionStatus(ctx, record)
+	// A Start replay reports only the status, so it skips the workflow
+	// child-run reads that failure_category needs.
+	status, err := s.executionStatus(ctx, record, false)
 	if err != nil {
 		return nil, true, httpx.ServiceUnavailable("外部执行状态正在确认，请重试")
 	}
@@ -801,6 +814,13 @@ func (s *Service) GetExecution(ctx context.Context, principal *Principal, extern
 }
 
 func (s *Service) getExecutionStatus(ctx context.Context, record ExecutionRecord) (*ExecutionStatusResponse, error) {
+	return s.executionStatus(ctx, record, true)
+}
+
+// executionStatus reads the downstream status. failure_category is set only
+// for a failed status; withWorkflowFailureCategory controls the extra child
+// run reads a failed workflow run needs for it.
+func (s *Service) executionStatus(ctx context.Context, record ExecutionRecord, withWorkflowFailureCategory bool) (*ExecutionStatusResponse, error) {
 	if rejectionErr := executionStartRejection(record); rejectionErr != nil {
 		return nil, rejectionErr
 	}
@@ -826,6 +846,9 @@ func (s *Service) getExecutionStatus(ctx context.Context, record ExecutionRecord
 		if resp.Status == "succeeded" {
 			resp.Output = run.Output
 		}
+		if resp.Status == "failed" {
+			resp.FailureCategory = runFailureCategory(run.Status, run.ErrorCode)
+		}
 		artifacts, err := s.runtime.ListRunArtifacts(ctx, record.ActorUserID, *record.ExecutionID)
 		if err != nil {
 			return nil, err
@@ -846,6 +869,16 @@ func (s *Service) getExecutionStatus(ctx context.Context, record ExecutionRecord
 		setSafeExecutionError(resp, safeError)
 		if resp.Status == "succeeded" {
 			resp.Output = run.Output
+		}
+		if resp.Status == "failed" {
+			resp.FailureCategory = FailureCategoryUnknown
+			if withWorkflowFailureCategory {
+				category, err := s.workflowFailureCategory(ctx, record.ActorUserID, run)
+				if err != nil {
+					return nil, err
+				}
+				resp.FailureCategory = category
+			}
 		}
 		resp.StartedAt = run.StartedAt
 		resp.FinishedAt = run.FinishedAt

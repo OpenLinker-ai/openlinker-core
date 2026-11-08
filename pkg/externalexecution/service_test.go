@@ -1049,6 +1049,10 @@ type fakeRuntimeService struct {
 	cancelErr      error
 	cancelEvidence runtime.RunCancellationEvidence
 	evidenceErr    error
+	// runs and runErrs answer GetRun per run id before getResponse.
+	runs     map[uuid.UUID]*runtime.RunResponse
+	runErrs  map[uuid.UUID]error
+	getCalls int
 }
 
 func (f *fakeRuntimeService) LookupRunByCreationRequest(_ context.Context, _ uuid.UUID, request *runtime.RunRequest, _ string) (*runtime.RunResponse, bool, error) {
@@ -1110,7 +1114,17 @@ func (f *fakeRuntimeService) GetRunCancellationEvidence(context.Context, uuid.UU
 	return runtime.RunCancellationEvidence{CancellationID: uuid.New(), State: "stopped"}, nil
 }
 
-func (f *fakeRuntimeService) GetRun(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error) {
+func (f *fakeRuntimeService) GetRun(_ context.Context, _ uuid.UUID, runID uuid.UUID) (*runtime.RunResponse, error) {
+	f.lookupMu.Lock()
+	f.getCalls++
+	run, runErr := f.runs[runID], f.runErrs[runID]
+	f.lookupMu.Unlock()
+	if runErr != nil {
+		return nil, runErr
+	}
+	if run != nil {
+		return run, nil
+	}
 	if f.getResponse == nil {
 		return nil, errors.New("unexpected GetRun")
 	}
