@@ -17,6 +17,7 @@ var credentialTestHeaders = map[string]string{
 	"Authorization":               "Bearer bearer-secret",
 	"Proxy-Authorization":         "Basic proxy-secret",
 	"Cookie":                      "session=cookie-secret",
+	"Cookie2":                     "$Version=1",
 }
 
 type hit struct {
