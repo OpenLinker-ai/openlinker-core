@@ -14,7 +14,10 @@ runtime protocol, and migration contract are declared stable.
   A2A push, delivery, registry and LLM clients drop `X-OpenLinker-Token`,
   `X-OpenLinker-Internal-Token`, `Authorization`, `Proxy-Authorization`,
   `Cookie` and `Referer` once a redirect leaves the first request's scheme,
-  host and port, for the rest of the chain. Same-origin redirects are
+  host and port, for the rest of the chain. Hosts are compared after the IDNA
+  conversions net/http dials and sends (an internationalized host whose dial
+  and Host forms disagree, or that cannot be converted, counts as another
+  origin) and ports as numbers. Same-origin redirects are
   unchanged; every hop is still re-validated (public addresses only, no plain
   HTTP outside opt-in loopback development). An endpoint that redirects to
   another origin now receives the request without its token; register the

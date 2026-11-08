@@ -71,7 +71,9 @@ func TestDeletePublishedRuntimeSignalsUsesRetentionIndexWithoutSort(t *testing.T
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	// One snapshot for the whole test: rows that other packages commit while
+	// it runs cannot change the plan or the batch it measures.
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +227,9 @@ func TestDeletePublishedRuntimeSignalsRangeScansDrainedTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	// One snapshot for the whole test: rows that other packages commit while
+	// it runs cannot change the plan or the batch it measures.
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		t.Fatal(err)
 	}
