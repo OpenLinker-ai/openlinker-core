@@ -78,3 +78,22 @@ FROM (
      ORDER BY lease_expires_at
      LIMIT 1)
 ) AS candidate;
+
+-- name: DeletePublishedRuntimeSignals :execrows
+-- Retention removes only completed signals. pending and processing rows are
+-- undelivered or leased and never match; published is terminal, so a locked
+-- candidate cannot change state before it is deleted. SKIP LOCKED lets every
+-- Core replica run retention without blocking another replica's batch.
+WITH candidates AS (
+    SELECT id
+    FROM runtime_signal_outbox
+    WHERE status = 'published'
+      AND published_at < clock_timestamp() - ($1::bigint * INTERVAL '1 millisecond')
+    ORDER BY published_at, id
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+DELETE FROM runtime_signal_outbox s
+USING candidates
+WHERE s.id = candidates.id
+  AND s.status = 'published';

@@ -14,6 +14,12 @@ func TestValidateCoreUp(t *testing.T) {
 	}{
 		{name: "fresh", snapshot: Snapshot{}},
 		{name: "current", snapshot: currentCoreSnapshot(), wantNoop: true},
+		{name: "signal retention predecessor", snapshot: signalRetentionPredecessorCoreSnapshot()},
+		{name: "signal retention predecessor drift", snapshot: withCoreDigest(signalRetentionPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
+		{name: "signal retention predecessor with current shape", snapshot: withCoreShape(signalRetentionPredecessorCoreSnapshot(), currentCoreShape()), wantError: "fingerprint mismatch"},
+		{name: "current version with signal retention predecessor shape", snapshot: withCoreShape(currentCoreSnapshot(), signalRetentionPredecessorCoreSnapshot().CoreShape), wantError: "fingerprint mismatch"},
+		{name: "signal retention predecessor callback invalid", snapshot: withCallbackOwnerIndexValidity(signalRetentionPredecessorCoreSnapshot(), false), wantError: "invalid callback index"},
+		{name: "current with invalid Core index", snapshot: withInvalidCoreIndexes(currentCoreSnapshot(), 1), wantError: "invalid indexes"},
 		{name: "feature upgrade predecessor", snapshot: featureUpgradePredecessorCoreSnapshot()},
 		{name: "feature upgrade predecessor drift", snapshot: withCoreDigest(featureUpgradePredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
 		{name: "supported predecessor", snapshot: upgradeableCoreSnapshot()},
@@ -76,6 +82,9 @@ func TestValidateCloudUp(t *testing.T) {
 		{name: "fresh after current Core", snapshot: fresh},
 		{name: "current", snapshot: current, wantNoop: true},
 		{name: "current Cloud accepts exact Core predecessor preflight", snapshot: upgradeableCloudSnapshot(current), wantNoop: true},
+		{name: "current Cloud accepts exact Core 100 predecessor preflight", snapshot: signalRetentionPredecessorCloudSnapshot(current), wantNoop: true},
+		{name: "Core 100 predecessor before fresh Cloud", snapshot: signalRetentionPredecessorCoreSnapshot(), wantError: "complete its supported migration"},
+		{name: "Core invalid index", snapshot: withInvalidCoreIndexes(current, 1), wantError: "invalid indexes"},
 		{name: "current Cloud accepts exact reviewed Core bridge preflight", snapshot: reviewedBridgeCloudSnapshot(current), wantNoop: true},
 		{name: "current Cloud accepts exact reviewed legacy Core bridge preflight", snapshot: legacyBridgeCloudSnapshot(current), wantNoop: true},
 		{name: "Core missing", snapshot: Snapshot{}, wantError: "current Core"},
@@ -125,7 +134,7 @@ func currentCoreShape() SchemaShape {
 		Digest:            CoreSchemaDigest,
 		Tables:            91,
 		Constraints:       728,
-		Indexes:           308,
+		Indexes:           309,
 		Triggers:          80,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -137,6 +146,28 @@ func currentCoreShape() SchemaShape {
 		BuiltInSkills:     30,
 		BuiltInSkillCases: 15,
 	}
+}
+
+// signalRetentionPredecessorCoreSnapshot is the exact 100 schema: 101 adds
+// only the published-signal retention index.
+func signalRetentionPredecessorCoreSnapshot() Snapshot {
+	s := currentCoreSnapshot()
+	s.Core.Version = CoreSignalRetentionPredecessorVersion
+	s.CoreShape.Digest = CoreSignalRetentionPredecessorDigest
+	s.CoreShape.Indexes = 308
+	return s
+}
+
+func signalRetentionPredecessorCloudSnapshot(current Snapshot) Snapshot {
+	predecessor := signalRetentionPredecessorCoreSnapshot()
+	current.Core = predecessor.Core
+	current.CoreShape = predecessor.CoreShape
+	return current
+}
+
+func withInvalidCoreIndexes(snapshot Snapshot, count int64) Snapshot {
+	snapshot.InvalidCoreIndexes = count
+	return snapshot
 }
 
 func authenticationPredecessorCoreShape() SchemaShape {

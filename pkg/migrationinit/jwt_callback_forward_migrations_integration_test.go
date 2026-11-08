@@ -23,7 +23,7 @@ func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91
 	if baseURL == "" {
 		t.Skip("TEST_DATABASE_URL is required")
 	}
-	for _, mode := range []string{"fresh", "version-86", "version-88", "version-91", "version-92", "version-93", "version-94", "version-95", "version-96", "version-97", "version-98", "version-99"} {
+	for _, mode := range []string{"fresh", "version-86", "version-88", "version-91", "version-92", "version-93", "version-94", "version-95", "version-96", "version-97", "version-98", "version-99", "version-100"} {
 		t.Run(mode, func(t *testing.T) {
 			databaseURL := createMigrationTestDatabase(t, baseURL)
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -33,7 +33,7 @@ func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91
 				if err != nil {
 					t.Fatal(err)
 				}
-				version := map[string]int64{"version-86": 86, "version-88": 88, "version-91": 91, "version-92": 92, "version-93": 93, "version-94": 94, "version-95": 95, "version-96": 96, "version-97": 97, "version-98": 98, "version-99": 99}[mode]
+				version := map[string]int64{"version-86": 86, "version-88": 88, "version-91": 91, "version-92": 92, "version-93": 93, "version-94": 94, "version-95": 95, "version-96": 96, "version-97": 97, "version-98": 98, "version-99": 99, "version-100": 100}[mode]
 				for _, migration := range []struct {
 					version int64
 					file    string
@@ -47,6 +47,7 @@ func TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91
 					{97, "097_resource_metadata.up.sql"},
 					{98, "098_agent_mcp_bindings.up.sql"},
 					{99, "099_runtime_node_upgrade_features.up.sql"},
+					{100, "100_runtime_mtls_transition.up.sql"},
 				} {
 					if migration.version <= version {
 						applyMigrationFile(t, ctx, conn, migration.file)
@@ -295,7 +296,7 @@ func TestRuntimeMTLSTransitionRollbackBeforeAuthorization(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL is required")
 	}
 	databaseURL := createMigrationTestDatabase(t, base)
-	migrateTestDatabaseToCurrent(t, databaseURL)
+	migrateTestDatabaseToVersion(t, databaseURL, 100)
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
