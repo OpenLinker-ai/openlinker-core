@@ -17,9 +17,9 @@ import (
 // and the first unproven capability rule is reported to the target owner.
 //
 // The listing is read as a closed form. Only its declared properties can be
-// present; Hosted intake rejects undeclared keys, and Core's run-time
-// validator enforces capability additionalProperties:false. Extra listing
-// keywords only narrow the listing and are therefore ignored.
+// present; the calling service's intake rejects undeclared keys, and Core's
+// run-time validator enforces capability additionalProperties:false. Extra
+// listing keywords only narrow the listing and are therefore ignored.
 //
 // Properties and required keys are walked in sorted order so the reported
 // incompatibility is deterministic.
