@@ -31,8 +31,8 @@ BEGIN
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 308 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 308', public_indexes;
+    IF public_indexes <> 309 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 309', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers
@@ -140,6 +140,40 @@ BEGIN
           AND index_metadata.indisvalid
     ) THEN
         RAISE EXCEPTION 'idx_task_callback_subscriptions_owner is missing or invalid';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_index index_metadata
+        JOIN pg_catalog.pg_class index_relation
+          ON index_relation.oid = index_metadata.indexrelid
+        JOIN pg_catalog.pg_namespace index_namespace
+          ON index_namespace.oid = index_relation.relnamespace
+        JOIN pg_catalog.pg_class table_relation
+          ON table_relation.oid = index_metadata.indrelid
+        JOIN pg_catalog.pg_namespace table_namespace
+          ON table_namespace.oid = table_relation.relnamespace
+        WHERE index_namespace.nspname = 'public'
+          AND index_relation.relname = 'idx_runtime_signal_outbox_published_retention'
+          AND table_namespace.nspname = 'public'
+          AND table_relation.relname = 'runtime_signal_outbox'
+          AND index_metadata.indisvalid
+          AND index_metadata.indisready
+    ) THEN
+        RAISE EXCEPTION 'idx_runtime_signal_outbox_published_retention is missing or invalid';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_index index_metadata
+        JOIN pg_catalog.pg_class table_relation
+          ON table_relation.oid = index_metadata.indrelid
+        JOIN pg_catalog.pg_namespace table_namespace
+          ON table_namespace.oid = table_relation.relnamespace
+        WHERE table_namespace.nspname = 'public'
+          AND NOT (index_metadata.indisvalid AND index_metadata.indisready)
+    ) THEN
+        RAISE EXCEPTION 'Core has an invalid index; drop and rebuild it before continuing';
     END IF;
 
     IF NOT EXISTS (

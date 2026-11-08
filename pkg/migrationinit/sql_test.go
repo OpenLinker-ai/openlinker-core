@@ -13,29 +13,31 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 		t.Fatal(err)
 	}
 	want := map[string]bool{
-		"100_runtime_mtls_transition.up.sql":         true,
-		"100_runtime_mtls_transition.down.sql":       true,
-		"099_runtime_node_upgrade_features.up.sql":   true,
-		"099_runtime_node_upgrade_features.down.sql": true,
-		"098_agent_mcp_bindings.up.sql":              true,
-		"098_agent_mcp_bindings.down.sql":            true,
-		"097_resource_metadata.up.sql":               true,
-		"097_resource_metadata.down.sql":             true,
-		"096_skill_package_publication.up.sql":       true,
-		"096_skill_package_publication.down.sql":     true,
-		"095_runtime_node_upgrade.up.sql":            true,
-		"095_runtime_node_upgrade.down.sql":          true,
-		"086_current_schema_init.up.sql":             true,
-		"086_current_schema_init_verify.sql":         true,
-		"087_browser_agent_execution_profile.up.sql": true,
-		"088_browser_human_control.up.sql":           true,
-		"089_user_jwt_token_version.up.sql":          true,
-		"090_task_callback_owner_index.up.sql":       true,
-		"091_browser_interaction_policy.up.sql":      true,
-		"092_browser_observation_audit.up.sql":       true,
-		"093_skill_packages.up.sql":                  true,
-		"094_cli_login.up.sql":                       true,
-		"094_cli_login.down.sql":                     true,
+		"101_runtime_signal_outbox_retention.up.sql":   true,
+		"101_runtime_signal_outbox_retention.down.sql": true,
+		"100_runtime_mtls_transition.up.sql":           true,
+		"100_runtime_mtls_transition.down.sql":         true,
+		"099_runtime_node_upgrade_features.up.sql":     true,
+		"099_runtime_node_upgrade_features.down.sql":   true,
+		"098_agent_mcp_bindings.up.sql":                true,
+		"098_agent_mcp_bindings.down.sql":              true,
+		"097_resource_metadata.up.sql":                 true,
+		"097_resource_metadata.down.sql":               true,
+		"096_skill_package_publication.up.sql":         true,
+		"096_skill_package_publication.down.sql":       true,
+		"095_runtime_node_upgrade.up.sql":              true,
+		"095_runtime_node_upgrade.down.sql":            true,
+		"086_current_schema_init.up.sql":               true,
+		"086_current_schema_init_verify.sql":           true,
+		"087_browser_agent_execution_profile.up.sql":   true,
+		"088_browser_human_control.up.sql":             true,
+		"089_user_jwt_token_version.up.sql":            true,
+		"090_task_callback_owner_index.up.sql":         true,
+		"091_browser_interaction_policy.up.sql":        true,
+		"092_browser_observation_audit.up.sql":         true,
+		"093_skill_packages.up.sql":                    true,
+		"094_cli_login.up.sql":                         true,
+		"094_cli_login.down.sql":                       true,
 	}
 	if len(paths) != len(want) {
 		t.Fatalf("migration SQL files = %v, want only current initializer and verifier", paths)
@@ -108,6 +110,34 @@ func TestTaskCallbackOwnerIndexForwardMigrationIsConcurrentAndExact(t *testing.T
 		if strings.Contains(up, forbidden) {
 			t.Fatalf("concurrent callback index migration contains forbidden %q", forbidden)
 		}
+	}
+}
+
+func TestRuntimeSignalOutboxRetentionIndexMigrationIsConcurrentAndExact(t *testing.T) {
+	up := readInitializer(t, "../../migrations/101_runtime_signal_outbox_retention.up.sql")
+	for _, fragment := range []string{
+		"CREATE INDEX CONCURRENTLY idx_runtime_signal_outbox_published_retention",
+		"ON public.runtime_signal_outbox",
+		"(published_at, id)",
+		"WHERE status = 'published'",
+	} {
+		if !strings.Contains(up, fragment) {
+			t.Fatalf("signal outbox retention index migration missing %q", fragment)
+		}
+	}
+	// CREATE INDEX CONCURRENTLY cannot run in a transaction block, and a
+	// second statement would make golang-migrate send one.
+	for _, forbidden := range []string{"IF NOT EXISTS", "DO $$", "BEGIN;", "SET ", "DELETE ", "runtime_schema_contracts"} {
+		if strings.Contains(up, forbidden) {
+			t.Fatalf("concurrent retention index migration contains forbidden %q", forbidden)
+		}
+	}
+	if strings.Count(up, ";") != 1 {
+		t.Fatalf("retention index migration must be a single statement:\n%s", up)
+	}
+	down := readInitializer(t, "../../migrations/101_runtime_signal_outbox_retention.down.sql")
+	if strings.TrimSpace(down) != "DROP INDEX CONCURRENTLY public.idx_runtime_signal_outbox_published_retention;" {
+		t.Fatalf("retention index rollback must drop exactly the 101 index:\n%s", down)
 	}
 }
 
@@ -236,7 +266,7 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	for _, fragment := range []string{
 		"public_tables <> 91",
 		"public_constraints <> 728",
-		"public_indexes <> 308",
+		"public_indexes <> 309",
 		"public_triggers <> 80",
 		"public_functions <> 72",
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",
@@ -252,6 +282,9 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 		"idx_task_callback_subscriptions_owner",
 		"index_metadata.indisvalid",
 		"idx_task_callback_subscriptions_owner is missing or invalid",
+		"idx_runtime_signal_outbox_published_retention",
+		"idx_runtime_signal_outbox_published_retention is missing or invalid",
+		"NOT (index_metadata.indisvalid AND index_metadata.indisready)",
 		"agents_browser_execution_profile_private",
 		"agents_browser_execution_profile_runtime",
 		"runtime_agent_execution_profiles_interaction_policy_valid",
