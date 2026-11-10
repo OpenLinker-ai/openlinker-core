@@ -56,6 +56,28 @@ func TestAgentHandlerDispatchesServiceSuccess(t *testing.T) {
 	}
 
 	c, rec = newAgentDispatchContext(agentDispatchRequest{
+		method: http.MethodPost,
+		target: "/creator/agents/mcp-tools/discover",
+		userID: userID.String(),
+		body:   `{"endpoint_url":"https://example.com/mcp","mcp_transport":"streamable_http"}`,
+	})
+	requireNoDispatchError(t, h.DiscoverMCPTools(c))
+	requireDispatchStatus(t, rec, http.StatusOK)
+	discovered := decodeAgentDispatchJSON[DiscoverMCPToolsResponse](t, rec)
+	if len(discovered.Tools) != 1 || discovered.Tools[0].Name != "streamable_http" {
+		t.Fatalf("DiscoverMCPTools response = %#v", discovered)
+	}
+	c, _ = newAgentDispatchContext(agentDispatchRequest{
+		method: http.MethodPost,
+		target: "/creator/agents/mcp-tools/discover",
+		userID: userID.String(),
+		body:   `{"endpoint_url":"https://example.com/mcp","mcp_transport":"legacy_json"}`,
+	})
+	if err := h.DiscoverMCPTools(c); err == nil {
+		t.Fatal("DiscoverMCPTools accepted legacy_json")
+	}
+
+	c, rec = newAgentDispatchContext(agentDispatchRequest{
 		method: http.MethodGet,
 		target: "/creator/agents",
 		userID: userID.String(),
@@ -255,6 +277,7 @@ func TestAgentHandlerDispatchesServiceSuccess(t *testing.T) {
 		"CheckSlug",
 		"BecomeCreator",
 		"CreateAgent",
+		"DiscoverMCPTools",
 		"ListMyAgentsPage",
 		"ListMyAgentsPage",
 		"ListMyAgentsPage",
@@ -540,6 +563,15 @@ func (m *mockAgentService) BecomeCreator(_ context.Context, userID uuid.UUID) er
 	m.record("BecomeCreator")
 	m.lastUserID = userID
 	return m.err
+}
+
+func (m *mockAgentService) DiscoverMCPTools(_ context.Context, userID uuid.UUID, req *DiscoverMCPToolsRequest) (*DiscoverMCPToolsResponse, error) {
+	m.record("DiscoverMCPTools")
+	m.lastUserID = userID
+	if m.err != nil {
+		return nil, m.err
+	}
+	return &DiscoverMCPToolsResponse{Tools: []DiscoveredMCPTool{{Name: req.MCPTransport}}}, nil
 }
 
 func (m *mockAgentService) CreateAgent(_ context.Context, userID uuid.UUID, req *CreateAgentRequest) (*AgentResponse, error) {

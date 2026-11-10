@@ -449,9 +449,14 @@ func (s *Service) externalExecutionWorkflowContractHash(ctx context.Context, w d
 			if agentRow.MCPToolName != nil {
 				mcpToolName = *agentRow.MCPToolName
 			}
+			authHeaderName := ""
+			if agentRow.EndpointAuthHeaderName != nil {
+				authHeaderName = *agentRow.EndpointAuthHeaderName
+			}
 			agentHash, err = executioncontract.AgentHash(executioncontract.Agent{
 				ID: node.AgentID.String(), ConnectionMode: agentRow.ConnectionMode,
 				EndpointURL: agentRow.EndpointURL, MCPToolName: mcpToolName,
+				MCPTransport: agentRow.MCPTransport, AuthHeaderName: authHeaderName,
 				CapabilityVersion: capability.Version, InputSchema: inputSchema, OutputSchema: outputSchema,
 			})
 			if err != nil {

@@ -1523,6 +1523,8 @@ func registryFakeAgentValues(agentID, ownerID uuid.UUID, lifecycleStatus string)
 		nil,
 		now,
 		now,
+		"legacy_json",
+		nil,
 	}
 }
 

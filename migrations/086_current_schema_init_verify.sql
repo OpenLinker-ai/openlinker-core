@@ -23,8 +23,8 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 728 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 728', public_constraints;
+    IF public_constraints <> 730 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 730', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
@@ -225,6 +225,38 @@ BEGIN
           AND constraint_row.convalidated
     ) THEN
         RAISE EXCEPTION 'Core initializer is missing the JWT token-version contract';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'agents'
+          AND column_name = 'mcp_transport'
+          AND data_type = 'text'
+          AND is_nullable = 'NO'
+          AND column_default = '''legacy_json''::text'
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'agents'
+          AND column_name = 'endpoint_auth_header_name'
+          AND data_type = 'text'
+          AND is_nullable = 'YES'
+          AND column_default IS NULL
+    ) OR (
+        SELECT count(*)
+        FROM pg_catalog.pg_constraint constraint_row
+        JOIN pg_catalog.pg_class relation ON relation.oid = constraint_row.conrelid
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relname = 'agents'
+          AND constraint_row.conname IN ('agents_mcp_transport_valid', 'agents_endpoint_auth_header_name_token')
+          AND constraint_row.contype = 'c'
+          AND constraint_row.convalidated
+    ) <> 2 THEN
+        RAISE EXCEPTION 'Core initializer is missing the Agent MCP transport contract';
     END IF;
 
     IF NOT EXISTS (
