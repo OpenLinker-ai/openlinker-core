@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -609,12 +611,20 @@ func TestWebhookServiceEnqueueRunEventCachesNoTaskCallbackSubscription(t *testin
 	}
 
 	event.ID = uuid.New()
-	event.EventType = "run.completed"
 	if err := svc.EnqueueRunEvent(context.Background(), event); err != nil {
 		t.Fatalf("second EnqueueRunEvent error = %v", err)
 	}
 	if q.activeCalls != 1 {
-		t.Fatalf("cached no-subscription run should not query again, got %d", q.activeCalls)
+		t.Fatalf("cached miss for the same event type should not query again, got %d", q.activeCalls)
+	}
+
+	event.ID = uuid.New()
+	event.EventType = "run.completed"
+	if err := svc.EnqueueRunEvent(context.Background(), event); err != nil {
+		t.Fatalf("other event type EnqueueRunEvent error = %v", err)
+	}
+	if q.activeCalls != 2 {
+		t.Fatalf("a miss for one event type must not hide another type, queries = %d, want 2", q.activeCalls)
 	}
 
 	sub := db.TaskCallbackSubscription{
@@ -625,17 +635,49 @@ func TestWebhookServiceEnqueueRunEventCachesNoTaskCallbackSubscription(t *testin
 		EventTypes: []string{"run.completed"},
 		Status:     "active",
 	}
-	svc.rememberTaskCallbackRun(runID, true)
+	svc.forgetTaskCallbackRunMisses(runID)
 	q.activeSubs = []db.TaskCallbackSubscription{sub}
 	event.ID = uuid.New()
 	if err := svc.EnqueueRunEvent(context.Background(), event); err != nil {
 		t.Fatalf("active EnqueueRunEvent error = %v", err)
 	}
-	if q.activeCalls != 2 {
-		t.Fatalf("active subscription query count = %d, want 2", q.activeCalls)
+	if q.activeCalls != 3 {
+		t.Fatalf("active subscription query count = %d, want 3", q.activeCalls)
 	}
 	if q.createRunDeliveryArg.SubscriptionID != sub.ID || q.createRunDeliveryArg.RunEventID != event.ID {
 		t.Fatalf("delivery arg = %#v", q.createRunDeliveryArg)
+	}
+}
+
+// A subscriber that only wants artifact deltas must still get them right after
+// the Run emits an event type nobody subscribed to.
+func TestWebhookServiceEnqueueRunEventDeliversSubscribedTypeAfterUnsubscribedMiss(t *testing.T) {
+	runID := uuid.New()
+	sub := db.TaskCallbackSubscription{
+		ID:         uuid.New(),
+		RunID:      runID,
+		TargetURL:  "https://client.example/hook",
+		Secret:     "secret",
+		EventTypes: []string{"run.artifact.delta"},
+		Status:     "active",
+	}
+	q := &fakeWebhookQueries{activeSubs: []db.TaskCallbackSubscription{sub}, filterActiveByEventType: true}
+	svc := &Service{queries: q}
+
+	message := db.RunEvent{ID: uuid.New(), RunID: runID, EventType: "run.message.delta", Sequence: 1, Payload: []byte(`{}`), CreatedAt: time.Now()}
+	if err := svc.EnqueueRunEvent(context.Background(), message); err != nil {
+		t.Fatalf("message EnqueueRunEvent error = %v", err)
+	}
+	if q.createRunDeliveryArg.SubscriptionID != uuid.Nil {
+		t.Fatalf("unsubscribed event type created a delivery: %#v", q.createRunDeliveryArg)
+	}
+
+	artifact := db.RunEvent{ID: uuid.New(), RunID: runID, EventType: "run.artifact.delta", Sequence: 2, Payload: []byte(`{}`), CreatedAt: time.Now()}
+	if err := svc.EnqueueRunEvent(context.Background(), artifact); err != nil {
+		t.Fatalf("artifact EnqueueRunEvent error = %v", err)
+	}
+	if q.createRunDeliveryArg.SubscriptionID != sub.ID || q.createRunDeliveryArg.RunEventID != artifact.ID {
+		t.Fatalf("subscribed artifact event was not delivered; delivery arg = %#v", q.createRunDeliveryArg)
 	}
 }
 
@@ -1085,6 +1127,11 @@ type fakeWebhookQueries struct {
 	activeSubs  []db.TaskCallbackSubscription
 	activeErr   error
 	activeCalls int
+	// filterActiveByEventType applies the SQL event-type filter to activeSubs.
+	filterActiveByEventType bool
+	// onActiveQuery runs inside the active-subscription lookup, to interleave
+	// other work with an in-flight query.
+	onActiveQuery func()
 
 	createRunDeliveryArg db.CreateTaskCallbackDeliveryParams
 	createRunDelivery    db.TaskCallbackDelivery
@@ -1231,7 +1278,22 @@ func (q *fakeWebhookQueries) DeleteTaskCallbackSubscriptionForOwner(_ context.Co
 func (q *fakeWebhookQueries) ListActiveTaskCallbackSubscriptionsForEvent(_ context.Context, arg db.ListActiveTaskCallbackSubscriptionsForEventParams) ([]db.TaskCallbackSubscription, error) {
 	q.activeArg = arg
 	q.activeCalls++
-	return q.activeSubs, q.activeErr
+	result, err := q.activeSubs, q.activeErr
+	if q.filterActiveByEventType && err == nil {
+		// Mirror the SQL filter: status = 'active' AND $2 = ANY(event_types).
+		var matched []db.TaskCallbackSubscription
+		for _, sub := range q.activeSubs {
+			if sub.RunID == arg.RunID && sub.Status == "active" && slices.Contains(sub.EventTypes, arg.EventType) {
+				matched = append(matched, sub)
+			}
+		}
+		result = matched
+	}
+	// The result is already read, as a real query's snapshot would be.
+	if q.onActiveQuery != nil {
+		q.onActiveQuery()
+	}
+	return result, err
 }
 
 func (q *fakeWebhookQueries) CreateTaskCallbackDelivery(_ context.Context, arg db.CreateTaskCallbackDeliveryParams) (db.TaskCallbackDelivery, error) {
@@ -1281,4 +1343,119 @@ func (q *fakeWebhookQueries) ResetTaskCallbackSubscriptionFailures(_ context.Con
 
 func (q *fakeWebhookQueries) ListPendingTaskCallbackDeliveries(context.Context) ([]db.TaskCallbackDelivery, error) {
 	return q.pendingRunDeliveries, q.pendingRunErr
+}
+
+func TestWebhookServiceBatchResumeForgetsCachedMisses(t *testing.T) {
+	runID := uuid.New()
+	sub := db.TaskCallbackSubscription{
+		ID:         uuid.New(),
+		RunID:      runID,
+		TargetURL:  "https://client.example/hook",
+		Secret:     "secret",
+		EventTypes: []string{"run.completed"},
+		Status:     "paused",
+	}
+	q := &fakeWebhookQueries{activeSubs: []db.TaskCallbackSubscription{sub}, filterActiveByEventType: true}
+	svc := &Service{queries: q}
+
+	// While paused, the event finds no active subscription and is cached.
+	first := db.RunEvent{ID: uuid.New(), RunID: runID, EventType: "run.completed", Sequence: 1, Payload: []byte(`{}`), CreatedAt: time.Now()}
+	if err := svc.EnqueueRunEvent(context.Background(), first); err != nil {
+		t.Fatalf("paused EnqueueRunEvent error = %v", err)
+	}
+
+	resumed := sub
+	resumed.Status = "active"
+	q.activeSubs = []db.TaskCallbackSubscription{resumed}
+	q.batchSubs = []db.TaskCallbackSubscription{resumed}
+	if _, err := svc.BatchManageTaskCallbackSubscriptions(context.Background(), uuid.New(), &BatchTaskCallbackSubscriptionsRequest{
+		SubscriptionIDs: []string{sub.ID.String()},
+		Action:          "resume",
+	}); err != nil {
+		t.Fatalf("batch resume error = %v", err)
+	}
+
+	second := db.RunEvent{ID: uuid.New(), RunID: runID, EventType: "run.completed", Sequence: 2, Payload: []byte(`{}`), CreatedAt: time.Now()}
+	if err := svc.EnqueueRunEvent(context.Background(), second); err != nil {
+		t.Fatalf("resumed EnqueueRunEvent error = %v", err)
+	}
+	if q.createRunDeliveryArg.SubscriptionID != sub.ID || q.createRunDeliveryArg.RunEventID != second.ID {
+		t.Fatalf("event after batch resume was not delivered; delivery arg = %#v", q.createRunDeliveryArg)
+	}
+}
+
+func TestWebhookServiceNoSubscriptionCacheIsBounded(t *testing.T) {
+	svc := &Service{}
+	runID := uuid.New()
+	for i := 0; i < taskCallbackMaxCachedMissesPerRun+10; i++ {
+		svc.rememberNoTaskCallbackSubscription(runID, fmt.Sprintf("custom.event_%d", i), 0)
+	}
+	if got := len(svc.taskCallbackRunCache[runID]); got != taskCallbackMaxCachedMissesPerRun {
+		t.Fatalf("cached misses for one Run = %d, want %d", got, taskCallbackMaxCachedMissesPerRun)
+	}
+
+	for i := 0; i < taskCallbackMaxCachedRuns+10; i++ {
+		svc.rememberNoTaskCallbackSubscription(uuid.New(), "run.started", 0)
+	}
+	if got := len(svc.taskCallbackRunCache); got != taskCallbackMaxCachedRuns {
+		t.Fatalf("cached Runs = %d, want %d", got, taskCallbackMaxCachedRuns)
+	}
+
+	// Expired misses are swept to make room for new Runs.
+	for _, misses := range svc.taskCallbackRunCache {
+		for eventType := range misses {
+			misses[eventType] = time.Now().Add(-time.Second)
+		}
+	}
+	fresh := uuid.New()
+	svc.rememberNoTaskCallbackSubscription(fresh, "run.started", 0)
+	if _, ok := svc.taskCallbackRunCache[fresh]; !ok || len(svc.taskCallbackRunCache) != 1 {
+		t.Fatalf("expired misses were not swept: cached Runs = %d", len(svc.taskCallbackRunCache))
+	}
+	if !svc.taskCallbackEventMayHaveSubscription(fresh, "run.completed", time.Now()) {
+		t.Fatal("a cached miss for one type must not hide another type")
+	}
+}
+
+// A lookup that returned "no subscription" just before a resume cleared the
+// cache must not put that stale miss back.
+func TestWebhookServiceStaleLookupDoesNotRecacheMissAfterResume(t *testing.T) {
+	runID := uuid.New()
+	sub := db.TaskCallbackSubscription{
+		ID:         uuid.New(),
+		RunID:      runID,
+		TargetURL:  "https://client.example/hook",
+		Secret:     "secret",
+		EventTypes: []string{"run.completed"},
+		Status:     "active",
+	}
+	q := &fakeWebhookQueries{filterActiveByEventType: true}
+	svc := &Service{queries: q}
+	q.onActiveQuery = func() {
+		// The resume lands while the first lookup is in flight.
+		q.onActiveQuery = nil
+		q.activeSubs = []db.TaskCallbackSubscription{sub}
+		svc.forgetTaskCallbackRunMisses(runID)
+	}
+
+	first := db.RunEvent{ID: uuid.New(), RunID: runID, EventType: "run.completed", Sequence: 1, Payload: []byte(`{}`), CreatedAt: time.Now()}
+	if err := svc.EnqueueRunEvent(context.Background(), first); err != nil {
+		t.Fatalf("first EnqueueRunEvent error = %v", err)
+	}
+	second := db.RunEvent{ID: uuid.New(), RunID: runID, EventType: "run.completed", Sequence: 2, Payload: []byte(`{}`), CreatedAt: time.Now()}
+	if err := svc.EnqueueRunEvent(context.Background(), second); err != nil {
+		t.Fatalf("second EnqueueRunEvent error = %v", err)
+	}
+	if q.createRunDeliveryArg.SubscriptionID != sub.ID || q.createRunDeliveryArg.RunEventID != second.ID {
+		t.Fatalf("stale miss hid the resumed subscription; delivery arg = %#v", q.createRunDeliveryArg)
+	}
+}
+
+func TestWebhookServiceDoesNotCacheOverlongEventTypes(t *testing.T) {
+	svc := &Service{}
+	runID := uuid.New()
+	svc.rememberNoTaskCallbackSubscription(runID, strings.Repeat("x", taskCallbackMaxCachedEventTypeLen+1), 0)
+	if len(svc.taskCallbackRunCache) != 0 {
+		t.Fatalf("overlong event type was cached: %v", svc.taskCallbackRunCache)
+	}
 }

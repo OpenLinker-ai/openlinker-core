@@ -40,6 +40,12 @@ const (
 	responseBodyMaxLen = 1024
 
 	taskCallbackNoSubscriptionCacheTTL = 10 * time.Second
+	// Bounds on the per-replica "no subscription" cache. Past either bound
+	// misses are simply not cached and the next event queries again.
+	taskCallbackMaxCachedRuns         = 4096
+	taskCallbackMaxCachedMissesPerRun = 32
+	// Event types are open-ended strings; longer ones are not cached.
+	taskCallbackMaxCachedEventTypeLen = 128
 
 	// errorMessageMaxLen 错误信息截断长度。
 	errorMessageMaxLen = 500
@@ -105,7 +111,10 @@ type Service struct {
 	httpClient             *http.Client
 	allowLocalHTTP         bool
 	taskCallbackRunCacheMu sync.Mutex
-	taskCallbackRunCache   map[uuid.UUID]taskCallbackRunCacheEntry
+	taskCallbackRunCache   map[uuid.UUID]map[string]time.Time // Run → event type → cached miss expiry
+	// taskCallbackCacheGeneration increases whenever cached misses are
+	// invalidated, so a lookup that raced the invalidation cannot re-cache.
+	taskCallbackCacheGeneration uint64
 }
 
 type webhookEffectQueries interface {
@@ -126,11 +135,6 @@ type webhookEffectQueries interface {
 	MarkTaskCallbackEffectDeliveryRetry(context.Context, db.MarkTaskCallbackEffectDeliveryRetryParams) (int64, error)
 	MarkTaskCallbackEffectDeliveryFailed(context.Context, db.MarkTaskCallbackEffectDeliveryFailedParams) (int64, error)
 	ResetTaskCallbackEffectDelivery(context.Context, uuid.UUID) (int64, error)
-}
-
-type taskCallbackRunCacheEntry struct {
-	mayHaveSubscription bool
-	expiresAt           time.Time
 }
 
 type webhookQueries interface {
@@ -521,7 +525,7 @@ func (s *Service) CreateTaskCallbackSubscription(ctx context.Context, runID, use
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("webhook.CreateTaskCallbackSubscription: insert")
 		return nil, httpx.Internal("创建 task callback 失败")
 	}
-	s.rememberTaskCallbackRun(runID, true)
+	s.forgetTaskCallbackRunMisses(runID)
 
 	// If matching events already exist, enqueue the latest one immediately so late subscribers can catch up.
 	if event, err := s.queries.GetLatestRunEventForTypes(ctx, db.GetLatestRunEventForTypesParams{
@@ -554,7 +558,7 @@ func (s *Service) ListTaskCallbackSubscriptions(ctx context.Context, runID, user
 	items := make([]TaskCallbackSubscriptionResponse, 0, len(rows))
 	for _, row := range rows {
 		if row.Status == "active" {
-			s.rememberTaskCallbackRun(row.RunID, true)
+			s.forgetTaskCallbackRunMisses(row.RunID)
 		}
 		items = append(items, taskCallbackSubscriptionToResponse(row))
 	}
@@ -603,6 +607,9 @@ func (s *Service) ListTaskCallbackSubscriptionsForOwner(ctx context.Context, use
 	}
 	items := make([]TaskCallbackSubscriptionResponse, 0, len(rows))
 	for _, row := range rows {
+		if row.Status == "active" {
+			s.forgetTaskCallbackRunMisses(row.RunID)
+		}
 		items = append(items, taskCallbackSubscriptionToResponse(row))
 	}
 	return items, nil
@@ -631,6 +638,9 @@ func (s *Service) BatchManageTaskCallbackSubscriptions(ctx context.Context, user
 	}
 	items := make([]TaskCallbackSubscriptionResponse, 0, len(rows))
 	for _, row := range rows {
+		if row.Status == "active" {
+			s.forgetTaskCallbackRunMisses(row.RunID)
+		}
 		items = append(items, taskCallbackSubscriptionToResponse(row))
 	}
 	return &BatchTaskCallbackSubscriptionsResponse{
@@ -664,7 +674,7 @@ func (s *Service) UpdateTaskCallbackSubscriptionStatus(ctx context.Context, runI
 	}
 	resp := taskCallbackSubscriptionToResponse(sub)
 	if sub.Status == "active" {
-		s.rememberTaskCallbackRun(sub.RunID, true)
+		s.forgetTaskCallbackRunMisses(sub.RunID)
 	}
 	return &resp, nil
 }
@@ -691,9 +701,10 @@ func (s *Service) DeleteTaskCallbackSubscription(ctx context.Context, runID, sub
 
 // EnqueueRunEvent creates deliveries for all subscriptions interested in this run_event.
 func (s *Service) EnqueueRunEvent(ctx context.Context, event db.RunEvent) error {
-	if !s.taskCallbackRunMayHaveSubscription(event.RunID, time.Now()) {
+	if !s.taskCallbackEventMayHaveSubscription(event.RunID, event.EventType, time.Now()) {
 		return nil
 	}
+	generation := s.taskCallbackMissGeneration()
 	subs, err := s.queries.ListActiveTaskCallbackSubscriptionsForEvent(ctx, db.ListActiveTaskCallbackSubscriptionsForEventParams{
 		RunID:     event.RunID,
 		EventType: event.EventType,
@@ -702,10 +713,9 @@ func (s *Service) EnqueueRunEvent(ctx context.Context, event db.RunEvent) error 
 		return fmt.Errorf("list task callback subscriptions: %w", err)
 	}
 	if len(subs) == 0 {
-		s.rememberTaskCallbackRun(event.RunID, false)
+		s.rememberNoTaskCallbackSubscription(event.RunID, event.EventType, generation)
 		return nil
 	}
-	s.rememberTaskCallbackRun(event.RunID, true)
 	for _, sub := range subs {
 		if err := s.enqueueTaskCallbackDelivery(ctx, sub, event); err != nil {
 			log.Error().Err(err).Str("subscription_id", sub.ID.String()).Str("event_id", event.ID.String()).
@@ -720,6 +730,7 @@ func (s *Service) EnqueueRunEvent(ctx context.Context, event db.RunEvent) error 
 // this path so it cannot be marked succeeded until all matching callback
 // delivery rows exist durably.
 func (s *Service) EnqueueRunEventDurable(ctx context.Context, event db.RunEvent) error {
+	generation := s.taskCallbackMissGeneration()
 	subs, err := s.queries.ListActiveTaskCallbackSubscriptionsForEvent(ctx, db.ListActiveTaskCallbackSubscriptionsForEventParams{
 		RunID:     event.RunID,
 		EventType: event.EventType,
@@ -728,10 +739,9 @@ func (s *Service) EnqueueRunEventDurable(ctx context.Context, event db.RunEvent)
 		return fmt.Errorf("list task callback subscriptions: %w", err)
 	}
 	if len(subs) == 0 {
-		s.rememberTaskCallbackRun(event.RunID, false)
+		s.rememberNoTaskCallbackSubscription(event.RunID, event.EventType, generation)
 		return nil
 	}
-	s.rememberTaskCallbackRun(event.RunID, true)
 	var enqueueErr error
 	for _, sub := range subs {
 		if err := s.enqueueTaskCallbackDelivery(ctx, sub, event); err != nil {
@@ -743,37 +753,114 @@ func (s *Service) EnqueueRunEventDurable(ctx context.Context, event db.RunEvent)
 	return enqueueErr
 }
 
-func (s *Service) taskCallbackRunMayHaveSubscription(runID uuid.UUID, now time.Time) bool {
+// taskCallbackEventMayHaveSubscription reports whether this event type on
+// this Run may have an active subscription. Only a recent miss for the same
+// event type is cached: subscriptions filter by event type, so a miss for one
+// type says nothing about the others.
+func (s *Service) taskCallbackEventMayHaveSubscription(runID uuid.UUID, eventType string, now time.Time) bool {
 	if s == nil || runID == uuid.Nil {
 		return false
 	}
 	s.taskCallbackRunCacheMu.Lock()
 	defer s.taskCallbackRunCacheMu.Unlock()
-	entry, ok := s.taskCallbackRunCache[runID]
+	misses, ok := s.taskCallbackRunCache[runID]
 	if !ok {
 		return true
 	}
-	if !entry.mayHaveSubscription && !entry.expiresAt.IsZero() && now.After(entry.expiresAt) {
-		delete(s.taskCallbackRunCache, runID)
+	until, ok := misses[eventType]
+	if !ok {
 		return true
 	}
-	return entry.mayHaveSubscription
+	if now.After(until) {
+		delete(misses, eventType)
+		if len(misses) == 0 {
+			delete(s.taskCallbackRunCache, runID)
+		}
+		return true
+	}
+	return false
 }
 
-func (s *Service) rememberTaskCallbackRun(runID uuid.UUID, mayHaveSubscription bool) {
+// taskCallbackMissGeneration returns the current invalidation generation. A
+// miss may only be cached if no subscription was created or reactivated on
+// this replica since the generation was read before the lookup.
+func (s *Service) taskCallbackMissGeneration() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.taskCallbackRunCacheMu.Lock()
+	defer s.taskCallbackRunCacheMu.Unlock()
+	return s.taskCallbackCacheGeneration
+}
+
+// rememberNoTaskCallbackSubscription caches that this Run had no active
+// subscription for this event type, as seen by a lookup that started at
+// generation.
+func (s *Service) rememberNoTaskCallbackSubscription(runID uuid.UUID, eventType string, generation uint64) {
+	if s == nil || runID == uuid.Nil || len(eventType) > taskCallbackMaxCachedEventTypeLen {
+		return
+	}
+	s.taskCallbackRunCacheMu.Lock()
+	defer s.taskCallbackRunCacheMu.Unlock()
+	if generation != s.taskCallbackCacheGeneration {
+		// A subscription changed while the lookup ran; its empty result may
+		// already be stale.
+		return
+	}
+	now := time.Now()
+	if s.taskCallbackRunCache == nil {
+		s.taskCallbackRunCache = map[uuid.UUID]map[string]time.Time{}
+	}
+	misses := s.taskCallbackRunCache[runID]
+	if misses == nil {
+		// Runs whose misses are never looked up again would otherwise stay
+		// forever, so sweep expired entries before admitting another Run.
+		if len(s.taskCallbackRunCache) >= taskCallbackMaxCachedRuns {
+			s.sweepExpiredTaskCallbackMissesLocked(now)
+			if len(s.taskCallbackRunCache) >= taskCallbackMaxCachedRuns {
+				return // Not caching only costs a query.
+			}
+		}
+		misses = map[string]time.Time{}
+		s.taskCallbackRunCache[runID] = misses
+	}
+	if _, cached := misses[eventType]; !cached && len(misses) >= taskCallbackMaxCachedMissesPerRun {
+		// Runtime event types are open-ended, so bound the types kept per Run.
+		for cachedType, until := range misses {
+			if now.After(until) {
+				delete(misses, cachedType)
+			}
+		}
+		if len(misses) >= taskCallbackMaxCachedMissesPerRun {
+			return
+		}
+	}
+	misses[eventType] = now.Add(taskCallbackNoSubscriptionCacheTTL)
+}
+
+func (s *Service) sweepExpiredTaskCallbackMissesLocked(now time.Time) {
+	for runID, misses := range s.taskCallbackRunCache {
+		for eventType, until := range misses {
+			if now.After(until) {
+				delete(misses, eventType)
+			}
+		}
+		if len(misses) == 0 {
+			delete(s.taskCallbackRunCache, runID)
+		}
+	}
+}
+
+// forgetTaskCallbackRunMisses drops every cached miss for the Run after one of
+// its subscriptions is created or reactivated on this replica.
+func (s *Service) forgetTaskCallbackRunMisses(runID uuid.UUID) {
 	if s == nil || runID == uuid.Nil {
 		return
 	}
 	s.taskCallbackRunCacheMu.Lock()
 	defer s.taskCallbackRunCacheMu.Unlock()
-	if s.taskCallbackRunCache == nil {
-		s.taskCallbackRunCache = map[uuid.UUID]taskCallbackRunCacheEntry{}
-	}
-	entry := taskCallbackRunCacheEntry{mayHaveSubscription: mayHaveSubscription}
-	if !mayHaveSubscription {
-		entry.expiresAt = time.Now().Add(taskCallbackNoSubscriptionCacheTTL)
-	}
-	s.taskCallbackRunCache[runID] = entry
+	s.taskCallbackCacheGeneration++
+	delete(s.taskCallbackRunCache, runID)
 }
 
 func (s *Service) enqueueTaskCallbackDelivery(ctx context.Context, sub db.TaskCallbackSubscription, event db.RunEvent) error {
