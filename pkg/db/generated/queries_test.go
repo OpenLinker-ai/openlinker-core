@@ -228,9 +228,10 @@ func TestAgentQueriesScanRowsAndAffectedRows(t *testing.T) {
 	webhookURL := "https://example.com/hook"
 	toolName := "search"
 	agentValues := agentRow(agentID, creatorID, now, &authHeader, &webhookURL, &toolName)
-	rows := &fakeRows{rows: [][]any{agentValues}}
+	scannedValues := withAgentTransport(agentValues)
+	rows := &fakeRows{rows: [][]any{scannedValues}}
 	dbtx := &fakeDBTX{
-		row:       fakeRow{values: agentValues},
+		row:       fakeRow{values: scannedValues},
 		queryRows: rows,
 		execTag:   pgconn.NewCommandTag("UPDATE 3"),
 	}
@@ -253,10 +254,10 @@ func TestAgentQueriesScanRowsAndAffectedRows(t *testing.T) {
 		t.Fatalf("CreateAgent error = %v", err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "CreateAgent")
-	if created.ID != agentID || created.EndpointAuthHeader == nil || *created.MCPToolName != toolName || created.WebhookURL == nil {
+	if created.ID != agentID || created.EndpointAuthHeader == nil || *created.MCPToolName != toolName || created.WebhookURL == nil || created.MCPTransport != "streamable_http" {
 		t.Fatalf("CreateAgent scan = %#v", created)
 	}
-	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{creatorID, "agent-one", "Agent One", "does work", "https://example.com/agent", &authHeader, int32(12), []string{"data"}, "public", "mcp_server", &toolName}) {
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{creatorID, "agent-one", "Agent One", "does work", "https://example.com/agent", &authHeader, int32(12), []string{"data"}, "public", "mcp_server", &toolName, "", (*string)(nil)}) {
 		t.Fatalf("CreateAgent args = %#v", dbtx.queryRowArgs)
 	}
 
@@ -308,7 +309,7 @@ func TestAgentQueriesScanRowsAndAffectedRows(t *testing.T) {
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "CountAdminAgents")
 
-	dbtx.row = fakeRow{values: agentValues}
+	dbtx.row = fakeRow{values: scannedValues}
 	moderated, err := q.UpdateAdminAgentModeration(context.Background(), UpdateAdminAgentModerationParams{
 		ID:                  agentID,
 		LifecycleStatus:     "active",
@@ -3293,7 +3294,7 @@ func TestAvailabilityMetricApprovalRequirementQueriesScanRowsAndArgs(t *testing.
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "MarkAgentAvailabilityFailure")
 
-	dueRows := &fakeRows{rows: [][]any{agentRow(agentID, creatorID, now, nil, nil, nil)}}
+	dueRows := &fakeRows{rows: [][]any{withAgentTransport(agentRow(agentID, creatorID, now, nil, nil, nil))}}
 	dbtx.queryRows = dueRows
 	dueAgents, err := q.ListAgentsDueAvailabilityCheck(context.Background(), ListAgentsDueAvailabilityCheckParams{StaleSeconds: 300, Limit: 20})
 	if err != nil {
@@ -3979,7 +3980,7 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "AgentsCount")
 
-	dbtx.row = fakeRow{values: agentValues}
+	dbtx.row = fakeRow{values: withAgentTransport(agentValues)}
 	updatedAgent, err := q.UpdateAgentDraft(context.Background(), UpdateAgentDraftParams{
 		ID:                 agentID,
 		Name:               "Agent One",
@@ -4006,20 +4007,20 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 	}
 	requireSQLName(t, dbtx.execSQL, "SetAgentVisibilityForOwner")
 
-	dbtx.row = fakeRow{values: agentValues}
+	dbtx.row = fakeRow{values: withAgentTransport(agentValues)}
 	if got, err := q.GetAgentByIDForOwner(context.Background(), GetAgentByIDForOwnerParams{ID: agentID, CreatorID: creatorID}); err != nil || got.ID != agentID {
 		t.Fatalf("GetAgentByIDForOwner = %#v, %v", got, err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "GetAgentByIDForOwner")
 
-	dbtx.row = fakeRow{values: agentValues}
+	dbtx.row = fakeRow{values: withAgentTransport(agentValues)}
 	if got, err := q.GetAgentByID(context.Background(), agentID); err != nil || got.CreatorID != creatorID {
 		t.Fatalf("GetAgentByID = %#v, %v", got, err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "GetAgentByID")
 
 	capabilityVersion := int32(3)
-	dbtx.row = fakeRow{values: append(append([]any{}, agentValues...), []byte(`{"type":"object"}`), &capabilityVersion)}
+	dbtx.row = fakeRow{values: append(withAgentTransport(agentValues), []byte(`{"type":"object"}`), &capabilityVersion)}
 	target, err := q.GetAgentRunTargetByID(context.Background(), agentID)
 	if err != nil || target.Agent.ID != agentID || target.CapabilityVersion == nil || *target.CapabilityVersion != capabilityVersion {
 		t.Fatalf("GetAgentRunTargetByID = %#v, %v", target, err)
@@ -4248,6 +4249,12 @@ func agentRow(id, creatorID uuid.UUID, now time.Time, authHeader, webhookURL, to
 		now,
 		now.Add(time.Minute),
 	}
+}
+
+// withAgentTransport appends the 102 columns that scanAgent and
+// GetAgentRunTargetByID read after updated_at.
+func withAgentTransport(values []any) []any {
+	return append(append([]any{}, values...), "streamable_http", (*string)(nil))
 }
 
 func adminAgentRow(values []any, creatorEmail, creatorName string, now time.Time) []any {

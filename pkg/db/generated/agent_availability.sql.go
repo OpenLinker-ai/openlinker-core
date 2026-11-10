@@ -114,7 +114,8 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        a.lifecycle_status, a.visibility, a.certification_status,
        a.rejection_reason, a.certified_at,
        a.total_calls, a.total_revenue_cents,
-       a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at
+       a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
+       a.mcp_transport, a.endpoint_auth_header_name
 FROM agents a
 LEFT JOIN agent_availability_snapshots s ON s.agent_id = a.id
 WHERE a.lifecycle_status = 'active'

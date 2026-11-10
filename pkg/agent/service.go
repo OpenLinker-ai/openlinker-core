@@ -123,6 +123,11 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 	if err != nil {
 		return nil, err
 	}
+	createHeaderName := req.EndpointAuthHeaderName
+	connection, err = connection.withMCPCallShape(req.MCPTransport, &createHeaderName)
+	if err != nil {
+		return nil, err
+	}
 
 	avail, err := s.queries.CheckSlugAvailable(ctx, slug)
 	if err != nil {
@@ -149,17 +154,19 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 		qtx := s.queries.WithTx(tx)
 		var createErr error
 		created, createErr = qtx.CreateAgent(ctx, db.CreateAgentParams{
-			CreatorID:          creatorID,
-			Slug:               slug,
-			Name:               strings.TrimSpace(req.Name),
-			Description:        strings.TrimSpace(req.Description),
-			EndpointURL:        connection.EndpointURL,
-			EndpointAuthHeader: authHeader,
-			PricePerCallCents:  req.PricePerCallCents,
-			Tags:               normalizeTagsForInsert(req.Tags),
-			Visibility:         visibility,
-			ConnectionMode:     connection.Mode,
-			MCPToolName:        connection.MCPToolName,
+			CreatorID:              creatorID,
+			Slug:                   slug,
+			Name:                   strings.TrimSpace(req.Name),
+			Description:            strings.TrimSpace(req.Description),
+			EndpointURL:            connection.EndpointURL,
+			EndpointAuthHeader:     authHeader,
+			PricePerCallCents:      req.PricePerCallCents,
+			Tags:                   normalizeTagsForInsert(req.Tags),
+			Visibility:             visibility,
+			ConnectionMode:         connection.Mode,
+			MCPToolName:            connection.MCPToolName,
+			MCPTransport:           connection.MCPTransport,
+			EndpointAuthHeaderName: connection.EndpointAuthHeaderName,
 		})
 		if createErr != nil {
 			return createErr
@@ -245,6 +252,22 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 		if err != nil {
 			return err
 		}
+		// Omitted transport / header name keep the stored values while the
+		// Agent stays mcp_server; leaving mcp_server resets them.
+		mcpTransport := req.MCPTransport
+		headerName := req.EndpointAuthHeaderName
+		if existing.ConnectionMode == ConnectionModeMCPServer && connection.Mode == ConnectionModeMCPServer {
+			if mcpTransport == "" {
+				mcpTransport = existing.MCPTransport
+			}
+			if headerName == nil {
+				headerName = existing.EndpointAuthHeaderName
+			}
+		}
+		connection, err = connection.withMCPCallShape(mcpTransport, headerName)
+		if err != nil {
+			return err
+		}
 		authHeader := nextEndpointAuthHeader(existing.EndpointAuthHeader, req.EndpointAuthHeader, req.ClearEndpointAuth)
 		visibility := strings.TrimSpace(req.Visibility)
 		if visibility == "" {
@@ -255,17 +278,19 @@ func (s *Service) UpdateAgent(ctx context.Context, agentID, creatorID uuid.UUID,
 		}
 		invalidation := evidenceInvalidationForUpdate(&existing, connection, authHeader)
 		updated, err = qtx.UpdateAgentDraft(ctx, db.UpdateAgentDraftParams{
-			ID:                 agentID,
-			Name:               strings.TrimSpace(req.Name),
-			Description:        strings.TrimSpace(req.Description),
-			EndpointURL:        connection.EndpointURL,
-			EndpointAuthHeader: authHeader,
-			PricePerCallCents:  req.PricePerCallCents,
-			Tags:               normalizeTagsForInsert(req.Tags),
-			CreatorID:          creatorID,
-			Visibility:         visibility,
-			ConnectionMode:     connection.Mode,
-			MCPToolName:        connection.MCPToolName,
+			ID:                     agentID,
+			Name:                   strings.TrimSpace(req.Name),
+			Description:            strings.TrimSpace(req.Description),
+			EndpointURL:            connection.EndpointURL,
+			EndpointAuthHeader:     authHeader,
+			PricePerCallCents:      req.PricePerCallCents,
+			Tags:                   normalizeTagsForInsert(req.Tags),
+			CreatorID:              creatorID,
+			Visibility:             visibility,
+			ConnectionMode:         connection.Mode,
+			MCPToolName:            connection.MCPToolName,
+			MCPTransport:           connection.MCPTransport,
+			EndpointAuthHeaderName: connection.EndpointAuthHeaderName,
 		})
 		if err != nil || !invalidation.any() {
 			return err
@@ -1281,6 +1306,12 @@ func toAgentResponse(a *db.Agent) AgentResponse {
 		ConnectionMode:      a.ConnectionMode,
 		MCPToolName:         a.MCPToolName,
 		CreatedAt:           a.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	// Rows from queries that do not select the transport columns leave them
+	// empty and show nothing rather than a guessed default.
+	if a.ConnectionMode == ConnectionModeMCPServer && a.MCPTransport != "" {
+		resp.MCPTransport = a.MCPTransport
+		resp.EndpointAuthHeaderName = a.EndpointAuthHeaderName
 	}
 	if a.CertifiedAt != nil {
 		ts := a.CertifiedAt.UTC().Format(time.RFC3339)

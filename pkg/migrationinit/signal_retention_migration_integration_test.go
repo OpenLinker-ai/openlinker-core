@@ -12,14 +12,16 @@ import (
 )
 
 // 101 is index-only: rolling it back must restore the exact 100 fingerprint,
-// and reapplying it must converge on the current one.
+// and reapplying it must converge on the current one. The rollback starts
+// from exact 101: 102 adds columns, and a column re-added after a rollback
+// gets a new attribute number and therefore a different catalog fingerprint.
 func TestRuntimeSignalRetentionIndexRollbackAndReapply(t *testing.T) {
 	base := os.Getenv("TEST_DATABASE_URL")
 	if base == "" {
 		t.Skip("TEST_DATABASE_URL is required")
 	}
 	databaseURL := createMigrationTestDatabase(t, base)
-	migrateTestDatabaseToCurrent(t, databaseURL)
+	migrateTestDatabaseToVersion(t, databaseURL, uint(CoreMCPTransportPredecessorVersion))
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
@@ -28,10 +30,10 @@ func TestRuntimeSignalRetentionIndexRollbackAndReapply(t *testing.T) {
 		t.Fatal(err)
 	}
 	if snapshot.InvalidCoreIndexes != 0 {
-		t.Fatalf("fresh current schema has %d invalid indexes", snapshot.InvalidCoreIndexes)
+		t.Fatalf("fresh 101 schema has %d invalid indexes", snapshot.InvalidCoreIndexes)
 	}
-	if noop, err := snapshot.ValidateCoreUp(); err != nil || !noop {
-		t.Fatalf("current preflight: noop=%t err=%v", noop, err)
+	if noop, err := snapshot.ValidateCoreUp(); err != nil || noop {
+		t.Fatalf("101 predecessor preflight: noop=%t err=%v", noop, err)
 	}
 
 	conn, err := pgx.Connect(ctx, databaseURL)
@@ -54,7 +56,7 @@ func TestRuntimeSignalRetentionIndexRollbackAndReapply(t *testing.T) {
 		t.Fatalf("100 predecessor preflight: noop=%t err=%v", noop, err)
 	}
 	if noop, err := snapshot.ValidateCloudUp(); err == nil || noop {
-		t.Fatalf("Cloud must wait for Core 101: noop=%t err=%v", noop, err)
+		t.Fatalf("Cloud must wait for the current Core: noop=%t err=%v", noop, err)
 	}
 
 	migrateTestDatabaseToCurrent(t, databaseURL)
@@ -85,25 +87,8 @@ func TestRuntimeSignalRetentionIndexRejectsInterruptedBuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close(context.Background())
 
-	if _, err := conn.Exec(ctx, `SET allow_system_table_mods = on`); err != nil {
-		t.Fatal(err)
-	}
-	result, err := conn.Exec(ctx, `
-UPDATE pg_catalog.pg_index
-SET indisvalid = false
-WHERE indexrelid = 'public.idx_runtime_signal_outbox_published_retention'::regclass
-`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.RowsAffected() != 1 {
-		t.Fatalf("invalidated index rows = %d, want 1", result.RowsAffected())
-	}
-	if _, err := conn.Exec(ctx, `SET allow_system_table_mods = off`); err != nil {
-		t.Fatal(err)
-	}
+	invalidateRetentionIndex(t, ctx, conn)
 
 	snapshot, err := Inspect(ctx, databaseURL)
 	if err != nil {
@@ -128,7 +113,18 @@ WHERE indexrelid = 'public.idx_runtime_signal_outbox_published_retention'::regcl
 	}
 
 	// Forcing the version back without dropping the leftover index must not
-	// pass as a clean 100 predecessor; a replay would fail on the name.
+	// pass as a clean 100 predecessor; a replay would fail on the name. This
+	// recovery runs on a separate exact-101 database: rolling 102 back and
+	// reapplying it would not reproduce the measured 102 fingerprint.
+	conn.Close(ctx)
+	databaseURL = createMigrationTestDatabase(t, base)
+	migrateTestDatabaseToVersion(t, databaseURL, uint(CoreMCPTransportPredecessorVersion))
+	conn, err = pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(context.Background())
+	invalidateRetentionIndex(t, ctx, conn)
 	if _, err := conn.Exec(ctx, `UPDATE schema_migrations SET version=100,dirty=false`); err != nil {
 		t.Fatal(err)
 	}
@@ -158,5 +154,28 @@ WHERE indexrelid = 'public.idx_runtime_signal_outbox_published_retention'::regcl
 	}
 	if current, err := snapshot.ValidateCoreUp(); err != nil || !current {
 		t.Fatalf("recovered migration state current=%t err=%v", current, err)
+	}
+}
+
+// invalidateRetentionIndex reproduces what an interrupted CREATE INDEX
+// CONCURRENTLY leaves behind.
+func invalidateRetentionIndex(t *testing.T, ctx context.Context, conn *pgx.Conn) {
+	t.Helper()
+	if _, err := conn.Exec(ctx, `SET allow_system_table_mods = on`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := conn.Exec(ctx, `
+UPDATE pg_catalog.pg_index
+SET indisvalid = false
+WHERE indexrelid = 'public.idx_runtime_signal_outbox_published_retention'::regclass
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowsAffected() != 1 {
+		t.Fatalf("invalidated index rows = %d, want 1", result.RowsAffected())
+	}
+	if _, err := conn.Exec(ctx, `SET allow_system_table_mods = off`); err != nil {
+		t.Fatal(err)
 	}
 }

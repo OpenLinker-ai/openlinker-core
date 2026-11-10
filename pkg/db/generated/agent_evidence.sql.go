@@ -21,7 +21,11 @@ WHERE id = $1
   AND connection_mode = $2
   AND endpoint_url = $3
   AND mcp_tool_name IS NOT DISTINCT FROM $4::text
-  AND (NOT $5::boolean OR endpoint_auth_header IS NOT DISTINCT FROM $6::text)
+  AND (NOT $5::boolean OR (
+      endpoint_auth_header IS NOT DISTINCT FROM $6::text
+      AND mcp_transport = COALESCE(NULLIF($7::text, ''), 'legacy_json')
+      AND endpoint_auth_header_name IS NOT DISTINCT FROM $8::text
+  ))
 FOR SHARE`
 
 type LockAgentEvidenceTargetParams struct {
@@ -31,6 +35,9 @@ type LockAgentEvidenceTargetParams struct {
 	MCPToolName        *string   `db:"mcp_tool_name" json:"mcp_tool_name"`
 	CompareAuthHeader  bool      `db:"compare_auth_header" json:"compare_auth_header"`
 	EndpointAuthHeader *string   `db:"endpoint_auth_header" json:"endpoint_auth_header"`
+	// MCPTransport "" compares as legacy_json, the column default.
+	MCPTransport           string  `db:"mcp_transport" json:"mcp_transport"`
+	EndpointAuthHeaderName *string `db:"endpoint_auth_header_name" json:"endpoint_auth_header_name"`
 }
 
 // LockAgentEvidenceTarget returns pgx.ErrNoRows when the Agent no longer
@@ -44,6 +51,8 @@ func (q *Queries) LockAgentEvidenceTarget(ctx context.Context, arg LockAgentEvid
 		arg.MCPToolName,
 		arg.CompareAuthHeader,
 		arg.EndpointAuthHeader,
+		arg.MCPTransport,
+		arg.EndpointAuthHeaderName,
 	)
 	var id uuid.UUID
 	err := row.Scan(&id)
@@ -75,15 +84,21 @@ type AgentEvidenceTarget struct {
 	EndpointURL        string
 	MCPToolName        *string
 	EndpointAuthHeader *string
+	// MCPTransport and EndpointAuthHeaderName decide how the credential is
+	// presented, so they are compared together with it.
+	MCPTransport           string
+	EndpointAuthHeaderName *string
 }
 
 // AgentEvidenceTargetOf captures the connection target of an Agent row.
 func AgentEvidenceTargetOf(agent Agent) AgentEvidenceTarget {
 	return AgentEvidenceTarget{
-		ConnectionMode:     agent.ConnectionMode,
-		EndpointURL:        agent.EndpointURL,
-		MCPToolName:        agent.MCPToolName,
-		EndpointAuthHeader: agent.EndpointAuthHeader,
+		ConnectionMode:         agent.ConnectionMode,
+		EndpointURL:            agent.EndpointURL,
+		MCPToolName:            agent.MCPToolName,
+		EndpointAuthHeader:     agent.EndpointAuthHeader,
+		MCPTransport:           agent.MCPTransport,
+		EndpointAuthHeaderName: agent.EndpointAuthHeaderName,
 	}
 }
 
@@ -92,7 +107,7 @@ func AgentEvidenceTargetOf(agent Agent) AgentEvidenceTarget {
 // Agent's target is its own Runtime queue, so only the connection mode is
 // compared. For direct_http and mcp_server the endpoint and MCP tool are
 // compared exactly, and compareCredential also requires the same
-// endpoint_auth_header. It returns ErrAgentEvidenceTargetChanged otherwise.
+// endpoint_auth_header, endpoint_auth_header_name and mcp_transport. It returns ErrAgentEvidenceTargetChanged otherwise.
 func (q *Queries) LockAgentEvidenceTargetUnchanged(
 	ctx context.Context,
 	agentID uuid.UUID,
@@ -104,12 +119,14 @@ func (q *Queries) LockAgentEvidenceTargetUnchanged(
 		_, err = q.LockAgentConnectionModeForEvidence(ctx, agentID, "runtime")
 	} else {
 		_, err = q.LockAgentEvidenceTarget(ctx, LockAgentEvidenceTargetParams{
-			ID:                 agentID,
-			ConnectionMode:     target.ConnectionMode,
-			EndpointURL:        target.EndpointURL,
-			MCPToolName:        target.MCPToolName,
-			CompareAuthHeader:  compareCredential,
-			EndpointAuthHeader: target.EndpointAuthHeader,
+			ID:                     agentID,
+			ConnectionMode:         target.ConnectionMode,
+			EndpointURL:            target.EndpointURL,
+			MCPToolName:            target.MCPToolName,
+			CompareAuthHeader:      compareCredential,
+			EndpointAuthHeader:     target.EndpointAuthHeader,
+			MCPTransport:           target.MCPTransport,
+			EndpointAuthHeaderName: target.EndpointAuthHeaderName,
 		})
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
