@@ -1,7 +1,7 @@
 # core-api 独立镜像(开源版,不含 wallet/payment/provider-specific LLM client 等)。
 # build context = openlinker-core/
 
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS builder
 WORKDIR /app
 RUN apk add --no-cache git ca-certificates
 ARG TARGETOS
@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-w -s" -o api ./cmd/api && \
     CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-w -s" -o runtime-cutover ./cmd/runtime-cutover
 
-FROM alpine:3.19
+FROM alpine:3.23
 ARG OPENLINKER_GIT_SHA=unknown
 ARG OPENLINKER_RELEASE_ID=local
 ARG OPENLINKER_DEPLOYED_AT=

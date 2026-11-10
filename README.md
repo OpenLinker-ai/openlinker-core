@@ -85,7 +85,7 @@ flowchart LR
 
 Prerequisites:
 
-- Go 1.25 or newer
+- Go 1.26 or newer (builds use the toolchain pinned in `go.mod`)
 - Docker or a local Postgres and Redis installation
 - `make`
 
