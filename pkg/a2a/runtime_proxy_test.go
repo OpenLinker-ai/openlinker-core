@@ -17,12 +17,21 @@ import (
 )
 
 type runtimeProxyIdentityResolverStub struct {
-	agent db.Agent
-	err   error
+	agent   db.Agent
+	err     error
+	userErr error
+	checked *[]uuid.UUID
 }
 
 func (s runtimeProxyIdentityResolverStub) GetAgentByID(context.Context, uuid.UUID) (db.Agent, error) {
 	return s.agent, s.err
+}
+
+func (s runtimeProxyIdentityResolverStub) EnsureUserEnabled(_ context.Context, userID uuid.UUID) error {
+	if s.checked != nil {
+		*s.checked = append(*s.checked, userID)
+	}
+	return s.userErr
 }
 
 func TestAgentRuntimeProxyMiddlewareDerivesCreatorAndSlug(t *testing.T) {
@@ -77,6 +86,52 @@ func TestAgentRuntimeProxyMiddlewareRejectsInactiveAgent(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+func TestAgentRuntimeProxyMiddlewareRejectsCreatorAccountProblems(t *testing.T) {
+	// Bodies must match the exact envelopes SDK A2A proxies recognize.
+	for _, tc := range []struct {
+		name     string
+		userErr  error
+		wantCode int
+		wantBody string
+	}{
+		{name: "disabled account", userErr: httpx.Unauthorized("账号已禁用"), wantCode: http.StatusForbidden,
+			wantBody: `{"error":{"code":"FORBIDDEN","message":"Runtime permission denied"}}`},
+		{name: "deleted account", userErr: httpx.Unauthorized("用户不存在或会话已失效"), wantCode: http.StatusForbidden,
+			wantBody: `{"error":{"code":"FORBIDDEN","message":"Runtime permission denied"}}`},
+		{name: "status lookup failure", userErr: httpx.Internal("认证状态校验失败"), wantCode: http.StatusServiceUnavailable,
+			wantBody: `{"error":{"code":"SERVICE_UNAVAILABLE","message":"Agent Runtime A2A proxy is unavailable"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agentID := uuid.New()
+			creatorID := uuid.New()
+			var checked []uuid.UUID
+			e := echo.New()
+			rec := httptest.NewRecorder()
+			c := e.NewContext(httptest.NewRequest(http.MethodPost, "/", nil), rec)
+			authenticator := runtimeProxyAuthenticatorFunc(func(echo.Context) (runtime.AuthenticatedRuntimePrincipal, *runtime.RuntimeTransportError) {
+				return runtime.AuthenticatedRuntimePrincipal{AgentID: agentID, CredentialID: uuid.New()}, nil
+			})
+			middleware := AgentRuntimeProxyMiddleware(authenticator, runtimeProxyIdentityResolverStub{
+				agent: db.Agent{
+					ID: agentID, CreatorID: creatorID, Slug: "runtime-agent", LifecycleStatus: "active",
+				},
+				userErr: tc.userErr,
+				checked: &checked,
+			})
+
+			err := middleware(func(echo.Context) error {
+				t.Fatal("next must not be called")
+				return nil
+			})(c)
+
+			require.NoError(t, err)
+			require.Equal(t, tc.wantCode, rec.Code)
+			require.JSONEq(t, tc.wantBody, rec.Body.String())
+			require.Equal(t, []uuid.UUID{creatorID}, checked)
+		})
+	}
 }
 
 func TestRuntimeProxyTargetPreservesPrivateAgentExecutionWithoutPublicLookup(t *testing.T) {

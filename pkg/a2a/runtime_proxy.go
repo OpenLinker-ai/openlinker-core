@@ -3,6 +3,7 @@ package a2a
 import (
 	"context"
 	"errors"
+	"net/http"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
@@ -23,19 +25,30 @@ type AgentRuntimeRequestAuthenticator interface {
 // Agent record. A compatibility adapter can never nominate the acting user.
 type AgentRuntimeIdentityResolver interface {
 	GetAgentByID(context.Context, uuid.UUID) (db.Agent, error)
+	// EnsureUserEnabled applies the same account check as JWT and User Token
+	// requests to the creator the proxy is about to act as.
+	EnsureUserEnabled(context.Context, uuid.UUID) error
 }
 
 type agentRuntimeProxyTargetContextKey struct{}
 
 type SQLAgentRuntimeIdentityResolver struct {
 	queries *db.Queries
+	users   *auth.DBUserStatusChecker
 }
 
 func NewSQLAgentRuntimeIdentityResolver(pool *pgxpool.Pool) *SQLAgentRuntimeIdentityResolver {
 	if pool == nil {
 		return &SQLAgentRuntimeIdentityResolver{}
 	}
-	return &SQLAgentRuntimeIdentityResolver{queries: db.New(pool)}
+	return &SQLAgentRuntimeIdentityResolver{queries: db.New(pool), users: auth.NewDBUserStatusChecker(pool)}
+}
+
+func (r *SQLAgentRuntimeIdentityResolver) EnsureUserEnabled(ctx context.Context, userID uuid.UUID) error {
+	if r == nil || r.users == nil {
+		return errors.New("Agent Runtime user status checker is not configured")
+	}
+	return r.users.EnsureUserEnabled(ctx, userID)
 }
 
 func (r *SQLAgentRuntimeIdentityResolver) GetAgentByID(ctx context.Context, agentID uuid.UUID) (db.Agent, error) {
@@ -64,6 +77,18 @@ func AgentRuntimeProxyMiddleware(
 			agentRecord, err := resolver.GetAgentByID(c.Request().Context(), principal.AgentID)
 			if err != nil || agentRecord.ID != principal.AgentID || agentRecord.CreatorID == uuid.Nil ||
 				agentRecord.Slug == "" || agentRecord.LifecycleStatus != "active" {
+				return writeAgentRuntimeProxyError(c, runtime.RuntimeErrorServiceUnavailable)
+			}
+			// The proxy acts as the Agent's creator, so a disabled or deleted
+			// account must stop here as it does for that user's own JWT.
+			if err := resolver.EnsureUserEnabled(c.Request().Context(), agentRecord.CreatorID); err != nil {
+				var httpErr *httpx.HTTPError
+				if errors.As(err, &httpErr) && httpErr.Status == http.StatusUnauthorized {
+					// Use Runtime's canonical permission-denied message: SDK
+					// proxies only recognize that exact 403 envelope.
+					transportErr := runtime.NewRuntimeTransportError(runtime.RuntimeErrorForbidden, "Runtime permission denied")
+					return c.JSON(runtime.RuntimeHTTPStatus(runtime.RuntimeErrorForbidden), transportErr.Envelope())
+				}
 				return writeAgentRuntimeProxyError(c, runtime.RuntimeErrorServiceUnavailable)
 			}
 
