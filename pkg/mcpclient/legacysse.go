@@ -25,7 +25,11 @@ type legacySSEConn struct {
 	pending map[string]chan incoming
 	done    chan struct{}
 	readErr error
-	replies sync.WaitGroup
+	// serverRequests queues requests the server sent on the stream. One
+	// worker answers them, and only after the message URL has been
+	// validated; a full queue drops further requests.
+	serverRequests chan incoming
+	workerDone     chan struct{}
 	// replyCtx bounds replies to server requests to the stream's lifetime.
 	replyCtx context.Context
 }
@@ -58,7 +62,7 @@ func dialLegacySSE(ctx context.Context, cfg Config) (*legacySSEConn, error) {
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		err := statusError("connect", resp, cfg.Limits.MaxEventBytes)
+		err := statusError("connect", resp)
 		drain(resp.Body, cfg.Limits.MaxEventBytes)
 		cancel()
 		return nil, err
@@ -75,6 +79,8 @@ func dialLegacySSE(ctx context.Context, cfg Config) (*legacySSEConn, error) {
 		pending:  map[string]chan incoming{},
 		done:     make(chan struct{}),
 		replyCtx: streamCtx,
+
+		serverRequests: make(chan incoming, maxQueuedServerRequests),
 	}
 	endpoint := make(chan string, 1)
 	go c.readLoop(resp, endpoint)
@@ -107,6 +113,10 @@ func dialLegacySSE(ctx context.Context, cfg Config) (*legacySSEConn, error) {
 		return nil, fmt.Errorf("%w: %v", ErrEndpointRejected, err)
 	}
 	c.messageURL = target.String()
+	// Start answering server requests only now: before this point there is
+	// no validated URL to answer them at.
+	c.workerDone = make(chan struct{})
+	go c.replyWorker()
 	return c, nil
 }
 
@@ -150,10 +160,14 @@ func (c *legacySSEConn) readLoop(resp *http.Response, endpoint chan<- string) {
 func (c *legacySSEConn) dispatch(m incoming) {
 	switch {
 	case m.isResponse():
+		id, isString := stringID(m.ID)
+		if !isString {
+			return
+		}
 		c.mu.Lock()
-		waiter, ok := c.pending[idKey(m.ID)]
+		waiter, ok := c.pending[id]
 		if ok {
-			delete(c.pending, idKey(m.ID))
+			delete(c.pending, id)
 		}
 		c.mu.Unlock()
 		if ok {
@@ -161,12 +175,42 @@ func (c *legacySSEConn) dispatch(m incoming) {
 		}
 	case m.isRequest():
 		// Reply off the read loop so a server that writes to the stream
-		// while handling the POST cannot stall it.
-		c.replies.Add(1)
-		go func() {
-			defer c.replies.Done()
-			_ = c.send(c.replyCtx, replyToServerRequest(m))
-		}()
+		// while handling the POST cannot stall it. The queue is bounded; a
+		// server that floods requests loses the excess, not Core resources.
+		select {
+		case c.serverRequests <- m:
+		default:
+		}
+	}
+}
+
+const (
+	// maxQueuedServerRequests bounds server requests waiting for a reply.
+	maxQueuedServerRequests = 16
+	// maxServerRequestReplies bounds replies sent in one session.
+	maxServerRequestReplies = 64
+	// serverRequestReplyTimeout bounds one reply POST.
+	serverRequestReplyTimeout = 5 * time.Second
+)
+
+// replyWorker answers queued server requests one at a time until the stream
+// ends, sending at most maxServerRequestReplies replies.
+func (c *legacySSEConn) replyWorker() {
+	defer close(c.workerDone)
+	sent := 0
+	for {
+		select {
+		case <-c.replyCtx.Done():
+			return
+		case m := <-c.serverRequests:
+			if sent >= maxServerRequestReplies {
+				continue
+			}
+			sent++
+			ctx, cancel := context.WithTimeout(c.replyCtx, serverRequestReplyTimeout)
+			_ = c.send(ctx, replyToServerRequest(m))
+			cancel()
+		}
 	}
 }
 
@@ -228,7 +272,7 @@ func (c *legacySSEConn) send(ctx context.Context, body message) error {
 	}
 	defer drain(resp.Body, c.cfg.Limits.MaxEventBytes)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return statusError(body.Method, resp, c.cfg.Limits.MaxEventBytes)
+		return statusError(body.Method, resp)
 	}
 	return nil
 }
@@ -241,13 +285,18 @@ func (c *legacySSEConn) notify(ctx context.Context, method string, params any) e
 }
 
 // close ends the event stream, which is how a 2024-11-05 session ends, and
-// waits for in-flight replies to server requests, which the stream context
-// bounds.
+// waits, within ctx, for the reader and the reply worker, which the stream
+// context stops.
 func (c *legacySSEConn) close(ctx context.Context) {
 	c.cancel()
 	select {
 	case <-c.done:
 	case <-ctx.Done():
 	}
-	c.replies.Wait()
+	if c.workerDone != nil {
+		select {
+		case <-c.workerDone:
+		case <-ctx.Done():
+		}
+	}
 }

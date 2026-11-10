@@ -78,7 +78,7 @@ func TestDiscoverMCPToolsValidatesInputAndHidesUpstreamBodies(t *testing.T) {
 		assert.Equal(t, http.StatusUnprocessableEntity, he.Status)
 	}
 	failing := func(context.Context, mcpclient.Config) ([]mcpclient.Tool, error) {
-		return nil, &mcpclient.HTTPStatusError{Stage: "initialize", StatusCode: 401, Body: "echo secret-value"}
+		return nil, &mcpclient.HTTPStatusError{Stage: "initialize", StatusCode: 401}
 	}
 	_, err := svc.discoverMCPTools(context.Background(), &DiscoverMCPToolsRequest{
 		EndpointURL: "https://example.com/mcp", MCPTransport: "legacy_sse", EndpointAuthHeader: "secret-value",
@@ -88,4 +88,22 @@ func TestDiscoverMCPToolsValidatesInputAndHidesUpstreamBodies(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, he.Status)
 	assert.NotContains(t, he.Error(), "secret-value")
 	assert.Contains(t, he.Error(), "401")
+}
+
+// Discovery errors never quote what a reflecting endpoint sent back.
+func TestDiscoverMCPToolsDoesNotLeakReflectedCredential(t *testing.T) {
+	const secret = "sk-discovery-reflected"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, "not json %s", r.Header.Get("X-Api-Key"))
+	}))
+	defer server.Close()
+	svc := &Service{cfg: &config.Config{AllowLocalHTTPEndpoints: true}}
+	_, err := svc.discoverMCPTools(context.Background(), &DiscoverMCPToolsRequest{
+		EndpointURL: server.URL, MCPTransport: "streamable_http",
+		EndpointAuthHeader: secret, EndpointAuthHeaderName: "X-Api-Key",
+	}, mcpclient.ListTools)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), secret)
+	assert.Contains(t, err.Error(), "MCP")
 }

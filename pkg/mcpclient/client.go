@@ -47,15 +47,25 @@ func (m incoming) isRequest() bool {
 	return m.Method != "" && len(m.ID) > 0 && string(m.ID) != "null"
 }
 
-// idKey normalizes a JSON-RPC id: a string id is its value, a number id is
-// its literal text. Core sends string ids, so a server echoing them matches.
-func idKey(raw json.RawMessage) string {
+// stringID returns the value of a JSON-RPC id that is a JSON string. Core
+// only sends string ids, so a number id never answers a Core request, even
+// when its digits spell the same text: JSON-RPC ids keep their type.
+func stringID(raw json.RawMessage) (string, bool) {
 	raw = bytes.TrimSpace(raw)
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s
+	if len(raw) == 0 || raw[0] != '"' {
+		return "", false
 	}
-	return string(raw)
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return "", false
+	}
+	return s, true
+}
+
+// answers reports whether m is the response to the request with string id.
+func (m incoming) answers(id string) bool {
+	got, ok := stringID(m.ID)
+	return m.isResponse() && ok && got == id
 }
 
 func rawID(id string) json.RawMessage {
@@ -268,9 +278,8 @@ func drain(body io.ReadCloser, limit int64) {
 	_ = body.Close()
 }
 
-func statusError(stage string, resp *http.Response, limit int64) error {
-	raw, _ := readLimited(resp.Body, min(limit, 4096))
-	return &HTTPStatusError{Stage: stage, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
+func statusError(stage string, resp *http.Response) error {
+	return &HTTPStatusError{Stage: stage, StatusCode: resp.StatusCode}
 }
 
 func isEventStream(resp *http.Response) bool {

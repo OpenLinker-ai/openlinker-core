@@ -218,18 +218,20 @@ func NewHTTPClient(base *http.Client, allowLocalHTTP bool) *http.Client {
 	}
 }
 
-// HTTPStatusError is a non-success HTTP status from the MCP endpoint.
+// HTTPStatusError is a non-success HTTP status from the MCP endpoint. The
+// response body is not kept: an endpoint can reflect request headers, so
+// the body may contain the endpoint credential.
 type HTTPStatusError struct {
 	Stage      string
 	StatusCode int
-	Body       string
 }
 
 func (e *HTTPStatusError) Error() string {
 	return fmt.Sprintf("mcp %s: HTTP %d", e.Stage, e.StatusCode)
 }
 
-// RPCError is a JSON-RPC error answered by the MCP server.
+// RPCError is a JSON-RPC error answered by the MCP server. Message is the
+// server's text; callers that show it must redact the credential first.
 type RPCError struct {
 	Stage   string
 	Code    int
@@ -242,7 +244,8 @@ func (e *RPCError) Error() string {
 
 // ProtocolError is a response that does not follow the transport: malformed
 // JSON-RPC, a missing result, an oversized event or stream, or a stream that
-// ended before the result.
+// ended before the result. Message is fixed text written by Core; it never
+// quotes the response.
 type ProtocolError struct {
 	Stage   string
 	Message string

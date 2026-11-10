@@ -2800,7 +2800,7 @@ func (s *Service) callMCPServerSession(
 		},
 	}, runID.String(), params)
 	if err != nil {
-		if agentErr := mcpSessionAgentError(err); agentErr != nil {
+		if agentErr := mcpSessionAgentError(err, credential); agentErr != nil {
 			return nil, nil, agentErr, nil
 		}
 		return nil, nil, nil, err
@@ -2813,23 +2813,49 @@ func (s *Service) callMCPServerSession(
 
 // mcpSessionAgentError maps answers from the MCP endpoint to Agent errors.
 // Network failures, refused redirects and cancellation stay call errors, as
-// they are for legacy_json.
-func mcpSessionAgentError(err error) *AgentError {
+// they are for legacy_json. Response bodies are never quoted, and the one
+// server-written text kept, a JSON-RPC error message, has the endpoint
+// credential redacted: an endpoint can reflect the headers it received, and
+// Run errors reach callers who must not learn the owner's credential.
+func mcpSessionAgentError(err error, credential string) *AgentError {
 	var status *mcpclient.HTTPStatusError
 	var rpc *mcpclient.RPCError
 	var protocol *mcpclient.ProtocolError
 	switch {
 	case errors.As(err, &status):
-		return &AgentError{Code: fmt.Sprintf("HTTP_%d", status.StatusCode), Message: truncate(status.Body, errMsgMaxLen)}
+		return &AgentError{
+			Code:    fmt.Sprintf("HTTP_%d", status.StatusCode),
+			Message: fmt.Sprintf("MCP endpoint returned HTTP %d during %s", status.StatusCode, status.Stage),
+		}
 	case errors.As(err, &rpc):
-		return &AgentError{Code: fmt.Sprintf("MCP_%d", rpc.Code), Message: truncate(rpc.Message, errMsgMaxLen)}
+		return &AgentError{Code: fmt.Sprintf("MCP_%d", rpc.Code), Message: truncate(redactCredential(rpc.Message, credential), errMsgMaxLen)}
 	case errors.As(err, &protocol):
 		return &AgentError{Code: "INVALID_MCP_RESPONSE", Message: truncate("MCP endpoint "+protocol.Stage+": "+protocol.Message, errMsgMaxLen)}
 	case errors.Is(err, mcpclient.ErrEndpointRejected):
-		return &AgentError{Code: "MCP_ENDPOINT_REJECTED", Message: truncate(err.Error(), errMsgMaxLen)}
+		return &AgentError{Code: "MCP_ENDPOINT_REJECTED", Message: "MCP endpoint event pointed outside the endpoint origin or failed the outbound endpoint policy"}
 	default:
 		return nil
 	}
+}
+
+// redactCredential removes the endpoint credential, and its token without an
+// authentication scheme such as "Bearer ", from text an endpoint wrote.
+func redactCredential(text, credential string) string {
+	credential = strings.TrimSpace(credential)
+	if credential == "" {
+		return text
+	}
+	secrets := []string{credential}
+	if fields := strings.Fields(credential); len(fields) > 1 {
+		secrets = append(secrets, fields[len(fields)-1])
+	}
+	for _, secret := range secrets {
+		if len(secret) < 4 {
+			continue
+		}
+		text = strings.ReplaceAll(text, secret, "[redacted]")
+	}
+	return text
 }
 
 func readAgentResponseBody(r io.Reader) ([]byte, error) {

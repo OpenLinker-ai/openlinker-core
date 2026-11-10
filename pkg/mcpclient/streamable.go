@@ -53,10 +53,14 @@ func (c *streamableConn) request(ctx context.Context, stage, id, method string, 
 	if err != nil {
 		return incoming{}, err
 	}
-	defer drain(resp.Body, c.cfg.Limits.MaxEventBytes)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return incoming{}, statusError(stage, resp, c.cfg.Limits.MaxEventBytes)
+		defer drain(resp.Body, c.cfg.Limits.MaxEventBytes)
+		return incoming{}, statusError(stage, resp)
 	}
+	// Close as soon as the response is read: a server may keep an SSE
+	// response open after the matching result, and draining it would hold
+	// the call until the stream ends or the session times out.
+	defer resp.Body.Close()
 	if method == "initialize" {
 		if session := resp.Header.Get(HeaderSessionID); session != "" {
 			c.mu.Lock()
@@ -86,10 +90,10 @@ func (c *streamableConn) readJSON(stage, id string, body io.Reader) (incoming, e
 	}
 	messages, err := decodeIncoming(raw)
 	if err != nil {
-		return incoming{}, &ProtocolError{Stage: stage, Message: "response is not JSON-RPC: " + truncate(string(raw), 200)}
+		return incoming{}, &ProtocolError{Stage: stage, Message: "response is not JSON-RPC"}
 	}
 	for _, m := range messages {
-		if m.isResponse() && idKey(m.ID) == id {
+		if m.answers(id) {
 			return m, nil
 		}
 	}
@@ -118,7 +122,7 @@ func (c *streamableConn) readStream(ctx context.Context, stage, id string, body 
 		}
 		for _, m := range messages {
 			switch {
-			case m.isResponse() && idKey(m.ID) == id:
+			case m.answers(id):
 				return m, nil
 			case m.isRequest():
 				if err := c.send(ctx, replyToServerRequest(m)); err != nil && ctx.Err() != nil {
@@ -138,7 +142,7 @@ func (c *streamableConn) send(ctx context.Context, body message) error {
 	}
 	defer drain(resp.Body, c.cfg.Limits.MaxEventBytes)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return statusError(body.Method, resp, c.cfg.Limits.MaxEventBytes)
+		return statusError(body.Method, resp)
 	}
 	return nil
 }
@@ -167,11 +171,4 @@ func (c *streamableConn) close(ctx context.Context) {
 		return
 	}
 	drain(resp.Body, 4096)
-}
-
-func truncate(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	return value[:limit] + "..."
 }

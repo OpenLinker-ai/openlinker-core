@@ -26,6 +26,10 @@ type legacySSEServer struct {
 	// postStatus is the status for POSTs; 0 means 202.
 	postStatus     int
 	ignoreCanceled bool
+	// preEndpoint is written before the endpoint event.
+	preEndpoint string
+	// onToolCall replaces the toolMode answer when toolMode is "custom".
+	onToolCall func(id json.RawMessage)
 
 	mu       sync.Mutex
 	stream   chan string
@@ -63,6 +67,7 @@ func (s *legacySSEServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
+		fmt.Fprint(w, s.preEndpoint)
 		if s.endpoint != "" {
 			fmt.Fprintf(w, ": hello\n\nevent: endpoint\ndata: %s\n\n", s.endpoint)
 		}
@@ -126,6 +131,8 @@ func (s *legacySSEServer) answer(id json.RawMessage, method string) {
 	case "tools/call":
 		s.toolCall <- struct{}{}
 		switch s.toolMode {
+		case "custom":
+			s.onToolCall(id)
 		case "result":
 			s.push(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 		case "out-of-order":

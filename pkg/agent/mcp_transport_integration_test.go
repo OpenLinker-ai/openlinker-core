@@ -29,8 +29,11 @@ func TestCreateAgentDefaultsToLegacyJSONAndRejectsTransportOutsideMCP(t *testing
 
 	created, err := svc.CreateAgent(ctx, ownerID, mcpCreateReq(freshSlug("mcp-default")))
 	require.NoError(t, err)
-	assert.Equal(t, "legacy_json", created.MCPTransport)
+	assert.Empty(t, created.MCPTransport, "default transport is omitted")
 	assert.Nil(t, created.EndpointAuthHeaderName)
+	var storedDefault string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT mcp_transport FROM agents WHERE id=$1`, uuid.MustParse(created.ID)).Scan(&storedDefault))
+	assert.Equal(t, "legacy_json", storedDefault)
 
 	direct, err := svc.CreateAgent(ctx, ownerID, validCreateReq(freshSlug("direct-default")))
 	require.NoError(t, err)

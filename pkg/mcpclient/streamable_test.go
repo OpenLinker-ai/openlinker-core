@@ -506,3 +506,12 @@ func TestCredentialHeaderRouting(t *testing.T) {
 }
 
 func strPtr(v string) *string { return &v }
+
+// idKey renders a JSON-RPC id for test assertions: a string id is its value,
+// a number id is its literal text.
+func idKey(raw json.RawMessage) string {
+	if s, ok := stringID(raw); ok {
+		return s
+	}
+	return string(raw)
+}

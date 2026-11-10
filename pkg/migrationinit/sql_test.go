@@ -368,3 +368,29 @@ func TestCoreSchemaShapeWasMeasuredForTheCurrentMigrationVersion(t *testing.T) {
 		)
 	}
 }
+
+func TestAgentMCPTransportMigrationIsBoundedAndGuarded(t *testing.T) {
+	up := readInitializer(t, "../../migrations/102_agent_mcp_transport.up.sql")
+	for _, fragment := range []string{
+		"SET LOCAL lock_timeout = '5s'",
+		"SET LOCAL statement_timeout = '30s'",
+		"ADD COLUMN mcp_transport text DEFAULT 'legacy_json'::text NOT NULL",
+		"ADD COLUMN endpoint_auth_header_name text",
+		"VALIDATE CONSTRAINT agents_mcp_transport_valid",
+		"VALIDATE CONSTRAINT agents_endpoint_auth_header_name_token",
+	} {
+		if !strings.Contains(up, fragment) {
+			t.Fatalf("102 up migration missing %q", fragment)
+		}
+	}
+	down := readInitializer(t, "../../migrations/102_agent_mcp_transport.down.sql")
+	lock := strings.Index(down, "LOCK TABLE public.agents IN ACCESS EXCLUSIVE MODE;")
+	guard := strings.Index(down, "DO $$")
+	drop := strings.Index(down, "DROP COLUMN mcp_transport")
+	if lock < 0 || guard < 0 || drop < 0 || !(lock < guard && guard < drop) {
+		t.Fatalf("102 rollback must lock agents, then check, then drop:\n%s", down)
+	}
+	if !strings.Contains(down, "SET LOCAL lock_timeout = '5s'") {
+		t.Fatalf("102 rollback must bound its lock wait:\n%s", down)
+	}
+}

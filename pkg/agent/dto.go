@@ -91,8 +91,9 @@ type AgentResponse struct {
 	RevenueThisMonth    int64    `json:"revenue_this_month_cents,omitempty"`
 	ConnectionMode      string   `json:"connection_mode"`
 	MCPToolName         *string  `json:"mcp_tool_name,omitempty"`
-	// MCPTransport and EndpointAuthHeaderName are shown for mcp_server
-	// Agents. The credential value itself is never returned.
+	// MCPTransport and EndpointAuthHeaderName are shown only when an
+	// mcp_server Agent uses a non-default value: absent means legacy_json and
+	// the default credential routing. The credential value is never returned.
 	MCPTransport           string        `json:"mcp_transport,omitempty"`
 	EndpointAuthHeaderName *string       `json:"endpoint_auth_header_name,omitempty"`
 	Availability           *Availability `json:"availability,omitempty"`

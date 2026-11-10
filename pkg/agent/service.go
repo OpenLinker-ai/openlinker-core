@@ -18,6 +18,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/mcpclient"
 )
 
 // slugPattern 与 schema CHECK 约束一致：以小写字母/数字开头结尾，中间允许连字符。
@@ -1307,11 +1308,18 @@ func toAgentResponse(a *db.Agent) AgentResponse {
 		MCPToolName:         a.MCPToolName,
 		CreatedAt:           a.CreatedAt.UTC().Format(time.RFC3339),
 	}
-	// Rows from queries that do not select the transport columns leave them
-	// empty and show nothing rather than a guessed default.
-	if a.ConnectionMode == ConnectionModeMCPServer && a.MCPTransport != "" {
-		resp.MCPTransport = a.MCPTransport
-		resp.EndpointAuthHeaderName = a.EndpointAuthHeaderName
+	// Only non-default call shapes are shown, so the response for every
+	// existing Agent is byte-for-byte what it was before transports existed.
+	// An absent mcp_transport means legacy_json; an absent header name means
+	// the default credential routing.
+	if a.ConnectionMode == ConnectionModeMCPServer {
+		if transport := mcpclient.NormalizeTransport(a.MCPTransport); transport != mcpclient.TransportLegacyJSON {
+			resp.MCPTransport = transport
+		}
+		if a.EndpointAuthHeaderName != nil && strings.TrimSpace(*a.EndpointAuthHeaderName) != "" {
+			name := strings.TrimSpace(*a.EndpointAuthHeaderName)
+			resp.EndpointAuthHeaderName = &name
+		}
 	}
 	if a.CertifiedAt != nil {
 		ts := a.CertifiedAt.UTC().Format(time.RFC3339)

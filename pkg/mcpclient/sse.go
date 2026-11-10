@@ -24,6 +24,8 @@ type sseEvent struct {
 type sseReader struct {
 	r        *bufio.Reader
 	maxEvent int64
+	started  bool
+	skipLF   bool
 }
 
 func newSSEReader(body io.Reader, maxEvent, maxStream int64) *sseReader {
@@ -86,27 +88,52 @@ func (s *sseReader) next() (sseEvent, error) {
 	}
 }
 
-// readLine returns one line without its terminator.
+// readLine returns one line without its terminator. CRLF, a lone LF and a
+// lone CR all end a line, and a UTF-8 BOM before the first line is skipped,
+// as the event-stream grammar requires. A CR is reported at once; an LF
+// directly after it is skipped on the next read, so a CR-terminated event is
+// dispatched without waiting for more bytes.
 func (s *sseReader) readLine() ([]byte, error) {
+	if !s.started {
+		s.started = true
+		// Peek one byte first so a stream that starts with a short chunk is
+		// not held until three bytes arrive.
+		if first, err := s.r.Peek(1); err == nil && first[0] == utf8BOM[0] {
+			if prefix, err := s.r.Peek(3); err == nil && bytes.Equal(prefix, utf8BOM) {
+				_, _ = s.r.Discard(3)
+			}
+		}
+	}
 	var line []byte
 	for {
-		chunk, err := s.r.ReadSlice('\n')
-		if int64(len(line)+len(chunk)) > s.maxEvent+2 {
-			return nil, errEventTooLarge
-		}
-		line = append(line, chunk...)
-		if errors.Is(err, bufio.ErrBufferFull) {
-			continue
-		}
+		c, err := s.r.ReadByte()
 		if err != nil {
 			if len(line) > 0 && errors.Is(err, io.EOF) {
-				return bytes.TrimRight(line, "\r\n"), nil
+				return line, nil
 			}
 			return nil, err
 		}
-		return bytes.TrimRight(line, "\r\n"), nil
+		if s.skipLF {
+			s.skipLF = false
+			if c == '\n' {
+				continue
+			}
+		}
+		switch c {
+		case '\r':
+			s.skipLF = true
+			return line, nil
+		case '\n':
+			return line, nil
+		}
+		if int64(len(line)) >= s.maxEvent {
+			return nil, errEventTooLarge
+		}
+		line = append(line, c)
 	}
 }
+
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
 // cappedReader fails once more than remaining bytes are read, so a stream
 // that keeps sending is cut off instead of read forever.

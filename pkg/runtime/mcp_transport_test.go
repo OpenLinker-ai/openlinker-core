@@ -201,12 +201,59 @@ func TestCallMCPServerRefusesCrossOriginRedirectForCustomHeaderAndNewTransports(
 }
 
 func TestCallMCPServerSessionMapsEndpointAnswers(t *testing.T) {
-	require.Equal(t, "HTTP_401", mcpSessionAgentError(&mcpclient.HTTPStatusError{StatusCode: 401, Body: "no"}).Code)
-	require.Equal(t, "MCP_-32601", mcpSessionAgentError(&mcpclient.RPCError{Code: -32601, Message: "x"}).Code)
-	require.Equal(t, "INVALID_MCP_RESPONSE", mcpSessionAgentError(&mcpclient.ProtocolError{Stage: "tools/call", Message: "x"}).Code)
-	require.Equal(t, "MCP_ENDPOINT_REJECTED", mcpSessionAgentError(fmt.Errorf("%w: other origin", mcpclient.ErrEndpointRejected)).Code)
-	require.Nil(t, mcpSessionAgentError(context.Canceled))
-	require.Nil(t, mcpSessionAgentError(endpointurl.ErrCrossOriginRedirect))
+	require.Equal(t, "HTTP_401", mcpSessionAgentError(&mcpclient.HTTPStatusError{StatusCode: 401, Stage: "initialize"}, "").Code)
+	require.Equal(t, "MCP_-32601", mcpSessionAgentError(&mcpclient.RPCError{Code: -32601, Message: "x"}, "").Code)
+	require.Equal(t, "INVALID_MCP_RESPONSE", mcpSessionAgentError(&mcpclient.ProtocolError{Stage: "tools/call", Message: "x"}, "").Code)
+	require.Equal(t, "MCP_ENDPOINT_REJECTED", mcpSessionAgentError(fmt.Errorf("%w: other origin", mcpclient.ErrEndpointRejected), "").Code)
+	require.Nil(t, mcpSessionAgentError(context.Canceled, ""))
+	require.Nil(t, mcpSessionAgentError(endpointurl.ErrCrossOriginRedirect, ""))
+	rpc := mcpSessionAgentError(&mcpclient.RPCError{Code: -32000, Message: "bad key Bearer sk-live-123 / sk-live-123"}, "Bearer sk-live-123")
+	require.NotContains(t, rpc.Message, "sk-live-123")
+}
+
+// A reflecting endpoint must not leak the stored credential into Run errors:
+// HTTP error bodies are not quoted, malformed responses are not excerpted,
+// and JSON-RPC error messages are redacted.
+func TestCallMCPServerSessionDoesNotLeakReflectedCredential(t *testing.T) {
+	const secret = "sk-reflected-secret-value"
+	for _, mode := range []string{"http", "rpc", "garbage"} {
+		t.Run(mode, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				var m struct {
+					ID     json.RawMessage `json:"id"`
+					Method string          `json:"method"`
+				}
+				_ = json.NewDecoder(req.Body).Decode(&m)
+				reflected := req.Header.Get("X-Api-Key")
+				if m.Method != "initialize" {
+					w.WriteHeader(http.StatusAccepted)
+					return
+				}
+				switch mode {
+				case "http":
+					http.Error(w, "unauthorized key "+reflected, http.StatusUnauthorized)
+				case "rpc":
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32001,"message":"key %s rejected"}}`, m.ID, reflected)
+				case "garbage":
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, "not json %s", reflected)
+				}
+			}))
+			defer server.Close()
+			svc := newLocalEndpointRuntimeService()
+			token := secret
+			headerName := "X-Api-Key"
+			toolName := "analyze"
+			agent := &db.Agent{
+				ID: uuid.New(), EndpointURL: server.URL, EndpointAuthHeader: &token, EndpointAuthHeaderName: &headerName,
+				ConnectionMode: connectionModeMCPServer, MCPToolName: &toolName, MCPTransport: mcpclient.TransportStreamableHTTP,
+			}
+			_, errMsg := svc.DryRun(context.Background(), agent, map[string]interface{}{})
+			require.NotEmpty(t, errMsg)
+			require.NotContains(t, errMsg, secret)
+		})
+	}
 }
 
 func TestDryRunUsesStreamableHTTPAndReportsToolErrors(t *testing.T) {
