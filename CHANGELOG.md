@@ -9,6 +9,33 @@ runtime protocol, and migration contract are declared stable.
 
 ### Security
 
+- **Behaviour change:** the production HTTP rate limiter no longer trusts a
+  client-supplied `X-Forwarded-For`. It now identifies clients the same way
+  CLI login does: from `X-Forwarded-For` only when the request comes from a
+  peer listed in `CLI_AUTH_TRUSTED_PROXY_CIDRS`, otherwise from the connection
+  peer. Before, any client could pick its own rate-limit bucket by sending the
+  header. A proxied production deployment must list its proxy peers there, or
+  every client behind the proxy shares one bucket.
+- Outbound endpoint validation rejects IPv6 addresses that carry a zone,
+  whether given literally (for example `https://[fd00::1%25eth0]/`, including
+  IPv4-mapped forms) or returned by DNS. A zone made the private-network
+  blocklist miss unique local and link-local addresses.
+- The Agent Runtime A2A proxy now rejects requests whose Agent creator is
+  disabled or deleted, as that user's own JWT and User Tokens already are. The
+  proxy acts as the creator, so a disabled account could previously still
+  create Runs through it. The rejection uses Runtime's standard 403 envelope
+  (`FORBIDDEN`, "Runtime permission denied").
+- Creating an Agent Token for an existing Agent now checks the ten-token cap
+  and inserts the token in one serialized transaction; concurrent requests
+  could previously exceed the cap.
+- Upgraded `github.com/labstack/echo/v4` to v4.16.3, `golang.org/x/net` to
+  v0.62.0 and `golang.org/x/crypto` to v0.58.0, and build with Go 1.26.10
+  (`toolchain go1.26.10`; the Docker image uses `golang:1.26.10-alpine` and
+  `alpine:3.23`). `govulncheck` now reports 2 reachable advisories instead of
+  12. Both are in Echo v4, which has no fixed release: GO-2026-6872 (forged
+  forwarding headers choosing a rate-limit bucket) is handled by the trusted
+  proxy change above, and GO-2026-6875 affects Echo's proxy middleware, which
+  Core does not use. The module now requires Go 1.26.
 - Outbound redirects no longer forward credentials to another origin. Agent
   endpoint (direct HTTP, MCP, dry-run, availability), webhook / task callback /
   A2A push, delivery, registry and LLM clients drop `X-OpenLinker-Token`,
@@ -35,6 +62,21 @@ runtime protocol, and migration contract are declared stable.
   `visibility`. Callers that need a public Agent must send `visibility: "public"`.
 
 ### Fixed
+
+- Server-Sent Event streams (Run events, A2A `message/stream` and
+  `tasks/resubscribe`) are no longer cut off after the server's 120-second
+  write timeout. Each write now moves the connection write deadline forward
+  by 60 seconds, so a healthy stream with 15-second heartbeats stays open and
+  a client that stops reading is still dropped.
+- A blocking A2A `message/send` whose Run takes longer than 120 seconds now
+  delivers its response; the write deadline is kept ahead while it waits.
+- Task callbacks no longer miss events after an unsubscribed event type. The
+  "no subscription" cache was kept per Run while subscriptions filter by event
+  type, so for ten seconds after an event nobody subscribed to, events the
+  Run's subscribers did want were skipped without a delivery. Misses are now
+  cached per Run and event type, with bounded size, and resuming or listing
+  subscriptions (including batch resume) clears the Run's cached misses on
+  that replica. Other replicas still keep their misses for up to ten seconds.
 
 - When Runtime rejects an External Execution input against the target
   capability at launch, the start is now rejected durably, under its launch
