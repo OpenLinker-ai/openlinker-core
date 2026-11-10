@@ -65,7 +65,12 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 			return c.JSON(http.StatusOK, jsonRPCError(req.ID, jsonRPCInvalidParams, err.Error(), nil))
 		}
 		attachProtocolServiceMetadata(&params, serviceParams)
+		// A blocking send waits for the Run, which can outlast the server's
+		// write timeout; keep the deadline ahead until the response is written.
+		releaseWriteDeadline := httpx.HoldWriteDeadline(c.Response().Writer, httpx.StreamWriteWindow)
+		defer releaseWriteDeadline() // also stops the refresh if the call panics
 		task, err := h.svc.SendProtocolMessage(c.Request().Context(), userID, c.Param("slug"), &params)
+		releaseWriteDeadline()
 		if err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
@@ -269,7 +274,12 @@ func (h *Handler) SendMessageHTTP(c echo.Context) error {
 		return httpx.BadRequest("请求体格式错误")
 	}
 	attachProtocolServiceMetadata(&params, serviceParams)
+	// A blocking send waits for the Run, which can outlast the server's write
+	// timeout; keep the deadline ahead until the response is written.
+	releaseWriteDeadline := httpx.HoldWriteDeadline(c.Response().Writer, httpx.StreamWriteWindow)
+	defer releaseWriteDeadline() // also stops the refresh if the call panics
 	task, err := h.svc.SendProtocolMessage(c.Request().Context(), userID, c.Param("slug"), &params)
+	releaseWriteDeadline()
 	if err != nil {
 		return err
 	}
@@ -843,10 +853,13 @@ func (h *Handler) streamProtocolTask(c echo.Context, userID uuid.UUID, slug, tas
 		}
 	}
 	res := c.Response()
-	flusher, ok := res.Writer.(http.Flusher)
-	if !ok {
+	if _, ok := res.Writer.(http.Flusher); !ok {
 		return httpx.Internal("当前响应不支持 streaming")
 	}
+	// Keep the stream alive past the server's absolute WriteTimeout: each
+	// write and heartbeat moves the write deadline forward instead.
+	res.Writer = httpx.NewStreamingResponseWriter(res.Writer, httpx.StreamWriteWindow)
+	flusher := res.Writer.(http.Flusher)
 	res.Header().Set(echo.HeaderContentType, "text/event-stream")
 	res.Header().Set(echo.HeaderCacheControl, "no-cache")
 	res.Header().Set(echo.HeaderConnection, "keep-alive")
