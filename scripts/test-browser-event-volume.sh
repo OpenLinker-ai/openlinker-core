@@ -180,7 +180,8 @@ run_database_test() {
     098_agent_mcp_bindings.up.sql \
     099_runtime_node_upgrade_features.up.sql \
     100_runtime_mtls_transition.up.sql \
-    101_runtime_signal_outbox_retention.up.sql; do
+    101_runtime_signal_outbox_retention.up.sql \
+    102_agent_mcp_transport.up.sql; do
     apply_schema_file "$repository_root/migrations/$migration_file"
   done
   apply_schema_file "$repository_root/migrations/086_current_schema_init_verify.sql"

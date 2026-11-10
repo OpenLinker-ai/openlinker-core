@@ -33,7 +33,7 @@ func TestAgentEvidenceQueriesUseExpectedSQLAndArgs(t *testing.T) {
 	if !strings.Contains(dbtx.queryRowSQL, "FOR SHARE") {
 		t.Fatalf("LockAgentEvidenceTarget must share-lock the Agent row: %s", dbtx.queryRowSQL)
 	}
-	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, "mcp_server", "https://a.example/rpc", &tool, true, &header}) {
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, "mcp_server", "https://a.example/rpc", &tool, true, &header, "", (*string)(nil)}) {
 		t.Fatalf("LockAgentEvidenceTarget args = %#v", dbtx.queryRowArgs)
 	}
 

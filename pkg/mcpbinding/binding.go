@@ -49,6 +49,26 @@ func denied() error {
 	return httpx.Forbidden("Tool authorization is unavailable; refresh the Agent configuration")
 }
 
+// configSQL is the authenticated service configuration. The transport and
+// the credential header name are appended only when they differ from the
+// defaults, so every grant saved before they existed keeps its digest.
+const configSQL = `jsonb_build_array(a.creator_id,a.connection_mode,a.lifecycle_status,a.visibility,a.endpoint_url,a.endpoint_auth_header,a.mcp_tool_name,COALESCE(c.input_schema,'{"type":"object"}'::jsonb),COALESCE(p.callable_by,'public'))
+ || CASE WHEN a.mcp_transport <> 'legacy_json' OR a.endpoint_auth_header_name IS NOT NULL
+    THEN jsonb_build_array(a.mcp_transport,a.endpoint_auth_header_name) ELSE '[]'::jsonb END`
+
+// legacyConfigSQL is configSQL before transports existed. Tests compare the
+// two for default Agents.
+const legacyConfigSQL = `jsonb_build_array(a.creator_id,a.connection_mode,a.lifecycle_status,a.visibility,a.endpoint_url,a.endpoint_auth_header,a.mcp_tool_name,COALESCE(c.input_schema,'{"type":"object"}'::jsonb),COALESCE(p.callable_by,'public'))`
+
+// configDigest authenticates config under the Core master secret.
+func configDigest(secret string, target uuid.UUID, config []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte("openlinker/mcp-binding/config/v1\x00"))
+	_, _ = mac.Write(target[:])
+	_, _ = mac.Write(config)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 // Resolve checks the selecting owner's authority and authenticates every execution-
 // relevant service field. Changing a URL, credential, tool, schema or policy
 // invalidates the grant until the owner explicitly saves it again. The stable Core
@@ -60,7 +80,7 @@ func Resolve(ctx context.Context, q DB, owner, target uuid.UUID, secret string) 
 	var t Tool
 	var config []byte
 	err := q.QueryRow(ctx, `SELECT a.name,a.description,a.mcp_tool_name,COALESCE(c.input_schema,'{"type":"object"}'::jsonb),
- jsonb_build_array(a.creator_id,a.connection_mode,a.lifecycle_status,a.visibility,a.endpoint_url,a.endpoint_auth_header,a.mcp_tool_name,COALESCE(c.input_schema,'{"type":"object"}'::jsonb),COALESCE(p.callable_by,'public'))
+ `+configSQL+`
  FROM agents a LEFT JOIN agent_capabilities c ON c.agent_id=a.id LEFT JOIN agent_call_policies p ON p.agent_id=a.id
  WHERE a.id=$1 AND a.connection_mode='mcp_server' AND a.lifecycle_status='active'
  AND (a.creator_id=$2 OR (a.visibility IN ('public','unlisted') AND COALESCE(p.callable_by,'public')='public')) FOR SHARE OF a`, target, owner).Scan(&t.Title, &t.Description, &t.ToolName, &t.InputSchema, &config)
@@ -82,11 +102,7 @@ func Resolve(ctx context.Context, q DB, owner, target uuid.UUID, secret string) 
 	if len([]rune(t.Description)) > 500 {
 		t.Description = string([]rune(t.Description)[:500])
 	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write([]byte("openlinker/mcp-binding/config/v1\x00"))
-	_, _ = mac.Write(target[:])
-	_, _ = mac.Write(config)
-	t.Digest = hex.EncodeToString(mac.Sum(nil))
+	t.Digest = configDigest(secret, target, config)
 	return t, nil
 }
 

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/mcpbinding"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/mcpclient"
 	"io"
 	"net/http"
 	"net/url"
@@ -2652,6 +2653,15 @@ func (s *Service) callMCPServer(
 	if conversation := s.conversationContextForRun(ctx, runID); conversation != nil {
 		metadata["conversation"] = conversation
 	}
+	// Arguments and the authoritative _meta above are identical for every
+	// transport; only how they reach the server differs.
+	if transport := mcpclient.NormalizeTransport(agent.MCPTransport); transport != mcpclient.TransportLegacyJSON {
+		return s.callMCPServerSession(ctx, agent, transport, runID, mcpToolCallParams{
+			Name:      toolName,
+			Arguments: req.Input,
+			Metadata:  metadata,
+		})
+	}
 	payload, err := json.Marshal(mcpToolCallRequest{
 		JSONRPC: "2.0",
 		ID:      runID.String(),
@@ -2675,16 +2685,25 @@ func (s *Service) callMCPServer(
 	httpReq.Header.Set("User-Agent", "OpenLinker/1.0")
 	httpReq.Header.Set("X-OpenLinker-Run-Id", runID.String())
 	httpReq.Header.Set("X-OpenLinker-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
+	customHeaderName := mcpAuthHeaderName(agent)
 	if agent.EndpointAuthHeader != nil && *agent.EndpointAuthHeader != "" {
 		auth := strings.TrimSpace(*agent.EndpointAuthHeader)
-		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		if customHeaderName != "" {
+			httpReq.Header.Set(customHeaderName, auth)
+		} else if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
 			httpReq.Header.Set("Authorization", auth)
 		} else {
 			httpReq.Header.Set("X-OpenLinker-Token", auth)
 		}
 	}
 
-	resp, err := s.httpClient.Do(httpReq)
+	client := s.httpClient
+	if customHeaderName != "" {
+		// The fixed cross-origin strip list does not know a custom header,
+		// so a redirect to another origin is refused instead.
+		client = s.sameOriginEndpointClient()
+	}
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -2721,6 +2740,124 @@ func (s *Service) callMCPServer(
 		return nil, nil, &AgentError{Code: "MCP_TOOL_FAILED", Message: "MCP tool reported an execution error"}, nil
 	}
 	return normalizeMCPResult(mr.Result), nil, nil, nil
+}
+
+// mcpAuthHeaderName is the owner-chosen credential header of an mcp_server
+// Agent, or "" for the default Bearer / X-OpenLinker-Token routing.
+func mcpAuthHeaderName(agent *db.Agent) string {
+	if agent.EndpointAuthHeaderName == nil {
+		return ""
+	}
+	return strings.TrimSpace(*agent.EndpointAuthHeaderName)
+}
+
+func (s *Service) allowLocalHTTPEndpoints() bool {
+	return s.cfg != nil && s.cfg.AllowLocalHTTPEndpoints
+}
+
+// sameOriginEndpointClient shares the endpoint transport and timeout but
+// refuses cross-origin redirects.
+func (s *Service) sameOriginEndpointClient() *http.Client {
+	return &http.Client{
+		Transport:     s.httpClient.Transport,
+		Timeout:       s.httpClient.Timeout,
+		CheckRedirect: endpointurl.SameOriginRedirectPolicy(s.allowLocalHTTPEndpoints()),
+	}
+}
+
+// callMCPServerSession calls an mcp_server Agent over Streamable HTTP or
+// legacy HTTP+SSE in a session of its own. Results are interpreted exactly as
+// for legacy_json; transport and protocol failures map onto the same error
+// codes where one exists.
+func (s *Service) callMCPServerSession(
+	ctx context.Context, agent *db.Agent, transport string, runID uuid.UUID, params mcpToolCallParams,
+) (map[string]interface{}, []AgentEvent, *AgentError, error) {
+	header := http.Header{}
+	header.Set("User-Agent", "OpenLinker/1.0")
+	header.Set("X-OpenLinker-Run-Id", runID.String())
+	header.Set("X-OpenLinker-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
+	credential := ""
+	if agent.EndpointAuthHeader != nil {
+		credential = *agent.EndpointAuthHeader
+	}
+	if name, value, ok := mcpclient.CredentialHeader(credential, agent.EndpointAuthHeaderName); ok {
+		header.Set(name, value)
+	}
+	totalTimeout := s.httpClient.Timeout
+	if totalTimeout <= 0 {
+		totalTimeout = 60 * time.Second
+	}
+	result, err := mcpclient.CallTool(ctx, mcpclient.Config{
+		Transport:      transport,
+		EndpointURL:    agent.EndpointURL,
+		Header:         header,
+		HTTPClient:     mcpclient.NewHTTPClient(s.httpClient, s.allowLocalHTTPEndpoints()),
+		AllowLocalHTTP: s.allowLocalHTTPEndpoints(),
+		Limits: mcpclient.Limits{
+			TotalTimeout:   totalTimeout,
+			MaxEventBytes:  maxAgentResponseBodyBytes,
+			MaxStreamBytes: 2 * maxAgentResponseBodyBytes,
+		},
+	}, runID.String(), params)
+	if err != nil {
+		if agentErr := mcpSessionAgentError(err, credential); agentErr != nil {
+			return nil, nil, agentErr, nil
+		}
+		return nil, nil, nil, err
+	}
+	if failed, _ := result["isError"].(bool); failed {
+		return nil, nil, &AgentError{Code: "MCP_TOOL_FAILED", Message: "MCP tool reported an execution error"}, nil
+	}
+	return normalizeMCPResult(result), nil, nil, nil
+}
+
+// mcpSessionAgentError maps answers from the MCP endpoint to Agent errors.
+// Network failures, refused redirects and cancellation stay call errors, as
+// they are for legacy_json. Response bodies are never quoted, and the one
+// server-written text kept, a JSON-RPC error message, has the endpoint
+// credential redacted: an endpoint can reflect the headers it received, and
+// Run errors reach callers who must not learn the owner's credential.
+func mcpSessionAgentError(err error, credential string) *AgentError {
+	var status *mcpclient.HTTPStatusError
+	var rpc *mcpclient.RPCError
+	var protocol *mcpclient.ProtocolError
+	switch {
+	case errors.As(err, &status):
+		return &AgentError{
+			Code:    fmt.Sprintf("HTTP_%d", status.StatusCode),
+			Message: fmt.Sprintf("MCP endpoint returned HTTP %d during %s", status.StatusCode, status.Stage),
+		}
+	case errors.As(err, &rpc):
+		return &AgentError{Code: fmt.Sprintf("MCP_%d", rpc.Code), Message: truncate(redactCredential(rpc.Message, credential), errMsgMaxLen)}
+	case errors.As(err, &protocol):
+		return &AgentError{Code: "INVALID_MCP_RESPONSE", Message: truncate("MCP endpoint "+protocol.Stage+": "+protocol.Message, errMsgMaxLen)}
+	case errors.Is(err, mcpclient.ErrEndpointRejected):
+		return &AgentError{Code: "MCP_ENDPOINT_REJECTED", Message: "MCP endpoint event pointed outside the endpoint origin or failed the outbound endpoint policy"}
+	default:
+		return nil
+	}
+}
+
+// redactCredential removes the endpoint credential, and its token without an
+// authentication scheme such as "Bearer ", from text an endpoint wrote.
+func redactCredential(text, credential string) string {
+	credential = strings.TrimSpace(credential)
+	if credential == "" {
+		return text
+	}
+	secrets := []string{credential}
+	if fields := strings.Fields(credential); len(fields) > 1 {
+		secrets = append(secrets, fields[len(fields)-1])
+	}
+	// Every nonempty secret is removed, however short: a short credential
+	// is still the owner's credential. Over-redacting an error is harmless.
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, secret, "[redacted]")
+	}
+	return text
 }
 
 func readAgentResponseBody(r io.Reader) ([]byte, error) {

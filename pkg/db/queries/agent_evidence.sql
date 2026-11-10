@@ -1,7 +1,8 @@
 -- agent_evidence.sql
 --
 -- Agent 就绪证据随连接目标失效。证据只对它被采集时的连接目标
--- （connection_mode + endpoint_url + mcp_tool_name，及调用凭据 endpoint_auth_header）
+-- （connection_mode + endpoint_url + mcp_tool_name，及调用方式 endpoint_auth_header、
+-- endpoint_auth_header_name、mcp_transport）
 -- 成立；创作者改连接目标时，UpdateAgent 在同一事务内把下列派生快照恢复到
 -- 未验证状态。原始历史（runs、agent_skill_benchmark_runs、告警）不删除。
 --
@@ -13,7 +14,7 @@
 -- name: LockAgentEvidenceTarget :one
 -- 证据写入前确认 Agent 仍指向被探测的连接目标；FOR SHARE 持有到写入提交，
 -- 与 UpdateAgent 的行锁互斥，连接目标变更不能插在确认与写入之间。
--- $5 = TRUE 时同时要求调用凭据未变（可用性 / dry-run 证据）；Benchmark
+-- $5 = TRUE 时同时要求调用凭据、认证头名称与 MCP 传输方式未变（可用性 / dry-run 证据）；Benchmark
 -- 只比较连接目标。目标已变化时返回 0 行，调用方丢弃结果。
 SELECT id
 FROM agents
@@ -21,7 +22,11 @@ WHERE id = $1
   AND connection_mode = $2
   AND endpoint_url = $3
   AND mcp_tool_name IS NOT DISTINCT FROM $4::text
-  AND (NOT $5::boolean OR endpoint_auth_header IS NOT DISTINCT FROM $6::text)
+  AND (NOT $5::boolean OR (
+      endpoint_auth_header IS NOT DISTINCT FROM $6::text
+      AND mcp_transport = COALESCE(NULLIF($7::text, ''), 'legacy_json')
+      AND endpoint_auth_header_name IS NOT DISTINCT FROM $8::text
+  ))
 FOR SHARE;
 
 -- name: LockAgentConnectionModeForEvidence :one

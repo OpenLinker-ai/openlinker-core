@@ -24,6 +24,7 @@ type agentService interface {
 	CheckSlug(context.Context, string) (*SlugCheckResponse, error)
 	BecomeCreator(context.Context, uuid.UUID) error
 	CreateAgent(context.Context, uuid.UUID, *CreateAgentRequest) (*AgentResponse, error)
+	DiscoverMCPTools(context.Context, uuid.UUID, *DiscoverMCPToolsRequest) (*DiscoverMCPToolsResponse, error)
 	ListMyAgents(context.Context, uuid.UUID) ([]AgentResponse, error)
 	ListMyAgentsPage(context.Context, uuid.UUID, AgentListOptions) (*AgentListResponse, error)
 	GetMyAgent(context.Context, uuid.UUID, uuid.UUID) (*AgentResponse, error)
@@ -86,6 +87,7 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 
 	creator := api.Group("/creator", jwtMiddleware)
 	creator.POST("/agents", h.CreateAgent)
+	creator.POST("/agents/mcp-tools/discover", h.DiscoverMCPTools)
 	creator.GET("/agents", h.ListMyAgents)
 	creator.GET("/agents/:id", h.GetMyAgent)
 	creator.PATCH("/agents/:id", h.UpdateAgent)
@@ -168,6 +170,26 @@ func (h *Handler) CreateAgent(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusCreated, resp)
+}
+
+// DiscoverMCPTools 用创作者提供的 endpoint 与凭据调用一次 tools/list（不保存凭据和结果）。
+func (h *Handler) DiscoverMCPTools(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	var req DiscoverMCPToolsRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	if err := h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	resp, err := h.svc.DiscoverMCPTools(c.Request().Context(), uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 // ListMyAgents 创作者中心列表。

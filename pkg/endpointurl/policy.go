@@ -150,6 +150,43 @@ func RedirectPolicy(allowLocalHTTP bool) func(*http.Request, []*http.Request) er
 	}
 }
 
+// ErrCrossOriginRedirect reports a redirect that left the origin of the first
+// request under SameOriginRedirectPolicy.
+var ErrCrossOriginRedirect = errors.New("endpoint redirected to another origin; the request was not forwarded")
+
+// SameOriginRedirectPolicy is the CheckRedirect for outbound calls that carry
+// headers the fixed cross-origin strip list does not know about, such as a
+// custom credential header name or an MCP session id. A hop that leaves the
+// origin of the first request (scheme, host and effective port) is refused
+// instead of stripped; a same-origin hop is still re-validated against the
+// public-endpoint policy.
+func SameOriginRedirectPolicy(allowLocalHTTP bool) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return errors.New("stopped after 10 redirects")
+		}
+		if len(via) > 0 && redirectChainCrossesOrigin(req, via) {
+			return ErrCrossOriginRedirect
+		}
+		return Validate(req.URL.String(), allowLocalHTTP)
+	}
+}
+
+// SameOrigin reports whether a and b have the same RFC 6454 origin as the
+// HTTP transport would connect to it. A URL whose origin cannot be normalized
+// is never the same origin as anything.
+func SameOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	left, ok := originOf(a)
+	if !ok {
+		return false
+	}
+	right, ok := originOf(b)
+	return ok && left == right
+}
+
 // CredentialRedirectPolicy is the CheckRedirect for operator-configured
 // endpoints (for example internal LLM services) that may legitimately live on
 // a private network. It keeps net/http's redirect limit and removes credential

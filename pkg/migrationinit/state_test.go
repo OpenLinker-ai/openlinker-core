@@ -14,6 +14,10 @@ func TestValidateCoreUp(t *testing.T) {
 	}{
 		{name: "fresh", snapshot: Snapshot{}},
 		{name: "current", snapshot: currentCoreSnapshot(), wantNoop: true},
+		{name: "mcp transport predecessor", snapshot: mcpTransportPredecessorCoreSnapshot()},
+		{name: "mcp transport predecessor drift", snapshot: withCoreDigest(mcpTransportPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
+		{name: "mcp transport predecessor with current shape", snapshot: withCoreShape(mcpTransportPredecessorCoreSnapshot(), currentCoreShape()), wantError: "fingerprint mismatch"},
+		{name: "current version with mcp transport predecessor shape", snapshot: withCoreShape(currentCoreSnapshot(), mcpTransportPredecessorCoreSnapshot().CoreShape), wantError: "fingerprint mismatch"},
 		{name: "signal retention predecessor", snapshot: signalRetentionPredecessorCoreSnapshot()},
 		{name: "signal retention predecessor drift", snapshot: withCoreDigest(signalRetentionPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
 		{name: "signal retention predecessor with current shape", snapshot: withCoreShape(signalRetentionPredecessorCoreSnapshot(), currentCoreShape()), wantError: "fingerprint mismatch"},
@@ -136,7 +140,7 @@ func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
 		Tables:            91,
-		Constraints:       728,
+		Constraints:       730,
 		Indexes:           309,
 		Triggers:          80,
 		CoreIdentities:    1,
@@ -157,7 +161,18 @@ func signalRetentionPredecessorCoreSnapshot() Snapshot {
 	s := currentCoreSnapshot()
 	s.Core.Version = CoreSignalRetentionPredecessorVersion
 	s.CoreShape.Digest = CoreSignalRetentionPredecessorDigest
+	s.CoreShape.Constraints = 728
 	s.CoreShape.Indexes = 308
+	return s
+}
+
+// mcpTransportPredecessorCoreSnapshot is the exact 101 schema: 102 adds only
+// the two Agent MCP transport columns and their CHECK constraints.
+func mcpTransportPredecessorCoreSnapshot() Snapshot {
+	s := currentCoreSnapshot()
+	s.Core.Version = CoreMCPTransportPredecessorVersion
+	s.CoreShape.Digest = CoreMCPTransportPredecessorDigest
+	s.CoreShape.Constraints = 728
 	return s
 }
 

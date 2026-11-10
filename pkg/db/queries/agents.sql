@@ -22,16 +22,18 @@
 INSERT INTO agents (
     creator_id, slug, name, description, endpoint_url,
     endpoint_auth_header, price_per_call_cents, tags, visibility,
-    connection_mode, mcp_tool_name
+    connection_mode, mcp_tool_name, mcp_transport, endpoint_auth_header_name
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+    COALESCE(NULLIF($12::text, ''), 'legacy_json'), $13::text
 )
 RETURNING id, creator_id, slug, name, description, endpoint_url,
           endpoint_auth_header, price_per_call_cents, tags,
           lifecycle_status, visibility, certification_status,
           rejection_reason, certified_at,
           total_calls, total_revenue_cents,
-          webhook_url, connection_mode, mcp_tool_name, created_at, updated_at;
+          webhook_url, connection_mode, mcp_tool_name, created_at, updated_at,
+          mcp_transport, endpoint_auth_header_name;
 
 -- name: UpdateAgentDraft :one
 -- 创作者编辑：可以同时改 visibility（public / unlisted / private）。
@@ -51,6 +53,8 @@ SET name = $2,
     visibility = $9,
     connection_mode = $10,
     mcp_tool_name = $11,
+    mcp_transport = COALESCE(NULLIF($12::text, ''), 'legacy_json'),
+    endpoint_auth_header_name = $13::text,
     updated_at = NOW()
 FROM profile_lock
 WHERE id = $1 AND creator_id = $8 AND lifecycle_status = 'active'
@@ -68,7 +72,8 @@ RETURNING id, creator_id, slug, name, description, endpoint_url,
           lifecycle_status, visibility, certification_status,
           rejection_reason, certified_at,
           total_calls, total_revenue_cents,
-          webhook_url, connection_mode, mcp_tool_name, created_at, updated_at;
+          webhook_url, connection_mode, mcp_tool_name, created_at, updated_at,
+          mcp_transport, endpoint_auth_header_name;
 
 -- name: GetAgentByIDForOwner :one
 SELECT id, creator_id, slug, name, description, endpoint_url,
@@ -76,7 +81,8 @@ SELECT id, creator_id, slug, name, description, endpoint_url,
        lifecycle_status, visibility, certification_status,
        rejection_reason, certified_at,
        total_calls, total_revenue_cents,
-       webhook_url, connection_mode, mcp_tool_name, created_at, updated_at
+       webhook_url, connection_mode, mcp_tool_name, created_at, updated_at,
+       mcp_transport, endpoint_auth_header_name
 FROM agents
 WHERE id = $1 AND creator_id = $2;
 
@@ -94,7 +100,8 @@ SELECT agents.id, agents.creator_id, agents.slug, agents.name, agents.descriptio
        agents.lifecycle_status, agents.visibility, agents.certification_status,
        agents.rejection_reason, agents.certified_at,
        agents.total_calls, agents.total_revenue_cents,
-       agents.webhook_url, agents.connection_mode, agents.mcp_tool_name, agents.created_at, agents.updated_at
+       agents.webhook_url, agents.connection_mode, agents.mcp_tool_name, agents.created_at, agents.updated_at,
+       agents.mcp_transport, agents.endpoint_auth_header_name
 FROM agents
 CROSS JOIN profile_lock
 WHERE agents.id = $1 AND agents.creator_id = $2
@@ -106,7 +113,8 @@ SELECT id, creator_id, slug, name, description, endpoint_url,
        lifecycle_status, visibility, certification_status,
        rejection_reason, certified_at,
        total_calls, total_revenue_cents,
-       webhook_url, connection_mode, mcp_tool_name, created_at, updated_at
+       webhook_url, connection_mode, mcp_tool_name, created_at, updated_at,
+       mcp_transport, endpoint_auth_header_name
 FROM agents
 WHERE id = $1;
 
@@ -119,6 +127,7 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        a.rejection_reason, a.certified_at,
        a.total_calls, a.total_revenue_cents,
        a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
+       a.mcp_transport, a.endpoint_auth_header_name,
        c.input_schema AS capability_input_schema,
        c.version AS capability_version
 FROM agents a
@@ -131,7 +140,8 @@ SELECT id, creator_id, slug, name, description, endpoint_url,
        lifecycle_status, visibility, certification_status,
        rejection_reason, certified_at,
        total_calls, total_revenue_cents,
-       webhook_url, connection_mode, mcp_tool_name, created_at, updated_at
+       webhook_url, connection_mode, mcp_tool_name, created_at, updated_at,
+       mcp_transport, endpoint_auth_header_name
 FROM agents
 WHERE creator_id = $1
 ORDER BY created_at DESC;
@@ -144,6 +154,7 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        a.rejection_reason, a.certified_at,
        a.total_calls, a.total_revenue_cents,
        a.webhook_url, a.connection_mode, a.mcp_tool_name, a.created_at, a.updated_at,
+       a.mcp_transport, a.endpoint_auth_header_name,
        COALESCE(av.availability_status, 'unknown') AS availability_status,
        av.last_successful_run_at AS availability_last_successful_run_at,
        av.last_failed_run_at AS availability_last_failed_run_at,
@@ -609,7 +620,8 @@ RETURNING id, creator_id, slug, name, description, endpoint_url,
           lifecycle_status, visibility, certification_status,
           rejection_reason, certified_at,
           total_calls, total_revenue_cents,
-          webhook_url, connection_mode, mcp_tool_name, created_at, updated_at;
+          webhook_url, connection_mode, mcp_tool_name, created_at, updated_at,
+          mcp_transport, endpoint_auth_header_name;
 
 -- name: GetAdminSummary :one
 SELECT

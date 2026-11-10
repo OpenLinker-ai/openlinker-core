@@ -83,6 +83,7 @@ jobs:
           grep -q -- '--- PASS: TestCLILoginRollbackAndReapplyIntegration' /tmp/migrationinit.log
           grep -q -- '--- PASS: TestRuntimeSignalRetentionIndexRollbackAndReapply ' /tmp/migrationinit.log
           grep -q -- '--- PASS: TestRuntimeSignalRetentionIndexRejectsInterruptedBuild ' /tmp/migrationinit.log
+          grep -q -- '--- PASS: TestAgentMCPTransportMigrationDefaultsChecksAndGuardedRollback ' /tmp/migrationinit.log
           grep -q -- '--- PASS: TestBrowserObservationMigrationConvergesFromFreshReviewedBridgeAndVersion91/version-100 ' /tmp/migrationinit.log
       - name: Prove CLI authorization against PostgreSQL
         shell: bash

@@ -154,10 +154,15 @@ func (s *Service) validateTarget(ctx context.Context, targetOwnerID uuid.UUID, t
 		if target.MCPToolName != nil {
 			mcpToolName = *target.MCPToolName
 		}
+		authHeaderName := ""
+		if target.EndpointAuthHeaderName != nil {
+			authHeaderName = *target.EndpointAuthHeaderName
+		}
 		contractHash, err := executioncontract.AgentHash(executioncontract.Agent{
 			ID: target.ID, ConnectionMode: connectionMode, EndpointURL: target.EndpointURL,
-			MCPToolName: mcpToolName, CapabilityVersion: onboarding.Capability.Version,
-			InputSchema: onboarding.Capability.InputSchema, OutputSchema: onboarding.Capability.OutputSchema,
+			MCPToolName: mcpToolName, MCPTransport: target.MCPTransport, AuthHeaderName: authHeaderName,
+			CapabilityVersion: onboarding.Capability.Version,
+			InputSchema:       onboarding.Capability.InputSchema, OutputSchema: onboarding.Capability.OutputSchema,
 		})
 		if err != nil {
 			return nil, httpx.Internal("计算 Agent contract 失败")

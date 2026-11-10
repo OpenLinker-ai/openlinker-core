@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/mcpclient"
 )
 
 // errEvidenceTargetChanged marks a probe result that was not stored because
@@ -84,11 +85,14 @@ func (e evidenceInvalidation) any() bool {
 // evidence. A changed endpoint credential on the same target only invalidates
 // reachability: calls now present different credentials, but certification
 // and benchmarks still describe the same service, so routine secret rotation
-// keeps them.
+// keeps them. A changed MCP transport or credential header name changes how
+// the same service is called, so it is treated like a credential change.
 func evidenceInvalidationForUpdate(existing *db.Agent, next connectionSettings, nextAuthHeader *string) evidenceInvalidation {
 	targetChanged := storedConnectionTarget(existing) != next.target()
 	credentialChanged := usesEndpointCredential(next.Mode) &&
-		authHeaderValue(existing.EndpointAuthHeader) != authHeaderValue(nextAuthHeader)
+		(authHeaderValue(existing.EndpointAuthHeader) != authHeaderValue(nextAuthHeader) ||
+			mcpclient.NormalizeTransport(existing.MCPTransport) != mcpclient.NormalizeTransport(next.MCPTransport) ||
+			authHeaderValue(existing.EndpointAuthHeaderName) != authHeaderValue(next.EndpointAuthHeaderName))
 	return evidenceInvalidation{
 		Reachability: targetChanged || credentialChanged,
 		Trust:        targetChanged,

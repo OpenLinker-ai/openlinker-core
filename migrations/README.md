@@ -8,11 +8,11 @@ canonical seed data for a fresh database. The migration runner then applies
 `091_browser_interaction_policy.up.sql`,
 `092_browser_observation_audit.up.sql`,
 `093_skill_packages.up.sql`, `094_cli_login.up.sql`, `095_runtime_node_upgrade.up.sql`,
-`096_skill_package_publication.up.sql` `097_resource_metadata.up.sql` `098_agent_mcp_bindings.up.sql` `099_runtime_node_upgrade_features.up.sql`, `100_runtime_mtls_transition.up.sql` and `101_runtime_signal_outbox_retention.up.sql`. Supported exact clean predecessors are
-`100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `101`.
+`096_skill_package_publication.up.sql` `097_resource_metadata.up.sql` `098_agent_mcp_bindings.up.sql` `099_runtime_node_upgrade_features.up.sql`, `100_runtime_mtls_transition.up.sql`, `101_runtime_signal_outbox_retention.up.sql` and `102_agent_mcp_transport.up.sql`. Supported exact clean predecessors are
+`101`, `100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `102`.
 `086_current_schema_init_verify.sql` is the PostgreSQL 16 current-catalog and
 seed fingerprint used after the complete migration chain. Fresh and predecessor
-paths therefore execute the same `101` DDL and converge on one version `101`
+paths therefore execute the same `102` DDL and converge on one version `102`
 catalog fingerprint without an idempotent duplicate schema definition.
 
 Migration `093` adds private skill packages, immutable versions, Agent bindings
@@ -32,8 +32,8 @@ standard Sessions, publication and connection-mode changes therefore cannot
 race past the initial policy decision.
 
 The migration command accepts only a truly empty database, an exact clean
-supported predecessor (`100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
-version `101` current schema.
+supported predecessor (`101`, `100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
+version `102` current schema.
 Exactness is enforced with catalog object counts and a SHA-256 fingerprint over
 table, column/default, constraint, index, trigger, and function definitions.
 Legacy, dirty, partial, or malformed databases are rejected before the
@@ -183,3 +183,13 @@ PostgreSQL 16 measured shape: 91 tables, 728 constraints, 309 indexes, 80 trigge
 13 Runtime schema records; digest
 `d85f44ea4e5381bf8708bc6d3f1a0f14c10dc42206270e6da2da8858a70ceb7a`.
 The exact 100 predecessor retains its 91/728/308/80 fingerprint above.
+
+Migration `102` adds `agents.mcp_transport` (`legacy_json` default,
+`streamable_http`, `legacy_sse`) and the nullable
+`agents.endpoint_auth_header_name` with an HTTP token CHECK. Existing Agents
+keep the single JSON-RPC POST and the existing credential routing. The down
+script refuses while any Agent uses a non-default transport or a header name,
+because dropping either column would silently change how that Agent is called.
+Re-adding the columns after a rollback assigns new attribute numbers, so the
+reapplied catalog does not match the measured `102` fingerprint and the
+preflight fails closed; the rollback is for disposable databases only.

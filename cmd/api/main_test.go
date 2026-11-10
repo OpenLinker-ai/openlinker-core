@@ -701,6 +701,20 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 			wantFactory:  1,
 		},
 		{
+			name:         "mcp transport predecessor up success",
+			args:         []string{"up"},
+			env:          map[string]string{"DATABASE_URL": "postgres://db"},
+			snapshot:     mcpTransportPredecessorCoreMigrationSnapshot(),
+			migrator:     &fakeMigrator{},
+			postSnapshot: migrationSnapshotPointer(currentCoreMigrationSnapshot()),
+			wantCode:     0,
+			wantOut:      "migrate up: ok",
+			wantSrc:      "file://./migrations",
+			wantDBURL:    "postgres://db",
+			wantInspect:  2,
+			wantFactory:  1,
+		},
+		{
 			name:         "signal retention predecessor up success",
 			args:         []string{"up"},
 			env:          map[string]string{"DATABASE_URL": "postgres://db"},
@@ -954,7 +968,7 @@ func currentCoreMigrationSnapshot() migrationinit.Snapshot {
 		CallbackOwnerIndexValid: true,
 		CoreShape: migrationinit.SchemaShape{
 			Digest: migrationinit.CoreSchemaDigest,
-			Tables: 91, Constraints: 728, Indexes: 309, Triggers: 80,
+			Tables: 91, Constraints: 730, Indexes: 309, Triggers: 80,
 			CoreIdentities: 1, RuntimeControls: 1, RuntimeSchemas: 13,
 			CurrentRuntime: 1, RuntimeWires: 5, CurrentWire: 1, PreviousWire: 1,
 			BuiltInSkills: 30, BuiltInSkillCases: 15,
@@ -966,7 +980,16 @@ func signalRetentionPredecessorCoreMigrationSnapshot() migrationinit.Snapshot {
 	snapshot := currentCoreMigrationSnapshot()
 	snapshot.Core.Version = migrationinit.CoreSignalRetentionPredecessorVersion
 	snapshot.CoreShape.Digest = migrationinit.CoreSignalRetentionPredecessorDigest
+	snapshot.CoreShape.Constraints = 728
 	snapshot.CoreShape.Indexes = 308
+	return snapshot
+}
+
+func mcpTransportPredecessorCoreMigrationSnapshot() migrationinit.Snapshot {
+	snapshot := currentCoreMigrationSnapshot()
+	snapshot.Core.Version = migrationinit.CoreMCPTransportPredecessorVersion
+	snapshot.CoreShape.Digest = migrationinit.CoreMCPTransportPredecessorDigest
+	snapshot.CoreShape.Constraints = 728
 	return snapshot
 }
 

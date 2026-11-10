@@ -16,10 +16,15 @@ const Prefix = "hct:v1:"
 var hashPattern = regexp.MustCompile(`^hct:v1:[a-f0-9]{64}$`)
 
 type Agent struct {
-	ID                string
-	ConnectionMode    string
-	EndpointURL       string
-	MCPToolName       string
+	ID             string
+	ConnectionMode string
+	EndpointURL    string
+	MCPToolName    string
+	// MCPTransport and AuthHeaderName describe how an mcp_server Agent is
+	// called. At their defaults ("" or legacy_json, and no header name) they
+	// are left out of the hash, so existing contracts keep their value.
+	MCPTransport      string
+	AuthHeaderName    string
 	CapabilityVersion int32
 	InputSchema       map[string]interface{}
 	OutputSchema      map[string]interface{}
@@ -54,7 +59,7 @@ func AgentHash(input Agent) (string, error) {
 	if mode == "mcp_server" {
 		tool = strings.TrimSpace(input.MCPToolName)
 	}
-	return hash(map[string]interface{}{
+	contract := map[string]interface{}{
 		"contract_schema":    "hct:v1",
 		"target_type":        "agent",
 		"target_id":          strings.TrimSpace(input.ID),
@@ -64,7 +69,19 @@ func AgentHash(input Agent) (string, error) {
 		"capability_version": input.CapabilityVersion,
 		"input_schema":       nonNilMap(input.InputSchema),
 		"output_schema":      nonNilMap(input.OutputSchema),
-	})
+	}
+	if mode == "mcp_server" {
+		transport := strings.TrimSpace(input.MCPTransport)
+		if transport == "" {
+			transport = "legacy_json"
+		}
+		headerName := strings.TrimSpace(input.AuthHeaderName)
+		if transport != "legacy_json" || headerName != "" {
+			contract["mcp_transport"] = transport
+			contract["endpoint_auth_header_name"] = headerName
+		}
+	}
+	return hash(contract)
 }
 
 func WorkflowHash(input Workflow) (string, error) {

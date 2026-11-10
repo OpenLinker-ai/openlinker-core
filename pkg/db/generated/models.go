@@ -86,6 +86,12 @@ type Agent struct {
 	MCPToolName         *string    `db:"mcp_tool_name" json:"mcp_tool_name"`
 	CreatedAt           time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt           time.Time  `db:"updated_at" json:"updated_at"`
+	// MCPTransport selects how Core calls an mcp_server Agent. Rows read by
+	// queries that do not select it keep "", which means legacy_json.
+	MCPTransport string `db:"mcp_transport" json:"mcp_transport"`
+	// EndpointAuthHeaderName, when set, is the request header that carries
+	// endpoint_auth_header for mcp_server calls instead of the default routing.
+	EndpointAuthHeaderName *string `db:"endpoint_auth_header_name" json:"endpoint_auth_header_name"`
 }
 
 // Run 对应 runs 表（每次调用一行）。
