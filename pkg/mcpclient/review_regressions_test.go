@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -205,5 +206,94 @@ func TestSSEReaderDispatchesCRTerminatedEventWithoutMoreBytes(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("CR-terminated event waited for more bytes")
+	}
+}
+
+// The server writes a ping, then a result larger than the socket buffers,
+// and acknowledges Core's ping reply only after the result stream has been
+// consumed. Replying inline would leave both sides waiting until the
+// timeout; the reply worker keeps the stream read.
+func TestStreamableHTTPRepliesDoNotBlockAResultStream(t *testing.T) {
+	resultWritten := make(chan struct{})
+	replyArrived := make(chan struct{}, 1)
+	var replyAcked atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var m struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		switch {
+		case m.Method == "initialize":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-06-18"}}`, m.ID)
+		case m.Method == "tools/call":
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":\"srv-ping\",\"method\":\"ping\"}\n\n")
+			w.(http.Flusher).Flush()
+			select {
+			case <-replyArrived:
+			case <-r.Context().Done():
+				return
+			}
+			big := strings.Repeat("r", 3<<20)
+			fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"structuredContent\":{\"blob\":\"%s\"}}}\n\n", m.ID, big)
+			w.(http.Flusher).Flush()
+			close(resultWritten)
+		case m.Method == "" && string(m.ID) == `"srv-ping"`:
+			replyArrived <- struct{}{}
+			select {
+			case <-resultWritten:
+				replyAcked.Store(true)
+				w.WriteHeader(http.StatusAccepted)
+			case <-r.Context().Done():
+			}
+		default:
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer server.Close()
+	cfg := testConfig(TransportStreamableHTTP, server.URL)
+	cfg.Limits.TotalTimeout = 10 * time.Second
+	started := time.Now()
+	result, err := CallTool(context.Background(), cfg, "run-1", toolParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blob, _ := result["structuredContent"].(map[string]any)["blob"].(string); len(blob) != 3<<20 {
+		t.Fatalf("result blob length = %d", len(blob))
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("reply POST and result stream deadlocked for %s", elapsed)
+	}
+	if !replyAcked.Load() {
+		t.Fatal("ping reply was not delivered once the result was consumed")
+	}
+}
+
+// Replies already queued when the result arrives still go out.
+func TestStreamableHTTPDeliversQueuedRepliesAfterResult(t *testing.T) {
+	server := newStreamableServer(t, "sse")
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+	// streamableServer buffers four tool-call signals; stay within them.
+	for i := 0; i < 4; i++ {
+		before := len(server.recorded())
+		if _, err := CallTool(context.Background(), testConfig(TransportStreamableHTTP, ts.URL), "run-1", toolParams()); err != nil {
+			t.Fatal(err)
+		}
+		replies := 0
+		for _, m := range server.recorded()[before:] {
+			if m.Method == "" {
+				replies++
+			}
+		}
+		if replies != 2 {
+			t.Fatalf("run %d: replies = %d, want ping and sampling", i, replies)
+		}
 	}
 }

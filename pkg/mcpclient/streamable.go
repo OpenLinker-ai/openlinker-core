@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 )
 
 // streamableConn is one Streamable HTTP session: every message is a POST to
@@ -17,6 +18,8 @@ type streamableConn struct {
 	mu              sync.Mutex
 	sessionID       string
 	protocolVersion string
+	// replyBudget counts replies to server requests across the session.
+	replyBudget atomic.Int32
 }
 
 func newStreamableConn(cfg Config) *streamableConn {
@@ -101,9 +104,24 @@ func (c *streamableConn) readJSON(stage, id string, body io.Reader) (incoming, e
 }
 
 // readStream reads SSE events until the response for id. Server requests on
-// the stream are answered with a POST; notifications and responses to other
-// ids are ignored.
+// the stream are answered with a POST from a bounded reply worker;
+// notifications and responses to other ids are ignored.
 func (c *streamableConn) readStream(ctx context.Context, stage, id string, body io.Reader) (incoming, error) {
+	// Replies go out from a worker while this loop keeps reading, so a
+	// server that streams more before acknowledging a reply cannot stall
+	// the call. When the stream is done, replies already queued get up to
+	// CancelGrace to go out, then the worker is stopped.
+	replyCtx, stopReplies := context.WithCancel(ctx)
+	replies := newReplyWorker(c.send, &c.replyBudget)
+	replies.start(replyCtx)
+	defer func() {
+		replies.finish()
+		waitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.Limits.CancelGrace)
+		replies.wait(waitCtx)
+		cancel()
+		stopReplies()
+		replies.wait(context.Background())
+	}()
 	events := newSSEReader(body, c.cfg.Limits.MaxEventBytes, c.cfg.Limits.MaxStreamBytes)
 	for {
 		event, err := events.next()
@@ -125,9 +143,7 @@ func (c *streamableConn) readStream(ctx context.Context, stage, id string, body 
 			case m.answers(id):
 				return m, nil
 			case m.isRequest():
-				if err := c.send(ctx, replyToServerRequest(m)); err != nil && ctx.Err() != nil {
-					return incoming{}, ctx.Err()
-				}
+				replies.enqueue(m)
 			}
 		}
 	}

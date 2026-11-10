@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/endpointurl"
@@ -25,11 +26,10 @@ type legacySSEConn struct {
 	pending map[string]chan incoming
 	done    chan struct{}
 	readErr error
-	// serverRequests queues requests the server sent on the stream. One
-	// worker answers them, and only after the message URL has been
-	// validated; a full queue drops further requests.
-	serverRequests chan incoming
-	workerDone     chan struct{}
+	// replies answers requests the server sent on the stream, and starts
+	// only after the message URL has been validated.
+	replies     *replyWorker
+	replyBudget atomic.Int32
 	// replyCtx bounds replies to server requests to the stream's lifetime.
 	replyCtx context.Context
 }
@@ -79,9 +79,8 @@ func dialLegacySSE(ctx context.Context, cfg Config) (*legacySSEConn, error) {
 		pending:  map[string]chan incoming{},
 		done:     make(chan struct{}),
 		replyCtx: streamCtx,
-
-		serverRequests: make(chan incoming, maxQueuedServerRequests),
 	}
+	c.replies = newReplyWorker(c.send, &c.replyBudget)
 	endpoint := make(chan string, 1)
 	go c.readLoop(resp, endpoint)
 
@@ -115,8 +114,7 @@ func dialLegacySSE(ctx context.Context, cfg Config) (*legacySSEConn, error) {
 	c.messageURL = target.String()
 	// Start answering server requests only now: before this point there is
 	// no validated URL to answer them at.
-	c.workerDone = make(chan struct{})
-	go c.replyWorker()
+	c.replies.start(c.replyCtx)
 	return c, nil
 }
 
@@ -177,40 +175,7 @@ func (c *legacySSEConn) dispatch(m incoming) {
 		// Reply off the read loop so a server that writes to the stream
 		// while handling the POST cannot stall it. The queue is bounded; a
 		// server that floods requests loses the excess, not Core resources.
-		select {
-		case c.serverRequests <- m:
-		default:
-		}
-	}
-}
-
-const (
-	// maxQueuedServerRequests bounds server requests waiting for a reply.
-	maxQueuedServerRequests = 16
-	// maxServerRequestReplies bounds replies sent in one session.
-	maxServerRequestReplies = 64
-	// serverRequestReplyTimeout bounds one reply POST.
-	serverRequestReplyTimeout = 5 * time.Second
-)
-
-// replyWorker answers queued server requests one at a time until the stream
-// ends, sending at most maxServerRequestReplies replies.
-func (c *legacySSEConn) replyWorker() {
-	defer close(c.workerDone)
-	sent := 0
-	for {
-		select {
-		case <-c.replyCtx.Done():
-			return
-		case m := <-c.serverRequests:
-			if sent >= maxServerRequestReplies {
-				continue
-			}
-			sent++
-			ctx, cancel := context.WithTimeout(c.replyCtx, serverRequestReplyTimeout)
-			_ = c.send(ctx, replyToServerRequest(m))
-			cancel()
-		}
+		c.replies.enqueue(m)
 	}
 }
 
@@ -293,10 +258,5 @@ func (c *legacySSEConn) close(ctx context.Context) {
 	case <-c.done:
 	case <-ctx.Done():
 	}
-	if c.workerDone != nil {
-		select {
-		case <-c.workerDone:
-		case <-ctx.Done():
-		}
-	}
+	c.replies.wait(ctx)
 }

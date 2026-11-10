@@ -2849,8 +2849,10 @@ func redactCredential(text, credential string) string {
 	if fields := strings.Fields(credential); len(fields) > 1 {
 		secrets = append(secrets, fields[len(fields)-1])
 	}
+	// Every nonempty secret is removed, however short: a short credential
+	// is still the owner's credential. Over-redacting an error is harmless.
 	for _, secret := range secrets {
-		if len(secret) < 4 {
+		if secret == "" {
 			continue
 		}
 		text = strings.ReplaceAll(text, secret, "[redacted]")

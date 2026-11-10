@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -209,6 +210,20 @@ func TestCallMCPServerSessionMapsEndpointAnswers(t *testing.T) {
 	require.Nil(t, mcpSessionAgentError(endpointurl.ErrCrossOriginRedirect, ""))
 	rpc := mcpSessionAgentError(&mcpclient.RPCError{Code: -32000, Message: "bad key Bearer sk-live-123 / sk-live-123"}, "Bearer sk-live-123")
 	require.NotContains(t, rpc.Message, "sk-live-123")
+}
+
+// Short credentials are redacted too, alone and as the token of a scheme.
+func TestRedactCredentialRemovesShortSecrets(t *testing.T) {
+	for _, tc := range []struct{ credential, text string }{
+		{"abc", "key abc rejected"},
+		{"Bearer abc", "token abc rejected for Bearer abc"},
+		{"x", "bad x"},
+	} {
+		rpc := mcpSessionAgentError(&mcpclient.RPCError{Code: -32001, Message: tc.text}, tc.credential)
+		token := strings.Fields(tc.credential)[len(strings.Fields(tc.credential))-1]
+		require.NotContains(t, strings.ReplaceAll(rpc.Message, "[redacted]", ""), token, "credential %q leaked: %q", tc.credential, rpc.Message)
+	}
+	require.Equal(t, "unchanged", redactCredential("unchanged", "  "))
 }
 
 // A reflecting endpoint must not leak the stored credential into Run errors:
