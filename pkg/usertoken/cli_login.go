@@ -45,15 +45,7 @@ type CLILoginHandler struct {
 }
 
 func NewCLILoginHandler(svc *Service, frontend string, trustedProxies ...*net.IPNet) *CLILoginHandler {
-	ip := echo.ExtractIPDirect()
-	if len(trustedProxies) > 0 {
-		options := []echo.TrustOption{echo.TrustLoopback(false), echo.TrustLinkLocal(false), echo.TrustPrivateNet(false)}
-		for _, network := range trustedProxies {
-			options = append(options, echo.TrustIPRange(network))
-		}
-		ip = echo.ExtractIPFromXFFHeader(options...)
-	}
-	return &CLILoginHandler{svc: svc, frontend: strings.TrimRight(frontend, "/"), clientIP: ip}
+	return &CLILoginHandler{svc: svc, frontend: strings.TrimRight(frontend, "/"), clientIP: httpx.TrustedProxyIPExtractor(trustedProxies)}
 }
 
 func (h *CLILoginHandler) Register(api *echo.Group, jwt echo.MiddlewareFunc) {

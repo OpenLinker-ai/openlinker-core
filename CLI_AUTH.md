@@ -57,7 +57,9 @@ covering only the actual proxy peers. The X-Forwarded-For chain is walked from
 the direct peer toward the client, stopping at the first untrusted IP; private
 and loopback networks are not implicitly trusted. Invalid CIDRs fail startup.
 With an empty setting, clients behind one proxy share a rate-limit bucket.
-This setting changes only CLI authorization, not other HTTP endpoints.
+The production-wide HTTP rate limiter uses the same setting to identify
+clients, so it must also list the proxy peers in any proxied production
+deployment.
 Pending requests expire after ten minutes, with bounded
 cleanup on subsequent starts. CLI does not retry an ambiguous successful
 exchange: a lost response may leave a token to revoke in website settings.
