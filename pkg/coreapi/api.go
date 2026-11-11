@@ -279,6 +279,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	workflowSvc.SetRunUpdateSource(runUpdates)
 	workflowHandler := workflow.NewHandler(workflowSvc)
 	workflowHandler.RegisterProtected(api, hybridMw)
+	if opts.AdminMiddleware != nil {
+		workflow.NewAdminHandler(workflowSvc).Register(api, jwtMiddleware, opts.AdminMiddleware)
+	}
 	externalExecutionSvc := externalexecution.NewService(
 		agentSvc,
 		runtimeSvc,

@@ -235,7 +235,12 @@ func scanWorkflowRun(row interface {
 
 const createWorkflowRun = `-- name: CreateWorkflowRun :one
 INSERT INTO workflow_runs (workflow_id, user_id, status, input, attempt_count)
-VALUES ($1, $2, 'running', $3, 1)
+SELECT $1, $2, 'running', $3, 1
+WHERE EXISTS (
+    SELECT 1 FROM workflow_admission
+    WHERE singleton AND state = 'open'
+    FOR SHARE
+)
 	RETURNING id, workflow_id, user_id, status, input, output, error_message,
 	          started_at, finished_at, created_at, updated_at,
 	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
@@ -255,7 +260,12 @@ func (q *Queries) CreateWorkflowRun(ctx context.Context, arg CreateWorkflowRunPa
 
 const createPendingWorkflowRun = `-- name: CreatePendingWorkflowRun :one
 	INSERT INTO workflow_runs (workflow_id, user_id, status, input, max_attempts)
-	VALUES ($1, $2, 'pending', $3, $4)
+	SELECT $1, $2, 'pending', $3, $4
+WHERE EXISTS (
+    SELECT 1 FROM workflow_admission
+    WHERE singleton AND state = 'open'
+    FOR SHARE
+)
 	RETURNING id, workflow_id, user_id, status, input, output, error_message,
 	          started_at, finished_at, created_at, updated_at,
 	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
@@ -276,7 +286,12 @@ func (q *Queries) CreatePendingWorkflowRun(ctx context.Context, arg CreatePendin
 
 const createPendingExternalExecutionWorkflowRun = `-- name: CreatePendingExternalExecutionWorkflowRun :one
 	INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts)
-	VALUES ($1, $2, $3, 'pending', $4, $5)
+	SELECT $1, $2, $3, 'pending', $4, $5
+WHERE EXISTS (
+    SELECT 1 FROM workflow_admission
+    WHERE singleton AND state = 'open'
+    FOR SHARE
+)
 	ON CONFLICT (id) DO NOTHING
 	RETURNING id, workflow_id, user_id, status, input, output, error_message,
 	          started_at, finished_at, created_at, updated_at,
@@ -573,6 +588,11 @@ const claimPendingWorkflowRun = `-- name: ClaimPendingWorkflowRun :one
 	    FROM workflow_runs
 	    WHERE status = 'pending'
 	      AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+	      AND EXISTS (
+	          SELECT 1 FROM workflow_admission
+	          WHERE singleton AND state = 'open'
+	          FOR SHARE
+	      )
 	    ORDER BY created_at ASC
 	    LIMIT 1
 	    FOR UPDATE SKIP LOCKED
@@ -760,7 +780,7 @@ SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        created_at, updated_at
 FROM workflow_run_steps
 WHERE workflow_run_id = $1
-ORDER BY sequence ASC`
+ORDER BY sequence ASC, created_at ASC, id ASC`
 
 func (q *Queries) ListWorkflowRunSteps(ctx context.Context, workflowRunID uuid.UUID) ([]WorkflowRunStep, error) {
 	rows, err := q.db.Query(ctx, listWorkflowRunSteps, workflowRunID)
@@ -785,7 +805,7 @@ SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        created_at, updated_at
 FROM workflow_run_steps
 WHERE workflow_run_id = ANY($1::uuid[])
-ORDER BY workflow_run_id ASC, sequence ASC`
+ORDER BY workflow_run_id ASC, sequence ASC, created_at ASC, id ASC`
 
 func (q *Queries) ListWorkflowRunStepsByRunIDs(ctx context.Context, workflowRunIds []uuid.UUID) ([]WorkflowRunStep, error) {
 	rows, err := q.db.Query(ctx, listWorkflowRunStepsByRunIDs, workflowRunIds)
@@ -802,4 +822,45 @@ func (q *Queries) ListWorkflowRunStepsByRunIDs(ctx context.Context, workflowRunI
 		items = append(items, s)
 	}
 	return items, rows.Err()
+}
+
+const getWorkflowAdmission = `-- name: GetWorkflowAdmission :one
+SELECT state, reason, changed_by, changed_at
+FROM workflow_admission
+WHERE singleton`
+
+type WorkflowAdmission struct {
+	State     string     `db:"state" json:"state"`
+	Reason    *string    `db:"reason" json:"reason"`
+	ChangedBy *uuid.UUID `db:"changed_by" json:"changed_by"`
+	ChangedAt time.Time  `db:"changed_at" json:"changed_at"`
+}
+
+func (q *Queries) GetWorkflowAdmission(ctx context.Context) (WorkflowAdmission, error) {
+	row := q.db.QueryRow(ctx, getWorkflowAdmission)
+	var i WorkflowAdmission
+	err := row.Scan(&i.State, &i.Reason, &i.ChangedBy, &i.ChangedAt)
+	return i, err
+}
+
+const setWorkflowAdmission = `-- name: SetWorkflowAdmission :one
+UPDATE workflow_admission
+SET state = $1, reason = $2, changed_by = $3, changed_at = clock_timestamp()
+WHERE singleton
+RETURNING state, reason, changed_by, changed_at`
+
+type SetWorkflowAdmissionParams struct {
+	State     string     `db:"state" json:"state"`
+	Reason    *string    `db:"reason" json:"reason"`
+	ChangedBy *uuid.UUID `db:"changed_by" json:"changed_by"`
+}
+
+// SetWorkflowAdmission takes the admission row lock. It waits for every run
+// creation or claim that already read the row FOR SHARE, so once it commits as
+// 'draining' nothing created or claimed afterwards saw 'open'.
+func (q *Queries) SetWorkflowAdmission(ctx context.Context, arg SetWorkflowAdmissionParams) (WorkflowAdmission, error) {
+	row := q.db.QueryRow(ctx, setWorkflowAdmission, arg.State, arg.Reason, arg.ChangedBy)
+	var i WorkflowAdmission
+	err := row.Scan(&i.State, &i.Reason, &i.ChangedBy, &i.ChangedAt)
+	return i, err
 }

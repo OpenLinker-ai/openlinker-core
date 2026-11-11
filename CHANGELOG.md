@@ -7,6 +7,29 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+### Workflow release drain
+
+- Migration `103` adds a durable workflow admission state (`open` or
+  `draining`) so a release can stop new workflow work before migrating.
+  While draining, creating a workflow run (async, synchronous `/run`, Retry,
+  step Rerun, External Execution) returns 503 `WORKFLOW_DRAINING`, and the
+  worker claims no pending run; running runs finish. Creation and claiming
+  read the admission row `FOR SHARE`, so a committed switch to `draining` is
+  a barrier. The state survives restarts.
+- Platform administrators can read and switch admission at
+  `GET/POST /admin/workflow-admission`, list blocking runs at
+  `GET /admin/workflow-runs?state=nonterminal|cancelling`, and cancel any
+  user's run at `POST /admin/workflow-runs/:id/cancel`. The run owner stays
+  the authorization subject for Runtime; workflow cancellations now record
+  `requested_by` and `requested_via` (`owner`, `external` or `admin`).
+  Owner-facing cancellation is unchanged.
+- The workflow worker now reconciles cancellations left in `requested` or
+  `stopping` (for example after a crash between the cancellation commit and
+  its first reconciliation), regardless of admission or the parent run state.
+- Workflow run steps are listed in a deterministic order
+  (`sequence, created_at, id`), so duplicate step rows for one node always
+  resolve to the same latest row.
+
 ### Security
 
 - **Behaviour change:** the production HTTP rate limiter no longer trusts a

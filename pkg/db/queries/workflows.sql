@@ -91,22 +91,42 @@ WHERE user_id = $1
   AND ($3::text = '' OR status = $3);
 
 -- name: CreateWorkflowRun :one
+-- Returns no row while workflow admission is draining. Reading the admission
+-- row FOR SHARE makes a committed switch to 'draining' a barrier.
 INSERT INTO workflow_runs (workflow_id, user_id, status, input, attempt_count)
-VALUES ($1, $2, 'running', $3, 1)
+SELECT $1, $2, 'running', $3, 1
+WHERE EXISTS (
+    SELECT 1 FROM workflow_admission
+    WHERE singleton AND state = 'open'
+    FOR SHARE
+)
 RETURNING id, workflow_id, user_id, status, input, output, error_message,
           started_at, finished_at, created_at, updated_at,
           attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error;
 
 -- name: CreatePendingWorkflowRun :one
+-- Returns no row while workflow admission is draining.
 INSERT INTO workflow_runs (workflow_id, user_id, status, input, max_attempts)
-VALUES ($1, $2, 'pending', $3, $4)
+SELECT $1, $2, 'pending', $3, $4
+WHERE EXISTS (
+    SELECT 1 FROM workflow_admission
+    WHERE singleton AND state = 'open'
+    FOR SHARE
+)
 RETURNING id, workflow_id, user_id, status, input, output, error_message,
           started_at, finished_at, created_at, updated_at,
           attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error;
 
 -- name: CreatePendingExternalExecutionWorkflowRun :one
+-- Returns no row on an identity conflict or while workflow admission is
+-- draining; callers distinguish the two by looking the identity up.
 INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts)
-VALUES ($1, $2, $3, 'pending', $4, $5)
+SELECT $1, $2, $3, 'pending', $4, $5
+WHERE EXISTS (
+    SELECT 1 FROM workflow_admission
+    WHERE singleton AND state = 'open'
+    FOR SHARE
+)
 ON CONFLICT (id) DO NOTHING
 RETURNING id, workflow_id, user_id, status, input, output, error_message,
           started_at, finished_at, created_at, updated_at,
@@ -280,6 +300,11 @@ WITH candidate AS (
     FROM workflow_runs
     WHERE status = 'pending'
       AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+      AND EXISTS (
+          SELECT 1 FROM workflow_admission
+          WHERE singleton AND state = 'open'
+          FOR SHARE
+      )
     ORDER BY created_at ASC
     LIMIT 1
     FOR UPDATE SKIP LOCKED
@@ -380,7 +405,7 @@ SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        created_at, updated_at
 FROM workflow_run_steps
 WHERE workflow_run_id = $1
-ORDER BY sequence ASC;
+ORDER BY sequence ASC, created_at ASC, id ASC;
 
 -- name: ListWorkflowRunStepsByRunIDs :many
 SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
@@ -388,4 +413,16 @@ SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        created_at, updated_at
 FROM workflow_run_steps
 WHERE workflow_run_id = ANY($1::uuid[])
-ORDER BY workflow_run_id ASC, sequence ASC;
+ORDER BY workflow_run_id ASC, sequence ASC, created_at ASC, id ASC;
+
+-- name: GetWorkflowAdmission :one
+SELECT state, reason, changed_by, changed_at
+FROM workflow_admission
+WHERE singleton;
+
+-- name: SetWorkflowAdmission :one
+UPDATE workflow_admission
+SET state = $1, reason = $2, changed_by = $3, changed_at = clock_timestamp()
+WHERE singleton
+RETURNING state, reason, changed_by, changed_at;
+

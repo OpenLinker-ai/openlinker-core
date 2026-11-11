@@ -13,6 +13,8 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 		t.Fatal(err)
 	}
 	want := map[string]bool{
+		"103_workflow_admission_drain.up.sql":          true,
+		"103_workflow_admission_drain.down.sql":        true,
 		"102_agent_mcp_transport.up.sql":               true,
 		"102_agent_mcp_transport.down.sql":             true,
 		"101_runtime_signal_outbox_retention.up.sql":   true,
@@ -266,9 +268,9 @@ func TestCoreFoundationalInitializerContainsPredecessorContracts(t *testing.T) {
 func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	verify := readInitializer(t, "../../migrations/086_current_schema_init_verify.sql")
 	for _, fragment := range []string{
-		"public_tables <> 91",
-		"public_constraints <> 730",
-		"public_indexes <> 309",
+		"public_tables <> 92",
+		"public_constraints <> 736",
+		"public_indexes <> 310",
 		"public_triggers <> 80",
 		"public_functions <> 72",
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",

@@ -11,6 +11,8 @@ const (
 	defaultRunWorkerInterval = 10 * time.Second
 	defaultRunStaleAfter     = 30 * time.Minute
 	defaultRunClaimBurst     = 5
+
+	workflowCancellationScanBatch = 20
 )
 
 type RunWorkerConfig struct {
@@ -50,6 +52,13 @@ func StartRunWorker(ctx context.Context, svc *Service, cfg RunWorkerConfig) {
 }
 
 func runWorkflowWorkerTick(ctx context.Context, svc *Service, cfg RunWorkerConfig) {
+	// Cancellations run regardless of admission: a drain depends on them
+	// reaching a final state.
+	if attempted, err := svc.ReconcileWorkflowCancellations(ctx, workflowCancellationScanBatch); err != nil {
+		log.Warn().Err(err).Msg("workflow: cancellation reconcile scan failed")
+	} else if attempted > 0 {
+		log.Info().Int("attempted", attempted).Msg("workflow: reconciled pending workflow cancellations")
+	}
 	requeued, err := svc.RequeueStaleWorkflowRuns(ctx, cfg.StaleAfter)
 	if err != nil {
 		log.Warn().Err(err).Msg("workflow: stale run recovery failed")

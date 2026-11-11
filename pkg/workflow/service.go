@@ -322,6 +322,9 @@ func (s *Service) RunWorkflow(ctx context.Context, userID, workflowID uuid.UUID,
 		UserID:     userID,
 		Input:      inputJSON,
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errWorkflowAdmissionDraining
+	}
 	if err != nil {
 		log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.RunWorkflow: CreateWorkflowRun")
 		return nil, httpx.Internal("创建 workflow_run 失败")
@@ -345,6 +348,9 @@ func (s *Service) StartWorkflowRun(ctx context.Context, userID, workflowID uuid.
 		Input:       inputJSON,
 		MaxAttempts: maxAttempts,
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errWorkflowAdmissionDraining
+	}
 	if err != nil {
 		log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.StartWorkflowRun: CreatePendingWorkflowRun")
 		return nil, httpx.Internal("创建异步 workflow_run 失败")
@@ -552,6 +558,8 @@ func (s *Service) StartExternalExecutionWorkflowRun(
 		if found {
 			return replay, nil
 		}
+		// No row and no identity: the insert was refused by admission.
+		return nil, errWorkflowAdmissionDraining
 	}
 	if err != nil {
 		log.Error().Err(err).Str("workflow_id", workflowID.String()).Str("external_request_id", externalRequestID.String()).Msg("workflow.StartExternalExecutionWorkflowRun")
@@ -743,6 +751,9 @@ func (s *Service) RerunWorkflowStep(ctx context.Context, userID, workflowRunID u
 		UserID:     userID,
 		Input:      inputJSON,
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errWorkflowAdmissionDraining
+	}
 	if err != nil {
 		log.Error().Err(err).Str("workflow_run_id", sourceRun.ID.String()).Msg("workflow.RerunWorkflowStep: CreateWorkflowRun")
 		return nil, httpx.Internal("创建 step rerun workflow_run 失败")
@@ -917,6 +928,7 @@ func (s *Service) CancelWorkflowRun(ctx context.Context, userID, workflowRunID u
 	}
 	evidence, err := s.requestWorkflowCancellation(
 		ctx, userID, workflowRunID, "OWNER_CANCEL_REQUESTED",
+		cancellationRequester{userID: userID, via: cancellationRequestedViaOwner},
 	)
 	if err != nil {
 		return nil, err

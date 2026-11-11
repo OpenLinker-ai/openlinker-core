@@ -111,6 +111,10 @@ func (s *Service) StartExternalExecutionWorkflowRunWithFence(
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			existing, getErr := s.queries.WithTx(tx).GetWorkflowRunByID(ctx, runID)
+			if errors.Is(getErr, pgx.ErrNoRows) {
+				// No row and no identity: the insert was refused by admission.
+				return errWorkflowAdmissionDraining
+			}
 			if getErr != nil {
 				return getErr
 			}
@@ -130,6 +134,9 @@ func (s *Service) StartExternalExecutionWorkflowRunWithFence(
 	})
 	if errors.Is(err, ErrExternalWorkflowLaunchFenceRejected) {
 		return nil, httpx.Conflict(ErrExternalWorkflowLaunchFenceRejected.Error())
+	}
+	if errors.Is(err, errWorkflowAdmissionDraining) {
+		return nil, errWorkflowAdmissionDraining
 	}
 	if err != nil {
 		return nil, httpx.Internal("创建 external workflow_run 失败")
