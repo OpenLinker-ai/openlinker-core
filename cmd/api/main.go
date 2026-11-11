@@ -387,6 +387,12 @@ func newEcho(cfg *config.Config, stores ...emw.RateLimiterStore) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
+	// Identify clients for rate limiting from the same explicitly trusted
+	// proxy peers as CLI login (CLI_AUTH_TRUSTED_PROXY_CIDRS). Config.Load
+	// rejects invalid ranges; with none configured the connection peer is the
+	// client, so clients behind an unlisted proxy share one bucket.
+	trustedProxies, _ := cfg.CLIAuthProxyRanges()
+	e.IPExtractor = httpx.TrustedProxyIPExtractor(trustedProxies)
 	e.Use(runtimeListenerIsolationForConfig(cfg))
 	e.Use(emw.Recover())
 	e.Use(emw.RequestID())

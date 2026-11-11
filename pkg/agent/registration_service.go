@@ -89,14 +89,6 @@ func (s *RegistrationService) CreateAgentToken(ctx context.Context, creatorID uu
 			log.Error().Err(err).Str("agent_id", parsed.String()).Msg("registration.CreateAgentToken: GetAgentByIDForOwner")
 			return nil, httpx.Internal("查询 Agent 失败")
 		}
-		count, err := s.queries.CountActiveAgentTokensByAgent(ctx, parsed)
-		if err != nil {
-			log.Error().Err(err).Str("agent_id", parsed.String()).Msg("registration.CreateAgentToken: CountActiveAgentTokensByAgent")
-			return nil, httpx.Internal("查询 Agent Token 失败")
-		}
-		if count >= maxAgentTokens {
-			return nil, httpx.BadRequest("Agent Token 数量已达上限（10 个），请先撤销旧 token")
-		}
 		agent = &owned
 		agentID = &parsed
 		status = "active_runtime"
@@ -120,7 +112,7 @@ func (s *RegistrationService) CreateAgentToken(ctx context.Context, creatorID uu
 		return nil, httpx.Internal("生成 Agent Token 失败")
 	}
 	tokenHash := credential.FastTokenHash(plaintext)
-	token, err := s.queries.CreateAgentToken(ctx, db.CreateAgentTokenParams{
+	params := db.CreateAgentTokenParams{
 		AgentID:       agentID,
 		CreatorUserID: creatorID,
 		Name:          name,
@@ -130,14 +122,59 @@ func (s *RegistrationService) CreateAgentToken(ctx context.Context, creatorID uu
 		Status:        status,
 		ExpiresAt:     expiresAt,
 		RedeemedAt:    redeemedAt,
-	})
-	if err != nil {
-		log.Error().Err(err).Msg("registration.CreateAgentToken: insert")
-		return nil, httpx.Internal("创建 Agent Token 失败")
+	}
+	var token db.AgentToken
+	if agentID == nil {
+		token, err = s.queries.CreateAgentToken(ctx, params)
+		if err != nil {
+			log.Error().Err(err).Msg("registration.CreateAgentToken: insert")
+			return nil, httpx.Internal("创建 Agent Token 失败")
+		}
+	} else {
+		token, err = s.createBoundAgentToken(ctx, *agentID, params)
+		if err != nil {
+			return nil, err
+		}
 	}
 	resp := agentTokenResponse(token)
 	resp.PlaintextToken = plaintext
 	return &resp, nil
+}
+
+// createBoundAgentToken enforces the per-Agent token cap and inserts the token
+// in one transaction. The advisory lock serializes creation per Agent so two
+// concurrent requests cannot both observe nine active tokens and create an
+// eleventh one.
+func (s *RegistrationService) createBoundAgentToken(ctx context.Context, agentID uuid.UUID, params db.CreateAgentTokenParams) (db.AgentToken, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registration.CreateAgentToken: begin tx")
+		return db.AgentToken{}, httpx.Internal("数据库事务失败")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "agent-token-quota:"+agentID.String()); err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registration.CreateAgentToken: lock quota")
+		return db.AgentToken{}, httpx.Internal("锁定 Agent Token 配额失败")
+	}
+	q := s.queries.WithTx(tx)
+	count, err := q.CountActiveAgentTokensByAgent(ctx, agentID)
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registration.CreateAgentToken: CountActiveAgentTokensByAgent")
+		return db.AgentToken{}, httpx.Internal("查询 Agent Token 失败")
+	}
+	if count >= maxAgentTokens {
+		return db.AgentToken{}, httpx.BadRequest("Agent Token 数量已达上限（10 个），请先撤销旧 token")
+	}
+	token, err := q.CreateAgentToken(ctx, params)
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registration.CreateAgentToken: insert")
+		return db.AgentToken{}, httpx.Internal("创建 Agent Token 失败")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("registration.CreateAgentToken: commit")
+		return db.AgentToken{}, httpx.Internal("创建 Agent Token 失败")
+	}
+	return token, nil
 }
 
 func (s *RegistrationService) ListAgentTokens(ctx context.Context, creatorID uuid.UUID, agentID *uuid.UUID, opts ListAgentTokensOptions) (*AgentTokenListResponse, error) {

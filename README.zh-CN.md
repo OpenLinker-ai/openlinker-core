@@ -75,7 +75,7 @@ flowchart LR
 
 依赖：
 
-- Go 1.25 或更高版本
+- Go 1.26 或更高版本（构建使用 `go.mod` 中固定的 toolchain）
 - Docker，或本地 Postgres / Redis
 - `make`
 

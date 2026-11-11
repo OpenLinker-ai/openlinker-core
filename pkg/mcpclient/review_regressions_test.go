@@ -267,7 +267,11 @@ func TestStreamableHTTPRepliesDoNotBlockAResultStream(t *testing.T) {
 	if blob, _ := result["structuredContent"].(map[string]any)["blob"].(string); len(blob) != 3<<20 {
 		t.Fatalf("result blob length = %d", len(blob))
 	}
-	if elapsed := time.Since(started); elapsed > 3*time.Second {
+	// A deadlock holds both sides until TotalTimeout (10s) and fails CallTool
+	// above. This bound only catches a near-deadlock; it leaves room for the
+	// race detector on shared CI runners, where the 3 MiB result alone has
+	// taken over 3s (locally it takes under 1s).
+	if elapsed := time.Since(started); elapsed > 8*time.Second {
 		t.Fatalf("reply POST and result stream deadlocked for %s", elapsed)
 	}
 	if !replyAcked.Load() {

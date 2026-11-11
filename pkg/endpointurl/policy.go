@@ -356,7 +356,8 @@ func isLoopbackHost(ctx context.Context, host string, resolver Resolver, allowDo
 		return false
 	}
 	for _, addr := range addrs {
-		if !addr.IsLoopback() {
+		// Match the dial-time check, which rejects every zoned address.
+		if addr.Zone() != "" || !addr.IsLoopback() {
 			return false
 		}
 	}
@@ -382,6 +383,10 @@ func resolveHost(ctx context.Context, host string, resolver Resolver, allowDocum
 		return nil, errPublicEndpointRequired
 	}
 	if addr, err := netip.ParseAddr(host); err == nil {
+		// Unmap drops the zone of an IPv4-mapped address, so check it first.
+		if addr.Zone() != "" {
+			return nil, errPublicEndpointRequired
+		}
 		return []netip.Addr{addr.Unmap()}, nil
 	}
 	if strings.EqualFold(host, "localhost") {
@@ -400,7 +405,8 @@ func resolveHost(ctx context.Context, host string, resolver Resolver, allowDocum
 	addrs := make([]netip.Addr, 0, len(ips))
 	for _, ip := range ips {
 		addr, ok := netip.AddrFromSlice(ip.IP)
-		if !ok {
+		// AddrFromSlice ignores the zone, so reject zoned results explicitly.
+		if !ok || ip.Zone != "" {
 			return nil, errPublicEndpointRequired
 		}
 		addrs = append(addrs, addr.Unmap())
@@ -409,6 +415,12 @@ func resolveHost(ctx context.Context, host string, resolver Resolver, allowDocum
 }
 
 func validatePublicAddr(addr netip.Addr, allowLoopback bool) error {
+	// A zone names a local interface, so a zoned address is never a public
+	// endpoint. netip.Prefix.Contains also never matches a zoned address,
+	// which would otherwise let fd00::1%eth0 slip past the fc00::/7 block.
+	if addr.Zone() != "" {
+		return errPublicEndpointRequired
+	}
 	addr = addr.Unmap()
 	if allowLoopback && addr.IsLoopback() {
 		return nil

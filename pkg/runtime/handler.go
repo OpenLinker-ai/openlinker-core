@@ -1042,10 +1042,13 @@ func (h *Handler) StreamRunEvents(c echo.Context) error {
 	}
 
 	res := c.Response()
-	flusher, ok := res.Writer.(http.Flusher)
-	if !ok {
+	if _, ok := res.Writer.(http.Flusher); !ok {
 		return httpx.Internal("当前响应不支持 streaming")
 	}
+	// Keep the stream alive past the server's absolute WriteTimeout: each
+	// write and heartbeat moves the write deadline forward instead.
+	res.Writer = httpx.NewStreamingResponseWriter(res.Writer, httpx.StreamWriteWindow)
+	flusher := res.Writer.(http.Flusher)
 	res.Header().Set(echo.HeaderContentType, "text/event-stream")
 	res.Header().Set(echo.HeaderCacheControl, "no-cache")
 	res.Header().Set(echo.HeaderConnection, "keep-alive")

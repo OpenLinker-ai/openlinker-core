@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -12,6 +13,7 @@ func TestValidate(t *testing.T) {
 		"public.openlinker.dev":  []string{"93.184.216.34"},
 		"private.openlinker.dev": []string{"10.0.0.5"},
 		"mixed.openlinker.dev":   []string{"93.184.216.34", "10.0.0.5"},
+		"zoned.openlinker.dev":   []string{"2606:4700::1%eth0"},
 	}
 	tests := []struct {
 		name       string
@@ -33,6 +35,14 @@ func TestValidate(t *testing.T) {
 		{name: "metadata ip literal is forbidden", url: "https://169.254.169.254/latest/meta-data", wantErr: true},
 		{name: "private dns result is forbidden", url: "https://private.openlinker.dev/invoke", wantErr: true},
 		{name: "mixed public private dns result is forbidden", url: "https://mixed.openlinker.dev/invoke", wantErr: true},
+		{name: "zoned unique local ip literal is forbidden", url: "https://[fd00::1%25eth0]/invoke", wantErr: true},
+		{name: "zoned link local ip literal is forbidden", url: "https://[fe80::1%25eth0]/invoke", wantErr: true},
+		{name: "zoned global ip literal is forbidden", url: "https://[2606:4700::1%25eth0]/invoke", wantErr: true},
+		{name: "zoned loopback is forbidden even when local is allowed", url: "https://[::1%25lo0]:9191/invoke", allowLocal: true, wantErr: true},
+		{name: "unzoned global ipv6 literal is accepted", url: "https://[2606:4700::1]/invoke"},
+		{name: "zoned ipv4-mapped public literal is forbidden", url: "https://[::ffff:8.8.8.8%25eth0]/invoke", wantErr: true},
+		{name: "zoned ipv4-mapped loopback is forbidden even when local is allowed", url: "https://[::ffff:127.0.0.1%25lo0]:9191/invoke", allowLocal: true, wantErr: true},
+		{name: "zoned dns result is forbidden", url: "https://zoned.openlinker.dev/invoke", wantErr: true},
 		{name: "userinfo is forbidden", url: "https://user:pass@agent.example.com/invoke", wantErr: true},
 		{name: "empty url is forbidden", url: " ", wantErr: true},
 		{name: "relative url is forbidden", url: "/invoke", wantErr: true},
@@ -71,7 +81,8 @@ func (s staticResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAd
 	}
 	out := make([]net.IPAddr, 0, len(raw))
 	for _, value := range raw {
-		out = append(out, net.IPAddr{IP: net.ParseIP(value)})
+		ip, zone, _ := strings.Cut(value, "%")
+		out = append(out, net.IPAddr{IP: net.ParseIP(ip), Zone: zone})
 	}
 	return out, nil
 }

@@ -282,6 +282,47 @@ type fakeRateLimiterStore struct{}
 
 func (fakeRateLimiterStore) Allow(string) (bool, error) { return true, nil }
 
+type recordingRateLimiterStore struct{ identifiers []string }
+
+func (s *recordingRateLimiterStore) Allow(identifier string) (bool, error) {
+	s.identifiers = append(s.identifiers, identifier)
+	return true, nil
+}
+
+func TestNewEchoRateLimitsByClientBehindExplicitlyTrustedProxy(t *testing.T) {
+	trusted := []string{"172.18.0.1/32"}
+	cases := []struct {
+		name         string
+		trusted      []string
+		remoteAddr   string
+		forwardedFor string
+		want         string
+	}{
+		{name: "client behind the listed proxy", trusted: trusted, remoteAddr: "172.18.0.1:41000", forwardedFor: "203.0.113.7", want: "203.0.113.7"},
+		{name: "second client behind the listed proxy gets its own bucket", trusted: trusted, remoteAddr: "172.18.0.1:41001", forwardedFor: "198.51.100.9", want: "198.51.100.9"},
+		{name: "entry the client supplied itself is ignored", trusted: trusted, remoteAddr: "172.18.0.1:41002", forwardedFor: "192.0.2.66, 203.0.113.7", want: "203.0.113.7"},
+		{name: "unlisted private peer cannot choose its bucket", trusted: trusted, remoteAddr: "172.18.0.9:41003", forwardedFor: "203.0.113.7", want: "172.18.0.9"},
+		{name: "public peer cannot choose its bucket", trusted: trusted, remoteAddr: "203.0.113.50:41004", forwardedFor: "192.0.2.66", want: "203.0.113.50"},
+		{name: "no trusted proxies uses the peer", remoteAddr: "172.18.0.1:41005", forwardedFor: "203.0.113.7", want: "172.18.0.1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &recordingRateLimiterStore{}
+			cfg := &config.Config{Env: "production", CLIAuthTrustedProxyCIDRs: tc.trusted}
+			e := newEcho(cfg, store)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/not-a-route", nil)
+			req.RemoteAddr = tc.remoteAddr
+			if tc.forwardedFor != "" {
+				req.Header.Set(echo.HeaderXForwardedFor, tc.forwardedFor)
+			}
+			e.ServeHTTP(httptest.NewRecorder(), req)
+			if len(store.identifiers) != 1 || store.identifiers[0] != tc.want {
+				t.Fatalf("rate-limit identifiers = %v, want [%s]", store.identifiers, tc.want)
+			}
+		})
+	}
+}
+
 func TestRateLimiterConfigUsesInjectedStore(t *testing.T) {
 	store := fakeRateLimiterStore{}
 	cfg := rateLimiterConfig(store)

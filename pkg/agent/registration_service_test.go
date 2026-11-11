@@ -3,7 +3,9 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -550,6 +552,61 @@ func TestRegistrationService_CreateAgentToken_ForExistingAgent(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(tokenHash, credential.FastTokenHashPrefix))
 	require.True(t, credential.VerifyFastTokenHash(tokenHash, resp.PlaintextToken))
+}
+
+func TestRegistrationService_CreateAgentToken_ConcurrentRequestsKeepAgentCap(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "Concurrent Token Creator")
+	agentID := createApprovedAgent(t, pool, creatorID, "concurrent-token-agent")
+	svc := agent.NewRegistrationService(pool)
+	ctx := context.Background()
+
+	for i := 0; i < 9; i++ {
+		_, err := svc.CreateAgentToken(ctx, creatorID, &agent.CreateAgentTokenRequest{
+			Name:    fmt.Sprintf("existing %d", i),
+			AgentID: agentID.String(),
+		})
+		require.NoError(t, err)
+	}
+
+	// With nine active tokens, only one of these requests may take the last
+	// slot; every other request must see the cap.
+	const racers = 32
+	start := make(chan struct{})
+	errs := make(chan error, racers)
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, err := svc.CreateAgentToken(ctx, creatorID, &agent.CreateAgentTokenRequest{
+				Name:    fmt.Sprintf("racer %d", i),
+				AgentID: agentID.String(),
+			})
+			errs <- err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	succeeded := 0
+	for err := range errs {
+		if err == nil {
+			succeeded++
+			continue
+		}
+		assertHTTPStatus(t, err, 400)
+	}
+	require.Equal(t, 1, succeeded, "exactly one concurrent request may take the last token slot")
+
+	var active int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM agent_tokens WHERE agent_id = $1 AND status = 'active_runtime' AND revoked_at IS NULL`,
+		agentID,
+	).Scan(&active))
+	require.Equal(t, 10, active)
 }
 
 func TestRegistrationService_ListAgentTokens_OnlyOwn(t *testing.T) {
