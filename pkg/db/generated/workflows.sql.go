@@ -780,7 +780,7 @@ SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        created_at, updated_at
 FROM workflow_run_steps
 WHERE workflow_run_id = $1
-ORDER BY sequence ASC, created_at ASC, id ASC`
+ORDER BY sequence ASC, attempt ASC, created_at ASC, id ASC`
 
 func (q *Queries) ListWorkflowRunSteps(ctx context.Context, workflowRunID uuid.UUID) ([]WorkflowRunStep, error) {
 	rows, err := q.db.Query(ctx, listWorkflowRunSteps, workflowRunID)
@@ -805,7 +805,7 @@ SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        created_at, updated_at
 FROM workflow_run_steps
 WHERE workflow_run_id = ANY($1::uuid[])
-ORDER BY workflow_run_id ASC, sequence ASC, created_at ASC, id ASC`
+ORDER BY workflow_run_id ASC, sequence ASC, attempt ASC, created_at ASC, id ASC`
 
 func (q *Queries) ListWorkflowRunStepsByRunIDs(ctx context.Context, workflowRunIds []uuid.UUID) ([]WorkflowRunStep, error) {
 	rows, err := q.db.Query(ctx, listWorkflowRunStepsByRunIDs, workflowRunIds)

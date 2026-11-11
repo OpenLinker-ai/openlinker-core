@@ -701,6 +701,20 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 			wantFactory:  1,
 		},
 		{
+			name:         "workflow attempts predecessor up success",
+			args:         []string{"up"},
+			env:          map[string]string{"DATABASE_URL": "postgres://db"},
+			snapshot:     workflowAttemptsPredecessorCoreMigrationSnapshot(),
+			migrator:     &fakeMigrator{},
+			postSnapshot: migrationSnapshotPointer(currentCoreMigrationSnapshot()),
+			wantCode:     0,
+			wantOut:      "migrate up: ok",
+			wantSrc:      "file://./migrations",
+			wantDBURL:    "postgres://db",
+			wantInspect:  2,
+			wantFactory:  1,
+		},
+		{
 			name:         "workflow admission predecessor up success",
 			args:         []string{"up"},
 			env:          map[string]string{"DATABASE_URL": "postgres://db"},
@@ -978,11 +992,11 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 func currentCoreMigrationSnapshot() migrationinit.Snapshot {
 	return migrationinit.Snapshot{
 		Core:                    migrationinit.MigrationTableState{Exists: true, Rows: 1, Version: migrationinit.CoreVersion},
-		NonBookkeepingObjects:   92,
+		NonBookkeepingObjects:   94,
 		CallbackOwnerIndexValid: true,
 		CoreShape: migrationinit.SchemaShape{
 			Digest: migrationinit.CoreSchemaDigest,
-			Tables: 92, Constraints: 736, Indexes: 310, Triggers: 80,
+			Tables: 94, Constraints: 760, Indexes: 315, Triggers: 80,
 			CoreIdentities: 1, RuntimeControls: 1, RuntimeSchemas: 13,
 			CurrentRuntime: 1, RuntimeWires: 5, CurrentWire: 1, PreviousWire: 1,
 			BuiltInSkills: 30, BuiltInSkillCases: 15,
@@ -1009,6 +1023,17 @@ func mcpTransportPredecessorCoreMigrationSnapshot() migrationinit.Snapshot {
 	snapshot.CoreShape.Tables = 91
 	snapshot.CoreShape.Constraints = 728
 	snapshot.CoreShape.Indexes = 309
+	return snapshot
+}
+
+func workflowAttemptsPredecessorCoreMigrationSnapshot() migrationinit.Snapshot {
+	snapshot := currentCoreMigrationSnapshot()
+	snapshot.Core.Version = migrationinit.CoreWorkflowAttemptsPredecessorVersion
+	snapshot.CoreShape.Digest = migrationinit.CoreWorkflowAttemptsPredecessorDigest
+	snapshot.NonBookkeepingObjects = 92
+	snapshot.CoreShape.Tables = 92
+	snapshot.CoreShape.Constraints = 736
+	snapshot.CoreShape.Indexes = 310
 	return snapshot
 }
 

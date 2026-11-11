@@ -13,8 +13,8 @@ BEGIN
     FROM pg_catalog.pg_tables
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_tables <> 92 THEN
-        RAISE EXCEPTION 'Core initializer table count is %, expected 92', public_tables;
+    IF public_tables <> 94 THEN
+        RAISE EXCEPTION 'Core initializer table count is %, expected 94', public_tables;
     END IF;
 
     SELECT count(*) INTO public_constraints
@@ -23,16 +23,16 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 736 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 736', public_constraints;
+    IF public_constraints <> 760 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 760', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 310 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 310', public_indexes;
+    IF public_indexes <> 315 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 315', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers
@@ -292,6 +292,34 @@ BEGIN
           AND constraint_row.convalidated
     ) <> 2 THEN
         RAISE EXCEPTION 'Core initializer is missing the workflow admission contract';
+    END IF;
+
+    IF to_regclass('public.workflow_run_nodes') IS NULL
+       OR to_regclass('public.workflow_step_stops') IS NULL
+       OR (
+        SELECT count(*)
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND (table_name, column_name) IN (
+              ('workflow_runs', 'lease_owner'), ('workflow_runs', 'lease_expires_at'),
+              ('workflow_runs', 'lease_epoch'), ('workflow_runs', 'lease_mode'),
+              ('workflow_runs', 'recovery_count'),
+              ('workflow_run_steps', 'attempt'), ('workflow_run_steps', 'deadline_at'),
+              ('workflow_run_steps', 'not_before'), ('workflow_run_steps', 'legacy_unfinished'),
+              ('workflow_step_launches', 'attempt'), ('workflow_step_launches', 'legacy_orphan')
+          )
+       ) <> 11
+       OR NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint constraint_row
+        JOIN pg_catalog.pg_class relation ON relation.oid = constraint_row.conrelid
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relname = 'workflow_step_launches'
+          AND constraint_row.conname = 'workflow_step_launches_pkey'
+          AND pg_catalog.pg_get_constraintdef(constraint_row.oid) = 'PRIMARY KEY (workflow_run_id, workflow_node_id, attempt)'
+       ) THEN
+        RAISE EXCEPTION 'Core initializer is missing the workflow attempt contract';
     END IF;
 
     IF NOT EXISTS (

@@ -30,6 +30,14 @@ runtime protocol, and migration contract are declared stable.
   (`sequence, created_at, id`), so duplicate step rows for one node always
   resolve to the same latest row.
 
+- Migration `104` adds workflow attempts, logical node state, per-attempt
+  stop records and run lease columns for the coming execution engine. It
+  refuses unless every workflow run is finished and backfills history only;
+  the current engine keeps running unchanged on the new schema.
+- `workflow-cutover preflight|verify|reopen` (shipped in the image) checks a
+  workflow release drain before and after migrating and reopens admission
+  only when nothing blocks. It prints a JSON report and exits 3 when blocked.
+
 ### Security
 
 - **Behaviour change:** the production HTTP rate limiter no longer trusts a

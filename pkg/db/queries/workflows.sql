@@ -405,7 +405,7 @@ SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        created_at, updated_at
 FROM workflow_run_steps
 WHERE workflow_run_id = $1
-ORDER BY sequence ASC, created_at ASC, id ASC;
+ORDER BY sequence ASC, attempt ASC, created_at ASC, id ASC;
 
 -- name: ListWorkflowRunStepsByRunIDs :many
 SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
@@ -413,7 +413,7 @@ SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        created_at, updated_at
 FROM workflow_run_steps
 WHERE workflow_run_id = ANY($1::uuid[])
-ORDER BY workflow_run_id ASC, sequence ASC, created_at ASC, id ASC;
+ORDER BY workflow_run_id ASC, sequence ASC, attempt ASC, created_at ASC, id ASC;
 
 -- name: GetWorkflowAdmission :one
 SELECT state, reason, changed_by, changed_at

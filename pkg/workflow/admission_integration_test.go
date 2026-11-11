@@ -355,28 +355,30 @@ func TestWorkflowRunStepsOrderIsDeterministicForDuplicateSequence(t *testing.T) 
 		INSERT INTO workflow_runs (id, workflow_id, user_id, status, finished_at)
 		VALUES ($1, $2, $3, 'failed', now())`, runID, f.workflowID, f.ownerID)
 	require.NoError(t, err)
-	// Two rows for the same node, same sequence and same created_at: the old
-	// recovery gap could leave these. Only the id breaks the tie.
+	// Two attempts for the same node with the same sequence and created_at, as
+	// migration 104 numbers the duplicates the old recovery gap could leave.
+	// The attempt orders them, whatever their ids.
 	low := uuid.MustParse("00000000-0000-4000-8000-000000000001")
 	high := uuid.MustParse("ffffffff-ffff-4fff-bfff-ffffffffffff")
 	for _, item := range []struct {
-		id     uuid.UUID
-		status string
-	}{{high, "success"}, {low, "failed"}} {
+		id      uuid.UUID
+		status  string
+		attempt int
+	}{{high, "success", 1}, {low, "failed", 2}} {
 		_, err := f.pool.Exec(ctx, `
 			INSERT INTO workflow_run_steps (
 			    id, workflow_run_id, workflow_node_id, node_key, agent_id, status, sequence,
-			    created_at, updated_at
-			) VALUES ($1, $2, $3, 'worker', $4, $5, 1, '2026-11-11T00:00:00Z', '2026-11-11T00:00:00Z')`,
-			item.id, runID, nodeID, agentID, item.status)
+			    attempt, created_at, updated_at
+			) VALUES ($1, $2, $3, 'worker', $4, $5, 1, $6, '2026-11-11T00:00:00Z', '2026-11-11T00:00:00Z')`,
+			item.id, runID, nodeID, agentID, item.status, item.attempt)
 		require.NoError(t, err)
 	}
 	for i := 0; i < 5; i++ {
 		steps, err := db.New(f.pool).ListWorkflowRunSteps(ctx, runID)
 		require.NoError(t, err)
 		require.Len(t, steps, 2)
-		require.Equal(t, low, steps[0].ID)
-		require.Equal(t, high, steps[1].ID)
+		require.Equal(t, high, steps[0].ID)
+		require.Equal(t, low, steps[1].ID)
 	}
 }
 

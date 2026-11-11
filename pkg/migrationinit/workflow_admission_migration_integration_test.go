@@ -61,12 +61,14 @@ func TestWorkflowAdmissionMigrationBackfillChecksAndGuardedRollback(t *testing.T
 	}
 	conn.Close(ctx)
 
-	migrateTestDatabaseToCurrent(t, databaseURL)
+	// 103 is now an exact predecessor of the current schema; stop there so the
+	// rollback below exercises 103 itself.
+	migrateTestDatabaseToVersion(t, databaseURL, uint(CoreWorkflowAttemptsPredecessorVersion))
 	snapshot, err = Inspect(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if noop, err := snapshot.ValidateCoreUp(); err != nil || !noop {
+	if noop, err := snapshot.ValidateCoreUp(); err != nil || noop {
 		t.Fatalf("upgraded 103 preflight: noop=%t err=%v shape=%s", noop, err, formatShape(snapshot.CoreShape))
 	}
 
