@@ -38,6 +38,22 @@ runtime protocol, and migration contract are declared stable.
   workflow release drain before and after migrating and reopens admission
   only when nothing blocks. It prints a JSON report and exits 3 when blocked.
 
+- Workflow runs now execute under a database lease (owner, epoch, expiry
+  from the database clock), renewed every 15 seconds with a 60-second TTL.
+  Every executor write (steps, child launches, run outcome) locks the parent
+  run and checks the lease first; Runtime checks it again before creating a
+  workflow child Run, together with the launch attempt and any stop request.
+  The lease is checked in a separate statement after the row lock is taken,
+  because a single `SELECT ... FOR UPDATE` evaluates `clock_timestamp()`
+  before its lock wait ends and would accept a lease that expired during the
+  wait. Synchronous `/run` and step rerun take a lease for the run they
+  create. **Behaviour change:** stale recovery uses lease expiry instead of
+  `WORKFLOW_RUN_STALE_SECONDS`: an expired run goes back to pending while its
+  recovery budget (`max_attempts - 1`) lasts, and otherwise fails in one
+  transaction that invalidates unlaunched children and records stop requests
+  for in-flight ones. An executor that lost its lease stops and writes
+  nothing.
+
 ### Security
 
 - **Behaviour change:** the production HTTP rate limiter no longer trusts a

@@ -1273,7 +1273,9 @@ func TestWorkflowWorkerRequeuesStaleRunAndCleansRetrySteps(t *testing.T) {
 	runID := uuid.MustParse(queued.ID)
 	_, err = pool.Exec(context.Background(), `
 		UPDATE workflow_runs
-		SET status='running', attempt_count=1, claimed_at=NOW() - INTERVAL '1 hour'
+		SET status='running', attempt_count=1, claimed_at=NOW() - INTERVAL '1 hour',
+		    lease_owner=gen_random_uuid(), lease_epoch=1, lease_mode='execute',
+		    lease_expires_at=clock_timestamp() - INTERVAL '1 minute'
 		WHERE id=$1`, runID)
 	require.NoError(t, err)
 	_, err = pool.Exec(context.Background(), `
@@ -1289,7 +1291,7 @@ func TestWorkflowWorkerRequeuesStaleRunAndCleansRetrySteps(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "pending", recovered.Status)
 	require.Equal(t, int32(1), recovered.AttemptCount)
-	require.Equal(t, "workflow worker stale claim timed out", recovered.LastWorkerError)
+	require.Equal(t, "workflow run lease expired before the executor finished", recovered.LastWorkerError)
 	require.Len(t, recovered.Steps, 1)
 
 	claimed, err := svc.ClaimAndRunPendingWorkflow(context.Background())

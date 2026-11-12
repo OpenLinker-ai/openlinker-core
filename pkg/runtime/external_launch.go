@@ -32,10 +32,17 @@ type ExternalExecutionLaunchFence struct {
 	LaunchToken       uuid.UUID
 }
 
+// WorkflowChildLaunchFence binds a workflow child Run creation to one launch
+// row (run, node, attempt, token) and to the parent run's execution lease
+// (owner, epoch). Runtime re-checks both inside its own creation transaction,
+// after locking the parent run, using the database clock for lease expiry.
 type WorkflowChildLaunchFence struct {
 	WorkflowRunID  uuid.UUID
 	WorkflowNodeID uuid.UUID
+	Attempt        int32
 	LaunchToken    uuid.UUID
+	LeaseOwner     uuid.UUID
+	LeaseEpoch     int64
 }
 
 func (s *Service) PrepareRunCreationIdentity(req *RunRequest, source string) (RunCreationIdentity, error) {
@@ -124,10 +131,11 @@ func (s *Service) RunWorkflowChild(
 				SET state = 'created', run_id = $4, updated_at = clock_timestamp()
 				WHERE workflow_run_id = $1
 				  AND workflow_node_id = $2
+				  AND attempt = $5
 				  AND launch_token = $3
 				  AND state = 'claimed'
 				  AND run_id IS NULL
-			`, fence.WorkflowRunID, fence.WorkflowNodeID, fence.LaunchToken, runID)
+			`, fence.WorkflowRunID, fence.WorkflowNodeID, fence.LaunchToken, runID, fence.Attempt)
 			if err != nil {
 				return err
 			}
@@ -248,36 +256,56 @@ func verifyWorkflowChildLaunchFence(
 	actorUserID uuid.UUID,
 	fence WorkflowChildLaunchFence,
 ) error {
-	var parentUserID uuid.UUID
-	var parentStatus string
+	if fence.LeaseOwner == uuid.Nil || fence.LeaseEpoch < 1 || fence.Attempt < 1 {
+		return ErrWorkflowChildLaunchFenceRejected
+	}
+	// Lock the parent first, then evaluate the lease with a fresh clock: a
+	// single SELECT ... FOR UPDATE computes clock_timestamp() before its lock
+	// wait ends and would accept a lease that expired during the wait.
+	var locked int
 	if err := tx.QueryRow(ctx, `
-		SELECT user_id, status
-		FROM workflow_runs
-		WHERE id = $1
-		FOR UPDATE
-	`, fence.WorkflowRunID).Scan(&parentUserID, &parentStatus); err != nil {
+		SELECT 1 FROM workflow_runs WHERE id = $1 FOR UPDATE
+	`, fence.WorkflowRunID).Scan(&locked); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrWorkflowChildLaunchFenceRejected
 		}
 		return err
 	}
-	if parentUserID != actorUserID || parentStatus != "running" {
+	var parentUserID uuid.UUID
+	var parentStatus string
+	var leaseHeld bool
+	if err := tx.QueryRow(ctx, `
+		SELECT user_id, status,
+		       COALESCE(lease_owner = $2 AND lease_epoch = $3 AND lease_expires_at > clock_timestamp(), false)
+		FROM workflow_runs
+		WHERE id = $1
+	`, fence.WorkflowRunID, fence.LeaseOwner, fence.LeaseEpoch).Scan(&parentUserID, &parentStatus, &leaseHeld); err != nil {
+		return err
+	}
+	if parentUserID != actorUserID || parentStatus != "running" || !leaseHeld {
 		return ErrWorkflowChildLaunchFenceRejected
 	}
 	var token uuid.UUID
 	var state string
+	var stopRequested bool
 	if err := tx.QueryRow(ctx, `
-		SELECT launch_token, state
-		FROM workflow_step_launches
-		WHERE workflow_run_id = $1 AND workflow_node_id = $2
-		FOR UPDATE
-	`, fence.WorkflowRunID, fence.WorkflowNodeID).Scan(&token, &state); err != nil {
+		SELECT l.launch_token, l.state,
+		       EXISTS (
+		           SELECT 1 FROM workflow_step_stops s
+		           WHERE s.workflow_run_id = l.workflow_run_id
+		             AND s.workflow_node_id = l.workflow_node_id
+		             AND s.attempt = l.attempt
+		       )
+		FROM workflow_step_launches l
+		WHERE l.workflow_run_id = $1 AND l.workflow_node_id = $2 AND l.attempt = $3
+		FOR UPDATE OF l
+	`, fence.WorkflowRunID, fence.WorkflowNodeID, fence.Attempt).Scan(&token, &state, &stopRequested); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrWorkflowChildLaunchFenceRejected
 		}
 		return err
 	}
-	if token != fence.LaunchToken || state != "claimed" {
+	if token != fence.LaunchToken || state != "claimed" || stopRequested {
 		return ErrWorkflowChildLaunchFenceRejected
 	}
 	return nil

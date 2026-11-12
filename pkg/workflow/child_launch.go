@@ -40,6 +40,10 @@ func (s *Service) claimWorkflowChildLaunch(
 		if ownerID != run.UserID || status != workflowRunStatusRunning {
 			return runtime.ErrWorkflowChildLaunchFenceRejected
 		}
+		if err := s.lockWorkflowRunLease(ctx, tx, run.ID); err != nil {
+			return err
+		}
+		lease, _ := workflowRunLeaseFrom(ctx)
 		var token uuid.UUID
 		var keyHash, fingerprint []byte
 		var state string
@@ -47,9 +51,9 @@ func (s *Service) claimWorkflowChildLaunch(
 		err := tx.QueryRow(ctx, `
 			SELECT launch_token, idempotency_key_hash, creation_fingerprint, state, run_id
 			FROM workflow_step_launches
-			WHERE workflow_run_id = $1 AND workflow_node_id = $2
+			WHERE workflow_run_id = $1 AND workflow_node_id = $2 AND attempt = $3
 			FOR UPDATE
-		`, run.ID, nodeID).Scan(&token, &keyHash, &fingerprint, &state, &childRunID)
+		`, run.ID, nodeID, workflowFirstAttempt).Scan(&token, &keyHash, &fingerprint, &state, &childRunID)
 		if err == nil {
 			if subtle.ConstantTimeCompare(keyHash, identity.IdempotencyKeyHash) != 1 ||
 				subtle.ConstantTimeCompare(fingerprint, identity.CreationFingerprint) != 1 ||
@@ -59,13 +63,11 @@ func (s *Service) claimWorkflowChildLaunch(
 			if _, err := tx.Exec(ctx, `
 				UPDATE workflow_step_launches
 				SET workflow_run_step_id = $3, updated_at = clock_timestamp()
-				WHERE workflow_run_id = $1 AND workflow_node_id = $2
-			`, run.ID, nodeID, stepID); err != nil {
+				WHERE workflow_run_id = $1 AND workflow_node_id = $2 AND attempt = $4
+			`, run.ID, nodeID, stepID, workflowFirstAttempt); err != nil {
 				return err
 			}
-			fence = runtime.WorkflowChildLaunchFence{
-				WorkflowRunID: run.ID, WorkflowNodeID: nodeID, LaunchToken: token,
-			}
+			fence = workflowChildFence(run.ID, nodeID, token, lease)
 			return nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -75,15 +77,13 @@ func (s *Service) claimWorkflowChildLaunch(
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO workflow_step_launches (
 			    workflow_run_id, workflow_node_id, workflow_run_step_id, node_key,
-			    launch_token, idempotency_key_hash, creation_fingerprint, state
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, 'claimed')
+			    launch_token, idempotency_key_hash, creation_fingerprint, state, attempt
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, 'claimed', $8)
 		`, run.ID, nodeID, stepID, nodeKey, token,
-			identity.IdempotencyKeyHash, identity.CreationFingerprint); err != nil {
+			identity.IdempotencyKeyHash, identity.CreationFingerprint, workflowFirstAttempt); err != nil {
 			return err
 		}
-		fence = runtime.WorkflowChildLaunchFence{
-			WorkflowRunID: run.ID, WorkflowNodeID: nodeID, LaunchToken: token,
-		}
+		fence = workflowChildFence(run.ID, nodeID, token, lease)
 		return nil
 	})
 	return fence, err
@@ -102,10 +102,7 @@ func (s *Service) attachWorkflowChildLaunch(
 	stepID, childRunID uuid.UUID,
 ) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		var status string
-		if err := tx.QueryRow(ctx, `
-			SELECT status FROM workflow_runs WHERE id = $1 FOR UPDATE
-		`, fence.WorkflowRunID).Scan(&status); err != nil {
+		if err := s.lockWorkflowRunLease(ctx, tx, fence.WorkflowRunID); err != nil {
 			return err
 		}
 		var token uuid.UUID
@@ -114,9 +111,9 @@ func (s *Service) attachWorkflowChildLaunch(
 		if err := tx.QueryRow(ctx, `
 			SELECT launch_token, state, run_id
 			FROM workflow_step_launches
-			WHERE workflow_run_id = $1 AND workflow_node_id = $2
+			WHERE workflow_run_id = $1 AND workflow_node_id = $2 AND attempt = $3
 			FOR UPDATE
-		`, fence.WorkflowRunID, fence.WorkflowNodeID).Scan(&token, &state, &storedRunID); err != nil {
+		`, fence.WorkflowRunID, fence.WorkflowNodeID, fence.Attempt).Scan(&token, &state, &storedRunID); err != nil {
 			return err
 		}
 		if token != fence.LaunchToken || storedRunID == nil || *storedRunID != childRunID ||
@@ -139,8 +136,25 @@ func (s *Service) attachWorkflowChildLaunch(
 		_, err = tx.Exec(ctx, `
 			UPDATE workflow_step_launches
 			SET state = 'attached', workflow_run_step_id = $3, updated_at = clock_timestamp()
-			WHERE workflow_run_id = $1 AND workflow_node_id = $2
-		`, fence.WorkflowRunID, fence.WorkflowNodeID, stepID)
+			WHERE workflow_run_id = $1 AND workflow_node_id = $2 AND attempt = $4
+		`, fence.WorkflowRunID, fence.WorkflowNodeID, stepID, fence.Attempt)
 		return err
 	})
+}
+
+// workflowFirstAttempt is the only attempt the current engine creates; the
+// attempt-aware scheduler creates later ones.
+const workflowFirstAttempt int32 = 1
+
+// workflowChildFence binds a child Run creation to the launch row and to the
+// executor's run lease, which Runtime checks again inside its own transaction.
+func workflowChildFence(runID, nodeID, token uuid.UUID, lease workflowRunLease) runtime.WorkflowChildLaunchFence {
+	return runtime.WorkflowChildLaunchFence{
+		WorkflowRunID:  runID,
+		WorkflowNodeID: nodeID,
+		Attempt:        workflowFirstAttempt,
+		LaunchToken:    token,
+		LeaseOwner:     lease.owner,
+		LeaseEpoch:     lease.epoch,
+	}
 }
