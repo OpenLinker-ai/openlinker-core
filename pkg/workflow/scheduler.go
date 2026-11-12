@@ -203,7 +203,11 @@ func decideWorkflowScheduling(
 			continue
 		}
 		ready := true
-		if rs.v2 != nil && node.state == nodeWaiting {
+		switch {
+		case node.state == nodeRetryWait:
+			// A retrying node was already activated: its parents resolved
+			// before the first attempt, under v1 or v2 rules alike.
+		case rs.v2 != nil:
 			activation, reason := rs.v2.activation(key, snapshot, outputs)
 			switch activation {
 			case "skip":
@@ -212,7 +216,7 @@ func decideWorkflowScheduling(
 			case "unresolved":
 				ready = false
 			}
-		} else {
+		default:
 			for _, parent := range graph.Parents[key] {
 				if p, ok := snapshot.nodes[parent]; !ok || p.state != nodeSuccess {
 					ready = false
@@ -317,9 +321,22 @@ func (s *Service) executeWorkflowRun(
 	callCtx, abortCalls := context.WithCancel(ctx)
 	driveCtx, cancelDrives := context.WithCancel(callCtx)
 	var wg sync.WaitGroup
+	// detached is set on pause: in-flight inline calls keep running after
+	// this executor returns, so the lease is released at once and Resume is
+	// not held up by a long child call. Their drives no longer write (driveCtx
+	// is canceled); the next executor or the deadline reconciler settles each
+	// attempt from its child Run.
+	detached := false
 	defer func() {
-		abortCalls()
 		cancelDrives()
+		if detached {
+			go func() {
+				wg.Wait()
+				abortCalls()
+			}()
+			return
+		}
+		abortCalls()
 		wg.Wait()
 	}()
 	finished := make(chan string, len(nodes))
@@ -347,7 +364,7 @@ func (s *Service) executeWorkflowRun(
 			// In-flight children keep running; their attempts are settled by
 			// the next executor or, at their deadline, by the reconciler.
 			cancelDrives()
-			wg.Wait()
+			detached = true
 			return s.GetWorkflowRun(context.WithoutCancel(ctx), run.UserID, run.ID)
 		default:
 			// Canceled or finished elsewhere.

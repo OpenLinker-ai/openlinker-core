@@ -481,7 +481,7 @@ func TestNewEchoAllowsRunIdempotencyCORSHeaders(t *testing.T) {
 	req := httptest.NewRequest(http.MethodOptions, "/api/v1/runs", nil)
 	req.Header.Set(echo.HeaderOrigin, "https://app.example")
 	req.Header.Set(echo.HeaderAccessControlRequestMethod, http.MethodPost)
-	req.Header.Set(echo.HeaderAccessControlRequestHeaders, "authorization,content-type,idempotency-key,prefer")
+	req.Header.Set(echo.HeaderAccessControlRequestHeaders, "authorization,content-type,idempotency-key,prefer,if-match,last-event-id")
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 
@@ -489,7 +489,7 @@ func TestNewEchoAllowsRunIdempotencyCORSHeaders(t *testing.T) {
 		t.Fatalf("preflight status = %d: %s", rec.Code, rec.Body.String())
 	}
 	allow := strings.ToLower(rec.Header().Get(echo.HeaderAccessControlAllowHeaders))
-	for _, header := range []string{"authorization", "content-type", "idempotency-key", "prefer"} {
+	for _, header := range []string{"authorization", "content-type", "idempotency-key", "prefer", "if-match", "last-event-id"} {
 		if !strings.Contains(allow, header) {
 			t.Fatalf("Access-Control-Allow-Headers = %q, missing %q", allow, header)
 		}

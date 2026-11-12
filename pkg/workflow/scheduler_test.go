@@ -161,3 +161,31 @@ func testWorkflowRunID() uuid.UUID { return uuid.MustParse("6b0f2d4e-3f8a-4c56-9
 func testWorkflowNode() db.WorkflowNode {
 	return db.WorkflowNode{ID: uuid.MustParse("1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f"), NodeKey: "worker"}
 }
+
+// A join:any node reached through one live branch keeps retrying even though
+// its other parent failed under continue: retry_wait is past activation.
+func TestWorkflowSchedulingJoinAnyRetryIgnoresFailedParent(t *testing.T) {
+	edges := []map[string]interface{}{{"from": "a", "to": "c"}, {"from": "b", "to": "c"}}
+	def, err := parseWorkflowV2Definition(v2Nodes(map[string]string{
+		"a": `{"policy":{"on_failure":"continue"}}`, "b": `{}`,
+		"c": `{"join":"any","policy":{"retry":{"max_attempts":2}}}`,
+	}), edges, nil)
+	require.NoError(t, err)
+	graph := schedulingGraph(
+		map[string][]string{"c": {"a", "b"}},
+		map[string]int32{"a": 0, "b": 0, "c": 1},
+	)
+	order := workflowTopologicalOrder(graph)
+	onFailure := func(key string) string {
+		if key == "a" {
+			return onFailureContinue
+		}
+		return onFailureFailWorkflow
+	}
+	decision := decideWorkflowScheduling(graph, order, schedulingSnapshot(map[string]workflowNodeSnapshot{
+		"a": {state: nodeFailed, status: attemptFailed},
+		"b": {state: nodeSuccess, status: attemptSuccess},
+		"c": {state: nodeRetryWait, status: attemptPending, startable: true, attempt: 2},
+	}), map[string]bool{}, 4, onFailure, workflowRunSemantics{semantics: workflowSemanticsV2, v2: def})
+	require.Equal(t, []string{"c"}, decision.drive)
+}

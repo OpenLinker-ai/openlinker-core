@@ -234,14 +234,15 @@ func (s *Service) recheckExternalWorkflowLaunch(
 	if _, err := workflowGraphFromDefinition(def.workflow, def.nodes); err != nil {
 		return uuid.Nil, ErrExternalWorkflowTargetUnavailable
 	}
-	if err := s.validateWorkflowStoredAgentsAvailable(ctx, uuid.Nil, def.nodes, true); err != nil {
+	txQueries := db.New(tx)
+	if err := s.validateWorkflowStoredAgentsAvailableWith(ctx, txQueries, uuid.Nil, def.nodes, true); err != nil {
 		if isWorkflowHTTPError(err) {
 			return uuid.Nil, ErrExternalWorkflowTargetUnavailable
 		}
 		return uuid.Nil, err
 	}
 	if fence.ExpectedContractHash != "" {
-		hash, err := s.externalExecutionWorkflowContractHash(ctx, def.workflow, def.nodes)
+		hash, err := s.externalExecutionWorkflowContractHashWith(ctx, txQueries, def.workflow, def.nodes)
 		if err != nil {
 			if isWorkflowHTTPError(err) {
 				return uuid.Nil, ErrExternalWorkflowTargetUnavailable

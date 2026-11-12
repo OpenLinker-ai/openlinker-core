@@ -146,7 +146,11 @@ func (s *Service) attachWorkflowChildLaunch(
 			SET state = 'attached', workflow_run_step_id = $3, updated_at = clock_timestamp()
 			WHERE workflow_run_id = $1 AND workflow_node_id = $2 AND attempt = $4
 		`, fence.WorkflowRunID, fence.WorkflowNodeID, stepID, fence.Attempt)
-		return err
+		if err != nil {
+			return err
+		}
+		// Observers see the child link as soon as it exists.
+		return notifyWorkflowRunChanged(ctx, tx, fence.WorkflowRunID)
 	})
 }
 

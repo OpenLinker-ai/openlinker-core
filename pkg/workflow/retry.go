@@ -51,7 +51,7 @@ func (g workflowStopGate) err(acknowledged bool) error {
 // evaluateWorkflowStopGate runs in the caller's transaction, which holds the
 // source run's row lock (stop reconcilers and public cancellation take the
 // same lock before writing stop state).
-func evaluateWorkflowStopGate(ctx context.Context, tx pgx.Tx, sourceRunID uuid.UUID) (workflowStopGate, error) {
+func evaluateWorkflowStopGate(ctx context.Context, tx db.DBTX, sourceRunID uuid.UUID) (workflowStopGate, error) {
 	gate := workflowStopGate{}
 	inProgress := map[string]bool{}
 	unconfirmed := map[string]bool{}

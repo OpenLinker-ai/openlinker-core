@@ -423,6 +423,10 @@ func (s *Service) ValidateExternalExecutionTargetVersion(ctx context.Context, ta
 }
 
 func (s *Service) externalExecutionWorkflowContractHash(ctx context.Context, w db.Workflow, nodes []db.WorkflowNode) (string, error) {
+	return s.externalExecutionWorkflowContractHashWith(ctx, s.queries, w, nodes)
+}
+
+func (s *Service) externalExecutionWorkflowContractHashWith(ctx context.Context, q *db.Queries, w db.Workflow, nodes []db.WorkflowNode) (string, error) {
 	rawEdges := []map[string]interface{}{}
 	if len(w.Edges) > 0 {
 		if err := json.Unmarshal(w.Edges, &rawEdges); err != nil {
@@ -442,14 +446,14 @@ func (s *Service) externalExecutionWorkflowContractHash(ctx context.Context, w d
 	for _, node := range nodes {
 		agentHash, ok := agentHashes[node.AgentID]
 		if !ok {
-			agentRow, err := s.queries.GetAgentByID(ctx, node.AgentID)
+			agentRow, err := q.GetAgentByID(ctx, node.AgentID)
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return "", httpx.Conflict("workflow node Agent 当前不可用于外部执行")
 				}
 				return "", err
 			}
-			capability, err := s.queries.GetAgentCapabilityByAgentID(ctx, node.AgentID)
+			capability, err := q.GetAgentCapabilityByAgentID(ctx, node.AgentID)
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return "", httpx.Conflict("workflow node Agent 缺少 capability")
@@ -1190,8 +1194,10 @@ func (s *Service) GetWorkflowRun(ctx context.Context, userID, workflowRunID uuid
 // decorateWorkflowRunStopEvidence adds the unconfirmed-children markers, the
 // pinned version number and the revision. A child is unconfirmed when its
 // stop record or the run's public cancellation ended without a stop
-// confirmation.
-func decorateWorkflowRunStopEvidence(ctx context.Context, q workflowQuerier, items []WorkflowRunResponse) error {
+// confirmation, or when Runtime classifies it so; finished retryable runs use
+// the same child union and classifier as the Retry/Rerun gate, so the marker
+// agrees with what Retry will require.
+func decorateWorkflowRunStopEvidence(ctx context.Context, q db.DBTX, items []WorkflowRunResponse) error {
 	if q == nil || len(items) == 0 {
 		return nil
 	}
@@ -1235,7 +1241,27 @@ func decorateWorkflowRunStopEvidence(ctx context.Context, q workflowQuerier, ite
 		}
 		item.Revision = revision
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	for i := range items {
+		item := &items[i]
+		if item.HasUnconfirmedChildren ||
+			(item.Status != workflowRunStatusFailed && item.Status != workflowRunStatusCanceled) {
+			continue
+		}
+		id, err := uuid.Parse(item.ID)
+		if err != nil {
+			continue
+		}
+		gate, err := evaluateWorkflowStopGate(ctx, q, id)
+		if err != nil {
+			return err
+		}
+		item.HasUnconfirmedChildren = len(gate.unconfirmed) > 0
+	}
+	return nil
 }
 
 func (s *Service) getWorkflowRunForOwner(ctx context.Context, userID, workflowRunID uuid.UUID) (db.WorkflowRun, error) {
@@ -1477,6 +1503,10 @@ func (s *Service) validateWorkflowRequestAgentsAvailable(ctx context.Context, us
 }
 
 func (s *Service) validateWorkflowStoredAgentsAvailable(ctx context.Context, userID uuid.UUID, nodes []db.WorkflowNode, requireRuntimeOnline bool) error {
+	return s.validateWorkflowStoredAgentsAvailableWith(ctx, s.queries, userID, nodes, requireRuntimeOnline)
+}
+
+func (s *Service) validateWorkflowStoredAgentsAvailableWith(ctx context.Context, q *db.Queries, userID uuid.UUID, nodes []db.WorkflowNode, requireRuntimeOnline bool) error {
 	refs := make([]workflowAgentRef, 0, len(nodes))
 	for _, node := range nodes {
 		refs = append(refs, workflowAgentRef{
@@ -1485,15 +1515,19 @@ func (s *Service) validateWorkflowStoredAgentsAvailable(ctx context.Context, use
 			AgentID: node.AgentID,
 		})
 	}
-	return s.validateWorkflowAgentsAvailable(ctx, userID, refs, requireRuntimeOnline)
+	return s.validateWorkflowAgentsAvailableWith(ctx, q, userID, refs, requireRuntimeOnline)
 }
 
 func (s *Service) validateWorkflowAgentsAvailable(ctx context.Context, userID uuid.UUID, refs []workflowAgentRef, requireRuntimeOnline bool) error {
+	return s.validateWorkflowAgentsAvailableWith(ctx, s.queries, userID, refs, requireRuntimeOnline)
+}
+
+func (s *Service) validateWorkflowAgentsAvailableWith(ctx context.Context, q *db.Queries, userID uuid.UUID, refs []workflowAgentRef, requireRuntimeOnline bool) error {
 	for _, ref := range refs {
 		if ref.AgentID == uuid.Nil {
 			return httpx.BadRequest("workflow node agent_id 不能为空")
 		}
-		agentRow, err := s.queries.GetAgentByID(ctx, ref.AgentID)
+		agentRow, err := q.GetAgentByID(ctx, ref.AgentID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return httpx.Conflict("workflow node Agent 当前不可用于工作流: " + workflowAgentRefLabel(ref))
@@ -1507,7 +1541,7 @@ func (s *Service) validateWorkflowAgentsAvailable(ctx context.Context, userID uu
 		if agentRow.CreatorID != userID && hasReservedWorkflowAgentTag(agentRow.Tags) {
 			return httpx.Conflict("workflow node Agent 当前不可用于工作流: " + workflowAgentRefLabel(ref))
 		}
-		callable, err := s.workflowAgentCallable(ctx, agentRow, requireRuntimeOnline)
+		callable, err := s.workflowAgentCallableWith(ctx, q, agentRow, requireRuntimeOnline)
 		if err != nil {
 			return err
 		}
@@ -1533,8 +1567,12 @@ func hasReservedWorkflowAgentTag(tags []string) bool {
 }
 
 func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, requireRuntimeOnline bool) (bool, error) {
+	return s.workflowAgentCallableWith(ctx, s.queries, agentRow, requireRuntimeOnline)
+}
+
+func (s *Service) workflowAgentCallableWith(ctx context.Context, q *db.Queries, agentRow db.Agent, requireRuntimeOnline bool) (bool, error) {
 	if agentRow.ConnectionMode == "runtime" {
-		hasActiveSession, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, agentRow.ID)
+		hasActiveSession, err := q.HasActiveRuntimeSessionForAgent(ctx, agentRow.ID)
 		if err != nil {
 			log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: HasActiveRuntimeSessionForAgent")
 			return false, httpx.Internal("校验 Workflow 的 Runtime Worker 连接状态失败")
@@ -1551,7 +1589,7 @@ func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, 
 		}
 	}
 
-	snapshot, err := s.queries.GetAgentAvailabilitySnapshot(ctx, agentRow.ID)
+	snapshot, err := q.GetAgentAvailabilitySnapshot(ctx, agentRow.ID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil

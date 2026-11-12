@@ -2539,7 +2539,7 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	if runningRun.ID != runID || runningRun.Status != "running" {
 		t.Fatalf("CreateWorkflowRun scan = %#v", runningRun)
 	}
-	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{workflowID, userID, []byte(`{"prompt":"go"}`)}) {
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{workflowID, userID, []byte(`{"prompt":"go"}`), (*uuid.UUID)(nil)}) {
 		t.Fatalf("CreateWorkflowRun args = %#v", dbtx.queryRowArgs)
 	}
 
@@ -2573,7 +2573,7 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	if externalExecutionRun.ID != runID {
 		t.Fatalf("CreatePendingExternalExecutionWorkflowRun scan = %#v", externalExecutionRun)
 	}
-	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID, workflowID, userID, []byte(`{"prompt":"go"}`), int32(3)}) {
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID, workflowID, userID, []byte(`{"prompt":"go"}`), int32(3), (*uuid.UUID)(nil)}) {
 		t.Fatalf("CreatePendingExternalExecutionWorkflowRun args = %#v", dbtx.queryRowArgs)
 	}
 
@@ -4634,6 +4634,8 @@ func workflowRunStepRow(id, workflowRunID, workflowNodeID, agentID uuid.UUID, ru
 		finishedAt,
 		now,
 		now.Add(time.Minute),
+		int32(1),
+		"executed",
 	}
 }
 
