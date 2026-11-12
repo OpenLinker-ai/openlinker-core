@@ -145,6 +145,33 @@ runtime protocol, and migration contract are declared stable.
   lock the Agent row first. Workflows with `semantics: v2` are not
   executable externally yet.
 
+### Workflow semantics v2
+
+- A definition can declare `"semantics": "v2"`; v1 definitions behave
+  exactly as before and ignore every v2 key. v2 interprets:
+  - node `config.policy`: `timeout_seconds`, `retry` (`max_attempts`,
+    `backoff_seconds`, `on` accepts only `failed`: timeouts are not retried
+    because no backend stop proof exists yet) and `on_failure`
+    (`fail_workflow` default, or `continue`);
+  - conditional edges `when` (`exists/eq/ne/in/gt/gte/lt/lte/truthy` on a
+    JSON path of the source output; never errors at runtime: a missing path
+    is true only for `ne`, numbers compare numerically so `1` equals `1.0`)
+    and node `config.join` (`all` default, or `any`; not on root nodes).
+    A node whose incoming edges resolve without activating it is `skipped`
+    with a recorded reason;
+  - input mapping v2 (JSON paths with integer indexes, `dependency` on any
+    ancestor, `default` whose presence is significant: `"default": null` is a
+    default) and a workflow `output_mapping`. A field whose source may be
+    unavailable (conditional, `join: any`, `continue` upstream) must have a
+    default; definitions are rejected otherwise.
+- v2 run outcome: with `output_mapping`, success exactly when every field
+  evaluates (else `failed` with `output_mapping_failed`); without it, success
+  when at least one sink succeeded (output lists only successful sinks),
+  else failed.
+- Retry and continue decisions read the node of the run's own version.
+  Workflows with semantics v2 are not executable through External Execution
+  until Cloud accepts their contract.
+
 ### Security
 
 - **Behaviour change:** the production HTTP rate limiter no longer trusts a

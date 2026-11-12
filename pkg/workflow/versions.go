@@ -131,11 +131,24 @@ type workflowDefinitionInput struct {
 	description string
 	edgesJSON   []byte
 	nodes       []WorkflowNodeRequest
+	semantics   string
+	outputJSON  []byte
 }
 
 // prepareWorkflowDefinition validates a definition request exactly as
 // workflow creation always did.
-func (s *Service) prepareWorkflowDefinition(ctx context.Context, userID uuid.UUID, name, description string, nodes []WorkflowNodeRequest, rawEdges []map[string]interface{}) (workflowDefinitionInput, error) {
+func (s *Service) prepareWorkflowDefinition(ctx context.Context, userID uuid.UUID, req *CreateWorkflowRequest) (workflowDefinitionInput, error) {
+	name, description, nodes, rawEdges := req.Name, req.Description, req.Nodes, req.Edges
+	semantics := strings.TrimSpace(req.Semantics)
+	if semantics == "" {
+		semantics = workflowSemanticsV1
+	}
+	if semantics != workflowSemanticsV1 && semantics != workflowSemanticsV2 {
+		return workflowDefinitionInput{}, httpx.BadRequest("semantics 只接受 v1 或 v2")
+	}
+	if semantics == workflowSemanticsV1 && req.OutputMapping != nil {
+		return workflowDefinitionInput{}, httpx.BadRequest("output_mapping 需要 semantics v2")
+	}
 	if len(nodes) == 0 {
 		return workflowDefinitionInput{}, httpx.BadRequest("workflow 至少需要一个 Agent 节点")
 	}
@@ -156,7 +169,29 @@ func (s *Service) prepareWorkflowDefinition(ctx context.Context, userID uuid.UUI
 	if err := s.validateWorkflowRequestAgentsAvailable(ctx, userID, nodes, false); err != nil {
 		return workflowDefinitionInput{}, err
 	}
-	if err := s.validateWorkflowRequestInputMappings(ctx, nodes, edges); err != nil {
+	var outputJSON []byte
+	if semantics == workflowSemanticsV2 {
+		v2Nodes := make([]workflowV2NodeInput, 0, len(nodes))
+		for _, node := range nodes {
+			config, err := json.Marshal(node.Config)
+			if err != nil {
+				return workflowDefinitionInput{}, httpx.BadRequest("node config 不是合法 JSON")
+			}
+			v2Nodes = append(v2Nodes, workflowV2NodeInput{key: strings.TrimSpace(node.Key), config: config})
+		}
+		var output interface{}
+		if req.OutputMapping != nil {
+			output = req.OutputMapping
+		}
+		if _, err := parseWorkflowV2Definition(v2Nodes, edges, output); err != nil {
+			return workflowDefinitionInput{}, httpx.NewError(422, workflowInputMappingInvalidCode, "workflow v2 定义无效: "+err.Error())
+		}
+		if req.OutputMapping != nil {
+			if outputJSON, err = json.Marshal(req.OutputMapping); err != nil {
+				return workflowDefinitionInput{}, httpx.BadRequest("output_mapping 不是合法 JSON")
+			}
+		}
+	} else if err := s.validateWorkflowRequestInputMappings(ctx, nodes, edges); err != nil {
 		return workflowDefinitionInput{}, err
 	}
 	edgesJSON, err := json.Marshal(edges)
@@ -179,6 +214,7 @@ func (s *Service) prepareWorkflowDefinition(ctx context.Context, userID uuid.UUI
 	}
 	return workflowDefinitionInput{
 		name: name, description: strings.TrimSpace(description), edgesJSON: edgesJSON, nodes: nodes,
+		semantics: semantics, outputJSON: outputJSON,
 	}, nil
 }
 
@@ -194,11 +230,11 @@ func writeWorkflowVersion(ctx context.Context, tx pgx.Tx, workflowID, userID uui
 	}
 	var versionID uuid.UUID
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO workflow_versions (workflow_id, version, semantics, name, description, edges, definition_digest, created_by)
-		SELECT $1, COALESCE(max(version), 0) + 1, 'v1', $2, $3, $4, repeat('0', 64), $5
+		INSERT INTO workflow_versions (workflow_id, version, semantics, name, description, edges, output_mapping, definition_digest, created_by)
+		SELECT $1, COALESCE(max(version), 0) + 1, $6, $2, $3, $4, $7::jsonb, repeat('0', 64), $5
 		FROM workflow_versions WHERE workflow_id = $1
 		RETURNING id
-	`, workflowID, def.name, def.description, def.edgesJSON, userID).Scan(&versionID); err != nil {
+	`, workflowID, def.name, def.description, def.edgesJSON, userID, def.semantics, nullableJSON(def.outputJSON)).Scan(&versionID); err != nil {
 		return err
 	}
 	for i, node := range def.nodes {
@@ -276,6 +312,9 @@ func (s *Service) workflowResponseForVersion(def workflowVersionDefinition) *Wor
 	resp.Version = def.number
 	resp.VersionID = def.id.String()
 	resp.Semantics = def.semantics
+	if len(def.outputJSON) > 0 {
+		_ = json.Unmarshal(def.outputJSON, &resp.OutputMapping)
+	}
 	return &resp
 }
 
@@ -292,7 +331,7 @@ func (s *Service) UpdateWorkflow(ctx context.Context, userID, workflowID uuid.UU
 	if _, err := s.loadOwnedWorkflowVersion(ctx, userID, workflowID, nil); err != nil {
 		return nil, err
 	}
-	def, err := s.prepareWorkflowDefinition(ctx, userID, req.Name, req.Description, req.Nodes, req.Edges)
+	def, err := s.prepareWorkflowDefinition(ctx, userID, req)
 	if err != nil {
 		return nil, err
 	}
@@ -351,8 +390,13 @@ func (s *Service) DuplicateWorkflow(ctx context.Context, userID, workflowID uuid
 		}
 		nodes = append(nodes, WorkflowNodeRequest{Key: node.NodeKey, Title: node.Title, AgentID: node.AgentID, Config: config})
 	}
+	var output map[string]interface{}
+	if len(source.outputJSON) > 0 {
+		_ = json.Unmarshal(source.outputJSON, &output)
+	}
 	return s.CreateWorkflow(ctx, userID, &CreateWorkflowRequest{
 		Name: name, Description: source.workflow.Description, Nodes: nodes, Edges: edges,
+		Semantics: source.semantics, OutputMapping: output,
 	})
 }
 
@@ -469,4 +513,11 @@ func workflowRunCreateError(err error) error {
 func isWorkflowHTTPError(err error) bool {
 	var he *httpx.HTTPError
 	return errors.As(err, &he)
+}
+
+func nullableJSON(raw []byte) interface{} {
+	if len(raw) == 0 {
+		return nil
+	}
+	return string(raw)
 }

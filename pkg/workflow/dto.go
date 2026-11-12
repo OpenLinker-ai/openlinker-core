@@ -9,6 +9,11 @@ type CreateWorkflowRequest struct {
 	Description string                   `json:"description,omitempty" validate:"omitempty,max=500"`
 	Nodes       []WorkflowNodeRequest    `json:"nodes" validate:"required,min=1,max=10,dive"`
 	Edges       []map[string]interface{} `json:"edges" validate:"omitempty,max=20"`
+	// Semantics "v2" interprets node policies (config.policy), join modes
+	// (config.join), conditional edges (when), input mapping v2 and
+	// output_mapping. Default "v1" keeps the original interpretation.
+	Semantics     string                 `json:"semantics,omitempty" validate:"omitempty,oneof=v1 v2"`
+	OutputMapping map[string]interface{} `json:"output_mapping,omitempty"`
 }
 
 type WorkflowNodeRequest struct {
@@ -60,9 +65,10 @@ type WorkflowResponse struct {
 	UpdatedAt   string                   `json:"updated_at"`
 	// Version is the immutable definition version these nodes and edges
 	// belong to; send it back as If-Match when updating.
-	Version   int32  `json:"version,omitempty"`
-	VersionID string `json:"version_id,omitempty"`
-	Semantics string `json:"semantics,omitempty"`
+	Version       int32                  `json:"version,omitempty"`
+	VersionID     string                 `json:"version_id,omitempty"`
+	Semantics     string                 `json:"semantics,omitempty"`
+	OutputMapping map[string]interface{} `json:"output_mapping,omitempty"`
 }
 
 // UpdateWorkflowRequest replaces the definition with a new version.

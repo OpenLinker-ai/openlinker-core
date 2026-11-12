@@ -105,7 +105,7 @@ func (s *Service) CreateWorkflow(ctx context.Context, userID uuid.UUID, req *Cre
 	if req == nil {
 		return nil, httpx.BadRequest("请求体不能为空")
 	}
-	def, err := s.prepareWorkflowDefinition(ctx, userID, req.Name, req.Description, req.Nodes, req.Edges)
+	def, err := s.prepareWorkflowDefinition(ctx, userID, req)
 	if err != nil {
 		return nil, err
 	}

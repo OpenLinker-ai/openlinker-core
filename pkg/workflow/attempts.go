@@ -85,7 +85,11 @@ func (s *Service) SetWorkflowNodeRetryDefaults(maxAttempts int32, backoff time.D
 	}
 }
 
-func (s *Service) workflowNodePolicy(_ []byte) workflowNodePolicy {
+// workflowNodePolicy is a node's execution policy. v1 definitions ignore
+// config.policy entirely (the service defaults apply, as before); v2
+// definitions use their validated policy, falling back to the defaults for
+// fields they leave out.
+func (s *Service) workflowNodePolicy(semantics string, config []byte) workflowNodePolicy {
 	policy := workflowNodePolicy{
 		timeout:     defaultWorkflowNodeTimeout,
 		maxAttempts: 1,
@@ -97,6 +101,23 @@ func (s *Service) workflowNodePolicy(_ []byte) workflowNodePolicy {
 	if s.nodeRetryAttempts > 1 {
 		policy.maxAttempts = s.nodeRetryAttempts
 		policy.backoff = s.nodeRetryBackoff
+	}
+	if semantics != workflowSemanticsV2 {
+		return policy
+	}
+	spec, err := parseWorkflowNodePolicy(config)
+	if err != nil || spec == nil {
+		return policy
+	}
+	if spec.TimeoutSeconds > 0 {
+		policy.timeout = time.Duration(spec.TimeoutSeconds) * time.Second
+	}
+	if spec.Retry != nil {
+		policy.maxAttempts = spec.Retry.MaxAttempts
+		policy.backoff = time.Duration(spec.Retry.BackoffSeconds) * time.Second
+	}
+	if spec.OnFailure != "" {
+		policy.onFailure = spec.OnFailure
 	}
 	return policy
 }
@@ -603,14 +624,19 @@ func (s *Service) recomputeFailedNode(
 ) (string, bool, error) {
 	var runStatus string
 	var config []byte
+	var semantics string
+	// The node of the run's own version (the workflow_nodes projection only
+	// holds the current version).
 	if err := tx.QueryRow(ctx, `
-		SELECT r.status, n.config
-		FROM workflow_runs r, workflow_nodes n
-		WHERE r.id = $1 AND n.id = $2
-	`, runID, nodeID).Scan(&runStatus, &config); err != nil {
+		SELECT r.status, n.config, v.semantics
+		FROM workflow_runs r
+		JOIN workflow_version_nodes n ON n.id = $2
+		JOIN workflow_versions v ON v.id = n.workflow_version_id
+		WHERE r.id = $1
+	`, runID, nodeID).Scan(&runStatus, &config, &semantics); err != nil {
 		return "", false, err
 	}
-	policy := s.workflowNodePolicy(config)
+	policy := s.workflowNodePolicy(semantics, config)
 	if attempt >= policy.maxAttempts {
 		return nodeFailed, true, nil
 	}

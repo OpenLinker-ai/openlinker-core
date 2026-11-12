@@ -56,7 +56,7 @@ func evaluateWorkflowStopGate(ctx context.Context, tx pgx.Tx, sourceRunID uuid.U
 	inProgress := map[string]bool{}
 	unconfirmed := map[string]bool{}
 	rows, err := tx.Query(ctx, `
-		SELECT n.node_key FROM workflow_step_stops s JOIN workflow_nodes n ON n.id = s.workflow_node_id
+		SELECT n.node_key FROM workflow_step_stops s JOIN workflow_version_nodes n ON n.id = s.workflow_node_id
 		WHERE s.workflow_run_id = $1 AND s.state IN ('requested', 'stopping')
 		UNION
 		SELECT '(workflow cancellation)' FROM workflow_run_cancellations
@@ -307,6 +307,12 @@ func (s *Service) RerunWorkflowStep(ctx context.Context, userID, workflowRunID u
 		if err := gate.err(acknowledged); err != nil {
 			return err
 		}
+		var sourceSemantics string
+		if err := tx.QueryRow(ctx, `
+			SELECT v.semantics FROM workflow_runs r JOIN workflow_versions v ON v.id = r.workflow_version_id WHERE r.id = $1
+		`, workflowRunID).Scan(&sourceSemantics); err != nil {
+			return err
+		}
 		logical, err := loadSourceLogicalNodes(ctx, tx, workflowRunID)
 		if err != nil {
 			return err
@@ -320,7 +326,7 @@ func (s *Service) RerunWorkflowStep(ctx context.Context, userID, workflowRunID u
 				continue
 			}
 			node, ok := logical[key]
-			if !ok || !s.workflowNodeReusable(node.state, nodeByKey[key].Config) {
+			if !ok || !s.workflowNodeReusable(sourceSemantics, node.state, nodeByKey[key].Config) {
 				e := httpx.NewError(409, workflowRerunNotReusableCode,
 					"非重跑路径上的 step 不能复用，请改为重跑该 step 或其祖先: "+key)
 				e.Details = map[string]any{"node_key": key}
@@ -363,12 +369,12 @@ func (s *Service) RerunWorkflowStep(ctx context.Context, userID, workflowRunID u
 
 // workflowNodeReusable: a node outside the rerun set is reused only when its
 // source logical result is final and did not fail the workflow.
-func (s *Service) workflowNodeReusable(state string, config []byte) bool {
+func (s *Service) workflowNodeReusable(semantics, state string, config []byte) bool {
 	switch state {
 	case nodeSuccess, nodeSkipped:
 		return true
 	case nodeFailed, nodeTimeout:
-		return s.workflowNodePolicy(config).onFailure != onFailureFailWorkflow
+		return s.workflowNodePolicy(semantics, config).onFailure != onFailureFailWorkflow
 	}
 	return false
 }
@@ -416,7 +422,7 @@ func copyReusedWorkflowNode(ctx context.Context, tx pgx.Tx, sourceRunID, newRunI
 		}
 	}
 	var key string
-	if err := tx.QueryRow(ctx, `SELECT node_key FROM workflow_nodes WHERE id = $1`, node.nodeID).Scan(&key); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT node_key FROM workflow_version_nodes WHERE id = $1`, node.nodeID).Scan(&key); err != nil {
 		return err
 	}
 	_, err := tx.Exec(ctx, `

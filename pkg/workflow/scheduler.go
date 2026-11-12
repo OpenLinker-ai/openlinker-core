@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,6 +121,20 @@ type workflowSchedulingDecision struct {
 	drive []string
 	// recompute lists nodes waiting on stop evidence (stopping).
 	recompute []string
+	// skip lists v2 nodes whose incoming edges all resolved without
+	// activating them (join all: some inactive; join any: none active).
+	skip []workflowSkip
+}
+
+type workflowSkip struct {
+	key    string
+	reason string
+}
+
+// workflowRunSemantics is how a run interprets its definition version.
+type workflowRunSemantics struct {
+	semantics string
+	v2        *workflowV2Definition // nil for v1
 }
 
 // decideWorkflowScheduling is the pure ready-set decision. Edges only look
@@ -132,8 +147,10 @@ func decideWorkflowScheduling(
 	active map[string]bool,
 	parallelism int,
 	onFailure func(nodeKey string) string,
+	rs workflowRunSemantics,
 ) workflowSchedulingDecision {
 	decision := workflowSchedulingDecision{}
+	outputs := workflowSnapshotOutputs(snapshot)
 	allTerminal := true
 	for _, key := range order {
 		node, ok := snapshot.nodes[key]
@@ -143,7 +160,7 @@ func decideWorkflowScheduling(
 		}
 		switch node.state {
 		case nodeFailed, nodeTimeout, nodeCanceled:
-			if onFailure(key) == onFailureFailWorkflow && !decision.failed {
+			if (node.state == nodeCanceled || onFailure(key) == onFailureFailWorkflow) && !decision.failed {
 				decision.failed, decision.failedKey = true, key
 			}
 		case nodeSuccess, nodeSkipped:
@@ -175,29 +192,77 @@ func decideWorkflowScheduling(
 		}
 	}
 	for _, key := range order {
-		if inFlight >= parallelism {
-			break
-		}
 		node, ok := snapshot.nodes[key]
 		if !ok || active[key] || !node.startable {
+			continue
+		}
+		if inFlight >= parallelism && (rs.v2 == nil || node.state != nodeWaiting) {
 			continue
 		}
 		if node.state != nodeWaiting && node.state != nodeRetryWait {
 			continue
 		}
 		ready := true
-		for _, parent := range graph.Parents[key] {
-			if p, ok := snapshot.nodes[parent]; !ok || p.state != nodeSuccess {
+		if rs.v2 != nil && node.state == nodeWaiting {
+			activation, reason := rs.v2.activation(key, snapshot, outputs)
+			switch activation {
+			case "skip":
+				decision.skip = append(decision.skip, workflowSkip{key: key, reason: reason})
 				ready = false
-				break
+			case "unresolved":
+				ready = false
+			}
+		} else {
+			for _, parent := range graph.Parents[key] {
+				if p, ok := snapshot.nodes[parent]; !ok || p.state != nodeSuccess {
+					ready = false
+					break
+				}
 			}
 		}
-		if ready {
+		if ready && inFlight < parallelism {
 			decision.drive = append(decision.drive, key)
 			inFlight++
 		}
 	}
 	return decision
+}
+
+// activation decides a waiting v2 node from its incoming edges: "ready",
+// "skip" (with the reason) or "unresolved" while any edge is undecided. An
+// edge is active when its source succeeded and its condition (if any) holds,
+// inactive when the source failed under continue, was skipped, or the
+// condition is false.
+func (d *workflowV2Definition) activation(key string, snapshot workflowRunSnapshot, outputs map[string]map[string]interface{}) (string, string) {
+	incoming := d.incoming[key]
+	if len(incoming) == 0 {
+		return "ready", ""
+	}
+	activeCount := 0
+	inactive := []string{}
+	for _, edge := range incoming {
+		source, ok := snapshot.nodes[edge.from]
+		if !ok || !workflowNodeStateTerminal(source.state) {
+			return "unresolved", ""
+		}
+		if source.state == nodeSuccess && (edge.when == nil || edge.when.evaluate(outputs[edge.from])) {
+			activeCount++
+		} else {
+			inactive = append(inactive, edge.from)
+		}
+	}
+	switch d.join[key] {
+	case joinAny:
+		if activeCount > 0 {
+			return "ready", ""
+		}
+		return "skip", "no active incoming edge (join any): " + strings.Join(inactive, ", ")
+	default:
+		if len(inactive) == 0 {
+			return "ready", ""
+		}
+		return "skip", "inactive incoming edge (join all): " + strings.Join(inactive, ", ")
+	}
 }
 
 func workflowTopologicalOrder(graph *workflowGraph) []string {
@@ -235,7 +300,13 @@ func (s *Service) executeWorkflowRun(
 		byKey[node.NodeKey] = node
 	}
 	order := workflowTopologicalOrder(graph)
-	onFailure := func(nodeKey string) string { return s.workflowNodePolicy(byKey[nodeKey].Config).onFailure }
+	rs, err := s.loadWorkflowRunSemantics(ctx, run, w, nodes)
+	if err != nil {
+		return nil, s.executorStopped(ctx, err)
+	}
+	onFailure := func(nodeKey string) string {
+		return s.workflowNodePolicy(rs.semantics, byKey[nodeKey].Config).onFailure
+	}
 
 	// Core executes direct HTTP/MCP children inline in the calling
 	// goroutine, so a child call runs under callCtx: pausing leaves it
@@ -295,7 +366,15 @@ func (s *Service) executeWorkflowRun(
 				delete(cooling, key)
 			}
 		}
-		decision := decideWorkflowScheduling(graph, order, snapshot, busy, s.workflowParallelism(), onFailure)
+		decision := decideWorkflowScheduling(graph, order, snapshot, busy, s.workflowParallelism(), onFailure, rs)
+		for _, skip := range decision.skip {
+			if err := s.skipWorkflowNode(ctx, run.ID, byKey[skip.key].ID, skip.reason); err != nil {
+				return nil, s.executorStopped(ctx, err)
+			}
+		}
+		if len(decision.skip) > 0 {
+			continue
+		}
 		for _, key := range decision.recompute {
 			nodeID := byKey[key].ID
 			if err := s.leasedTransition(ctx, run.ID, func(tx pgx.Tx, _ string) error {
@@ -325,7 +404,7 @@ func (s *Service) executeWorkflowRun(
 			return resp, &workflowRunFailedError{message: msg}
 		}
 		if decision.done {
-			return s.completeWorkflowRun(ctx, run, graph, snapshot)
+			return s.completeWorkflowRun(ctx, run, graph, snapshot, rs, input)
 		}
 		outputs := workflowSnapshotOutputs(snapshot)
 		for _, key := range decision.drive {
@@ -336,7 +415,7 @@ func (s *Service) executeWorkflowRun(
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				s.driveWorkflowAttempt(driveCtx, callCtx, w, run, node, attempt, stepInput)
+				s.driveWorkflowAttempt(driveCtx, callCtx, w, run, node, attempt, stepInput, rs.semantics)
 				finished <- node.NodeKey
 			}()
 		}
@@ -380,13 +459,54 @@ func workflowSnapshotOutputs(snapshot workflowRunSnapshot) map[string]map[string
 	return outputs
 }
 
+// completeWorkflowRun is the success-side finalizer once every node is
+// logically terminal without failing the workflow. v1: the output of the
+// sinks (all succeeded). v2 with output_mapping: success only when every
+// field evaluates (or defaults), else failed with output_mapping_failed.
+// v2 without it: success with the successful sinks' outputs when at least
+// one sink succeeded, else failed (no usable terminal output).
 func (s *Service) completeWorkflowRun(
 	ctx context.Context,
 	run db.WorkflowRun,
 	graph *workflowGraph,
 	snapshot workflowRunSnapshot,
+	rs workflowRunSemantics,
+	input map[string]interface{},
 ) (*WorkflowRunResponse, error) {
-	finalOutput := workflowFinalOutput(workflowSnapshotOutputs(snapshot), graph.Sinks)
+	outputs := workflowSnapshotOutputs(snapshot)
+	var finalOutput map[string]interface{}
+	failure := ""
+	switch {
+	case rs.v2 != nil && rs.v2.output != nil:
+		mapped, err := rs.v2.output.evaluate(workflowMappingContext{input: input, outputs: outputs})
+		if err != nil {
+			failure = "output_mapping_failed: " + err.Error()
+		}
+		finalOutput = mapped
+	case rs.v2 != nil:
+		successfulSinks := []string{}
+		for _, sink := range graph.Sinks {
+			if _, ok := outputs[sink]; ok {
+				successfulSinks = append(successfulSinks, sink)
+			}
+		}
+		if len(successfulSinks) == 0 {
+			failure = "workflow 没有可用的终端输出：所有汇点都被跳过或失败"
+		}
+		finalOutput = workflowFinalOutput(outputs, successfulSinks)
+	default:
+		finalOutput = workflowFinalOutput(outputs, graph.Sinks)
+	}
+	if failure != "" {
+		if err := s.failWorkflowRunAtomic(context.WithoutCancel(ctx), run.ID, failure); err != nil {
+			return nil, s.executorStopped(ctx, err)
+		}
+		resp, err := s.GetWorkflowRun(context.WithoutCancel(ctx), run.UserID, run.ID)
+		if err != nil {
+			return nil, err
+		}
+		return resp, &workflowRunFailedError{message: failure}
+	}
 	finalJSON, _ := json.Marshal(finalOutput)
 	if err := s.fencedWrite(ctx, run.ID, func(q *db.Queries) error {
 		_, err := q.MarkWorkflowRunSuccess(ctx, db.MarkWorkflowRunSuccessParams{ID: run.ID, Output: finalJSON})
@@ -401,6 +521,70 @@ func (s *Service) completeWorkflowRun(
 		return nil, httpx.Internal("更新 workflow_run 失败")
 	}
 	return s.GetWorkflowRun(ctx, run.UserID, run.ID)
+}
+
+// loadWorkflowRunSemantics reads the run's version semantics and, for v2,
+// parses the definition (already validated when the version was written).
+func (s *Service) loadWorkflowRunSemantics(ctx context.Context, run db.WorkflowRun, w db.Workflow, nodes []db.WorkflowNode) (workflowRunSemantics, error) {
+	rs := workflowRunSemantics{semantics: workflowSemanticsV1}
+	if s.pool == nil {
+		return rs, nil
+	}
+	var outputJSON []byte
+	if err := s.pool.QueryRow(ctx, `
+		SELECT v.semantics, v.output_mapping
+		FROM workflow_runs r JOIN workflow_versions v ON v.id = r.workflow_version_id
+		WHERE r.id = $1
+	`, run.ID).Scan(&rs.semantics, &outputJSON); err != nil {
+		return rs, err
+	}
+	if rs.semantics != workflowSemanticsV2 {
+		return rs, nil
+	}
+	edges := []map[string]interface{}{}
+	if len(w.Edges) > 0 {
+		if err := json.Unmarshal(w.Edges, &edges); err != nil {
+			return rs, err
+		}
+	}
+	v2Nodes := make([]workflowV2NodeInput, 0, len(nodes))
+	for _, node := range nodes {
+		v2Nodes = append(v2Nodes, workflowV2NodeInput{key: node.NodeKey, config: node.Config})
+	}
+	var output interface{}
+	if len(outputJSON) > 0 {
+		if err := json.Unmarshal(outputJSON, &output); err != nil {
+			return rs, err
+		}
+	}
+	def, err := parseWorkflowV2Definition(v2Nodes, edges, output)
+	if err != nil {
+		return rs, err
+	}
+	rs.v2 = def
+	return rs, nil
+}
+
+// skipWorkflowNode marks a waiting v2 node skipped (logically terminal with
+// its reason) and voids its never-started attempt. Requires the lease.
+func (s *Service) skipWorkflowNode(ctx context.Context, runID, nodeID uuid.UUID, reason string) error {
+	return s.leasedTransition(ctx, runID, func(tx pgx.Tx, _ string) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE workflow_run_nodes
+			SET state = 'skipped', skip_reason = $3, terminal_at = clock_timestamp(), updated_at = clock_timestamp()
+			WHERE workflow_run_id = $1 AND workflow_node_id = $2 AND state = 'waiting' AND terminal_at IS NULL
+		`, runID, nodeID, truncate(reason, 500))
+		if err != nil || tag.RowsAffected() == 0 {
+			return err
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE workflow_run_steps
+			SET status = 'canceled', finished_at = clock_timestamp(), updated_at = clock_timestamp(),
+			    error_message = 'workflow node skipped'
+			WHERE workflow_run_id = $1 AND workflow_node_id = $2 AND status = 'pending'
+		`, runID, nodeID)
+		return err
+	})
 }
 
 // failWorkflowRunAtomic is the fail_workflow finalization: in one parent
@@ -435,8 +619,9 @@ func (s *Service) driveWorkflowAttempt(
 	node db.WorkflowNode,
 	attempt workflowNodeSnapshot,
 	stepInput workflowStepInputResult,
+	semantics string,
 ) {
-	policy := s.workflowNodePolicy(node.Config)
+	policy := s.workflowNodePolicy(semantics, node.Config)
 	stepID := attempt.stepID
 	inputJSON := attempt.input
 	var deadline time.Time

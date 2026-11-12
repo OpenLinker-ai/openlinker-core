@@ -42,13 +42,13 @@ func TestWorkflowSchedulingDiamondHasNoLevelBarrier(t *testing.T) {
 
 	start := decideWorkflowScheduling(graph, order, schedulingSnapshot(map[string]workflowNodeSnapshot{
 		"a": waitingNode(), "b": waitingNode(), "c": waitingNode(), "d": waitingNode(),
-	}), map[string]bool{}, 4, failWorkflowPolicy)
+	}), map[string]bool{}, 4, failWorkflowPolicy, workflowRunSemantics{})
 	require.Equal(t, []string{"a"}, start.drive, "only the root is ready")
 
 	branches := decideWorkflowScheduling(graph, order, schedulingSnapshot(map[string]workflowNodeSnapshot{
 		"a": {state: nodeSuccess, status: attemptSuccess},
 		"b": waitingNode(), "c": waitingNode(), "d": waitingNode(),
-	}), map[string]bool{}, 4, failWorkflowPolicy)
+	}), map[string]bool{}, 4, failWorkflowPolicy, workflowRunSemantics{})
 	require.Equal(t, []string{"b", "c"}, branches.drive)
 
 	oneBranch := decideWorkflowScheduling(graph, order, schedulingSnapshot(map[string]workflowNodeSnapshot{
@@ -56,7 +56,7 @@ func TestWorkflowSchedulingDiamondHasNoLevelBarrier(t *testing.T) {
 		"b": {state: nodeSuccess, status: attemptSuccess},
 		"c": {state: nodeRunning, status: attemptRunning},
 		"d": waitingNode(),
-	}), map[string]bool{"c": true}, 4, failWorkflowPolicy)
+	}), map[string]bool{"c": true}, 4, failWorkflowPolicy, workflowRunSemantics{})
 	require.Empty(t, oneBranch.drive, "d waits for c")
 
 	join := decideWorkflowScheduling(graph, order, schedulingSnapshot(map[string]workflowNodeSnapshot{
@@ -64,12 +64,12 @@ func TestWorkflowSchedulingDiamondHasNoLevelBarrier(t *testing.T) {
 		"b": {state: nodeSuccess, status: attemptSuccess},
 		"c": {state: nodeSuccess, status: attemptSuccess},
 		"d": waitingNode(),
-	}), map[string]bool{}, 4, failWorkflowPolicy)
+	}), map[string]bool{}, 4, failWorkflowPolicy, workflowRunSemantics{})
 	require.Equal(t, []string{"d"}, join.drive)
 
 	done := decideWorkflowScheduling(graph, order, schedulingSnapshot(map[string]workflowNodeSnapshot{
 		"a": {state: nodeSuccess}, "b": {state: nodeSuccess}, "c": {state: nodeSuccess}, "d": {state: nodeSuccess},
-	}), map[string]bool{}, 4, failWorkflowPolicy)
+	}), map[string]bool{}, 4, failWorkflowPolicy, workflowRunSemantics{})
 	require.True(t, done.done)
 }
 
@@ -85,12 +85,12 @@ func TestWorkflowSchedulingWideFanOutRespectsParallelism(t *testing.T) {
 	graph := schedulingGraph(parents, sequence)
 	order := workflowTopologicalOrder(graph)
 
-	decision := decideWorkflowScheduling(graph, order, schedulingSnapshot(nodes), map[string]bool{}, 4, failWorkflowPolicy)
+	decision := decideWorkflowScheduling(graph, order, schedulingSnapshot(nodes), map[string]bool{}, 4, failWorkflowPolicy, workflowRunSemantics{})
 	require.Len(t, decision.drive, 4)
 
 	// Two already in flight leave room for two more.
 	decision = decideWorkflowScheduling(graph, order, schedulingSnapshot(nodes),
-		map[string]bool{"n1": true, "n2": true}, 4, failWorkflowPolicy)
+		map[string]bool{"n1": true, "n2": true}, 4, failWorkflowPolicy, workflowRunSemantics{})
 	require.Equal(t, []string{"n3", "n4"}, decision.drive)
 }
 
@@ -101,7 +101,7 @@ func TestWorkflowSchedulingRecoveredRunningAttemptsIgnoreTheLimit(t *testing.T) 
 		"a": {state: nodeRunning, status: attemptRunning},
 		"b": {state: nodeRunning, status: attemptRunning},
 		"c": waitingNode(),
-	}), map[string]bool{}, 1, failWorkflowPolicy)
+	}), map[string]bool{}, 1, failWorkflowPolicy, workflowRunSemantics{})
 	require.Equal(t, []string{"a", "b"}, decision.drive, "in-flight attempts are resumed; c waits for a slot")
 }
 
@@ -112,7 +112,7 @@ func TestWorkflowSchedulingRetryAndStoppingKeepChildrenWaiting(t *testing.T) {
 	backoff := decideWorkflowScheduling(graph, order, schedulingSnapshot(map[string]workflowNodeSnapshot{
 		"a": {state: nodeRetryWait, status: attemptPending, attempt: 2, startable: false},
 		"b": waitingNode(),
-	}), map[string]bool{}, 4, failWorkflowPolicy)
+	}), map[string]bool{}, 4, failWorkflowPolicy, workflowRunSemantics{})
 	require.Empty(t, backoff.drive, "a is backing off; its child stays unresolved")
 	require.False(t, backoff.failed)
 	require.False(t, backoff.done)
@@ -120,13 +120,13 @@ func TestWorkflowSchedulingRetryAndStoppingKeepChildrenWaiting(t *testing.T) {
 	due := decideWorkflowScheduling(graph, order, schedulingSnapshot(map[string]workflowNodeSnapshot{
 		"a": {state: nodeRetryWait, status: attemptPending, attempt: 2, startable: true},
 		"b": waitingNode(),
-	}), map[string]bool{}, 4, failWorkflowPolicy)
+	}), map[string]bool{}, 4, failWorkflowPolicy, workflowRunSemantics{})
 	require.Equal(t, []string{"a"}, due.drive)
 
 	stopping := decideWorkflowScheduling(graph, order, schedulingSnapshot(map[string]workflowNodeSnapshot{
 		"a": {state: nodeStopping, status: attemptFailed},
 		"b": waitingNode(),
-	}), map[string]bool{}, 4, failWorkflowPolicy)
+	}), map[string]bool{}, 4, failWorkflowPolicy, workflowRunSemantics{})
 	require.Empty(t, stopping.drive)
 	require.Equal(t, []string{"a"}, stopping.recompute)
 	require.False(t, stopping.failed, "stopping is not a logical failure yet")
@@ -140,7 +140,7 @@ func TestWorkflowSchedulingLogicalFailureFailsTheWorkflow(t *testing.T) {
 			"a": {state: state, status: state},
 			"b": {state: nodeRunning, status: attemptRunning},
 			"c": waitingNode(),
-		}), map[string]bool{"b": true}, 4, failWorkflowPolicy)
+		}), map[string]bool{"b": true}, 4, failWorkflowPolicy, workflowRunSemantics{})
 		require.True(t, decision.failed, state)
 		require.Equal(t, "a", decision.failedKey)
 		require.Empty(t, decision.drive)
