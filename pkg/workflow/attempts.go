@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
@@ -122,6 +123,21 @@ func (s *Service) workflowNodePolicy(semantics string, config []byte) workflowNo
 	return policy
 }
 
+// notifyWorkflowRunChanged advances the run's revision and queues a
+// notification in the caller's transaction; PostgreSQL delivers it only on
+// commit. Run event streams re-read a snapshot when notified.
+func notifyWorkflowRunChanged(ctx context.Context, q interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, runID uuid.UUID) error {
+	if _, err := q.Exec(ctx, `UPDATE workflow_runs SET revision = revision + 1 WHERE id = $1`, runID); err != nil {
+		return err
+	}
+	_, err := q.Exec(ctx, `SELECT pg_notify($1, $2)`, workflowRunChangedChannel, runID.String())
+	return err
+}
+
+const workflowRunChangedChannel = "workflow_run.changed"
+
 // lockWorkflowRunForTransition locks the parent run, then reads its status
 // with a fresh statement. Every attempt transition holds this lock.
 func lockWorkflowRunForTransition(ctx context.Context, tx pgx.Tx, runID uuid.UUID) (string, error) {
@@ -181,7 +197,10 @@ func (s *Service) leasedTransition(ctx context.Context, runID uuid.UUID, fn func
 		if err := tx.QueryRow(ctx, `SELECT status FROM workflow_runs WHERE id = $1`, runID).Scan(&status); err != nil {
 			return err
 		}
-		return fn(tx, status)
+		if err := fn(tx, status); err != nil {
+			return err
+		}
+		return notifyWorkflowRunChanged(ctx, tx, runID)
 	})
 }
 
@@ -339,6 +358,20 @@ func (s *Service) failAttemptLocal(ctx context.Context, runID, nodeID uuid.UUID,
 func (s *Service) settleFromRuntime(ctx context.Context, runID, nodeID uuid.UUID, attempt int32) (string, error) {
 	var result string
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		changed, err := s.settleFromRuntimeTx(ctx, tx, runID, nodeID, attempt, &result)
+		if err != nil || !changed {
+			return err
+		}
+		return notifyWorkflowRunChanged(ctx, tx, runID)
+	})
+	return result, err
+}
+
+func (s *Service) settleFromRuntimeTx(ctx context.Context, tx pgx.Tx, runID, nodeID uuid.UUID, attempt int32, resultOut *string) (bool, error) {
+	var result string
+	changed := false
+	defer func() { *resultOut = result }()
+	err := func() error {
 		if _, err := lockWorkflowRunForTransition(ctx, tx, runID); err != nil {
 			return err
 		}
@@ -411,6 +444,7 @@ func (s *Service) settleFromRuntime(ctx context.Context, runID, nodeID uuid.UUID
 					}
 					result = attemptFailed
 				}
+				changed = true
 				return s.recomputeNode(ctx, tx, runID, nodeID)
 			}
 		}
@@ -444,9 +478,10 @@ func (s *Service) settleFromRuntime(ctx context.Context, runID, nodeID uuid.UUID
 		`, runID, nodeID, attempt); err != nil {
 			return err
 		}
+		changed = true
 		return s.recomputeNode(ctx, tx, runID, nodeID)
-	})
-	return result, err
+	}()
+	return changed, err
 }
 
 func insertWorkflowStepStop(ctx context.Context, tx pgx.Tx, runID, nodeID uuid.UUID, attempt int32, childID uuid.UUID, reason string) error {

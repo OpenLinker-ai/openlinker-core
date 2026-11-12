@@ -5,10 +5,12 @@ import "github.com/google/uuid"
 // CreateWorkflowRequest creates a DAG of Agent nodes. Omitted/null edges use
 // the sequential default; an explicit empty array makes all nodes independent.
 type CreateWorkflowRequest struct {
-	Name        string                   `json:"name" validate:"required,min=1,max=120"`
-	Description string                   `json:"description,omitempty" validate:"omitempty,max=500"`
-	Nodes       []WorkflowNodeRequest    `json:"nodes" validate:"required,min=1,max=10,dive"`
-	Edges       []map[string]interface{} `json:"edges" validate:"omitempty,max=20"`
+	Name        string `json:"name" validate:"required,min=1,max=120"`
+	Description string `json:"description,omitempty" validate:"omitempty,max=500"`
+	// The configured limits (WORKFLOW_MAX_NODES/EDGES, default 30/60) are
+	// enforced by the service; these tags are the absolute ceiling.
+	Nodes []WorkflowNodeRequest    `json:"nodes" validate:"required,min=1,max=100,dive"`
+	Edges []map[string]interface{} `json:"edges" validate:"omitempty,max=200"`
 	// Semantics "v2" interprets node policies (config.policy), join modes
 	// (config.join), conditional edges (when), input mapping v2 and
 	// output_mapping. Default "v1" keeps the original interpretation.
@@ -139,6 +141,18 @@ type WorkflowRunResponse struct {
 	UnconfirmedChildrenAcknowledgedBy string `json:"unconfirmed_children_acknowledged_by,omitempty"`
 	// WorkflowVersion is the definition version this run executes.
 	WorkflowVersion int32 `json:"workflow_version,omitempty"`
+	// Revision increases with every change to the run, its nodes, attempts
+	// and stop records; event streams use it as the event id.
+	Revision int64 `json:"revision,omitempty"`
+	// Nodes are the logical node states (absent for history without them).
+	Nodes []WorkflowRunNodeResponse `json:"nodes,omitempty"`
+}
+
+type WorkflowRunNodeResponse struct {
+	NodeKey          string `json:"node_key"`
+	State            string `json:"state"`
+	EffectiveAttempt int32  `json:"effective_attempt,omitempty"`
+	SkipReason       string `json:"skip_reason,omitempty"`
 }
 
 type WorkflowRunListResponse struct {

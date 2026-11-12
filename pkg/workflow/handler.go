@@ -68,6 +68,7 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	g.GET("/:id/runs", h.ListRuns)
 	h.registerVersionRoutes(g)
 	api.GET("/workflow-runs/:id", h.GetRun, jwtMiddleware)
+	api.GET("/workflow-runs/:id/events", h.RunEvents, jwtMiddleware)
 	api.POST("/workflow-runs/:id/retry", h.RetryRun, jwtMiddleware)
 	api.POST("/workflow-runs/:id/steps/rerun", h.RerunStep, jwtMiddleware)
 	api.GET("/workflow-runs/:id/compare/:other_id", h.CompareRuns, jwtMiddleware)

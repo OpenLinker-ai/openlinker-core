@@ -14,6 +14,9 @@ func TestValidateCoreUp(t *testing.T) {
 	}{
 		{name: "fresh", snapshot: Snapshot{}},
 		{name: "current", snapshot: currentCoreSnapshot(), wantNoop: true},
+		{name: "workflow revision predecessor", snapshot: workflowRevisionPredecessorCoreSnapshot()},
+		{name: "workflow revision predecessor drift", snapshot: withCoreDigest(workflowRevisionPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
+		{name: "current version with workflow revision predecessor shape", snapshot: withCoreShape(currentCoreSnapshot(), workflowRevisionPredecessorCoreSnapshot().CoreShape), wantError: "fingerprint mismatch"},
 		{name: "workflow versions predecessor", snapshot: workflowVersionsPredecessorCoreSnapshot()},
 		{name: "workflow versions predecessor drift", snapshot: withCoreDigest(workflowVersionsPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
 		{name: "workflow versions predecessor with current shape", snapshot: withCoreShape(workflowVersionsPredecessorCoreSnapshot(), currentCoreShape()), wantError: "fingerprint mismatch"},
@@ -152,7 +155,7 @@ func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
 		Tables:            96,
-		Constraints:       781,
+		Constraints:       782,
 		Indexes:           322,
 		Triggers:          80,
 		CoreIdentities:    1,
@@ -190,6 +193,16 @@ func mcpTransportPredecessorCoreSnapshot() Snapshot {
 	s.CoreShape.Constraints = 728
 	s.CoreShape.Indexes = 309
 	s.NonBookkeepingObjects = 91
+	return s
+}
+
+// workflowRevisionPredecessorCoreSnapshot is the exact 105 schema: 106 adds
+// only the run revision column.
+func workflowRevisionPredecessorCoreSnapshot() Snapshot {
+	s := currentCoreSnapshot()
+	s.Core.Version = CoreWorkflowRevisionPredecessorVersion
+	s.CoreShape.Digest = CoreWorkflowRevisionPredecessorDigest
+	s.CoreShape.Constraints = 781
 	return s
 }
 

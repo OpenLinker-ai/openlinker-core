@@ -191,7 +191,10 @@ func (s *Service) requestWorkflowCancellation(
 			requester.userID, requester.via)
 		var err error
 		evidence, err = scanWorkflowCancellation(row)
-		return err
+		if err != nil {
+			return err
+		}
+		return notifyWorkflowRunChanged(ctx, tx, workflowRunID)
 	})
 	return evidence, err
 }
@@ -386,7 +389,10 @@ func (s *Service) advanceWorkflowCancellation(ctx context.Context, workflowRunID
 			    updated_at = clock_timestamp()
 			WHERE workflow_run_id = $1
 		`, workflowRunID, next)
-		return err
+		if err != nil {
+			return err
+		}
+		return notifyWorkflowRunChanged(ctx, tx, workflowRunID)
 	})
 }
 

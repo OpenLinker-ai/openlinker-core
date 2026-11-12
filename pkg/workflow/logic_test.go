@@ -169,19 +169,7 @@ func TestWorkflowCreateValidatesBeforePersistence(t *testing.T) {
 	}{
 		{name: "nil request", req: nil, want: http.StatusBadRequest},
 		{name: "missing nodes", req: &CreateWorkflowRequest{Name: "Draft"}, want: http.StatusBadRequest},
-		{name: "too many nodes", req: &CreateWorkflowRequest{Name: "Draft", Nodes: []WorkflowNodeRequest{
-			{Key: "n0", AgentID: validAgentID},
-			{Key: "n1", AgentID: validAgentID},
-			{Key: "n2", AgentID: validAgentID},
-			{Key: "n3", AgentID: validAgentID},
-			{Key: "n4", AgentID: validAgentID},
-			{Key: "n5", AgentID: validAgentID},
-			{Key: "n6", AgentID: validAgentID},
-			{Key: "n7", AgentID: validAgentID},
-			{Key: "n8", AgentID: validAgentID},
-			{Key: "n9", AgentID: validAgentID},
-			{Key: "n10", AgentID: validAgentID},
-		}}, want: http.StatusBadRequest},
+		{name: "too many nodes", req: &CreateWorkflowRequest{Name: "Draft", Nodes: tooManyWorkflowNodes(validAgentID)}, want: http.StatusBadRequest},
 		{name: "blank name", req: &CreateWorkflowRequest{Name: "   ", Nodes: []WorkflowNodeRequest{validNode}}, want: http.StatusBadRequest},
 		{name: "bad edge", req: &CreateWorkflowRequest{
 			Name:  "Draft",
@@ -1658,4 +1646,13 @@ func workflowFakeRunValues(runID, workflowID, userID uuid.UUID, status string, e
 		nil,
 		nil,
 	}
+}
+
+// tooManyWorkflowNodes exceeds the default limit of 30 nodes.
+func tooManyWorkflowNodes(agentID uuid.UUID) []WorkflowNodeRequest {
+	nodes := make([]WorkflowNodeRequest, 0, 31)
+	for i := 0; i < 31; i++ {
+		nodes = append(nodes, WorkflowNodeRequest{Key: fmt.Sprintf("n%d", i), AgentID: agentID})
+	}
+	return nodes
 }

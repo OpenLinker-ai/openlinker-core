@@ -22,6 +22,8 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 		"101_runtime_signal_outbox_retention.up.sql":   true,
 		"101_runtime_signal_outbox_retention.down.sql": true,
 		"100_runtime_mtls_transition.up.sql":           true,
+		"106_workflow_run_revision.up.sql":             true,
+		"106_workflow_run_revision.down.sql":           true,
 		"105_workflow_versions.up.sql":                 true,
 		"105_workflow_versions.down.sql":               true,
 		"100_runtime_mtls_transition.down.sql":         true,
@@ -273,7 +275,7 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	verify := readInitializer(t, "../../migrations/086_current_schema_init_verify.sql")
 	for _, fragment := range []string{
 		"public_tables <> 96",
-		"public_constraints <> 781",
+		"public_constraints <> 782",
 		"public_indexes <> 322",
 		"public_triggers <> 80",
 		"public_functions <> 72",

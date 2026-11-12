@@ -174,7 +174,8 @@ SET status = 'paused',
     END,
     next_retry_at = NULL,
     last_worker_error = NULL,
-    updated_at = NOW()
+    updated_at = NOW(),
+    revision = revision + 1
 WHERE id = $1
   AND (
       status = 'pending'
@@ -192,7 +193,8 @@ SET status = 'pending',
     finished_at = NULL,
     error_message = NULL,
     last_worker_error = NULL,
-    updated_at = NOW()
+    updated_at = NOW(),
+    revision = revision + 1
 WHERE id = $1
   AND status = 'paused'
   AND claimed_at IS NULL

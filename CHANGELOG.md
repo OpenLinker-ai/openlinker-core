@@ -172,6 +172,23 @@ runtime protocol, and migration contract are declared stable.
   Workflows with semantics v2 are not executable through External Execution
   until Cloud accepts their contract.
 
+### Workflow observation and limits
+
+- Migration `106` adds a monotonic `revision` to workflow runs. Every change
+  to a run, its logical nodes, attempts and stop records advances it in the
+  same transaction and sends `pg_notify('workflow_run.changed', run id)`
+  (delivered on commit; no triggers).
+- `GET /workflow-runs/:id` reads the run, steps, logical nodes and stop
+  evidence in one `REPEATABLE READ READ ONLY` snapshot and returns
+  `revision` and `nodes` (logical state, effective attempt, skip reason).
+- New `GET /workflow-runs/:id/events` (server-sent events, same
+  authorization as the run): a full snapshot on connect (`event: snapshot`,
+  `id` = revision) and whenever the revision advances, ending after a
+  terminal snapshot. `Last-Event-ID` resumes; notifications wake the stream
+  and a periodic re-read covers lost ones.
+- **Behaviour change:** definition limits are configurable and raised to 30
+  nodes and 60 edges by default (`WORKFLOW_MAX_NODES`, `WORKFLOW_MAX_EDGES`).
+
 ### Security
 
 - **Behaviour change:** the production HTTP rate limiter no longer trusts a

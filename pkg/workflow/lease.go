@@ -121,7 +121,10 @@ func (s *Service) fencedWrite(ctx context.Context, runID uuid.UUID, fn func(*db.
 		if err := s.lockWorkflowRunLease(ctx, tx, runID); err != nil {
 			return err
 		}
-		return fn(s.queries.WithTx(tx))
+		if err := fn(s.queries.WithTx(tx)); err != nil {
+			return err
+		}
+		return notifyWorkflowRunChanged(ctx, tx, runID)
 	})
 }
 
@@ -155,7 +158,8 @@ func (s *Service) claimPendingWorkflowRunWithLease(ctx context.Context) (db.Work
 		    lease_owner = $1,
 		    lease_expires_at = clock_timestamp() + make_interval(secs => $2),
 		    lease_epoch = r.lease_epoch + 1,
-		    lease_mode = 'execute'
+		    lease_mode = 'execute',
+		    revision = r.revision + 1
 		FROM candidate
 		WHERE r.id = candidate.id
 		RETURNING r.id, r.lease_epoch
@@ -163,6 +167,9 @@ func (s *Service) claimPendingWorkflowRunWithLease(ctx context.Context) (db.Work
 	if err != nil {
 		return db.WorkflowRun{}, workflowRunLease{}, err
 	}
+	// The claim already advanced the revision; this notification is best
+	// effort (streams also poll).
+	_, _ = s.pool.Exec(ctx, `SELECT pg_notify($1, $2)`, workflowRunChangedChannel, runID.String())
 	run, err := s.queries.GetWorkflowRunByID(ctx, runID)
 	if err != nil {
 		return db.WorkflowRun{}, workflowRunLease{}, err
@@ -333,6 +340,9 @@ func (s *Service) RecoverExpiredWorkflowRunLeases(ctx context.Context) (int64, e
 				continue
 			}
 			if err := s.recoverExpiredWorkflowRun(ctx, tx, item.id, item.status, item.recoveries, item.maxAttempt); err != nil {
+				return err
+			}
+			if err := notifyWorkflowRunChanged(ctx, tx, item.id); err != nil {
 				return err
 			}
 			total++

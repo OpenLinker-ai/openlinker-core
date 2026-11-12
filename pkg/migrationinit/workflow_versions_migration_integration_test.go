@@ -66,13 +66,13 @@ VALUES($1,$2,$3,'a',$4,$5,$5,'invalidated')`, run, nodeA, step, uuid.New(), sum[
 	}
 	exec(`UPDATE workflow_runs SET status='canceled', finished_at=now() WHERE id=$1`, pending)
 
-	migrateTestDatabaseToCurrent(t, databaseURL)
+	migrateTestDatabaseToVersion(t, databaseURL, uint(CoreWorkflowRevisionPredecessorVersion))
 	snapshot, err := Inspect(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if noop, err := snapshot.ValidateCoreUp(); err != nil || !noop {
-		t.Fatalf("upgraded 105: noop=%t err=%v shape=%s", noop, err, formatShape(snapshot.CoreShape))
+	if noop, err := snapshot.ValidateCoreUp(); err != nil || noop {
+		t.Fatalf("upgraded 105 (predecessor of current): noop=%t err=%v shape=%s", noop, err, formatShape(snapshot.CoreShape))
 	}
 
 	// Version 1 keeps the definition byte for byte.

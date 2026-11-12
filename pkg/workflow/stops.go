@@ -254,7 +254,10 @@ func (s *Service) finishWorkflowStepStop(ctx context.Context, claim workflowStop
 		`, claim.runID, claim.nodeID, claim.attempt, next); err != nil {
 			return err
 		}
-		return s.recomputeNode(ctx, tx, claim.runID, claim.nodeID)
+		if err := s.recomputeNode(ctx, tx, claim.runID, claim.nodeID); err != nil {
+			return err
+		}
+		return notifyWorkflowRunChanged(ctx, tx, claim.runID)
 	})
 	if errors.Is(err, runtime.ErrWorkflowChildStopFenceRejected) {
 		return nil

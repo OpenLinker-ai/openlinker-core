@@ -23,8 +23,8 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 781 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 781', public_constraints;
+    IF public_constraints <> 782 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 782', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
@@ -342,6 +342,14 @@ BEGIN
           AND constraint_row.convalidated
        ) <> 5 THEN
         RAISE EXCEPTION 'Core initializer is missing the workflow version contract';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'workflow_runs'
+          AND column_name = 'revision' AND is_nullable = 'NO'
+    ) THEN
+        RAISE EXCEPTION 'Core initializer is missing the workflow run revision';
     END IF;
 
     IF NOT EXISTS (

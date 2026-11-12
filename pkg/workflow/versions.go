@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -152,8 +153,12 @@ func (s *Service) prepareWorkflowDefinition(ctx context.Context, userID uuid.UUI
 	if len(nodes) == 0 {
 		return workflowDefinitionInput{}, httpx.BadRequest("workflow 至少需要一个 Agent 节点")
 	}
-	if len(nodes) > 10 {
-		return workflowDefinitionInput{}, httpx.BadRequest("workflow 节点不能超过 10 个")
+	maxNodes, maxEdges := s.workflowLimits()
+	if len(nodes) > maxNodes {
+		return workflowDefinitionInput{}, httpx.BadRequest(fmt.Sprintf("workflow 节点不能超过 %d 个", maxNodes))
+	}
+	if len(rawEdges) > maxEdges {
+		return workflowDefinitionInput{}, httpx.BadRequest(fmt.Sprintf("workflow 依赖不能超过 %d 条", maxEdges))
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -520,4 +525,30 @@ func nullableJSON(raw []byte) interface{} {
 		return nil
 	}
 	return string(raw)
+}
+
+const (
+	defaultWorkflowMaxNodes = 30
+	defaultWorkflowMaxEdges = 60
+)
+
+// SetWorkflowLimits sets the definition size limits (Q4 defaults 30/60).
+func (s *Service) SetWorkflowLimits(maxNodes, maxEdges int) {
+	if maxNodes > 0 && maxNodes <= 100 {
+		s.maxNodes = maxNodes
+	}
+	if maxEdges > 0 && maxEdges <= 200 {
+		s.maxEdges = maxEdges
+	}
+}
+
+func (s *Service) workflowLimits() (int, int) {
+	nodes, edges := defaultWorkflowMaxNodes, defaultWorkflowMaxEdges
+	if s.maxNodes > 0 {
+		nodes = s.maxNodes
+	}
+	if s.maxEdges > 0 {
+		edges = s.maxEdges
+	}
+	return nodes, edges
 }

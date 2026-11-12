@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,6 +41,12 @@ type Service struct {
 	nodeRetryAttempts int32
 	nodeRetryBackoff  time.Duration
 	parallelism       int
+	maxNodes          int
+	maxEdges          int
+
+	// Run change notifications for event streams.
+	listenerOnce sync.Once
+	listener     *workflowRunListener
 }
 
 type workflowRuntime interface {
@@ -844,7 +851,11 @@ func (s *Service) ListWorkflowRunsPage(ctx context.Context, userID, workflowID u
 	for _, run := range rows {
 		items = append(items, workflowRunToResponse(run, stepsByRunID[run.ID]))
 	}
-	s.decorateWorkflowRunStopEvidence(ctx, items)
+	if s.pool != nil {
+		if err := decorateWorkflowRunStopEvidence(ctx, s.pool, items); err != nil {
+			log.Warn().Err(err).Msg("workflow.ListWorkflowRuns: decorate")
+		}
+	}
 	return &WorkflowRunListResponse{
 		Items:        items,
 		Total:        total,
@@ -1114,68 +1125,117 @@ func (s *Service) waitForRuntimeRunCompletionByPollingUntil(
 }
 
 func (s *Service) GetWorkflowRun(ctx context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {
-	run, err := s.getWorkflowRunForOwner(ctx, userID, workflowRunID)
-	if err != nil {
-		return nil, err
+	if s.pool == nil {
+		run, err := s.getWorkflowRunForOwner(ctx, userID, workflowRunID)
+		if err != nil {
+			return nil, err
+		}
+		steps, err := s.queries.ListWorkflowRunSteps(ctx, workflowRunID)
+		if err != nil {
+			log.Error().Err(err).Str("workflow_run_id", workflowRunID.String()).Msg("workflow.GetWorkflowRun: steps")
+			return nil, httpx.Internal("查询 workflow_run_steps 失败")
+		}
+		resp := workflowRunToResponse(run, steps)
+		return &resp, nil
 	}
-	steps, err := s.queries.ListWorkflowRunSteps(ctx, workflowRunID)
+	// One REPEATABLE READ READ ONLY transaction: the run (with its revision),
+	// steps, logical nodes and stop evidence come from one snapshot.
+	var resp *WorkflowRunResponse
+	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		q := s.queries.WithTx(tx)
+		run, err := q.GetWorkflowRunByID(ctx, workflowRunID)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && run.UserID != userID) {
+			return httpx.NotFound("workflow_run 不存在")
+		}
+		if err != nil {
+			return err
+		}
+		steps, err := q.ListWorkflowRunSteps(ctx, workflowRunID)
+		if err != nil {
+			return err
+		}
+		built := workflowRunToResponse(run, steps)
+		items := []WorkflowRunResponse{built}
+		if err := decorateWorkflowRunStopEvidence(ctx, tx, items); err != nil {
+			return err
+		}
+		resp = &items[0]
+		rows, err := tx.Query(ctx, `
+			SELECT node_key, state, COALESCE(effective_attempt, 0), COALESCE(skip_reason, '')
+			FROM workflow_run_nodes WHERE workflow_run_id = $1 ORDER BY node_key
+		`, workflowRunID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var node WorkflowRunNodeResponse
+			if err := rows.Scan(&node.NodeKey, &node.State, &node.EffectiveAttempt, &node.SkipReason); err != nil {
+				return err
+			}
+			resp.Nodes = append(resp.Nodes, node)
+		}
+		return rows.Err()
+	})
 	if err != nil {
-		log.Error().Err(err).Str("workflow_run_id", workflowRunID.String()).Msg("workflow.GetWorkflowRun: steps")
-		return nil, httpx.Internal("查询 workflow_run_steps 失败")
+		if isWorkflowHTTPError(err) {
+			return nil, err
+		}
+		log.Error().Err(err).Str("workflow_run_id", workflowRunID.String()).Msg("workflow.GetWorkflowRun")
+		return nil, httpx.Internal("查询 workflow_run 失败")
 	}
-	resp := workflowRunToResponse(run, steps)
-	items := []WorkflowRunResponse{resp}
-	s.decorateWorkflowRunStopEvidence(ctx, items)
-	return &items[0], nil
+	return resp, nil
 }
 
-// decorateWorkflowRunStopEvidence adds the unconfirmed-children markers. A
-// child is unconfirmed when its stop record or the run's public cancellation
-// ended without a stop confirmation. Best effort: a read failure leaves the
-// markers unset.
-func (s *Service) decorateWorkflowRunStopEvidence(ctx context.Context, items []WorkflowRunResponse) {
-	if s.pool == nil || len(items) == 0 {
-		return
+// decorateWorkflowRunStopEvidence adds the unconfirmed-children markers, the
+// pinned version number and the revision. A child is unconfirmed when its
+// stop record or the run's public cancellation ended without a stop
+// confirmation.
+func decorateWorkflowRunStopEvidence(ctx context.Context, q workflowQuerier, items []WorkflowRunResponse) error {
+	if q == nil || len(items) == 0 {
+		return nil
 	}
 	ids := make([]uuid.UUID, 0, len(items))
-	for _, item := range items {
+	byID := map[string]int{}
+	for i, item := range items {
 		if id, err := uuid.Parse(item.ID); err == nil {
 			ids = append(ids, id)
+			byID[item.ID] = i
 		}
 	}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := q.Query(ctx, `
 		SELECT r.id,
 		       EXISTS (SELECT 1 FROM workflow_step_stops s WHERE s.workflow_run_id = r.id AND s.state = 'unconfirmed')
 		       OR EXISTS (SELECT 1 FROM workflow_run_cancellations c WHERE c.workflow_run_id = r.id AND c.state = 'unconfirmed'),
 		       r.unconfirmed_children_acknowledged_by,
-		       (SELECT v.version FROM workflow_versions v WHERE v.id = r.workflow_version_id)
+		       (SELECT v.version FROM workflow_versions v WHERE v.id = r.workflow_version_id),
+		       r.revision
 		FROM workflow_runs r WHERE r.id = ANY($1::uuid[])
 	`, ids)
 	if err != nil {
-		return
+		return err
 	}
 	defer rows.Close()
-	byID := map[string]int{}
-	for i, item := range items {
-		byID[item.ID] = i
-	}
 	for rows.Next() {
 		var id uuid.UUID
 		var unconfirmed bool
 		var acknowledgedBy *uuid.UUID
 		var version *int32
-		if rows.Scan(&id, &unconfirmed, &acknowledgedBy, &version) != nil {
-			return
+		var revision int64
+		if err := rows.Scan(&id, &unconfirmed, &acknowledgedBy, &version, &revision); err != nil {
+			return err
+		}
+		item := &items[byID[id.String()]]
+		item.HasUnconfirmedChildren = unconfirmed
+		if acknowledgedBy != nil {
+			item.UnconfirmedChildrenAcknowledgedBy = acknowledgedBy.String()
 		}
 		if version != nil {
-			items[byID[id.String()]].WorkflowVersion = *version
+			item.WorkflowVersion = *version
 		}
-		i := byID[id.String()]
-		items[i].HasUnconfirmedChildren = unconfirmed
-		if acknowledgedBy != nil {
-			items[i].UnconfirmedChildrenAcknowledgedBy = acknowledgedBy.String()
-		}
+		item.Revision = revision
 	}
+	return rows.Err()
 }
 
 func (s *Service) getWorkflowRunForOwner(ctx context.Context, userID, workflowRunID uuid.UUID) (db.WorkflowRun, error) {

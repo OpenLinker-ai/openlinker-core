@@ -155,6 +155,8 @@ type Config struct {
 	WorkflowRunMaxConcurrent         int  `envconfig:"WORKFLOW_RUN_MAX_CONCURRENT" default:"8"`
 	WorkflowRunParallelism           int  `envconfig:"WORKFLOW_RUN_PARALLELISM" default:"4"`
 	WorkflowNodeTimeoutSeconds       int  `envconfig:"WORKFLOW_NODE_TIMEOUT_SECONDS" default:"1800"`
+	WorkflowMaxNodes                 int  `envconfig:"WORKFLOW_MAX_NODES" default:"30"`
+	WorkflowMaxEdges                 int  `envconfig:"WORKFLOW_MAX_EDGES" default:"60"`
 }
 
 // Load 从环境变量加载配置。

@@ -424,5 +424,10 @@ func applyWorkflowChildStopFence(ctx context.Context, tx pgx.Tx, fence WorkflowC
 	if tag.RowsAffected() != 1 {
 		return ErrWorkflowChildStopFenceRejected
 	}
-	return nil
+	// Workflow run observers follow the stop record through the run revision.
+	if _, err := tx.Exec(ctx, `UPDATE workflow_runs SET revision = revision + 1 WHERE id = $1`, fence.WorkflowRunID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `SELECT pg_notify('workflow_run.changed', $1)`, fence.WorkflowRunID.String())
+	return err
 }
