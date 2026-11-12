@@ -1,5 +1,7 @@
 // Command workflow-cutover checks and finishes a workflow release drain.
 //
+//	drain        switch admission to draining; ready once every run finished
+//	abort-drain  reopen admission for a release abandoned before migrating
 //	preflight  read-only, before the workflow attempt migration
 //	verify     read-only, after the migration while admission still drains
 //	reopen     verifies, then reopens workflow admission
@@ -44,14 +46,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 		usage(stdout)
 		return exitOK
 	}
-	if command != "preflight" && command != "verify" && command != "reopen" {
+	switch command {
+	case "drain", "abort-drain", "preflight", "verify", "reopen":
+	default:
 		usage(stderr)
 		return exitUsage
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	timeout := flags.Duration("timeout", 30*time.Second, "command timeout")
-	reason := flags.String("reason", "", "reopen reason recorded on workflow admission")
+	reason := flags.String("reason", "", "reason recorded on workflow admission (drain, abort-drain, reopen)")
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
 		return exitUsage
 	}
@@ -71,6 +75,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 
 	var report workflow.CutoverReport
 	switch command {
+	case "drain":
+		report, err = workflow.DrainWorkflowAdmission(ctx, pool, *reason)
+	case "abort-drain":
+		report, err = workflow.AbortWorkflowDrain(ctx, pool, *reason)
 	case "preflight":
 		report, err = workflow.PreflightWorkflowCutover(ctx, pool)
 	case "verify":
@@ -95,7 +103,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, `usage: workflow-cutover <preflight|verify|reopen> [-timeout 30s] [-reason text]
+	fmt.Fprintln(w, `usage: workflow-cutover <drain|abort-drain|preflight|verify|reopen> [-timeout 30s] [-reason text]
+  drain        switch admission to draining; ready once every run finished
+  abort-drain  reopen admission for a release abandoned before migrating
   preflight  read-only drain check before the workflow attempt migration
   verify     read-only check after the migration, admission still draining
   reopen     verify, then reopen workflow admission

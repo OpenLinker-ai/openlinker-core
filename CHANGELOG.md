@@ -37,6 +37,9 @@ runtime protocol, and migration contract are declared stable.
 - `workflow-cutover preflight|verify|reopen` (shipped in the image) checks a
   workflow release drain before and after migrating and reopens admission
   only when nothing blocks. It prints a JSON report and exits 3 when blocked.
+  `drain` switches admission to draining against the release being replaced
+  (schema 103) and is ready once every run finished; `abort-drain` reopens
+  admission for a release abandoned before migrating.
 
 - Workflow runs now execute under a database lease (owner, epoch, expiry
   from the database clock), renewed every 15 seconds with a 60-second TTL.

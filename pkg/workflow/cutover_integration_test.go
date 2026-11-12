@@ -79,3 +79,33 @@ func TestWorkflowCutoverPreflightVerifyAndReopen(t *testing.T) {
 	require.Equal(t, workflow.WorkflowAdmissionOpen, state.State)
 	require.Equal(t, "release verified in test", state.Reason)
 }
+
+// drain switches admission to draining and is ready only once every run
+// finished; abort-drain reopens admission unconditionally.
+func TestWorkflowCutoverDrainAndAbort(t *testing.T) {
+	f := newAdmissionFixture(t)
+	ctx := context.Background()
+	f.release()
+	_, err := f.svc.StartWorkflowRun(ctx, f.ownerID, f.workflowID, &workflow.RunWorkflowRequest{})
+	require.NoError(t, err)
+
+	report, err := workflow.DrainWorkflowAdmission(ctx, f.pool, "release drill")
+	require.ErrorIs(t, err, workflow.ErrWorkflowCutoverBlocked)
+	require.Equal(t, workflow.WorkflowAdmissionDraining, report.AdmissionState)
+	require.Equal(t, []string{workflow.CutoverBlockerNonterminalRuns}, cutoverBlockerCodes(report))
+
+	// The pending run can no longer be claimed; once it is finished the drain
+	// is complete.
+	claimed, err := f.svc.ClaimAndRunPendingWorkflow(ctx)
+	require.NoError(t, err)
+	require.False(t, claimed)
+	_, err = f.pool.Exec(ctx, `UPDATE workflow_runs SET status = 'canceled', finished_at = NOW() WHERE workflow_id = $1`, f.workflowID)
+	require.NoError(t, err)
+	report, err = workflow.DrainWorkflowAdmission(ctx, f.pool, "release drill")
+	require.NoError(t, err)
+	require.True(t, report.Ready)
+
+	report, err = workflow.AbortWorkflowDrain(ctx, f.pool, "release abandoned")
+	require.NoError(t, err)
+	require.Equal(t, workflow.WorkflowAdmissionOpen, report.AdmissionState)
+}

@@ -19,7 +19,8 @@ func TestRunRejectsUsageErrorsBeforeConnecting(t *testing.T) {
 		out  string
 	}{
 		{name: "no command", args: nil, want: exitUsage, out: "usage"},
-		{name: "unknown command", args: []string{"drain"}, want: exitUsage, out: "usage"},
+		{name: "unknown command", args: []string{"undrain"}, want: exitUsage, out: "usage"},
+		{name: "drain needs a database", args: []string{"drain"}, want: exitUsage, out: "DATABASE_URL is required"},
 		{name: "extra argument", args: []string{"verify", "now"}, env: map[string]string{"DATABASE_URL": "postgres://db"}, want: exitUsage},
 		{name: "missing database", args: []string{"preflight"}, want: exitUsage, out: "DATABASE_URL is required"},
 		{name: "help", args: []string{"help"}, want: exitOK},

@@ -155,6 +155,48 @@ func ReopenWorkflowAdmission(ctx context.Context, pool *pgxpool.Pool, reason str
 	return report, nil
 }
 
+// DrainWorkflowAdmission switches admission to draining (idempotently) and
+// reports whether the drain is complete. It works on the schema of the
+// release being replaced (103 or later): the admission row is the barrier
+// both releases honor. Blocked means runs or cancellations remain.
+func DrainWorkflowAdmission(ctx context.Context, pool *pgxpool.Pool, reason string) (CutoverReport, error) {
+	report := CutoverReport{Phase: "drain", Blockers: []CutoverBlocker{}}
+	if reason == "" {
+		reason = "workflow release drain"
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE workflow_admission
+		SET state = 'draining', reason = $1, changed_by = NULL, changed_at = clock_timestamp()
+		WHERE singleton AND state <> 'draining'
+	`, reason); err != nil {
+		return report, fmt.Errorf("drain workflow admission (requires the schema 103 release): %w", err)
+	}
+	if err := readDrainState(ctx, pool, &report); err != nil {
+		return report, err
+	}
+	return finishCutoverReport(report)
+}
+
+// AbortWorkflowDrain reopens admission without any check. It is only for a
+// release abandoned before the workflow attempt migration ran, so the
+// previous release can take workflow runs again.
+func AbortWorkflowDrain(ctx context.Context, pool *pgxpool.Pool, reason string) (CutoverReport, error) {
+	report := CutoverReport{Phase: "abort-drain", Blockers: []CutoverBlocker{}}
+	if reason == "" {
+		reason = "workflow release drain aborted"
+	}
+	if err := pool.QueryRow(ctx, `
+		UPDATE workflow_admission
+		SET state = 'open', reason = $1, changed_by = NULL, changed_at = clock_timestamp()
+		WHERE singleton
+		RETURNING state
+	`, reason).Scan(&report.AdmissionState); err != nil {
+		return report, fmt.Errorf("abort workflow drain: %w", err)
+	}
+	report.Ready = true
+	return report, nil
+}
+
 func readDrainState(ctx context.Context, q cutoverQuerier, report *CutoverReport) error {
 	if err := q.QueryRow(ctx, `
 		SELECT
