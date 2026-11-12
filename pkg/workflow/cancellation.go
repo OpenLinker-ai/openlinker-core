@@ -169,11 +169,9 @@ func (s *Service) requestWorkflowCancellation(
 			}
 			// Parent row is already locked. Every child creation locks it before
 			// its launch row, so invalidation and create are mutually exclusive.
-			if _, err := tx.Exec(ctx, `
-				UPDATE workflow_step_launches
-				SET state = 'invalidated', updated_at = clock_timestamp()
-				WHERE workflow_run_id = $1 AND state = 'claimed' AND run_id IS NULL
-			`, workflowRunID); err != nil {
+			// Open attempts become canceled; this cancellation's own
+			// reconciliation stops the children, so no stop records are added.
+			if err := s.cancelAttempts(ctx, tx, workflowRunID, stopReasonWorkflowCancel, false); err != nil {
 				return err
 			}
 		}

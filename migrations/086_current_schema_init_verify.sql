@@ -31,8 +31,8 @@ BEGIN
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 315 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 315', public_indexes;
+    IF public_indexes <> 316 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 316', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers

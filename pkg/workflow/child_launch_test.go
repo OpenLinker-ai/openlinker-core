@@ -10,9 +10,9 @@ import (
 
 func TestClaimWorkflowChildLaunchRejectsIncompleteEvidence(t *testing.T) {
 	svc := &Service{}
-	_, err := svc.claimWorkflowChildLaunch(
+	_, _, err := svc.claimWorkflowChildLaunch(
 		context.Background(), dbWorkflowRunIdentity{ID: uuid.New(), UserID: uuid.New()},
-		uuid.New(), uuid.New(), "node", runtime.RunCreationIdentity{},
+		uuid.New(), uuid.New(), "node", 1, runtime.RunCreationIdentity{},
 	)
 	if err == nil {
 		t.Fatal("incomplete child creation evidence was accepted")

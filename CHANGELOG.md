@@ -53,6 +53,44 @@ runtime protocol, and migration contract are declared stable.
   transaction that invalidates unlaunched children and records stop requests
   for in-flight ones. An executor that lost its lease stops and writes
   nothing.
+- New workflow execution engine. Every node has a logical state
+  (`workflow_run_nodes`) separate from its attempts, and nodes start as soon
+  as all their parents succeeded (ready-set scheduling, at most
+  `WORKFLOW_RUN_PARALLELISM`, default 4, per run) instead of level by level.
+  A reclaimed run resumes from its persisted attempts; steps are no longer
+  deleted on retry.
+- **Behaviour change:** node attempts have a deadline
+  (`WORKFLOW_NODE_TIMEOUT_SECONDS`, default 1800) instead of the fixed
+  60-second wait. The executor waits for the child until the deadline; a
+  child that finishes after it does not count. A timed-out node is
+  immediately terminal (`timeout`) and its child is stopped in the
+  background. Deadlines are enforced by the worker even while the run is
+  paused or has no executor.
+- Attempts change state only through fixed transitions under the parent
+  row lock. Settling from Runtime facts uses the child's finish time against
+  the deadline and needs no lease; failures before any child exists are
+  judged by the database clock (past the deadline they are timeouts). A
+  logically terminal node never changes again.
+- `fail_workflow` is atomic: the run fails, every open attempt is canceled,
+  unlaunched children are invalidated and in-flight children get stop
+  requests in one transaction. Public cancellation now also cancels open
+  attempts in its transaction (**behaviour change:** such attempts show
+  `canceled` instead of `failed`).
+- Per-attempt stop records are driven by a stop reconciler with its own
+  claim, independent of the run lease. Only the claim holder can cancel the
+  child: Runtime checks the claim in its own cancellation transaction
+  (`CancelWorkflowChildFenced`). Runtime classifies whether a child is known
+  to have stopped (`in_progress`, `confirmed`, `unconfirmed`); any accepted
+  Attempt that was canceled or ended without a definite result is
+  unconfirmed and is never retried automatically.
+- Workflow child Runs snapshot a single accepted execution (`max_attempts`
+  1): an unaccepted offer is still redispatched, but Runtime never re-executes
+  an accepted Attempt; node retries happen only in the workflow, as new
+  attempts with their own launch and child Run. Node retry policies arrive
+  with node policies; until then every node has one attempt.
+- The worker claims runs on its tick and executes them in goroutines (at
+  most `WORKFLOW_RUN_MAX_CONCURRENT`, default 8, per process). Step lists
+  omit attempts that never started.
 
 ### Security
 

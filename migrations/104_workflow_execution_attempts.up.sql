@@ -220,4 +220,10 @@ CREATE INDEX idx_workflow_runs_lease_expiry ON public.workflow_runs
     USING btree (lease_expires_at)
     WHERE (lease_owner IS NOT NULL);
 
+-- The deadline scan settles open attempts past their deadline independently
+-- of any executor.
+CREATE INDEX idx_workflow_run_steps_open_deadline ON public.workflow_run_steps
+    USING btree (deadline_at)
+    WHERE ((status = ANY (ARRAY['pending'::text, 'running'::text])) AND (deadline_at IS NOT NULL) AND (NOT legacy_unfinished));
+
 COMMIT;

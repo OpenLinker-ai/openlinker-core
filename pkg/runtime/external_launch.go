@@ -122,6 +122,7 @@ func (s *Service) RunWorkflowChild(
 		return nil, httpx.Conflict(ErrWorkflowChildLaunchFenceRejected.Error())
 	}
 	return s.runWithOptions(ctx, actorUserID, req, source, createRunOptions{
+		singleAcceptedExecution: true,
 		beforeCreate: func(txCtx context.Context, tx pgx.Tx) error {
 			return verifyWorkflowChildLaunchFence(txCtx, tx, actorUserID, fence)
 		},
@@ -307,6 +308,121 @@ func verifyWorkflowChildLaunchFence(
 	}
 	if token != fence.LaunchToken || state != "claimed" || stopRequested {
 		return ErrWorkflowChildLaunchFenceRejected
+	}
+	// The attempt must still be running and inside its deadline, evaluated
+	// now that the launch row is locked: a creation that arrives after the
+	// attempt timed out (or was canceled) is void.
+	var attemptLive bool
+	if err := tx.QueryRow(ctx, `
+		SELECT status = 'running' AND (deadline_at IS NULL OR clock_timestamp() < deadline_at)
+		FROM workflow_run_steps
+		WHERE workflow_run_id = $1 AND workflow_node_id = $2 AND attempt = $3
+	`, fence.WorkflowRunID, fence.WorkflowNodeID, fence.Attempt).Scan(&attemptLive); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrWorkflowChildLaunchFenceRejected
+		}
+		return err
+	}
+	if !attemptLive {
+		return ErrWorkflowChildLaunchFenceRejected
+	}
+	return nil
+}
+
+// WorkflowChildStopFence authorizes cancelling one workflow attempt's child
+// Run. It is the stop record's own claim, never the parent's execution lease:
+// only the stop reconciler holding the claim may cancel the child.
+type WorkflowChildStopFence struct {
+	WorkflowRunID  uuid.UUID
+	WorkflowNodeID uuid.UUID
+	Attempt        int32
+	ChildRunID     uuid.UUID
+	ClaimOwner     uuid.UUID
+	ClaimEpoch     int64
+}
+
+// ErrWorkflowChildStopFenceRejected means the stop claim is no longer held
+// (expired, taken over) or the record no longer asks for this child to stop.
+var ErrWorkflowChildStopFenceRejected = errors.New("workflow child stop fence rejected")
+
+// CancelWorkflowChildFenced cancels a workflow child Run in Runtime's own
+// cancellation transaction after locking parent -> launch -> stop record and
+// checking the stop claim with the database clock. The stop record moves to
+// stopping in the same transaction. A child that already ended returns
+// ErrRuntimeCancellationRunEnded; the caller then settles from evidence.
+func (s *Service) CancelWorkflowChildFenced(ctx context.Context, fence WorkflowChildStopFence) error {
+	if s == nil || s.cancellation == nil || s.pool == nil {
+		return errors.New("Runtime cancellation is not configured")
+	}
+	if fence.WorkflowRunID == uuid.Nil || fence.WorkflowNodeID == uuid.Nil || fence.Attempt < 1 ||
+		fence.ChildRunID == uuid.Nil || fence.ClaimOwner == uuid.Nil || fence.ClaimEpoch < 1 {
+		return ErrWorkflowChildStopFenceRejected
+	}
+	var ownerID uuid.UUID
+	if err := s.pool.QueryRow(ctx, `SELECT user_id FROM workflow_runs WHERE id = $1`, fence.WorkflowRunID).Scan(&ownerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrWorkflowChildStopFenceRejected
+		}
+		return err
+	}
+	result, err := s.cancellation.cancelOwnedRun(ctx, ownerID, fence.ChildRunID, "workflow attempt stopped",
+		func(txCtx context.Context, tx pgx.Tx) error {
+			return applyWorkflowChildStopFence(txCtx, tx, fence)
+		})
+	if err != nil {
+		return err
+	}
+	if s.browserObservation != nil && result.Cancellation.TargetAttemptID != nil {
+		s.browserObservation.closeAttemptAsync(fence.ChildRunID, *result.Cancellation.TargetAttemptID, "run_browser_closed")
+	}
+	return nil
+}
+
+func applyWorkflowChildStopFence(ctx context.Context, tx pgx.Tx, fence WorkflowChildStopFence) error {
+	var locked int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM workflow_runs WHERE id = $1 FOR UPDATE`, fence.WorkflowRunID).Scan(&locked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrWorkflowChildStopFenceRejected
+		}
+		return err
+	}
+	var launchRunID *uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		SELECT run_id FROM workflow_step_launches
+		WHERE workflow_run_id = $1 AND workflow_node_id = $2 AND attempt = $3
+		FOR UPDATE
+	`, fence.WorkflowRunID, fence.WorkflowNodeID, fence.Attempt).Scan(&launchRunID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if launchRunID != nil && *launchRunID != fence.ChildRunID {
+		return ErrWorkflowChildStopFenceRejected
+	}
+	if err := tx.QueryRow(ctx, `
+		SELECT 1 FROM workflow_step_stops
+		WHERE workflow_run_id = $1 AND workflow_node_id = $2 AND attempt = $3
+		FOR UPDATE
+	`, fence.WorkflowRunID, fence.WorkflowNodeID, fence.Attempt).Scan(&locked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrWorkflowChildStopFenceRejected
+		}
+		return err
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE workflow_step_stops
+		SET state = 'stopping',
+		    applied_at = COALESCE(applied_at, clock_timestamp()),
+		    updated_at = clock_timestamp()
+		WHERE workflow_run_id = $1 AND workflow_node_id = $2 AND attempt = $3
+		  AND child_run_id = $4
+		  AND claim_owner = $5 AND claim_epoch = $6
+		  AND claim_expires_at > clock_timestamp()
+		  AND state IN ('requested', 'stopping')
+	`, fence.WorkflowRunID, fence.WorkflowNodeID, fence.Attempt, fence.ChildRunID, fence.ClaimOwner, fence.ClaimEpoch)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrWorkflowChildStopFenceRejected
 	}
 	return nil
 }

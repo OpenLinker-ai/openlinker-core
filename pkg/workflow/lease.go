@@ -332,7 +332,7 @@ func (s *Service) RecoverExpiredWorkflowRunLeases(ctx context.Context) (int64, e
 			if !stillExpired {
 				continue
 			}
-			if err := recoverExpiredWorkflowRun(ctx, tx, item.id, item.status, item.recoveries, item.maxAttempt); err != nil {
+			if err := s.recoverExpiredWorkflowRun(ctx, tx, item.id, item.status, item.recoveries, item.maxAttempt); err != nil {
 				return err
 			}
 			total++
@@ -342,7 +342,7 @@ func (s *Service) RecoverExpiredWorkflowRunLeases(ctx context.Context) (int64, e
 	return total, err
 }
 
-func recoverExpiredWorkflowRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID, status string, recoveries, maxAttempts int32) error {
+func (s *Service) recoverExpiredWorkflowRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID, status string, recoveries, maxAttempts int32) error {
 	switch {
 	case status == workflowRunStatusRunning && recoveries < maxAttempts-1:
 		_, err := tx.Exec(ctx, `
@@ -355,7 +355,7 @@ func recoverExpiredWorkflowRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID, 
 		`, runID, workflowRunLeaseRecoveryLastError)
 		return err
 	case status == workflowRunStatusRunning:
-		return finalizeExpiredWorkflowRun(ctx, tx, runID)
+		return s.finalizeExpiredWorkflowRun(ctx, tx, runID)
 	case status == workflowRunStatusPaused:
 		_, err := tx.Exec(ctx, `
 			UPDATE workflow_runs
@@ -374,11 +374,12 @@ func recoverExpiredWorkflowRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID, 
 	}
 }
 
-// finalizeExpiredWorkflowRun fails a run whose recovery budget is spent. In
-// the same transaction it stops new child launches and records a stop
-// request for every attempt whose child Run is still in flight, so the run is
+// finalizeExpiredWorkflowRun fails a run whose recovery budget is spent, in
+// the recovery transaction that holds the parent lock: the run becomes
+// failed and cancelAttempts cancels every open attempt, invalidates claimed
+// launches and records a stop request for every created child. The run is
 // never failed without its children being asked to stop.
-func finalizeExpiredWorkflowRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID) error {
+func (s *Service) finalizeExpiredWorkflowRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE workflow_runs
 		SET status = 'failed', finished_at = COALESCE(finished_at, NOW()),
@@ -390,33 +391,7 @@ func finalizeExpiredWorkflowRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID)
 	`, runID, workflowRunLeaseRecoveryFailureMsg); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE workflow_step_launches
-		SET state = 'invalidated', updated_at = clock_timestamp()
-		WHERE workflow_run_id = $1 AND state = 'claimed' AND run_id IS NULL
-	`, runID); err != nil {
-		return err
-	}
-	_, err := tx.Exec(ctx, `
-		INSERT INTO workflow_step_stops (
-		    workflow_run_id, workflow_node_id, attempt, child_run_id, reason, state
-		)
-		SELECT s.workflow_run_id, s.workflow_node_id, s.attempt, child.id, 'workflow_failure', 'requested'
-		FROM workflow_run_steps s
-		-- While the child call is in flight its Run ID may be recorded only on
-		-- the launch (created) and not yet attached to the step.
-		LEFT JOIN workflow_step_launches l
-		       ON l.workflow_run_id = s.workflow_run_id
-		      AND l.workflow_node_id = s.workflow_node_id
-		      AND l.attempt = s.attempt
-		      AND l.run_id IS NOT NULL
-		JOIN runs child ON child.id = COALESCE(s.run_id, l.run_id)
-		WHERE s.workflow_run_id = $1
-		  AND s.status = 'running'
-		  AND child.status NOT IN ('success', 'failed', 'timeout', 'canceled')
-		ON CONFLICT (workflow_run_id, workflow_node_id, attempt) DO NOTHING
-	`, runID)
-	return err
+	return s.cancelAttempts(ctx, tx, runID, stopReasonWorkflowFailure, true)
 }
 
 // leaseNewWorkflowRun takes the first lease of a run the caller just created

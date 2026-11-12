@@ -272,7 +272,7 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	for _, fragment := range []string{
 		"public_tables <> 94",
 		"public_constraints <> 760",
-		"public_indexes <> 315",
+		"public_indexes <> 316",
 		"public_triggers <> 80",
 		"public_functions <> 72",
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",

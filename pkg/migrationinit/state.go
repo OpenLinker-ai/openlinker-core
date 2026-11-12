@@ -57,7 +57,7 @@ const (
 	CoreReviewedBridgeVersion      int64 = 88
 	CoreLegacyBridgeVersion        int64 = 86
 	CloudVersion                   int64 = 55
-	CoreSchemaDigest                     = "86022ffdc373e0b20715d7b8cc7dc78c162bd178eb95dfff34aa78fe174dc72f"
+	CoreSchemaDigest                     = "3f819c05a3f7f2e1042bfa3659f83a557af98a797820f87c5ff97b0d88df4ef0"
 	CoreUpgradeSchemaDigest              = "1b2591b579018b4edd6465e19f36823fca28af01068742358293d1367c1c1ed8"
 	CoreReviewedBridgeSchemaDigest       = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
 	CoreLegacyBridgeSchemaDigest         = "6c22808a8cd658cf827a5828a92d3343f040d7d6ff3302f9fdab691fe90aec5b"
@@ -775,12 +775,12 @@ func validateCoreShape(shape SchemaShape) error {
 		Digest: CoreSchemaDigest,
 		// 104 adds workflow_run_nodes and workflow_step_stops, run lease and
 		// attempt columns with their checks, the attempt unique key, a new
-		// launch primary key and two partial indexes; Runtime seeds stay fixed.
+		// launch primary key and three partial indexes; Runtime seeds stay fixed.
 		// Measured on a clean PostgreSQL 16 with 086..104 applied; the digest is
 		// a catalog fingerprint and cannot be derived from the DDL alone.
 		Tables:            94,
 		Constraints:       760,
-		Indexes:           315,
+		Indexes:           316,
 		Triggers:          80,
 		CoreIdentities:    1,
 		RuntimeControls:   1,

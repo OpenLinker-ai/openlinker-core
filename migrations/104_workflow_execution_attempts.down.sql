@@ -45,6 +45,7 @@ END $$;
 
 DROP TABLE public.workflow_step_stops;
 DROP TABLE public.workflow_run_nodes;
+DROP INDEX public.idx_workflow_run_steps_open_deadline;
 DROP INDEX public.idx_workflow_runs_lease_expiry;
 
 ALTER TABLE public.workflow_step_launches

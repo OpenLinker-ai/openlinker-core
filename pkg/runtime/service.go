@@ -125,6 +125,12 @@ type createRunOptions struct {
 	delegation                *Delegation
 	allowOfflineQueuedRuntime bool
 	replayOfRunID             *uuid.UUID
+	// singleAcceptedExecution snapshots max_attempts = 1. Runtime counts
+	// only accepted Attempts against max_attempts (offers have their own
+	// budget), so an unaccepted offer can still be redispatched while an
+	// accepted Attempt that ends without a result is never re-executed.
+	// Workflow children use it: node retries happen only in the workflow.
+	singleAcceptedExecution bool
 	// beforeCreate runs inside the same transaction, immediately before the
 	// child Run is inserted. Runtime-scoped delegation uses it to revalidate
 	// the accepted parent Attempt under durable locks; a successful return is
@@ -1338,6 +1344,9 @@ func (s *Service) createRunningRun(
 	}
 
 	endpointIdempotencySnapshot, maxAttempts := runEndpointIdempotencySnapshot(agent.ConnectionMode)
+	if opts.singleAcceptedExecution {
+		maxAttempts = 1
+	}
 	dispatchDeadlineAfter, runDeadlineAfter := s.runCreationDeadlineWindows(agent.ConnectionMode)
 
 	// 4. The winner atomically writes the Run, its creation evidence and the

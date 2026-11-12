@@ -405,6 +405,10 @@ SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        created_at, updated_at
 FROM workflow_run_steps
 WHERE workflow_run_id = $1
+  -- Attempts that never started (pending, or canceled before starting) are
+  -- scheduling data, not execution records.
+  AND status <> 'pending'
+  AND NOT (status = 'canceled' AND deadline_at IS NULL)
 ORDER BY sequence ASC, attempt ASC, created_at ASC, id ASC;
 
 -- name: ListWorkflowRunStepsByRunIDs :many
@@ -413,6 +417,10 @@ SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        created_at, updated_at
 FROM workflow_run_steps
 WHERE workflow_run_id = ANY($1::uuid[])
+  -- Attempts that never started (pending, or canceled before starting) are
+  -- scheduling data, not execution records.
+  AND status <> 'pending'
+  AND NOT (status = 'canceled' AND deadline_at IS NULL)
 ORDER BY workflow_run_id ASC, sequence ASC, attempt ASC, created_at ASC, id ASC;
 
 -- name: GetWorkflowAdmission :one

@@ -1213,7 +1213,9 @@ func TestCancelRunningWorkflowRunPreventsSuccessOverwrite(t *testing.T) {
 	require.Equal(t, "canceled", final.Status)
 	require.Equal(t, "workflow run canceled", final.Error)
 	require.Len(t, final.Steps, 1)
-	require.Equal(t, "failed", final.Steps[0].Status)
+	// Public cancellation cancels the open attempt in its own transaction;
+	// the late child result cannot settle it afterwards.
+	require.Equal(t, "canceled", final.Steps[0].Status)
 
 	evidence, err := svc.GetWorkflowCancellationEvidence(
 		context.Background(), userID, uuid.MustParse(queued.ID),

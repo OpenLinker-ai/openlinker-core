@@ -207,10 +207,10 @@ func TestWorkflowChildLaunchClaimRequiresLease(t *testing.T) {
 	svc, lease := leaseTestRun(t, time.Minute)
 	stale := lease
 	stale.epoch++
-	_, err := svc.claimWorkflowChildLaunch(
+	_, _, err := svc.claimWorkflowChildLaunch(
 		withWorkflowRunLease(context.Background(), stale),
 		dbWorkflowRunIdentity{ID: lease.runID, UserID: leaseRunOwner(t, svc, lease.runID)},
-		uuid.New(), uuid.New(), "worker", testRunCreationIdentity(),
+		uuid.New(), uuid.New(), "worker", 1, testRunCreationIdentity(),
 	)
 	require.True(t, errors.Is(err, errWorkflowRunLeaseLost), "err = %v", err)
 }

@@ -277,6 +277,8 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 
 	workflowSvc := workflow.NewService(pool, runtimeSvc)
 	workflowSvc.SetRunUpdateSource(runUpdates)
+	workflowSvc.SetWorkflowNodeTimeout(time.Duration(cfg.WorkflowNodeTimeoutSeconds) * time.Second)
+	workflowSvc.SetWorkflowParallelism(cfg.WorkflowRunParallelism)
 	workflowHandler := workflow.NewHandler(workflowSvc)
 	workflowHandler.RegisterProtected(api, hybridMw)
 	if opts.AdminMiddleware != nil {
@@ -299,6 +301,8 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 			Interval:   time.Duration(cfg.WorkflowRunWorkerIntervalSeconds) * time.Second,
 			StaleAfter: time.Duration(cfg.WorkflowRunStaleSeconds) * time.Second,
 			ClaimBurst: cfg.WorkflowRunClaimBurst,
+
+			MaxConcurrentRuns: cfg.WorkflowRunMaxConcurrent,
 		})
 	}
 

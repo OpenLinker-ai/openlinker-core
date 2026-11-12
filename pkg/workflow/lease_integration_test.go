@@ -84,9 +84,9 @@ func TestWorkflowExecutorStopsAndWritesNothingAfterLosingItsLease(t *testing.T) 
 }
 
 // A lease that expires while its executor is stuck (it has not renewed yet)
-// is recovered. With max_attempts 1 the run fails, and its in-flight child
-// gets a stop request in the same transaction. The stuck executor, when it
-// wakes, writes nothing.
+// is recovered. With max_attempts 1 the run fails, its open attempt is
+// canceled and its in-flight child gets a stop request in the same
+// transaction. The stuck executor, when it wakes, changes nothing.
 func TestWorkflowLeaseRecoveryFailsSpentRunWithStopRequests(t *testing.T) {
 	f := newAdmissionFixture(t)
 	f.svc.SetWorkflowRunLeaseTiming(30*time.Second, 30*time.Second)
@@ -117,7 +117,9 @@ func TestWorkflowLeaseRecoveryFailsSpentRunWithStopRequests(t *testing.T) {
 	run, err := f.svc.GetWorkflowRun(ctx, f.ownerID, runID)
 	require.NoError(t, err)
 	require.Equal(t, "failed", run.Status)
-	require.Equal(t, "running", run.Steps[0].Status, "the stuck executor must not write after losing the run")
+	// The finalization canceled the attempt; the stuck executor, waking
+	// after its child finished, cannot settle a canceled attempt.
+	require.Equal(t, "canceled", run.Steps[0].Status)
 }
 
 // With recovery budget left the run goes back to pending. The stuck

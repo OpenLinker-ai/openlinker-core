@@ -354,22 +354,6 @@ func TestWorkflowResponseAndDataHelpers(t *testing.T) {
 	}
 }
 
-func TestWorkflowNodeErrorPreferenceKeepsBusinessFailure(t *testing.T) {
-	businessErr := errors.New("agent branch failed")
-	if got := preferWorkflowNodeError(nil, businessErr); got != businessErr {
-		t.Fatalf("nil current should accept candidate, got %v", got)
-	}
-	if got := preferWorkflowNodeError(context.Canceled, businessErr); got != businessErr {
-		t.Fatalf("business error should replace context cancellation, got %v", got)
-	}
-	if got := preferWorkflowNodeError(businessErr, context.Canceled); got != businessErr {
-		t.Fatalf("context cancellation should not replace business error, got %v", got)
-	}
-	if got := preferWorkflowNodeError(context.DeadlineExceeded, context.Canceled); !errors.Is(got, context.DeadlineExceeded) {
-		t.Fatalf("first context error should be kept, got %v", got)
-	}
-}
-
 func TestWorkflowComparisonAndRerunHelpers(t *testing.T) {
 	graph := &workflowGraph{
 		Children: map[string][]string{
@@ -477,43 +461,6 @@ func TestWorkflowComparisonAndRerunHelpers(t *testing.T) {
 	if truncate("abcdef", 3) != "abc" || truncate("abc", 3) != "abc" {
 		t.Fatalf("truncate failed")
 	}
-}
-
-func TestWorkflowFailureStatusMarking(t *testing.T) {
-	runID := uuid.New()
-	workflowID := uuid.New()
-	userID := uuid.New()
-	longMessage := strings.Repeat("x", 1205)
-	storedMessage := strings.Repeat("x", 1000)
-
-	dbtx := &workflowFakeDBTX{
-		row: workflowFakeRow{
-			values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusFailed, &storedMessage),
-		},
-	}
-	svc := &Service{queries: db.New(dbtx)}
-
-	err := svc.failWorkflowRun(context.Background(), runID, longMessage)
-	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
-	if !strings.Contains(dbtx.queryRowSQL, "-- name: MarkWorkflowRunFailed") {
-		t.Fatalf("expected MarkWorkflowRunFailed query, got %q", dbtx.queryRowSQL)
-	}
-	if len(dbtx.queryRowArgs) != 2 || dbtx.queryRowArgs[0] != runID {
-		t.Fatalf("unexpected MarkWorkflowRunFailed args: %#v", dbtx.queryRowArgs)
-	}
-	messageArg, ok := dbtx.queryRowArgs[1].(*string)
-	if !ok || messageArg == nil || *messageArg != storedMessage {
-		t.Fatalf("expected truncated error message arg, got %#v", dbtx.queryRowArgs[1])
-	}
-
-	conflictSvc := &Service{queries: db.New(&workflowFakeDBTX{row: workflowFakeRow{err: pgx.ErrNoRows}})}
-	err = conflictSvc.markWorkflowRunFailedStatus(context.Background(), runID, "already stopped")
-	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
-
-	dbErr := errors.New("db down")
-	failingSvc := &Service{queries: db.New(&workflowFakeDBTX{row: workflowFakeRow{err: dbErr}})}
-	err = failingSvc.markWorkflowRunFailedStatus(context.Background(), runID, "boom")
-	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
 }
 
 func TestWorkflowRunOwnershipAndDBErrorEdges(t *testing.T) {
@@ -699,14 +646,13 @@ func TestWorkflowQueueAndDefinitionErrorEdges(t *testing.T) {
 	}
 	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
 
-	noWorkSvc := &Service{
-		runtime: &runtimemod.Service{},
-		queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{err: pgx.ErrNoRows}}}),
+	// Claiming needs the transactional store (execution leases).
+	noStoreSvc := &Service{runtime: &runtimemod.Service{}}
+	claimed, err = noStoreSvc.ClaimAndRunPendingWorkflow(context.Background())
+	if claimed {
+		t.Fatalf("ClaimAndRunPendingWorkflow without a store claimed work")
 	}
-	claimed, err = noWorkSvc.ClaimAndRunPendingWorkflow(context.Background())
-	if err != nil || claimed {
-		t.Fatalf("ClaimAndRunPendingWorkflow no rows = %v, %v", claimed, err)
-	}
+	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
 
 	claimErrSvc := &Service{
 		runtime: &runtimemod.Service{},
@@ -1072,20 +1018,6 @@ func TestWorkflowRetryRerunWaitAndClaimedRunErrorEdges(t *testing.T) {
 	})}
 	err = claimedBadInputSvc.executeClaimedWorkflowRun(context.Background(), claimedBadInput)
 	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
-
-	claimedRetry := claimedBadInput
-	claimedRetry.Input = []byte(`{"prompt":"retry"}`)
-	claimedRetry.AttemptCount = 2
-	deleteErrSvc := &Service{queries: db.New(&workflowFakeDBTX{
-		queryRowRows: []workflowFakeRow{
-			{values: workflowFakeWorkflowValues(workflowID, userID)},
-			{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusFailed, nil)},
-		},
-		queryResults: []workflowFakeQueryResult{{rows: nodeRows}},
-		execErr:      errors.New("delete steps failed"),
-	})}
-	err = deleteErrSvc.executeClaimedWorkflowRun(context.Background(), claimedRetry)
-	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
 }
 
 func TestWorkflowRerunStepPlanningErrorEdges(t *testing.T) {
@@ -1246,13 +1178,11 @@ func TestWorkflowStoppedAndWorkerTickErrorEdges(t *testing.T) {
 	runWorkflowWorkerTick(context.Background(), &Service{
 		runtime: &runtimemod.Service{},
 		queries: db.New(&workflowFakeDBTX{execErr: errors.New("requeue failed")}),
-	}, RunWorkerConfig{ClaimBurst: 1})
+	}, RunWorkerConfig{ClaimBurst: 1}, make(chan struct{}, 1))
 }
 
 func TestWorkflowStepCopyAndRunNodeErrorEdges(t *testing.T) {
 	runID := uuid.New()
-	workflowID := uuid.New()
-	userID := uuid.New()
 	nodeID := uuid.New()
 	agentID := uuid.New()
 	sourceStep := db.WorkflowRunStep{
@@ -1276,285 +1206,6 @@ func TestWorkflowStepCopyAndRunNodeErrorEdges(t *testing.T) {
 	}})}
 	err = successErrSvc.copyWorkflowRunStep(context.Background(), runID, sourceStep)
 	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
-
-	runNodeSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{err: errors.New("create step failed")}}})}
-	result := runNodeSvc.runWorkflowNode(
-		context.Background(),
-		userID,
-		db.Workflow{ID: workflowID},
-		db.WorkflowRun{ID: runID, UserID: userID},
-		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
-		workflowStepInputResult{Value: map[string]interface{}{"node_key": "extract"}},
-		0,
-	)
-	if result.Err == nil || !strings.Contains(result.Err.Error(), "创建 step 失败") {
-		t.Fatalf("runWorkflowNode error = %#v", result)
-	}
-}
-
-func TestRunWorkflowNodeAttachesChildRunBeforeWaiting(t *testing.T) {
-	runID := uuid.New()
-	workflowID := uuid.New()
-	userID := uuid.New()
-	nodeID := uuid.New()
-	agentID := uuid.New()
-	stepID := uuid.New()
-	childRunID := uuid.New()
-	stepValues := workflowFakeStepValues(runID, nodeID, agentID, "extract", workflowRunStatusRunning)
-	stepValues[0] = stepID
-	successStepValues := append([]any(nil), stepValues...)
-	successStepValues[5] = &childRunID
-	successStepValues[6] = workflowRunStatusSuccess
-	successStepValues[8] = []byte(`{"summary":"done"}`)
-
-	dbtx := &workflowFakeDBTX{
-		execRowsAffected: 1,
-		queryRowRows: []workflowFakeRow{
-			{values: stepValues},
-			{values: successStepValues},
-		},
-	}
-	runtimeClient := &workflowRuntimeFake{
-		runResponse: &runtimemod.RunResponse{RunID: childRunID.String(), Status: runtimeRunStatusRunning},
-		getRunResponse: &runtimemod.RunResponse{
-			RunID:  childRunID.String(),
-			Status: runtimeRunStatusSuccess,
-			Output: map[string]interface{}{"summary": "done"},
-		},
-		onGetRun: func(gotRunID uuid.UUID) error {
-			if gotRunID != childRunID {
-				return fmt.Errorf("GetRun runID = %s, want %s", gotRunID, childRunID)
-			}
-			if !strings.Contains(dbtx.execSQL, "-- name: AttachWorkflowRunStepRun") {
-				return fmt.Errorf("GetRun called before child run attachment: %q", dbtx.execSQL)
-			}
-			if !reflect.DeepEqual(dbtx.execArgs, []any{stepID, childRunID}) {
-				return fmt.Errorf("attachment args = %#v", dbtx.execArgs)
-			}
-			return nil
-		},
-	}
-	svc := &Service{queries: db.New(dbtx), runtime: runtimeClient}
-	result := svc.runWorkflowNode(
-		context.Background(),
-		userID,
-		db.Workflow{ID: workflowID},
-		db.WorkflowRun{ID: runID, UserID: userID},
-		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
-		workflowStepInputResult{Value: map[string]interface{}{"node_key": "extract"}},
-		0,
-	)
-	if result.Err != nil || result.Output["summary"] != "done" {
-		t.Fatalf("runWorkflowNode result = %#v", result)
-	}
-	if runtimeClient.getRunCalls != 1 {
-		t.Fatalf("GetRun calls = %d, want 1", runtimeClient.getRunCalls)
-	}
-	if !strings.Contains(dbtx.queryRowSQL, "-- name: MarkWorkflowRunStepSuccess") {
-		t.Fatalf("terminal step query = %q", dbtx.queryRowSQL)
-	}
-	terminalRunID, ok := dbtx.queryRowArgs[1].(*uuid.UUID)
-	if !ok || terminalRunID == nil || *terminalRunID != childRunID {
-		t.Fatalf("terminal step run_id = %#v, want %s", dbtx.queryRowArgs[1], childRunID)
-	}
-}
-
-func TestRunWorkflowNodeRejectsInvalidChildRunIDWithoutWaiting(t *testing.T) {
-	runID := uuid.New()
-	nodeID := uuid.New()
-	agentID := uuid.New()
-	stepValues := workflowFakeStepValues(runID, nodeID, agentID, "extract", workflowRunStatusRunning)
-	failedStepValues := append([]any(nil), stepValues...)
-	failedStepValues[6] = workflowRunStatusFailed
-
-	dbtx := &workflowFakeDBTX{queryRowRows: []workflowFakeRow{
-		{values: stepValues},
-		{values: failedStepValues},
-	}}
-	runtimeClient := &workflowRuntimeFake{runResponse: &runtimemod.RunResponse{
-		RunID:  "not-a-uuid",
-		Status: runtimeRunStatusRunning,
-	}}
-	result := (&Service{queries: db.New(dbtx), runtime: runtimeClient}).runWorkflowNode(
-		context.Background(),
-		uuid.New(),
-		db.Workflow{ID: uuid.New()},
-		db.WorkflowRun{ID: runID},
-		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
-		workflowStepInputResult{Value: map[string]interface{}{"node_key": "extract"}},
-		0,
-	)
-	if result.Err == nil || !strings.Contains(result.Err.Error(), "runID 无效") {
-		t.Fatalf("runWorkflowNode error = %v", result.Err)
-	}
-	if runtimeClient.getRunCalls != 0 {
-		t.Fatalf("GetRun calls = %d, want 0", runtimeClient.getRunCalls)
-	}
-	if dbtx.execSQL != "" {
-		t.Fatalf("invalid child run must not be attached: %q", dbtx.execSQL)
-	}
-	if !strings.Contains(dbtx.queryRowSQL, "-- name: MarkWorkflowRunStepFailed") {
-		t.Fatalf("terminal step query = %q", dbtx.queryRowSQL)
-	}
-	invalidRunID, ok := dbtx.queryRowArgs[1].(*uuid.UUID)
-	if !ok || invalidRunID != nil {
-		t.Fatalf("invalid child run_id persisted as %#v", dbtx.queryRowArgs[1])
-	}
-}
-
-func TestRunWorkflowNodeDurablyAttachesChildRunAfterContextCancellation(t *testing.T) {
-	runID := uuid.New()
-	nodeID := uuid.New()
-	agentID := uuid.New()
-	stepID := uuid.New()
-	childRunID := uuid.New()
-	stepValues := workflowFakeStepValues(runID, nodeID, agentID, "extract", workflowRunStatusRunning)
-	stepValues[0] = stepID
-	failedStepValues := append([]any(nil), stepValues...)
-	failedStepValues[5] = &childRunID
-	failedStepValues[6] = workflowRunStatusFailed
-
-	ctx, cancel := context.WithCancel(context.Background())
-	dbtx := &workflowFakeDBTX{
-		execRowsAffected: 1,
-		queryRowRows: []workflowFakeRow{
-			{values: stepValues},
-			{values: failedStepValues},
-		},
-	}
-	runtimeClient := &workflowRuntimeFake{
-		runResponse: &runtimemod.RunResponse{
-			RunID:  childRunID.String(),
-			Status: runtimeRunStatusRunning,
-		},
-		getRunResponse: &runtimemod.RunResponse{
-			RunID:  childRunID.String(),
-			Status: runtimeRunStatusRunning,
-		},
-		onRun: cancel,
-	}
-	result := (&Service{queries: db.New(dbtx), runtime: runtimeClient}).runWorkflowNode(
-		ctx,
-		uuid.New(),
-		db.Workflow{ID: uuid.New()},
-		db.WorkflowRun{ID: runID},
-		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
-		workflowStepInputResult{Value: map[string]interface{}{"node_key": "extract"}},
-		0,
-	)
-	if result.Err == nil || !strings.Contains(result.Err.Error(), context.Canceled.Error()) {
-		t.Fatalf("runWorkflowNode error = %v, want context cancellation after attachment", result.Err)
-	}
-	if !errors.Is(ctx.Err(), context.Canceled) {
-		t.Fatalf("source context error = %v, want canceled", ctx.Err())
-	}
-	if !errors.Is(runtimeClient.getRunContextErr, context.Canceled) {
-		t.Fatalf("GetRun context error = %v, want original cancellation", runtimeClient.getRunContextErr)
-	}
-	if dbtx.execContextErr != nil {
-		t.Fatalf("durable child run attachment inherited canceled context: %v", dbtx.execContextErr)
-	}
-	if !strings.Contains(dbtx.execSQL, "-- name: AttachWorkflowRunStepRun") ||
-		!reflect.DeepEqual(dbtx.execArgs, []any{stepID, childRunID}) {
-		t.Fatalf("attachment = %q %#v", dbtx.execSQL, dbtx.execArgs)
-	}
-	if dbtx.queryRowContextErr != nil {
-		t.Fatalf("terminal step evidence inherited canceled context: %v", dbtx.queryRowContextErr)
-	}
-	if !strings.Contains(dbtx.queryRowSQL, "-- name: MarkWorkflowRunStepFailed") {
-		t.Fatalf("terminal step query = %q", dbtx.queryRowSQL)
-	}
-}
-
-func TestRunWorkflowNodeStopsWhenChildRunAttachmentErrors(t *testing.T) {
-	runID := uuid.New()
-	nodeID := uuid.New()
-	agentID := uuid.New()
-	stepID := uuid.New()
-	childRunID := uuid.New()
-	attachErr := errors.New("attach unavailable")
-	stepValues := workflowFakeStepValues(runID, nodeID, agentID, "extract", workflowRunStatusRunning)
-	stepValues[0] = stepID
-	failedStepValues := append([]any(nil), stepValues...)
-	failedStepValues[5] = &childRunID
-	failedStepValues[6] = workflowRunStatusFailed
-
-	ctx, cancel := context.WithCancel(context.Background())
-	dbtx := &workflowFakeDBTX{
-		execErr: attachErr,
-		queryRowRows: []workflowFakeRow{
-			{values: stepValues},
-			{values: failedStepValues},
-		},
-	}
-	runtimeClient := &workflowRuntimeFake{runResponse: &runtimemod.RunResponse{
-		RunID:  childRunID.String(),
-		Status: runtimeRunStatusRunning,
-	}, onRun: cancel}
-	result := (&Service{queries: db.New(dbtx), runtime: runtimeClient}).runWorkflowNode(
-		ctx,
-		uuid.New(),
-		db.Workflow{ID: uuid.New()},
-		db.WorkflowRun{ID: runID},
-		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
-		workflowStepInputResult{Value: map[string]interface{}{"node_key": "extract"}},
-		0,
-	)
-	if result.Err == nil || !strings.Contains(result.Err.Error(), attachErr.Error()) {
-		t.Fatalf("runWorkflowNode error = %v", result.Err)
-	}
-	if runtimeClient.getRunCalls != 0 {
-		t.Fatalf("GetRun calls = %d, want 0", runtimeClient.getRunCalls)
-	}
-	if !errors.Is(ctx.Err(), context.Canceled) {
-		t.Fatalf("source context error = %v, want canceled", ctx.Err())
-	}
-	if !strings.Contains(dbtx.execSQL, "-- name: AttachWorkflowRunStepRun") {
-		t.Fatalf("attachment query = %q", dbtx.execSQL)
-	}
-	if !strings.Contains(dbtx.queryRowSQL, "-- name: MarkWorkflowRunStepFailed") {
-		t.Fatalf("terminal step query = %q", dbtx.queryRowSQL)
-	}
-	terminalRunID, ok := dbtx.queryRowArgs[1].(*uuid.UUID)
-	if !ok || terminalRunID == nil || *terminalRunID != childRunID {
-		t.Fatalf("terminal step run_id = %#v, want %s", dbtx.queryRowArgs[1], childRunID)
-	}
-	if dbtx.queryRowContextErr != nil {
-		t.Fatalf("attachment compensation inherited canceled context: %v", dbtx.queryRowContextErr)
-	}
-}
-
-func TestRunWorkflowNodeStopsWhenChildRunAttachmentIsRejected(t *testing.T) {
-	runID := uuid.New()
-	nodeID := uuid.New()
-	agentID := uuid.New()
-	stepValues := workflowFakeStepValues(runID, nodeID, agentID, "extract", workflowRunStatusRunning)
-	dbtx := &workflowFakeDBTX{
-		execRowsAffected: 0,
-		queryRowRows:     []workflowFakeRow{{values: stepValues}},
-	}
-	runtimeClient := &workflowRuntimeFake{runResponse: &runtimemod.RunResponse{
-		RunID:  uuid.NewString(),
-		Status: runtimeRunStatusRunning,
-	}}
-	result := (&Service{queries: db.New(dbtx), runtime: runtimeClient}).runWorkflowNode(
-		context.Background(),
-		uuid.New(),
-		db.Workflow{ID: uuid.New()},
-		db.WorkflowRun{ID: runID},
-		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
-		workflowStepInputResult{Value: map[string]interface{}{"node_key": "extract"}},
-		0,
-	)
-	if result.Err == nil || !strings.Contains(result.Err.Error(), "不再接受子 run 关联") {
-		t.Fatalf("runWorkflowNode error = %v", result.Err)
-	}
-	if runtimeClient.getRunCalls != 0 {
-		t.Fatalf("GetRun calls = %d, want 0", runtimeClient.getRunCalls)
-	}
-	if dbtx.queryRowCalls != 1 {
-		t.Fatalf("QueryRow calls = %d, want only CreateWorkflowRunStep", dbtx.queryRowCalls)
-	}
 }
 
 func TestWorkflowNodeRunIdempotencyKeyIsStablePrintableASCII(t *testing.T) {
