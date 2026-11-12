@@ -34,12 +34,20 @@ func leaseTestRun(t *testing.T, ttl time.Duration) (*Service, workflowRunLease) 
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `INSERT INTO workflows(id,user_id,name) VALUES($1,$2,'lease')`, workflowID, userID)
 	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		WITH v AS (
+		    INSERT INTO workflow_versions(workflow_id, version, name, definition_digest)
+		    VALUES ($1, 1, 'lease', repeat('0', 64)) RETURNING id
+		)
+		UPDATE workflows SET current_version_id = (SELECT id FROM v) WHERE id = $1`, workflowID)
+	require.NoError(t, err)
 	svc := NewService(pool, nil)
 	lease := workflowRunLease{runID: runID, owner: svc.instanceID, epoch: 3}
 	_, err = pool.Exec(ctx, `
 		INSERT INTO workflow_runs (id, workflow_id, user_id, status, attempt_count, max_attempts,
-		                           lease_owner, lease_epoch, lease_mode, lease_expires_at, claimed_at)
-		VALUES ($1, $2, $3, 'running', 1, 3, $4, 3, 'execute', clock_timestamp() + make_interval(secs => $5), NOW())`,
+		                           lease_owner, lease_epoch, lease_mode, lease_expires_at, claimed_at, workflow_version_id)
+		VALUES ($1, $2, $3, 'running', 1, 3, $4, 3, 'execute', clock_timestamp() + make_interval(secs => $5), NOW(),
+		        (SELECT current_version_id FROM workflows WHERE id = $2))`,
 		runID, workflowID, userID, lease.owner, ttl.Seconds())
 	require.NoError(t, err)
 	t.Cleanup(func() {

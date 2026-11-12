@@ -45,6 +45,12 @@ type WorkflowTargetValidation struct {
 	Executable        bool
 	UnavailableReason string
 	ContractHash      string
+	TargetVersionID   string
+}
+
+// versionedWorkflowTargets validates a specific workflow definition version.
+type versionedWorkflowTargets interface {
+	ValidateExternalExecutionTargetVersion(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID) (*WorkflowTargetValidation, error)
 }
 
 type workflowService interface {
@@ -84,6 +90,10 @@ func (s *Service) ValidateTarget(ctx context.Context, principal *Principal, req 
 	if err != nil {
 		return nil, err
 	}
+	targetVersionID, err := parseTargetVersionID(req.TargetVersionID, targetType)
+	if err != nil {
+		return nil, err
+	}
 	targetOwnerID, err := s.store.ResolveTargetOwner(ctx, targetType, targetID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &TargetValidationResponse{
@@ -98,10 +108,10 @@ func (s *Service) ValidateTarget(ctx context.Context, principal *Principal, req 
 			TargetType: targetType, TargetID: targetID.String(), UnavailableReason: "not_found",
 		}, nil
 	}
-	return s.validateTarget(ctx, targetOwnerID, targetType, targetID, inputSchema)
+	return s.validateTarget(ctx, targetOwnerID, targetType, targetID, inputSchema, targetVersionID)
 }
 
-func (s *Service) validateTarget(ctx context.Context, targetOwnerID uuid.UUID, targetType string, targetID uuid.UUID, inputSchema map[string]interface{}) (*TargetValidationResponse, error) {
+func (s *Service) validateTarget(ctx context.Context, targetOwnerID uuid.UUID, targetType string, targetID uuid.UUID, inputSchema map[string]interface{}, targetVersionID *uuid.UUID) (*TargetValidationResponse, error) {
 	resp := &TargetValidationResponse{TargetType: targetType, TargetID: targetID.String()}
 	switch targetType {
 	case TargetTypeAgent:
@@ -171,10 +181,19 @@ func (s *Service) validateTarget(ctx context.Context, targetOwnerID uuid.UUID, t
 		resp.ContractHash = contractHash
 		return resp, nil
 	case TargetTypeWorkflow:
-		target, err := s.workflows.ValidateExternalExecutionTarget(ctx, targetOwnerID, targetID)
+		var target *WorkflowTargetValidation
+		var err error
+		if versioned, ok := s.workflows.(versionedWorkflowTargets); ok {
+			target, err = versioned.ValidateExternalExecutionTargetVersion(ctx, targetOwnerID, targetID, targetVersionID)
+		} else if targetVersionID != nil {
+			target = &WorkflowTargetValidation{UnavailableReason: "not_found"}
+		} else {
+			target, err = s.workflows.ValidateExternalExecutionTarget(ctx, targetOwnerID, targetID)
+		}
 		if err != nil {
 			return nil, err
 		}
+		resp.TargetVersionID = target.TargetVersionID
 		resp.TargetName = target.TargetName
 		resp.Executable = target.Executable
 		resp.UnavailableReason = target.UnavailableReason
@@ -355,11 +374,21 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 			workflow.ExternalExecutionLaunchFence{
 				CallerServiceID: parsed.callerServiceID, ExternalRequestID: parsed.externalRequestID,
 				ActorUserID: parsed.actorUserID, LaunchToken: launchToken,
+				ExpectedContractHash: parsed.expectedContractHash, TargetVersionID: parsed.targetVersionID,
 			},
 		)
 		if err != nil {
 			if errors.Is(err, workflow.ErrExternalWorkflowLaunchFenceRejected) {
 				return nil, s.launchFenceFailure(ctx, parsed)
+			}
+			// Deterministic refusals from the launch transaction are recorded
+			// under the launch token and returned as-is; only transient
+			// failures stay retryable.
+			if errors.Is(err, workflow.ErrExternalWorkflowTargetUnavailable) {
+				return s.rejectLaunchWithCode(ctx, parsed, launchToken, "TARGET_UNAVAILABLE")
+			}
+			if errors.Is(err, workflow.ErrExternalWorkflowTargetContractChanged) {
+				return s.rejectLaunchWithCode(ctx, parsed, launchToken, "TARGET_CONTRACT_CHANGED")
 			}
 			return nil, httpx.ServiceUnavailable("Workflow 启动状态正在确认，请重试")
 		}
@@ -377,8 +406,16 @@ func (s *Service) StartExecution(ctx context.Context, principal *Principal, req 
 // Runtime refused. If the launch token is no longer current, the authoritative
 // record answers instead.
 func (s *Service) rejectLaunch(ctx context.Context, parsed parsedExecution, launchToken uuid.UUID) (*ExecutionStartResponse, error) {
+	return s.rejectLaunchWithCode(ctx, parsed, launchToken, "TARGET_CONTRACT_CHANGED")
+}
+
+// rejectLaunchWithCode records a terminal rejection under the launch token.
+// When the token is no longer current (canceled, reclaimed, or another
+// starter created the execution) the authoritative record answers instead:
+// created > canceled > rejected.
+func (s *Service) rejectLaunchWithCode(ctx context.Context, parsed parsedExecution, launchToken uuid.UUID, code string) (*ExecutionStartResponse, error) {
 	record, _, err := s.store.RejectLaunch(
-		ctx, parsed.callerServiceID, parsed.externalRequestID, launchToken, "TARGET_CONTRACT_CHANGED",
+		ctx, parsed.callerServiceID, parsed.externalRequestID, launchToken, code,
 	)
 	if err != nil {
 		return nil, httpx.Internal("保存外部执行拒绝状态失败")
@@ -553,7 +590,7 @@ func (s *Service) ensureExecutionStartAuthorized(
 		}
 		return ExecutionRecord{}, nil, err
 	}
-	validation, err := s.validateTarget(ctx, targetOwnerID, parsed.targetType, parsed.targetID, parsed.inputSchema)
+	validation, err := s.validateTarget(ctx, targetOwnerID, parsed.targetType, parsed.targetID, parsed.inputSchema, parsed.targetVersionID)
 	if err != nil {
 		var validationHTTPError *httpx.HTTPError
 		if errors.As(err, &validationHTTPError) && validationHTTPError.Status >= 400 && validationHTTPError.Status < 500 {
@@ -1004,6 +1041,7 @@ type parsedExecution struct {
 	expectedContractHash   string
 	inputSchema            map[string]interface{}
 	inputSchemaFingerprint [sha256.Size]byte
+	targetVersionID        *uuid.UUID
 }
 
 type downstreamReplayIdentity struct {
@@ -1151,20 +1189,31 @@ func parseExecutionRequest(req *ExecutionRequest) (parsedExecution, error) {
 		return parsedExecution{}, httpx.BadRequest("input_schema 不是合法 I-JSON")
 	}
 	schemaFingerprint := sha256.Sum256(canonicalSchema)
+	targetVersionID, err := parseTargetVersionID(req.TargetVersionID, targetType)
+	if err != nil {
+		return parsedExecution{}, err
+	}
 	return parsedExecution{
 		externalRequestID: externalRequestID,
 		targetType:        targetType, targetID: targetID, input: input, metadata: metadata, traceID: traceID,
 		expectedContractHash: expectedContractHash, inputSchema: inputSchema, inputSchemaFingerprint: schemaFingerprint,
+		targetVersionID: targetVersionID,
 	}, nil
 }
 
 func executionRequestFingerprint(parsed parsedExecution) ([sha256.Size]byte, error) {
-	canonical, err := runtime.CanonicalizeRFC8785(map[string]interface{}{
+	document := map[string]interface{}{
 		"caller_service_id": parsed.callerServiceID, "actor_user_id": parsed.actorUserID.String(),
 		"target_type": parsed.targetType, "target_id": parsed.targetID.String(),
 		"input": parsed.input, "metadata": parsed.metadata, "trace_id": parsed.traceID, "expected_contract_hash": parsed.expectedContractHash,
 		"input_schema": parsed.inputSchema,
-	})
+	}
+	// Only a request that names a version fingerprints it: requests without
+	// one keep their exact fingerprint, so they replay across edits.
+	if parsed.targetVersionID != nil {
+		document["target_version_id"] = parsed.targetVersionID.String()
+	}
+	canonical, err := runtime.CanonicalizeRFC8785(document)
 	if err != nil {
 		return [sha256.Size]byte{}, httpx.BadRequest("input 不是合法 I-JSON")
 	}
@@ -1212,6 +1261,21 @@ func normalizeExternalMetadata(input map[string]interface{}) (map[string]interfa
 func externalExecutionIdempotencyKey(callerServiceID string, externalRequestID uuid.UUID) string {
 	digest := sha256.Sum256([]byte(callerServiceID))
 	return "external-execution/" + hex.EncodeToString(digest[:]) + "/" + externalRequestID.String()
+}
+
+func parseTargetVersionID(raw, targetType string) (*uuid.UUID, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if targetType != TargetTypeWorkflow {
+		return nil, httpx.BadRequest("target_version_id 只适用于 workflow 目标")
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil || id == uuid.Nil {
+		return nil, httpx.BadRequest("target_version_id 不是合法 uuid")
+	}
+	return &id, nil
 }
 
 func parseTargetIdentity(targetRaw, targetTypeRaw string) (uuid.UUID, string, error) {

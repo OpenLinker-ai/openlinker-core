@@ -118,8 +118,8 @@ func TestWorkflowAdmissionDrainingRefusesEveryEntryAndPersists(t *testing.T) {
 	require.NoError(t, err)
 	failedRunID := uuid.New()
 	_, err = f.pool.Exec(ctx, `
-		INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, finished_at, error_message)
-		VALUES ($1, $2, $3, 'failed', '{"topic":"retry me"}', now(), 'synthetic failure')`,
+		INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, finished_at, error_message, workflow_version_id)
+		VALUES ($1, $2, $3, 'failed', '{"topic":"retry me"}', now(), 'synthetic failure', (SELECT current_version_id FROM workflows WHERE id = $2))`,
 		failedRunID, f.workflowID, f.ownerID)
 	require.NoError(t, err)
 
@@ -322,8 +322,8 @@ func TestWorkflowCancellationScanFinishesRequestedLeftByCrash(t *testing.T) {
 
 	runID := uuid.New()
 	_, err := f.pool.Exec(ctx, `
-		INSERT INTO workflow_runs (id, workflow_id, user_id, status, finished_at, error_message)
-		VALUES ($1, $2, $3, 'canceled', now(), 'workflow run canceled')`,
+		INSERT INTO workflow_runs (id, workflow_id, user_id, status, finished_at, error_message, workflow_version_id)
+		VALUES ($1, $2, $3, 'canceled', now(), 'workflow run canceled', (SELECT current_version_id FROM workflows WHERE id = $2))`,
 		runID, f.workflowID, f.ownerID)
 	require.NoError(t, err)
 	_, err = f.pool.Exec(ctx, `
@@ -352,8 +352,8 @@ func TestWorkflowRunStepsOrderIsDeterministicForDuplicateSequence(t *testing.T) 
 	).Scan(&nodeID, &agentID))
 	runID := uuid.New()
 	_, err := f.pool.Exec(ctx, `
-		INSERT INTO workflow_runs (id, workflow_id, user_id, status, finished_at)
-		VALUES ($1, $2, $3, 'failed', now())`, runID, f.workflowID, f.ownerID)
+		INSERT INTO workflow_runs (id, workflow_id, user_id, status, finished_at, workflow_version_id)
+		VALUES ($1, $2, $3, 'failed', now(), (SELECT current_version_id FROM workflows WHERE id = $2))`, runID, f.workflowID, f.ownerID)
 	require.NoError(t, err)
 	// Two attempts for the same node with the same sequence and created_at, as
 	// migration 104 numbers the duplicates the old recovery gap could leave.

@@ -21,6 +21,9 @@ type WorkflowNodeRequest struct {
 type RunWorkflowRequest struct {
 	Input       map[string]interface{} `json:"input,omitempty"`
 	MaxAttempts int32                  `json:"max_attempts,omitempty" validate:"omitempty,min=1,max=10"`
+	// Version runs a specific definition version (queued runs only); the
+	// default is the current version.
+	Version int32 `json:"version,omitempty" validate:"omitempty,min=1"`
 }
 
 // ExternalExecutionTargetValidation is the narrow Core result consumed by an
@@ -31,6 +34,8 @@ type ExternalExecutionTargetValidation struct {
 	Executable        bool   `json:"executable"`
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
 	ContractHash      string `json:"contract_hash,omitempty"`
+	// TargetVersionID is the definition version the hash describes.
+	TargetVersionID string `json:"target_version_id,omitempty"`
 }
 
 type RerunWorkflowStepRequest struct {
@@ -53,6 +58,34 @@ type WorkflowResponse struct {
 	Edges       []map[string]interface{} `json:"edges"`
 	CreatedAt   string                   `json:"created_at"`
 	UpdatedAt   string                   `json:"updated_at"`
+	// Version is the immutable definition version these nodes and edges
+	// belong to; send it back as If-Match when updating.
+	Version   int32  `json:"version,omitempty"`
+	VersionID string `json:"version_id,omitempty"`
+	Semantics string `json:"semantics,omitempty"`
+}
+
+// UpdateWorkflowRequest replaces the definition with a new version.
+type UpdateWorkflowRequest = CreateWorkflowRequest
+
+type DuplicateWorkflowRequest struct {
+	Name string `json:"name,omitempty" validate:"omitempty,min=1,max=120"`
+}
+
+type WorkflowVersionSummary struct {
+	ID               string `json:"id"`
+	Version          int32  `json:"version"`
+	Semantics        string `json:"semantics"`
+	Name             string `json:"name"`
+	DefinitionDigest string `json:"definition_digest"`
+	NodeCount        int32  `json:"node_count"`
+	Current          bool   `json:"current"`
+	CreatedAt        string `json:"created_at"`
+}
+
+type WorkflowVersionListResponse struct {
+	Items          []WorkflowVersionSummary `json:"items"`
+	CurrentVersion int32                    `json:"current_version"`
 }
 
 type WorkflowListResponse struct {
@@ -98,6 +131,8 @@ type WorkflowRunResponse struct {
 	// UnconfirmedChildrenAcknowledgedBy: the owner who created this run by
 	// Retry/Rerun accepting unconfirmed children of the source run.
 	UnconfirmedChildrenAcknowledgedBy string `json:"unconfirmed_children_acknowledged_by,omitempty"`
+	// WorkflowVersion is the definition version this run executes.
+	WorkflowVersion int32 `json:"workflow_version,omitempty"`
 }
 
 type WorkflowRunListResponse struct {

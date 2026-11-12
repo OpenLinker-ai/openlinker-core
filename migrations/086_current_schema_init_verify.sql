@@ -13,8 +13,8 @@ BEGIN
     FROM pg_catalog.pg_tables
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_tables <> 94 THEN
-        RAISE EXCEPTION 'Core initializer table count is %, expected 94', public_tables;
+    IF public_tables <> 96 THEN
+        RAISE EXCEPTION 'Core initializer table count is %, expected 96', public_tables;
     END IF;
 
     SELECT count(*) INTO public_constraints
@@ -23,16 +23,16 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 761 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 761', public_constraints;
+    IF public_constraints <> 781 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 781', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 316 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 316', public_indexes;
+    IF public_indexes <> 322 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 322', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers
@@ -320,6 +320,28 @@ BEGIN
           AND pg_catalog.pg_get_constraintdef(constraint_row.oid) = 'PRIMARY KEY (workflow_run_id, workflow_node_id, attempt)'
        ) THEN
         RAISE EXCEPTION 'Core initializer is missing the workflow attempt contract';
+    END IF;
+
+    IF to_regclass('public.workflow_versions') IS NULL
+       OR to_regclass('public.workflow_version_nodes') IS NULL
+       OR NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'workflow_runs'
+          AND column_name = 'workflow_version_id' AND is_nullable = 'NO'
+       )
+       OR (
+        SELECT count(*)
+        FROM pg_catalog.pg_constraint constraint_row
+        WHERE constraint_row.conname IN (
+            'workflow_run_steps_workflow_version_node_id_fkey',
+            'workflow_step_launches_workflow_version_node_id_fkey',
+            'workflow_run_nodes_workflow_version_node_id_fkey',
+            'workflow_runs_workflow_version_fkey',
+            'workflows_current_version_fkey'
+        )
+          AND constraint_row.convalidated
+       ) <> 5 THEN
+        RAISE EXCEPTION 'Core initializer is missing the workflow version contract';
     END IF;
 
     IF NOT EXISTS (

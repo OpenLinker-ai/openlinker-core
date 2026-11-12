@@ -165,13 +165,16 @@ func createGatedWorkflowRun(
 	userID uuid.UUID,
 	gate workflowStopGate,
 ) (db.WorkflowRun, error) {
+	// Retry and Rerun execute the source run's definition version.
+	var sourceVersionID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT workflow_version_id FROM workflow_runs WHERE id = $1`, source.ID).Scan(&sourceVersionID); err != nil {
+		return db.WorkflowRun{}, err
+	}
 	run, err := db.New(tx).CreatePendingWorkflowRun(ctx, db.CreatePendingWorkflowRunParams{
 		WorkflowID: source.WorkflowID, UserID: userID, Input: source.Input, MaxAttempts: source.MaxAttempts,
+		WorkflowVersionID: &sourceVersionID,
 	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return db.WorkflowRun{}, errWorkflowAdmissionDraining
-	}
-	if err != nil {
+	if err := workflowRunCreateError(err); err != nil {
 		return db.WorkflowRun{}, err
 	}
 	if len(gate.unconfirmed) > 0 {
@@ -269,7 +272,7 @@ func (s *Service) RerunWorkflowStep(ctx context.Context, userID, workflowRunID u
 	default:
 		return nil, httpx.Conflict("只有 success / failed workflow_run 可以 step 级重跑")
 	}
-	w, nodes, err := s.getWorkflowForOwner(ctx, userID, sourceRun.WorkflowID)
+	w, nodes, err := s.getWorkflowRunDefinition(ctx, sourceRun)
 	if err != nil {
 		return nil, err
 	}

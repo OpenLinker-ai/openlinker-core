@@ -93,8 +93,12 @@ WHERE user_id = $1
 -- name: CreateWorkflowRun :one
 -- Returns no row while workflow admission is draining. Reading the admission
 -- row FOR SHARE makes a committed switch to 'draining' a barrier.
-INSERT INTO workflow_runs (workflow_id, user_id, status, input, attempt_count)
-SELECT $1, $2, 'running', $3, 1
+-- An archived workflow yields a NULL version, which the NOT NULL column
+-- rejects: archiving is a barrier for new runs.
+INSERT INTO workflow_runs (workflow_id, user_id, status, input, attempt_count, workflow_version_id)
+SELECT $1, $2, 'running', $3, 1,
+       CASE WHEN (SELECT status FROM workflows WHERE id = $1) = 'active'
+            THEN COALESCE(sqlc.narg(workflow_version_id)::uuid, (SELECT current_version_id FROM workflows WHERE id = $1)) END
 WHERE EXISTS (
     SELECT 1 FROM workflow_admission
     WHERE singleton AND state = 'open'
@@ -106,8 +110,10 @@ RETURNING id, workflow_id, user_id, status, input, output, error_message,
 
 -- name: CreatePendingWorkflowRun :one
 -- Returns no row while workflow admission is draining.
-INSERT INTO workflow_runs (workflow_id, user_id, status, input, max_attempts)
-SELECT $1, $2, 'pending', $3, $4
+INSERT INTO workflow_runs (workflow_id, user_id, status, input, max_attempts, workflow_version_id)
+SELECT $1, $2, 'pending', $3, $4,
+       CASE WHEN (SELECT status FROM workflows WHERE id = $1) = 'active'
+            THEN COALESCE(sqlc.narg(workflow_version_id)::uuid, (SELECT current_version_id FROM workflows WHERE id = $1)) END
 WHERE EXISTS (
     SELECT 1 FROM workflow_admission
     WHERE singleton AND state = 'open'
@@ -120,8 +126,10 @@ RETURNING id, workflow_id, user_id, status, input, output, error_message,
 -- name: CreatePendingExternalExecutionWorkflowRun :one
 -- Returns no row on an identity conflict or while workflow admission is
 -- draining; callers distinguish the two by looking the identity up.
-INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts)
-SELECT $1, $2, $3, 'pending', $4, $5
+INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts, workflow_version_id)
+SELECT $1, $2, $3, 'pending', $4, $5,
+       CASE WHEN (SELECT status FROM workflows WHERE id = $2) = 'active'
+            THEN COALESCE(sqlc.narg(workflow_version_id)::uuid, (SELECT current_version_id FROM workflows WHERE id = $2)) END
 WHERE EXISTS (
     SELECT 1 FROM workflow_admission
     WHERE singleton AND state = 'open'

@@ -14,6 +14,10 @@ func TestValidateCoreUp(t *testing.T) {
 	}{
 		{name: "fresh", snapshot: Snapshot{}},
 		{name: "current", snapshot: currentCoreSnapshot(), wantNoop: true},
+		{name: "workflow versions predecessor", snapshot: workflowVersionsPredecessorCoreSnapshot()},
+		{name: "workflow versions predecessor drift", snapshot: withCoreDigest(workflowVersionsPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
+		{name: "workflow versions predecessor with current shape", snapshot: withCoreShape(workflowVersionsPredecessorCoreSnapshot(), currentCoreShape()), wantError: "fingerprint mismatch"},
+		{name: "current version with workflow versions predecessor shape", snapshot: withCoreShape(currentCoreSnapshot(), workflowVersionsPredecessorCoreSnapshot().CoreShape), wantError: "fingerprint mismatch"},
 		{name: "workflow attempts predecessor", snapshot: workflowAttemptsPredecessorCoreSnapshot()},
 		{name: "workflow attempts predecessor drift", snapshot: withCoreDigest(workflowAttemptsPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
 		{name: "workflow attempts predecessor with current shape", snapshot: withCoreShape(workflowAttemptsPredecessorCoreSnapshot(), currentCoreShape()), wantError: "fingerprint mismatch"},
@@ -85,7 +89,7 @@ func TestValidateCloudUp(t *testing.T) {
 	current := fresh
 	current.Cloud = MigrationTableState{Exists: true, Rows: 1, Version: CloudVersion}
 	current.CloudShape = currentCloudShape()
-	current.NonBookkeepingObjects = 101
+	current.NonBookkeepingObjects = 103
 
 	tests := []struct {
 		name      string
@@ -139,7 +143,7 @@ func currentCoreSnapshot() Snapshot {
 	return Snapshot{
 		Core:                    MigrationTableState{Exists: true, Rows: 1, Version: CoreVersion},
 		CoreShape:               currentCoreShape(),
-		NonBookkeepingObjects:   94,
+		NonBookkeepingObjects:   96,
 		CallbackOwnerIndexValid: true,
 	}
 }
@@ -147,9 +151,9 @@ func currentCoreSnapshot() Snapshot {
 func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
-		Tables:            94,
-		Constraints:       761,
-		Indexes:           316,
+		Tables:            96,
+		Constraints:       781,
+		Indexes:           322,
 		Triggers:          80,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -186,6 +190,19 @@ func mcpTransportPredecessorCoreSnapshot() Snapshot {
 	s.CoreShape.Constraints = 728
 	s.CoreShape.Indexes = 309
 	s.NonBookkeepingObjects = 91
+	return s
+}
+
+// workflowVersionsPredecessorCoreSnapshot is the exact 104 schema: 105 adds
+// the workflow version tables and the version foreign keys.
+func workflowVersionsPredecessorCoreSnapshot() Snapshot {
+	s := currentCoreSnapshot()
+	s.Core.Version = CoreWorkflowVersionsPredecessorVersion
+	s.CoreShape.Digest = CoreWorkflowVersionsPredecessorDigest
+	s.CoreShape.Tables = 94
+	s.CoreShape.Constraints = 761
+	s.CoreShape.Indexes = 316
+	s.NonBookkeepingObjects = 94
 	return s
 }
 

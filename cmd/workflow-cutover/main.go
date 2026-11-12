@@ -1,5 +1,6 @@
 // Command workflow-cutover checks and finishes a workflow release drain.
 //
+//	mode         print whether upgrading this database needs a workflow drain
 //	drain        switch admission to draining; ready once every run finished
 //	abort-drain  reopen admission for a release abandoned before migrating
 //	preflight  read-only, before the workflow attempt migration
@@ -47,7 +48,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 		return exitOK
 	}
 	switch command {
-	case "drain", "abort-drain", "preflight", "verify", "reopen":
+	case "mode", "drain", "abort-drain", "preflight", "verify", "reopen":
 	default:
 		usage(stderr)
 		return exitUsage
@@ -73,6 +74,19 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 	}
 	defer pool.Close()
 
+	if command == "mode" {
+		mode, modeErr := workflow.DecideWorkflowCutoverMode(ctx, pool)
+		if modeErr != nil && !errors.Is(modeErr, workflow.ErrWorkflowCutoverUnsupportedSource) {
+			fmt.Fprintf(stderr, "workflow-cutover mode: %v\n", modeErr)
+			return exitFailure
+		}
+		_ = json.NewEncoder(stdout).Encode(mode)
+		if modeErr != nil {
+			fmt.Fprintf(stderr, "workflow-cutover mode: %v\n", modeErr)
+			return exitFailure
+		}
+		return exitOK
+	}
 	var report workflow.CutoverReport
 	switch command {
 	case "drain":
@@ -103,7 +117,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, `usage: workflow-cutover <drain|abort-drain|preflight|verify|reopen> [-timeout 30s] [-reason text]
+	fmt.Fprintln(w, `usage: workflow-cutover <mode|drain|abort-drain|preflight|verify|reopen> [-timeout 30s] [-reason text]
+  mode         print {"mode":"cutover"|"none"} for upgrading this database
   drain        switch admission to draining; ready once every run finished
   abort-drain  reopen admission for a release abandoned before migrating
   preflight  read-only drain check before the workflow attempt migration

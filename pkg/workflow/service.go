@@ -105,109 +105,47 @@ func (s *Service) CreateWorkflow(ctx context.Context, userID uuid.UUID, req *Cre
 	if req == nil {
 		return nil, httpx.BadRequest("请求体不能为空")
 	}
-	if len(req.Nodes) == 0 {
-		return nil, httpx.BadRequest("workflow 至少需要一个 Agent 节点")
-	}
-	if len(req.Nodes) > 10 {
-		return nil, httpx.BadRequest("workflow 节点不能超过 10 个")
-	}
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		return nil, httpx.BadRequest("workflow 名称不能为空")
-	}
-	description := strings.TrimSpace(req.Description)
-	edges, err := normalizeWorkflowEdgesFromRequest(req.Nodes, req.Edges)
+	def, err := s.prepareWorkflowDefinition(ctx, userID, req.Name, req.Description, req.Nodes, req.Edges)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateWorkflowGraphFromRequest(req.Nodes, edges); err != nil {
-		return nil, err
+	if s.pool == nil {
+		return nil, httpx.Internal("workflow 存储未配置")
 	}
-	if err := s.validateWorkflowRequestAgentsAvailable(ctx, userID, req.Nodes, false); err != nil {
-		return nil, err
-	}
-	if err := s.validateWorkflowRequestInputMappings(ctx, req.Nodes, edges); err != nil {
-		return nil, err
-	}
-	edgesJSON, err := json.Marshal(edges)
-	if err != nil {
-		return nil, httpx.BadRequest("edges 不是合法 JSON")
-	}
-
-	var workflow db.Workflow
-	var nodes []db.WorkflowNode
+	var workflowID uuid.UUID
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		q := s.queries.WithTx(tx)
-		created, err := q.CreateWorkflow(ctx, db.CreateWorkflowParams{
+		created, err := s.queries.WithTx(tx).CreateWorkflow(ctx, db.CreateWorkflowParams{
 			UserID:      userID,
-			Name:        name,
-			Description: description,
-			Edges:       edgesJSON,
+			Name:        def.name,
+			Description: def.description,
+			Edges:       def.edgesJSON,
 		})
 		if err != nil {
 			return err
 		}
-		workflow = created
-		seen := map[string]struct{}{}
-		for i, node := range req.Nodes {
-			key := strings.TrimSpace(node.Key)
-			if key == "" {
-				return httpx.BadRequest("workflow node key 不能为空")
-			}
-			if _, ok := seen[key]; ok {
-				return httpx.BadRequest("workflow node key 不能重复: " + key)
-			}
-			if node.AgentID == uuid.Nil {
-				return httpx.BadRequest("workflow node agent_id 不能为空")
-			}
-			seen[key] = struct{}{}
-			title := strings.TrimSpace(node.Title)
-			if title == "" {
-				title = "Agent " + key
-			}
-			config := node.Config
-			if config == nil {
-				config = map[string]interface{}{}
-			}
-			configJSON, err := json.Marshal(config)
-			if err != nil {
-				return httpx.BadRequest("node config 不是合法 JSON")
-			}
-			createdNode, err := q.CreateWorkflowNode(ctx, db.CreateWorkflowNodeParams{
-				WorkflowID: workflow.ID,
-				NodeKey:    key,
-				NodeType:   "agent",
-				AgentID:    node.AgentID,
-				Title:      title,
-				Config:     configJSON,
-				Position:   int32(i),
-			})
-			if err != nil {
-				return err
-			}
-			nodes = append(nodes, createdNode)
-		}
-		return nil
+		workflowID = created.ID
+		return writeWorkflowVersion(ctx, tx, created.ID, userID, def)
 	})
 	if err != nil {
-		var he *httpx.HTTPError
-		if errors.As(err, &he) {
-			return nil, err
-		}
-		log.Error().Err(err).Str("user_id", userID.String()).Msg("workflow.CreateWorkflow")
-		return nil, httpx.Internal("创建 workflow 失败")
+		return nil, workflowWriteError(err, "workflow.CreateWorkflow", workflowID)
 	}
-	resp := workflowToResponse(workflow, nodes)
-	return &resp, nil
+	return s.GetWorkflow(ctx, userID, workflowID)
 }
 
 func (s *Service) GetWorkflow(ctx context.Context, userID, workflowID uuid.UUID) (*WorkflowResponse, error) {
-	w, nodes, err := s.getWorkflowForOwner(ctx, userID, workflowID)
+	if s.pool == nil {
+		w, nodes, err := s.getWorkflowForOwner(ctx, userID, workflowID)
+		if err != nil {
+			return nil, err
+		}
+		resp := workflowToResponse(w, nodes)
+		return &resp, nil
+	}
+	def, err := s.loadOwnedWorkflowVersion(ctx, userID, workflowID, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp := workflowToResponse(w, nodes)
-	return &resp, nil
+	return s.workflowResponseForVersion(def), nil
 }
 
 func (s *Service) ListWorkflows(ctx context.Context, userID uuid.UUID, limit int32) (*WorkflowListResponse, error) {
@@ -327,17 +265,32 @@ func (s *Service) RunWorkflow(ctx context.Context, userID, workflowID uuid.UUID,
 	if err != nil {
 		return nil, err
 	}
-	run, err := s.queries.CreateWorkflowRun(ctx, db.CreateWorkflowRunParams{
-		WorkflowID: workflowID,
-		UserID:     userID,
-		Input:      inputJSON,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errWorkflowAdmissionDraining
-	}
+	versionID, err := s.requestedWorkflowVersionID(ctx, workflowID, req)
 	if err != nil {
-		log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.RunWorkflow: CreateWorkflowRun")
-		return nil, httpx.Internal("创建 workflow_run 失败")
+		return nil, err
+	}
+	run, err := s.queries.CreateWorkflowRun(ctx, db.CreateWorkflowRunParams{
+		WorkflowID:        workflowID,
+		UserID:            userID,
+		Input:             inputJSON,
+		WorkflowVersionID: versionID,
+	})
+	if err = workflowRunCreateError(err); err != nil {
+		if !isWorkflowHTTPError(err) {
+			log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.RunWorkflow: CreateWorkflowRun")
+			return nil, httpx.Internal("创建 workflow_run 失败")
+		}
+		return nil, err
+	}
+	// Execute exactly the version the run pinned (an edit may have landed
+	// between reading the definition and creating the run).
+	if s.pool != nil {
+		if w, nodes, err = s.getWorkflowRunDefinition(ctx, run); err != nil {
+			return nil, err
+		}
+		if graph, err = workflowGraphFromDefinition(w, nodes); err != nil {
+			return nil, err
+		}
 	}
 	execCtx, finish, err := s.leaseNewWorkflowRun(ctx, run.ID)
 	if err != nil {
@@ -361,18 +314,23 @@ func (s *Service) StartWorkflowRun(ctx context.Context, userID, workflowID uuid.
 	if err != nil {
 		return nil, err
 	}
-	run, err := s.queries.CreatePendingWorkflowRun(ctx, db.CreatePendingWorkflowRunParams{
-		WorkflowID:  workflowID,
-		UserID:      userID,
-		Input:       inputJSON,
-		MaxAttempts: maxAttempts,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errWorkflowAdmissionDraining
-	}
+	versionID, err := s.requestedWorkflowVersionID(ctx, workflowID, req)
 	if err != nil {
-		log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.StartWorkflowRun: CreatePendingWorkflowRun")
-		return nil, httpx.Internal("创建异步 workflow_run 失败")
+		return nil, err
+	}
+	run, err := s.queries.CreatePendingWorkflowRun(ctx, db.CreatePendingWorkflowRunParams{
+		WorkflowID:        workflowID,
+		UserID:            userID,
+		Input:             inputJSON,
+		MaxAttempts:       maxAttempts,
+		WorkflowVersionID: versionID,
+	})
+	if err = workflowRunCreateError(err); err != nil {
+		if !isWorkflowHTTPError(err) {
+			log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.StartWorkflowRun: CreatePendingWorkflowRun")
+			return nil, httpx.Internal("创建异步 workflow_run 失败")
+		}
+		return nil, err
 	}
 	resp := workflowRunToResponse(run, nil)
 	return &resp, nil
@@ -382,8 +340,34 @@ func (s *Service) StartWorkflowRun(ctx context.Context, userID, workflowID uuid.
 // for external execution. Passing uuid.Nil to the existing Agent validator
 // intentionally requires every node to be public and callable.
 func (s *Service) ValidateExternalExecutionTarget(ctx context.Context, targetOwnerID, workflowID uuid.UUID) (*ExternalExecutionTargetValidation, error) {
+	return s.ValidateExternalExecutionTargetVersion(ctx, targetOwnerID, workflowID, nil)
+}
+
+// ValidateExternalExecutionTargetVersion validates one definition version for
+// external execution; versionID nil means the current version. Only v1
+// semantics are executable until Cloud accepts the v2 contract.
+func (s *Service) ValidateExternalExecutionTargetVersion(ctx context.Context, targetOwnerID, workflowID uuid.UUID, versionID *uuid.UUID) (*ExternalExecutionTargetValidation, error) {
 	result := &ExternalExecutionTargetValidation{UnavailableReason: "not_found"}
-	w, nodes, err := s.getWorkflowForOwner(ctx, targetOwnerID, workflowID)
+	var w db.Workflow
+	var nodes []db.WorkflowNode
+	var err error
+	if s.pool != nil {
+		var def workflowVersionDefinition
+		def, err = s.loadOwnedWorkflowVersion(ctx, targetOwnerID, workflowID, versionID)
+		w, nodes = def.workflow, def.nodes
+		if err == nil {
+			result.TargetVersionID = def.id.String()
+			if def.semantics != workflowSemanticsV1 {
+				result.TargetName = w.Name
+				result.UnavailableReason = "semantics_unsupported"
+				return result, nil
+			}
+		}
+	} else if versionID != nil {
+		return result, nil
+	} else {
+		w, nodes, err = s.getWorkflowForOwner(ctx, targetOwnerID, workflowID)
+	}
 	if err != nil {
 		var he *httpx.HTTPError
 		if errors.As(err, &he) && he.Status < 500 {
@@ -917,9 +901,22 @@ func (s *Service) prepareWorkflowExecution(
 	userID, workflowID uuid.UUID,
 	req *RunWorkflowRequest,
 ) (db.Workflow, []db.WorkflowNode, *workflowGraph, map[string]interface{}, []byte, int32, error) {
-	w, nodes, err := s.getWorkflowForOwner(ctx, userID, workflowID)
+	var w db.Workflow
+	var nodes []db.WorkflowNode
+	var err error
+	if versionID, versionErr := s.requestedWorkflowVersionID(ctx, workflowID, req); versionErr != nil {
+		return db.Workflow{}, nil, nil, nil, nil, 0, versionErr
+	} else if versionID != nil {
+		def, loadErr := s.loadOwnedWorkflowVersion(ctx, userID, workflowID, versionID)
+		w, nodes, err = def.workflow, def.nodes, loadErr
+	} else {
+		w, nodes, err = s.getWorkflowForOwner(ctx, userID, workflowID)
+	}
 	if err != nil {
 		return db.Workflow{}, nil, nil, nil, nil, 0, err
+	}
+	if w.Status == workflowStatusArchived {
+		return db.Workflow{}, nil, nil, nil, nil, 0, errWorkflowArchived
 	}
 	if len(nodes) == 0 {
 		return db.Workflow{}, nil, nil, nil, nil, 0, httpx.BadRequest("workflow 没有可执行节点")
@@ -1150,7 +1147,8 @@ func (s *Service) decorateWorkflowRunStopEvidence(ctx context.Context, items []W
 		SELECT r.id,
 		       EXISTS (SELECT 1 FROM workflow_step_stops s WHERE s.workflow_run_id = r.id AND s.state = 'unconfirmed')
 		       OR EXISTS (SELECT 1 FROM workflow_run_cancellations c WHERE c.workflow_run_id = r.id AND c.state = 'unconfirmed'),
-		       r.unconfirmed_children_acknowledged_by
+		       r.unconfirmed_children_acknowledged_by,
+		       (SELECT v.version FROM workflow_versions v WHERE v.id = r.workflow_version_id)
 		FROM workflow_runs r WHERE r.id = ANY($1::uuid[])
 	`, ids)
 	if err != nil {
@@ -1165,8 +1163,12 @@ func (s *Service) decorateWorkflowRunStopEvidence(ctx context.Context, items []W
 		var id uuid.UUID
 		var unconfirmed bool
 		var acknowledgedBy *uuid.UUID
-		if rows.Scan(&id, &unconfirmed, &acknowledgedBy) != nil {
+		var version *int32
+		if rows.Scan(&id, &unconfirmed, &acknowledgedBy, &version) != nil {
 			return
+		}
+		if version != nil {
+			items[byID[id.String()]].WorkflowVersion = *version
 		}
 		i := byID[id.String()]
 		items[i].HasUnconfirmedChildren = unconfirmed
@@ -1270,7 +1272,7 @@ func (s *Service) executeClaimedWorkflowRun(ctx context.Context, run db.Workflow
 		defer s.releasePausedWorkflowRunClaim(ctx, run.ID, *run.ClaimedAt, run.AttemptCount)
 	}
 
-	w, nodes, err := s.getWorkflowDefinition(ctx, run.WorkflowID)
+	w, nodes, err := s.getWorkflowRunDefinition(ctx, run)
 	if err != nil {
 		return s.failWorkflowRun(ctx, run.ID, err.Error())
 	}
@@ -1308,6 +1310,10 @@ func (s *Service) releasePausedWorkflowRunClaim(ctx context.Context, workflowRun
 }
 
 func (s *Service) getWorkflowForOwner(ctx context.Context, userID, workflowID uuid.UUID) (db.Workflow, []db.WorkflowNode, error) {
+	if s.pool != nil {
+		def, err := s.loadOwnedWorkflowVersion(ctx, userID, workflowID, nil)
+		return def.workflow, def.nodes, err
+	}
 	w, err := s.queries.GetWorkflowByID(ctx, workflowID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1325,6 +1331,24 @@ func (s *Service) getWorkflowForOwner(ctx context.Context, userID, workflowID uu
 		return db.Workflow{}, nil, httpx.Internal("查询 workflow 节点失败")
 	}
 	return w, nodes, nil
+}
+
+// getWorkflowRunDefinition reads the definition version a run executes.
+func (s *Service) getWorkflowRunDefinition(ctx context.Context, run db.WorkflowRun) (db.Workflow, []db.WorkflowNode, error) {
+	if s.pool == nil {
+		return s.getWorkflowDefinition(ctx, run.WorkflowID)
+	}
+	versionID, err := s.workflowRunVersionID(ctx, run.ID)
+	if err != nil {
+		log.Error().Err(err).Str("workflow_run_id", run.ID.String()).Msg("workflow.getWorkflowRunDefinition")
+		return db.Workflow{}, nil, httpx.Internal("查询 workflow 版本失败")
+	}
+	def, err := loadWorkflowVersion(ctx, s.pool, run.WorkflowID, &versionID)
+	if err != nil {
+		log.Error().Err(err).Str("workflow_run_id", run.ID.String()).Msg("workflow.getWorkflowRunDefinition")
+		return db.Workflow{}, nil, httpx.Internal("查询 workflow 版本失败")
+	}
+	return def.workflow, def.nodes, nil
 }
 
 func (s *Service) getWorkflowDefinition(ctx context.Context, workflowID uuid.UUID) (db.Workflow, []db.WorkflowNode, error) {

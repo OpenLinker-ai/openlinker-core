@@ -809,7 +809,24 @@ func (s *Service) UpsertCapability(ctx context.Context, agentID, creatorID uuid.
 	}
 
 	s.ensureOnboardingStatusBestEffort(ctx, agentID)
-	row, err := s.queries.UpsertAgentCapability(ctx, prepared.upsertParams(agentID, creatorID))
+	var row db.AgentCapability
+	if s.pool != nil {
+		// The Agent row lock is the mutual exclusion point shared with
+		// visibility/lifecycle changes and with workflow external-execution
+		// launches, which re-check eligibility and the contract hash under
+		// a share lock on the same row.
+		err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+			var locked int
+			if err := tx.QueryRow(ctx, `SELECT 1 FROM agents WHERE id = $1 FOR UPDATE`, agentID).Scan(&locked); err != nil {
+				return err
+			}
+			var upsertErr error
+			row, upsertErr = s.queries.WithTx(tx).UpsertAgentCapability(ctx, prepared.upsertParams(agentID, creatorID))
+			return upsertErr
+		})
+	} else {
+		row, err = s.queries.UpsertAgentCapability(ctx, prepared.upsertParams(agentID, creatorID))
+	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, httpx.NotFound("Agent 不存在")

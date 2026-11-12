@@ -82,12 +82,13 @@ VALUES($1,$2,$3,$4,$5,$6,$6,$7)`, run, node, step, key, uuid.New(), sum[:], stat
 	}
 	exec(`UPDATE workflow_runs SET status='canceled', finished_at=now() WHERE id=$1`, pendingRun)
 
-	migrateTestDatabaseToCurrent(t, databaseURL)
+	migrateTestDatabaseToVersion(t, databaseURL, uint(CoreWorkflowVersionsPredecessorVersion))
 	snapshot, err := Inspect(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if noop, err := snapshot.ValidateCoreUp(); err != nil || !noop {
+	// 104 is now the supported predecessor of the current version.
+	if noop, err := snapshot.ValidateCoreUp(); err != nil || noop {
 		t.Fatalf("upgraded 104 preflight: noop=%t err=%v shape=%s", noop, err, formatShape(snapshot.CoreShape))
 	}
 

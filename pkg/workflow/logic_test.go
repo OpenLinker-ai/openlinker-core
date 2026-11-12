@@ -1080,7 +1080,6 @@ func TestWorkflowRerunStepPlanningErrorEdges(t *testing.T) {
 	_, err = stepsErrSvc.RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "extract"})
 	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
 
-
 	badInputRun := workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusSuccess, nil)
 	badInputRun[4] = []byte(`{bad`)
 	badInputSvc := &Service{

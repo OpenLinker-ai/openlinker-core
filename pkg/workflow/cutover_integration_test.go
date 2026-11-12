@@ -109,3 +109,11 @@ func TestWorkflowCutoverDrainAndAbort(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, workflow.WorkflowAdmissionOpen, report.AdmissionState)
 }
+
+func TestWorkflowCutoverModeForTheCurrentSchema(t *testing.T) {
+	f := newAdmissionFixture(t)
+	mode, err := workflow.DecideWorkflowCutoverMode(context.Background(), f.pool)
+	require.NoError(t, err)
+	require.Equal(t, "none", mode.Mode, "a database already at this release needs no drain")
+	require.GreaterOrEqual(t, mode.SourceVersion, int64(105))
+}

@@ -1112,8 +1112,8 @@ func TestReleasePausedWorkflowRunClaimRejectsStaleFence(t *testing.T) {
 	claimB := claimA.Add(30 * time.Second)
 	_, err = pool.Exec(context.Background(), `
 		INSERT INTO workflow_runs (
-			id, workflow_id, user_id, status, input, attempt_count, max_attempts, claimed_at
-		) VALUES ($1, $2, $3, 'paused', '{}'::jsonb, 2, 3, $4)`,
+			id, workflow_id, user_id, status, input, attempt_count, max_attempts, claimed_at, workflow_version_id
+		) VALUES ($1, $2, $3, 'paused', '{}'::jsonb, 2, 3, $4, (SELECT current_version_id FROM workflows WHERE id = $2))`,
 		runID, uuid.MustParse(created.ID), userID, claimB)
 	require.NoError(t, err)
 
@@ -1388,8 +1388,8 @@ func TestWorkflowControlPlaneReadsListsAndRunStateTransitions(t *testing.T) {
 
 	runID := uuid.New()
 	_, err = pool.Exec(ctx, `
-		INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts)
-		VALUES ($1, $2, $3, 'pending', $4, 5)`,
+		INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts, workflow_version_id)
+		VALUES ($1, $2, $3, 'pending', $4, 5, (SELECT current_version_id FROM workflows WHERE id = $2))`,
 		runID, workflowID, userID, []byte(`{"topic":"control plane"}`))
 	require.NoError(t, err)
 
@@ -1468,8 +1468,15 @@ VALUES ($1,'{"type":"object"}'::jsonb,'{"type":"object"}'::jsonb,'external execu
 	require.True(t, first.Executable)
 	require.Regexp(t, `^hct:v1:[a-f0-9]{64}$`, first.ContractHash)
 
-	_, err = pool.Exec(context.Background(), `UPDATE workflow_nodes SET config=$2::jsonb WHERE workflow_id=$1`, workflowID,
-		`{"mode":"strict","input_mapping":{"version":"v1","fields":{"task":{"source":"workflow_input","path":["text"]}}}}`)
+	// Editing the definition creates version 2 with a new contract hash.
+	_, err = svc.UpdateWorkflow(context.Background(), ownerID, workflowID, created.Version, &workflow.UpdateWorkflowRequest{
+		Name: "Execution contract", Nodes: []workflow.WorkflowNodeRequest{{Key: "run", AgentID: agentID, Config: map[string]interface{}{
+			"mode": "strict",
+			"input_mapping": map[string]interface{}{"version": "v1", "fields": map[string]interface{}{
+				"task": map[string]interface{}{"source": "workflow_input", "path": []interface{}{"text"}},
+			}},
+		}}},
+	})
 	require.NoError(t, err)
 	mapped, err := svc.ValidateExternalExecutionTarget(context.Background(), ownerID, workflowID)
 	require.NoError(t, err)

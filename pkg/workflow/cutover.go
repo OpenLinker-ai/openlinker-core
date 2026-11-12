@@ -155,6 +155,50 @@ func ReopenWorkflowAdmission(ctx context.Context, pool *pgxpool.Pool, reason str
 	return report, nil
 }
 
+// workflowDrainRequiredVersions are the Core migrations that refuse to run
+// while any workflow run is unfinished (104 attempts, 105 versions). A
+// release crossing one of them must drain workflow runs first.
+var workflowDrainRequiredVersions = []int64{104, 105}
+
+// workflowAdmissionVersion is the first schema with the admission barrier.
+const workflowAdmissionVersion int64 = 103
+
+// WorkflowCutoverMode is the release decision for the database's current
+// Core schema: "cutover" when upgrading to this release crosses a migration
+// that needs drained workflow runs, "none" otherwise.
+type WorkflowCutoverMode struct {
+	Mode          string `json:"mode"`
+	SourceVersion int64  `json:"source_version"`
+	Reason        string `json:"reason,omitempty"`
+}
+
+// ErrWorkflowCutoverUnsupportedSource: the database predates the admission
+// release, so workflow runs cannot be drained by this release.
+var ErrWorkflowCutoverUnsupportedSource = errors.New("deploy the workflow admission release (Core schema 103) first")
+
+func DecideWorkflowCutoverMode(ctx context.Context, pool *pgxpool.Pool) (WorkflowCutoverMode, error) {
+	var version int64
+	var dirty bool
+	if err := pool.QueryRow(ctx, `SELECT version, dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
+		return WorkflowCutoverMode{}, fmt.Errorf("read Core schema version: %w", err)
+	}
+	mode := WorkflowCutoverMode{Mode: "none", SourceVersion: version}
+	if dirty {
+		return mode, fmt.Errorf("Core schema %d is dirty", version)
+	}
+	for _, required := range workflowDrainRequiredVersions {
+		if version < required {
+			mode.Mode = "cutover"
+			mode.Reason = fmt.Sprintf("migration %d requires drained workflow runs", required)
+			break
+		}
+	}
+	if mode.Mode == "cutover" && version < workflowAdmissionVersion {
+		return mode, ErrWorkflowCutoverUnsupportedSource
+	}
+	return mode, nil
+}
+
 // DrainWorkflowAdmission switches admission to draining (idempotently) and
 // reports whether the drain is complete. It works on the schema of the
 // release being replaced (103 or later): the admission row is the barrier

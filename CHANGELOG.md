@@ -111,6 +111,40 @@ runtime protocol, and migration contract are declared stable.
   `WORKFLOW_RERUN_NOT_REUSABLE`. Steps now carry `attempt`, `effective` and
   `source`.
 
+### Workflow versions
+
+- Migration `105` makes workflow definitions versioned. Every workflow gets
+  an immutable version 1 that keeps its node UUIDs, configs and edges, so the
+  execution contract hash (`hct:v1`) of an unedited workflow is unchanged.
+  Steps, launches and logical nodes now reference immutable version nodes
+  (the foreign keys are switched inside the migration with no unconstrained
+  window); `workflow_nodes` remains as the projection of the current version.
+  Every run records `workflow_version_id`. Like `104` it requires drained
+  workflow runs; `workflow-cutover mode` tells a release whether a drain is
+  needed for the database it upgrades.
+- New endpoints: `PUT /workflows/:id` (requires `If-Match: <version>`; 409
+  `WORKFLOW_VERSION_CONFLICT` when stale, 428 without it),
+  `GET /workflows/:id/versions[/:version]`,
+  `POST /workflows/:id/duplicate|archive|unarchive`. Workflow responses carry
+  `version`, `version_id` and `semantics`; run responses carry
+  `workflow_version`. `POST /workflows/:id/runs` accepts `version`.
+- Runs execute the version they pinned at creation: an edit never changes a
+  queued, paused or retried run. Retry and step Rerun use the source run's
+  version. Definition reads take nodes and edges from one version.
+- **Behaviour change:** archived workflows refuse new runs (409
+  `WORKFLOW_ARCHIVED`, checked atomically when the run is created) and new
+  versions.
+- External Execution accepts an optional `target_version_id` (validation
+  returns it with the contract hash). With it, that version executes;
+  without it, the version current at launch must still match
+  `expected_contract_hash`. Requests without a version keep their exact
+  request fingerprint. The workflow launch transaction locks the workflow
+  and the node Agents, re-checks eligibility and recomputes the contract
+  hash; deterministic refusals are recorded as `TARGET_UNAVAILABLE` or
+  `TARGET_CONTRACT_CHANGED` instead of a retryable 503. Capability writes now
+  lock the Agent row first. Workflows with `semantics: v2` are not
+  executable externally yet.
+
 ### Security
 
 - **Behaviour change:** the production HTTP rate limiter no longer trusts a

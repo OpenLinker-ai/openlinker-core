@@ -234,8 +234,10 @@ func scanWorkflowRun(row interface {
 }
 
 const createWorkflowRun = `-- name: CreateWorkflowRun :one
-INSERT INTO workflow_runs (workflow_id, user_id, status, input, attempt_count)
-SELECT $1, $2, 'running', $3, 1
+INSERT INTO workflow_runs (workflow_id, user_id, status, input, attempt_count, workflow_version_id)
+SELECT $1, $2, 'running', $3, 1,
+       CASE WHEN (SELECT status FROM workflows WHERE id = $1) = 'active'
+            THEN COALESCE($4::uuid, (SELECT current_version_id FROM workflows WHERE id = $1)) END
 WHERE EXISTS (
     SELECT 1 FROM workflow_admission
     WHERE singleton AND state = 'open'
@@ -246,21 +248,24 @@ WHERE EXISTS (
 	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
 
 type CreateWorkflowRunParams struct {
-	WorkflowID uuid.UUID `db:"workflow_id" json:"workflow_id"`
-	UserID     uuid.UUID `db:"user_id" json:"user_id"`
-	Input      []byte    `db:"input" json:"input"`
+	WorkflowID        uuid.UUID  `db:"workflow_id" json:"workflow_id"`
+	UserID            uuid.UUID  `db:"user_id" json:"user_id"`
+	Input             []byte     `db:"input" json:"input"`
+	WorkflowVersionID *uuid.UUID `db:"workflow_version_id" json:"workflow_version_id"`
 }
 
 func (q *Queries) CreateWorkflowRun(ctx context.Context, arg CreateWorkflowRunParams) (WorkflowRun, error) {
-	row := q.db.QueryRow(ctx, createWorkflowRun, arg.WorkflowID, arg.UserID, arg.Input)
+	row := q.db.QueryRow(ctx, createWorkflowRun, arg.WorkflowID, arg.UserID, arg.Input, arg.WorkflowVersionID)
 	var r WorkflowRun
 	err := scanWorkflowRun(row, &r)
 	return r, err
 }
 
 const createPendingWorkflowRun = `-- name: CreatePendingWorkflowRun :one
-	INSERT INTO workflow_runs (workflow_id, user_id, status, input, max_attempts)
-	SELECT $1, $2, 'pending', $3, $4
+INSERT INTO workflow_runs (workflow_id, user_id, status, input, max_attempts, workflow_version_id)
+SELECT $1, $2, 'pending', $3, $4,
+       CASE WHEN (SELECT status FROM workflows WHERE id = $1) = 'active'
+            THEN COALESCE($5::uuid, (SELECT current_version_id FROM workflows WHERE id = $1)) END
 WHERE EXISTS (
     SELECT 1 FROM workflow_admission
     WHERE singleton AND state = 'open'
@@ -271,22 +276,25 @@ WHERE EXISTS (
 	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
 
 type CreatePendingWorkflowRunParams struct {
-	WorkflowID  uuid.UUID `db:"workflow_id" json:"workflow_id"`
-	UserID      uuid.UUID `db:"user_id" json:"user_id"`
-	Input       []byte    `db:"input" json:"input"`
-	MaxAttempts int32     `db:"max_attempts" json:"max_attempts"`
+	WorkflowID        uuid.UUID  `db:"workflow_id" json:"workflow_id"`
+	UserID            uuid.UUID  `db:"user_id" json:"user_id"`
+	Input             []byte     `db:"input" json:"input"`
+	MaxAttempts       int32      `db:"max_attempts" json:"max_attempts"`
+	WorkflowVersionID *uuid.UUID `db:"workflow_version_id" json:"workflow_version_id"`
 }
 
 func (q *Queries) CreatePendingWorkflowRun(ctx context.Context, arg CreatePendingWorkflowRunParams) (WorkflowRun, error) {
-	row := q.db.QueryRow(ctx, createPendingWorkflowRun, arg.WorkflowID, arg.UserID, arg.Input, arg.MaxAttempts)
+	row := q.db.QueryRow(ctx, createPendingWorkflowRun, arg.WorkflowID, arg.UserID, arg.Input, arg.MaxAttempts, arg.WorkflowVersionID)
 	var r WorkflowRun
 	err := scanWorkflowRun(row, &r)
 	return r, err
 }
 
 const createPendingExternalExecutionWorkflowRun = `-- name: CreatePendingExternalExecutionWorkflowRun :one
-	INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts)
-	SELECT $1, $2, $3, 'pending', $4, $5
+INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts, workflow_version_id)
+SELECT $1, $2, $3, 'pending', $4, $5,
+       CASE WHEN (SELECT status FROM workflows WHERE id = $2) = 'active'
+            THEN COALESCE($6::uuid, (SELECT current_version_id FROM workflows WHERE id = $2)) END
 WHERE EXISTS (
     SELECT 1 FROM workflow_admission
     WHERE singleton AND state = 'open'
@@ -298,15 +306,16 @@ WHERE EXISTS (
 	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
 
 type CreatePendingExternalExecutionWorkflowRunParams struct {
-	ID          uuid.UUID `db:"id" json:"id"`
-	WorkflowID  uuid.UUID `db:"workflow_id" json:"workflow_id"`
-	UserID      uuid.UUID `db:"user_id" json:"user_id"`
-	Input       []byte    `db:"input" json:"input"`
-	MaxAttempts int32     `db:"max_attempts" json:"max_attempts"`
+	ID                uuid.UUID  `db:"id" json:"id"`
+	WorkflowID        uuid.UUID  `db:"workflow_id" json:"workflow_id"`
+	UserID            uuid.UUID  `db:"user_id" json:"user_id"`
+	Input             []byte     `db:"input" json:"input"`
+	MaxAttempts       int32      `db:"max_attempts" json:"max_attempts"`
+	WorkflowVersionID *uuid.UUID `db:"workflow_version_id" json:"workflow_version_id"`
 }
 
 func (q *Queries) CreatePendingExternalExecutionWorkflowRun(ctx context.Context, arg CreatePendingExternalExecutionWorkflowRunParams) (WorkflowRun, error) {
-	row := q.db.QueryRow(ctx, createPendingExternalExecutionWorkflowRun, arg.ID, arg.WorkflowID, arg.UserID, arg.Input, arg.MaxAttempts)
+	row := q.db.QueryRow(ctx, createPendingExternalExecutionWorkflowRun, arg.ID, arg.WorkflowID, arg.UserID, arg.Input, arg.MaxAttempts, arg.WorkflowVersionID)
 	var r WorkflowRun
 	err := scanWorkflowRun(row, &r)
 	return r, err
