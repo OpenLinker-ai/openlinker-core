@@ -665,7 +665,7 @@ func scanWorkflowRunStep(row interface {
 	return row.Scan(
 		&s.ID, &s.WorkflowRunID, &s.WorkflowNodeID, &s.NodeKey, &s.AgentID, &s.RunID,
 		&s.Status, &s.Input, &s.Output, &s.ErrorMessage, &s.Sequence, &s.StartedAt, &s.FinishedAt,
-		&s.CreatedAt, &s.UpdatedAt,
+		&s.CreatedAt, &s.UpdatedAt, &s.Attempt, &s.Source,
 	)
 }
 
@@ -677,7 +677,7 @@ INSERT INTO workflow_run_steps (
 )
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
-          created_at, updated_at`
+          created_at, updated_at, attempt, source`
 
 type CreateWorkflowRunStepParams struct {
 	WorkflowRunID  uuid.UUID `db:"workflow_run_id" json:"workflow_run_id"`
@@ -732,7 +732,7 @@ WHERE id = $1
   AND (run_id IS NULL OR run_id = $2)
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
-          created_at, updated_at`
+          created_at, updated_at, attempt, source`
 
 type MarkWorkflowRunStepSuccessParams struct {
 	ID     uuid.UUID  `db:"id" json:"id"`
@@ -759,7 +759,7 @@ WHERE id = $1
   AND (run_id IS NULL OR run_id = $2)
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
-          created_at, updated_at`
+          created_at, updated_at, attempt, source`
 
 type MarkWorkflowRunStepFailedParams struct {
 	ID           uuid.UUID  `db:"id" json:"id"`
@@ -777,7 +777,7 @@ func (q *Queries) MarkWorkflowRunStepFailed(ctx context.Context, arg MarkWorkflo
 const listWorkflowRunSteps = `-- name: ListWorkflowRunSteps :many
 SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        status, input, output, error_message, sequence, started_at, finished_at,
-       created_at, updated_at
+       created_at, updated_at, attempt, source
 FROM workflow_run_steps
 WHERE workflow_run_id = $1
   -- Attempts that never started (pending, or canceled before starting) are
@@ -806,7 +806,7 @@ func (q *Queries) ListWorkflowRunSteps(ctx context.Context, workflowRunID uuid.U
 const listWorkflowRunStepsByRunIDs = `-- name: ListWorkflowRunStepsByRunIDs :many
 SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        status, input, output, error_message, sequence, started_at, finished_at,
-       created_at, updated_at
+       created_at, updated_at, attempt, source
 FROM workflow_run_steps
 WHERE workflow_run_id = ANY($1::uuid[])
   -- Attempts that never started (pending, or canceled before starting) are

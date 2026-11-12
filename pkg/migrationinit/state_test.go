@@ -148,7 +148,7 @@ func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
 		Tables:            94,
-		Constraints:       760,
+		Constraints:       761,
 		Indexes:           316,
 		Triggers:          80,
 		CoreIdentities:    1,

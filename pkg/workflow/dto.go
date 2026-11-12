@@ -35,6 +35,13 @@ type ExternalExecutionTargetValidation struct {
 
 type RerunWorkflowStepRequest struct {
 	NodeKey string `json:"node_key" validate:"required,min=1,max=80"`
+	// AcknowledgeUnconfirmedChildren: the owner accepts that children of the
+	// source run may still be executing in their backends.
+	AcknowledgeUnconfirmedChildren bool `json:"acknowledge_unconfirmed_children,omitempty"`
+}
+
+type RetryWorkflowRunRequest struct {
+	AcknowledgeUnconfirmedChildren bool `json:"acknowledge_unconfirmed_children,omitempty"`
 }
 
 type WorkflowResponse struct {
@@ -85,6 +92,12 @@ type WorkflowRunResponse struct {
 	FinishedAt      string                    `json:"finished_at,omitempty"`
 	CreatedAt       string                    `json:"created_at"`
 	UpdatedAt       string                    `json:"updated_at"`
+	// HasUnconfirmedChildren: some child Run of this run could not be shown
+	// to have stopped in its backend.
+	HasUnconfirmedChildren bool `json:"has_unconfirmed_children,omitempty"`
+	// UnconfirmedChildrenAcknowledgedBy: the owner who created this run by
+	// Retry/Rerun accepting unconfirmed children of the source run.
+	UnconfirmedChildrenAcknowledgedBy string `json:"unconfirmed_children_acknowledged_by,omitempty"`
 }
 
 type WorkflowRunListResponse struct {
@@ -143,4 +156,8 @@ type WorkflowRunStepResponse struct {
 	Sequence   int32                  `json:"sequence"`
 	StartedAt  string                 `json:"started_at"`
 	FinishedAt string                 `json:"finished_at,omitempty"`
+	Attempt    int32                  `json:"attempt"`
+	// Effective marks the node's latest listed attempt, the one readers use.
+	Effective bool   `json:"effective"`
+	Source    string `json:"source"`
 }

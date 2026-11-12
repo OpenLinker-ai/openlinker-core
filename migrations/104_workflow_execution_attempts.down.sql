@@ -61,11 +61,13 @@ ALTER TABLE public.workflow_step_launches
 ALTER TABLE public.workflow_run_steps
     DROP CONSTRAINT workflow_run_steps_attempt_key,
     DROP CONSTRAINT workflow_run_steps_legacy_unfinished_running,
+    DROP CONSTRAINT workflow_run_steps_source_valid,
     DROP CONSTRAINT workflow_run_steps_attempt_positive,
     DROP CONSTRAINT workflow_run_steps_status_valid;
 ALTER TABLE public.workflow_run_steps
     ADD CONSTRAINT workflow_run_steps_status_valid CHECK ((status = ANY (ARRAY['running'::text, 'success'::text, 'failed'::text])));
 ALTER TABLE public.workflow_run_steps
+    DROP COLUMN source,
     DROP COLUMN legacy_unfinished,
     DROP COLUMN not_before,
     DROP COLUMN deadline_at,
@@ -81,6 +83,7 @@ ALTER TABLE public.workflow_runs
     DROP COLUMN lease_mode,
     DROP COLUMN lease_epoch,
     DROP COLUMN lease_expires_at,
-    DROP COLUMN lease_owner;
+    DROP COLUMN lease_owner,
+    DROP COLUMN unconfirmed_children_acknowledged_by;
 
 COMMIT;

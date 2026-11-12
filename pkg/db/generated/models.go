@@ -1102,4 +1102,6 @@ type WorkflowRunStep struct {
 	FinishedAt     *time.Time `db:"finished_at" json:"finished_at"`
 	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+	Attempt        int32      `db:"attempt" json:"attempt"`
+	Source         string     `db:"source" json:"source"`
 }

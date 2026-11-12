@@ -271,7 +271,7 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	verify := readInitializer(t, "../../migrations/086_current_schema_init_verify.sql")
 	for _, fragment := range []string{
 		"public_tables <> 94",
-		"public_constraints <> 760",
+		"public_constraints <> 761",
 		"public_indexes <> 316",
 		"public_triggers <> 80",
 		"public_functions <> 72",

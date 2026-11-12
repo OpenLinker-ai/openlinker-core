@@ -23,6 +23,9 @@ END $$;
 -- for a normal executor and 'finalize' for the cleanup lease granted once
 -- the recovery budget is spent. The three lease columns are set together.
 ALTER TABLE public.workflow_runs
+    -- The owner who accepted, when creating this run by Retry or Rerun, that
+    -- children of the source run may still be executing in their backends.
+    ADD COLUMN unconfirmed_children_acknowledged_by uuid,
     ADD COLUMN lease_owner uuid,
     ADD COLUMN lease_expires_at timestamp with time zone,
     ADD COLUMN lease_epoch bigint DEFAULT 0 NOT NULL,
@@ -45,7 +48,10 @@ ALTER TABLE public.workflow_run_steps
     ADD COLUMN attempt integer DEFAULT 1 NOT NULL,
     ADD COLUMN deadline_at timestamp with time zone,
     ADD COLUMN not_before timestamp with time zone,
-    ADD COLUMN legacy_unfinished boolean DEFAULT false NOT NULL;
+    ADD COLUMN legacy_unfinished boolean DEFAULT false NOT NULL,
+    -- executed: run by this run; reused: carried over from a source run by a
+    -- step rerun (keeps the source child Run and output).
+    ADD COLUMN source text DEFAULT 'executed'::text NOT NULL;
 
 -- Backfilling history must not rewrite its timestamps.
 ALTER TABLE public.workflow_run_steps DISABLE TRIGGER workflow_run_steps_set_updated_at;
@@ -82,6 +88,7 @@ ALTER TABLE public.workflow_run_steps
         status = ANY (ARRAY['pending'::text, 'running'::text, 'success'::text, 'failed'::text, 'timeout'::text, 'canceled'::text])
     ),
     ADD CONSTRAINT workflow_run_steps_attempt_positive CHECK (attempt >= 1),
+    ADD CONSTRAINT workflow_run_steps_source_valid CHECK (source = ANY (ARRAY['executed'::text, 'reused'::text, 'copied'::text])),
     ADD CONSTRAINT workflow_run_steps_legacy_unfinished_running CHECK (NOT legacy_unfinished OR status = 'running'),
     ADD CONSTRAINT workflow_run_steps_attempt_key UNIQUE (workflow_run_id, workflow_node_id, attempt);
 

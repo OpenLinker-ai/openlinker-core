@@ -137,7 +137,7 @@ func TestWorkflowAdmissionDrainingRefusesEveryEntryAndPersists(t *testing.T) {
 		Input: map[string]interface{}{"topic": "sync"},
 	})
 	requireWorkflowDraining(t, err)
-	_, err = f.svc.RetryWorkflowRun(ctx, f.ownerID, failedRunID)
+	_, err = f.svc.RetryWorkflowRun(ctx, f.ownerID, failedRunID, nil)
 	requireWorkflowDraining(t, err)
 
 	// The worker does not claim the pending run while draining.

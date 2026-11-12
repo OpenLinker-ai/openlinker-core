@@ -91,6 +91,22 @@ runtime protocol, and migration contract are declared stable.
 - The worker claims runs on its tick and executes them in goroutines (at
   most `WORKFLOW_RUN_MAX_CONCURRENT`, default 8, per process). Step lists
   omit attempts that never started.
+- Retry and step Rerun lock the source run and, in the same transaction,
+  check every child Run the source ever referenced (launches and step
+  run_ids, including children reused from earlier reruns). While a stop or
+  the run's cancellation is still open they return 409
+  `WORKFLOW_CHILDREN_STOPPING`; when a child cannot be shown to have stopped
+  they return 409 `WORKFLOW_CHILDREN_UNCONFIRMED` unless the owner sends
+  `acknowledge_unconfirmed_children: true`, which is recorded on the new run
+  (`unconfirmed_children_acknowledged_by`). Runs report
+  `has_unconfirmed_children`.
+- **Behaviour change:** step Rerun no longer executes synchronously. It
+  returns 202 with a pending run whose reused nodes are copied with their
+  logical result (steps marked `source: reused`, keeping the source child
+  Run and output); the worker executes the rest. A node outside the rerun
+  set must have ended successfully (or skipped); otherwise 409
+  `WORKFLOW_RERUN_NOT_REUSABLE`. Steps now carry `attempt`, `effective` and
+  `source`.
 
 ### Security
 

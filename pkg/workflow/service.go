@@ -679,148 +679,6 @@ func externalExecutionWorkflowRunMatches(run db.WorkflowRun, workflowID, actorUs
 	return reflect.DeepEqual(existing, normalizedInput)
 }
 
-func (s *Service) RetryWorkflowRun(ctx context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {
-	run, err := s.getWorkflowRunForOwner(ctx, userID, workflowRunID)
-	if err != nil {
-		return nil, err
-	}
-	if run.Status != workflowRunStatusFailed {
-		return nil, httpx.Conflict("只有 failed workflow_run 可以重试")
-	}
-	input := map[string]interface{}{}
-	if len(run.Input) > 0 {
-		if err := json.Unmarshal(run.Input, &input); err != nil {
-			return nil, httpx.Internal("workflow_run input 不是合法 JSON")
-		}
-	}
-	return s.StartWorkflowRun(ctx, userID, run.WorkflowID, &RunWorkflowRequest{
-		Input:       input,
-		MaxAttempts: run.MaxAttempts,
-	})
-}
-
-func (s *Service) RerunWorkflowStep(ctx context.Context, userID, workflowRunID uuid.UUID, req *RerunWorkflowStepRequest) (*WorkflowStepRerunResponse, error) {
-	if s.runtime == nil {
-		return nil, httpx.Internal("workflow runtime 未配置")
-	}
-	if req == nil {
-		return nil, httpx.BadRequest("请求体不能为空")
-	}
-	nodeKey := strings.TrimSpace(req.NodeKey)
-	if nodeKey == "" {
-		return nil, httpx.BadRequest("node_key 不能为空")
-	}
-	sourceRun, err := s.getWorkflowRunForOwner(ctx, userID, workflowRunID)
-	if err != nil {
-		return nil, err
-	}
-	switch sourceRun.Status {
-	case workflowRunStatusSuccess, workflowRunStatusFailed:
-	default:
-		return nil, httpx.Conflict("只有 success / failed workflow_run 可以 step 级重跑")
-	}
-	w, nodes, err := s.getWorkflowForOwner(ctx, userID, sourceRun.WorkflowID)
-	if err != nil {
-		return nil, err
-	}
-	graph, err := workflowGraphFromDefinition(w, nodes)
-	if err != nil {
-		return nil, err
-	}
-	nodeByKey := map[string]db.WorkflowNode{}
-	for _, node := range nodes {
-		nodeByKey[node.NodeKey] = node
-	}
-	if _, ok := nodeByKey[nodeKey]; !ok {
-		return nil, httpx.NotFound("workflow step 不存在")
-	}
-
-	sourceSteps, err := s.queries.ListWorkflowRunSteps(ctx, sourceRun.ID)
-	if err != nil {
-		log.Error().Err(err).Str("workflow_run_id", sourceRun.ID.String()).Msg("workflow.RerunWorkflowStep: source steps")
-		return nil, httpx.Internal("查询 workflow_run_steps 失败")
-	}
-	sourceStepByKey := latestWorkflowStepByNodeKey(sourceSteps)
-	if _, ok := sourceStepByKey[nodeKey]; !ok {
-		return nil, httpx.Conflict("source workflow_run 尚未执行该 step，请重跑已执行过的 step 或其失败父节点")
-	}
-	affected := workflowAffectedNodeKeys(graph, nodeKey)
-	for _, node := range nodes {
-		if _, shouldRerun := affected[node.NodeKey]; shouldRerun {
-			continue
-		}
-		step, ok := sourceStepByKey[node.NodeKey]
-		if !ok || step.Status != workflowRunStatusSuccess {
-			return nil, httpx.Conflict("非重跑路径上的 step 必须已成功，无法复用: " + node.NodeKey)
-		}
-	}
-
-	input := map[string]interface{}{}
-	if len(sourceRun.Input) > 0 {
-		if err := json.Unmarshal(sourceRun.Input, &input); err != nil {
-			return nil, httpx.Internal("workflow_run input 不是合法 JSON")
-		}
-	}
-	inputJSON, err := json.Marshal(input)
-	if err != nil {
-		return nil, httpx.BadRequest("input 不是合法 JSON")
-	}
-	rerun, err := s.queries.CreateWorkflowRun(ctx, db.CreateWorkflowRunParams{
-		WorkflowID: sourceRun.WorkflowID,
-		UserID:     userID,
-		Input:      inputJSON,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errWorkflowAdmissionDraining
-	}
-	if err != nil {
-		log.Error().Err(err).Str("workflow_run_id", sourceRun.ID.String()).Msg("workflow.RerunWorkflowStep: CreateWorkflowRun")
-		return nil, httpx.Internal("创建 step rerun workflow_run 失败")
-	}
-	ctx, finishLease, err := s.leaseNewWorkflowRun(ctx, rerun.ID)
-	if err != nil {
-		return nil, err
-	}
-	defer finishLease()
-
-	reusedKeys := []string{}
-	rerunKeys := []string{}
-	for _, key := range workflowTopologicalOrder(graph) {
-		if _, shouldRerun := affected[key]; shouldRerun {
-			rerunKeys = append(rerunKeys, key)
-			continue
-		}
-		sourceStep := sourceStepByKey[key]
-		if _, err := workflowStepOutputMap(sourceStep); err != nil {
-			_ = s.failWorkflowRunAtomic(ctx, rerun.ID, err.Error())
-			return nil, httpx.Internal(err.Error())
-		}
-		if err := s.copyWorkflowRunStep(ctx, rerun.ID, sourceStep); err != nil {
-			_ = s.failWorkflowRunAtomic(ctx, rerun.ID, err.Error())
-			return nil, err
-		}
-		reusedKeys = append(reusedKeys, key)
-	}
-	runResp, err := s.executeWorkflowRun(ctx, w, nodes, graph, rerun, input)
-	var failed *workflowRunFailedError
-	if err != nil && !(errors.As(err, &failed) && runResp != nil) {
-		return nil, err
-	}
-	comparison, err := s.CompareWorkflowRuns(ctx, userID, sourceRun.ID, rerun.ID)
-	if err != nil {
-		return nil, err
-	}
-	return &WorkflowStepRerunResponse{
-		SourceRunID:    sourceRun.ID.String(),
-		RerunRunID:     rerun.ID.String(),
-		NodeKey:        nodeKey,
-		ReusedNodeKeys: reusedKeys,
-		RerunNodeKeys:  rerunKeys,
-		Run:            *runResp,
-		Comparison:     *comparison,
-	}, nil
-}
-
 func (s *Service) CompareWorkflowRuns(ctx context.Context, userID, baseRunID, candidateRunID uuid.UUID) (*WorkflowRunComparisonResponse, error) {
 	baseRun, err := s.getWorkflowRunForOwner(ctx, userID, baseRunID)
 	if err != nil {
@@ -1002,6 +860,7 @@ func (s *Service) ListWorkflowRunsPage(ctx context.Context, userID, workflowID u
 	for _, run := range rows {
 		items = append(items, workflowRunToResponse(run, stepsByRunID[run.ID]))
 	}
+	s.decorateWorkflowRunStopEvidence(ctx, items)
 	return &WorkflowRunListResponse{
 		Items:        items,
 		Total:        total,
@@ -1268,7 +1127,53 @@ func (s *Service) GetWorkflowRun(ctx context.Context, userID, workflowRunID uuid
 		return nil, httpx.Internal("查询 workflow_run_steps 失败")
 	}
 	resp := workflowRunToResponse(run, steps)
-	return &resp, nil
+	items := []WorkflowRunResponse{resp}
+	s.decorateWorkflowRunStopEvidence(ctx, items)
+	return &items[0], nil
+}
+
+// decorateWorkflowRunStopEvidence adds the unconfirmed-children markers. A
+// child is unconfirmed when its stop record or the run's public cancellation
+// ended without a stop confirmation. Best effort: a read failure leaves the
+// markers unset.
+func (s *Service) decorateWorkflowRunStopEvidence(ctx context.Context, items []WorkflowRunResponse) {
+	if s.pool == nil || len(items) == 0 {
+		return
+	}
+	ids := make([]uuid.UUID, 0, len(items))
+	for _, item := range items {
+		if id, err := uuid.Parse(item.ID); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT r.id,
+		       EXISTS (SELECT 1 FROM workflow_step_stops s WHERE s.workflow_run_id = r.id AND s.state = 'unconfirmed')
+		       OR EXISTS (SELECT 1 FROM workflow_run_cancellations c WHERE c.workflow_run_id = r.id AND c.state = 'unconfirmed'),
+		       r.unconfirmed_children_acknowledged_by
+		FROM workflow_runs r WHERE r.id = ANY($1::uuid[])
+	`, ids)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	byID := map[string]int{}
+	for i, item := range items {
+		byID[item.ID] = i
+	}
+	for rows.Next() {
+		var id uuid.UUID
+		var unconfirmed bool
+		var acknowledgedBy *uuid.UUID
+		if rows.Scan(&id, &unconfirmed, &acknowledgedBy) != nil {
+			return
+		}
+		i := byID[id.String()]
+		items[i].HasUnconfirmedChildren = unconfirmed
+		if acknowledgedBy != nil {
+			items[i].UnconfirmedChildrenAcknowledgedBy = acknowledgedBy.String()
+		}
+	}
 }
 
 func (s *Service) getWorkflowRunForOwner(ctx context.Context, userID, workflowRunID uuid.UUID) (db.WorkflowRun, error) {
@@ -1954,8 +1859,16 @@ func workflowRunToResponse(run db.WorkflowRun, steps []db.WorkflowRunStep) Workf
 	if run.FinishedAt != nil {
 		resp.FinishedAt = run.FinishedAt.UTC().Format(time.RFC3339)
 	}
+	latest := map[uuid.UUID]int32{}
 	for _, step := range steps {
-		resp.Steps = append(resp.Steps, workflowRunStepToResponse(step))
+		if step.Attempt > latest[step.WorkflowNodeID] {
+			latest[step.WorkflowNodeID] = step.Attempt
+		}
+	}
+	for _, step := range steps {
+		stepResp := workflowRunStepToResponse(step)
+		stepResp.Effective = step.Attempt == latest[step.WorkflowNodeID]
+		resp.Steps = append(resp.Steps, stepResp)
 	}
 	return resp
 }
@@ -1977,6 +1890,8 @@ func workflowRunStepToResponse(step db.WorkflowRunStep) WorkflowRunStepResponse 
 		Output:    output,
 		Sequence:  step.Sequence,
 		StartedAt: step.StartedAt.UTC().Format(time.RFC3339),
+		Attempt:   step.Attempt,
+		Source:    step.Source,
 	}
 	if step.RunID != nil {
 		resp.RunID = step.RunID.String()

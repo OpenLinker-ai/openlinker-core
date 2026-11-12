@@ -23,8 +23,8 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 760 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 760', public_constraints;
+    IF public_constraints <> 761 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 761', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes

@@ -359,7 +359,7 @@ INSERT INTO workflow_run_steps (
 )
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
-          created_at, updated_at;
+          created_at, updated_at, attempt, source;
 
 -- name: AttachWorkflowRunStepRun :execrows
 -- A matching re-attachment is accepted and deliberately touches updated_at.
@@ -383,7 +383,7 @@ WHERE id = $1
   AND (run_id IS NULL OR run_id = $2)
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
-          created_at, updated_at;
+          created_at, updated_at, attempt, source;
 
 -- name: MarkWorkflowRunStepFailed :one
 UPDATE workflow_run_steps
@@ -397,12 +397,12 @@ WHERE id = $1
   AND (run_id IS NULL OR run_id = $2)
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
-          created_at, updated_at;
+          created_at, updated_at, attempt, source;
 
 -- name: ListWorkflowRunSteps :many
 SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        status, input, output, error_message, sequence, started_at, finished_at,
-       created_at, updated_at
+       created_at, updated_at, attempt, source
 FROM workflow_run_steps
 WHERE workflow_run_id = $1
   -- Attempts that never started (pending, or canceled before starting) are
@@ -414,7 +414,7 @@ ORDER BY sequence ASC, attempt ASC, created_at ASC, id ASC;
 -- name: ListWorkflowRunStepsByRunIDs :many
 SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        status, input, output, error_message, sequence, started_at, finished_at,
-       created_at, updated_at
+       created_at, updated_at, attempt, source
 FROM workflow_run_steps
 WHERE workflow_run_id = ANY($1::uuid[])
   -- Attempts that never started (pending, or canceled before starting) are

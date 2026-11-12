@@ -57,7 +57,7 @@ const (
 	CoreReviewedBridgeVersion      int64 = 88
 	CoreLegacyBridgeVersion        int64 = 86
 	CloudVersion                   int64 = 55
-	CoreSchemaDigest                     = "3f819c05a3f7f2e1042bfa3659f83a557af98a797820f87c5ff97b0d88df4ef0"
+	CoreSchemaDigest                     = "075688903f447bdad2d2d1f7de2388d55321b11c6cff20905677407e2cc33d38"
 	CoreUpgradeSchemaDigest              = "1b2591b579018b4edd6465e19f36823fca28af01068742358293d1367c1c1ed8"
 	CoreReviewedBridgeSchemaDigest       = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
 	CoreLegacyBridgeSchemaDigest         = "6c22808a8cd658cf827a5828a92d3343f040d7d6ff3302f9fdab691fe90aec5b"
@@ -779,7 +779,7 @@ func validateCoreShape(shape SchemaShape) error {
 		// Measured on a clean PostgreSQL 16 with 086..104 applied; the digest is
 		// a catalog fingerprint and cannot be derived from the DDL alone.
 		Tables:            94,
-		Constraints:       760,
+		Constraints:       761,
 		Indexes:           316,
 		Triggers:          80,
 		CoreIdentities:    1,

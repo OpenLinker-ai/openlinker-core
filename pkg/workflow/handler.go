@@ -28,7 +28,7 @@ type workflowService interface {
 	ListWorkflowRuns(context.Context, uuid.UUID, uuid.UUID, int32) (*WorkflowRunListResponse, error)
 	ListWorkflowRunsPage(context.Context, uuid.UUID, uuid.UUID, string, string, string, int32, int32) (*WorkflowRunListResponse, error)
 	GetWorkflowRun(context.Context, uuid.UUID, uuid.UUID) (*WorkflowRunResponse, error)
-	RetryWorkflowRun(context.Context, uuid.UUID, uuid.UUID) (*WorkflowRunResponse, error)
+	RetryWorkflowRun(context.Context, uuid.UUID, uuid.UUID, *RetryWorkflowRunRequest) (*WorkflowRunResponse, error)
 	RerunWorkflowStep(context.Context, uuid.UUID, uuid.UUID, *RerunWorkflowStepRequest) (*WorkflowStepRerunResponse, error)
 	CompareWorkflowRuns(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*WorkflowRunComparisonResponse, error)
 	PauseWorkflowRun(context.Context, uuid.UUID, uuid.UUID) (*WorkflowRunResponse, error)
@@ -283,10 +283,16 @@ func (h *Handler) RetryRun(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	var req RetryWorkflowRunRequest
+	if c.Request().ContentLength != 0 {
+		if err := c.Bind(&req); err != nil {
+			return httpx.BadRequest("请求体格式错误")
+		}
+	}
 	if err := h.requireWorkflowRunActionPermission(c, uid, id, "workflows:run"); err != nil {
 		return err
 	}
-	resp, err := h.svc.RetryWorkflowRun(c.Request().Context(), uid, id)
+	resp, err := h.svc.RetryWorkflowRun(c.Request().Context(), uid, id, &req)
 	if err != nil {
 		return err
 	}
@@ -316,7 +322,8 @@ func (h *Handler) RerunStep(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, resp)
+	// The rerun run is queued and executed by the worker.
+	return c.JSON(http.StatusAccepted, resp)
 }
 
 func (h *Handler) CompareRuns(c echo.Context) error {

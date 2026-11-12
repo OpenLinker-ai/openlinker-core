@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	runtimemod "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/workflow"
 )
@@ -420,4 +421,101 @@ func TestWorkflowChildCancellationRequiresTheStopClaim(t *testing.T) {
 	require.Equal(t, "canceled", childStatus)
 	_, state := readStepStop(t, f.pool, runID)
 	require.Equal(t, "stopping", state)
+}
+
+func requireWorkflowConflictCode(t *testing.T, err error, code string) {
+	t.Helper()
+	var httpErr *httpx.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	require.Equal(t, http.StatusConflict, httpErr.Status)
+	require.Equal(t, httpx.ErrorCode(code), httpErr.Code)
+}
+
+// timedOutRun fails a run by node timeout and waits until its stop record
+// is finished. Its child ended result-unknown, so it is unconfirmed.
+func timedOutRun(t *testing.T) (*engineFixture, uuid.UUID) {
+	t.Helper()
+	f := newEngineFixture(t, func(_ int64, w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(4 * time.Second):
+		}
+	})
+	f.svc.SetWorkflowNodeTimeout(time.Second)
+	ctx := context.Background()
+	_, err := f.svc.RunWorkflow(ctx, f.ownerID, f.workflowID, &workflow.RunWorkflowRequest{})
+	require.Error(t, err)
+	var runID uuid.UUID
+	require.NoError(t, f.pool.QueryRow(ctx, `SELECT id FROM workflow_runs WHERE workflow_id = $1`, f.workflowID).Scan(&runID))
+	require.Eventually(t, func() bool {
+		_, _ = f.svc.ReconcileWorkflowStepStops(ctx, 10)
+		_, state := readStepStop(t, f.pool, runID)
+		return state == "stopped" || state == "unconfirmed"
+	}, 10*time.Second, 200*time.Millisecond)
+	return f, runID
+}
+
+// Retry needs the owner's explicit acknowledgement when a child of the source
+// run cannot be shown to have stopped; the acknowledgement is recorded.
+func TestWorkflowRetryOfUnconfirmedChildrenNeedsAcknowledgement(t *testing.T) {
+	f, runID := timedOutRun(t)
+	ctx := context.Background()
+
+	_, err := f.svc.RetryWorkflowRun(ctx, f.ownerID, runID, nil)
+	requireWorkflowConflictCode(t, err, "WORKFLOW_CHILDREN_UNCONFIRMED")
+
+	retried, err := f.svc.RetryWorkflowRun(ctx, f.ownerID, runID, &workflow.RetryWorkflowRunRequest{AcknowledgeUnconfirmedChildren: true})
+	require.NoError(t, err)
+	require.Equal(t, "pending", retried.Status)
+	require.Equal(t, f.ownerID.String(), retried.UnconfirmedChildrenAcknowledgedBy)
+}
+
+// While a stop of the source run is still open, Retry and Rerun refuse even
+// with the acknowledgement.
+func TestWorkflowRetryAndRerunRefuseWhileStopsAreOpen(t *testing.T) {
+	f, runID := timedOutRun(t)
+	ctx := context.Background()
+	_, err := f.pool.Exec(ctx, `
+		UPDATE workflow_step_stops SET state = 'requested', applied_at = NULL, finished_at = NULL
+		WHERE workflow_run_id = $1`, runID)
+	require.NoError(t, err)
+
+	_, err = f.svc.RetryWorkflowRun(ctx, f.ownerID, runID, &workflow.RetryWorkflowRunRequest{AcknowledgeUnconfirmedChildren: true})
+	requireWorkflowConflictCode(t, err, "WORKFLOW_CHILDREN_STOPPING")
+	_, err = f.svc.RerunWorkflowStep(ctx, f.ownerID, runID, &workflow.RerunWorkflowStepRequest{
+		NodeKey: "worker", AcknowledgeUnconfirmedChildren: true,
+	})
+	requireWorkflowConflictCode(t, err, "WORKFLOW_CHILDREN_STOPPING")
+}
+
+// A node outside the rerun set that failed the workflow cannot be reused.
+func TestWorkflowRerunRefusesReusingANodeThatFailedTheWorkflow(t *testing.T) {
+	f := newEngineFixture(t, func(_ int64, w http.ResponseWriter, r *http.Request) {
+		var req runtimemod.AgentRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Input["node_key"] == "fails" {
+			http.Error(w, "fails", http.StatusInternalServerError)
+			return
+		}
+		writeAgentOutput(w, map[string]interface{}{"ok": true})
+	})
+	ctx := context.Background()
+	created, err := f.svc.CreateWorkflow(ctx, f.ownerID, &workflow.CreateWorkflowRequest{
+		Name: "Two roots",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "fails", Title: "Fails", AgentID: f.agentID},
+			{Key: "other", Title: "Other", AgentID: f.agentID},
+		},
+		Edges: []map[string]interface{}{},
+	})
+	require.NoError(t, err)
+	_, err = f.svc.RunWorkflow(ctx, f.ownerID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{})
+	require.Error(t, err)
+	var runID uuid.UUID
+	require.NoError(t, f.pool.QueryRow(ctx, `SELECT id FROM workflow_runs WHERE workflow_id = $1`, created.ID).Scan(&runID))
+
+	_, err = f.svc.RerunWorkflowStep(ctx, f.ownerID, runID, &workflow.RerunWorkflowStepRequest{
+		NodeKey: "other", AcknowledgeUnconfirmedChildren: true,
+	})
+	requireWorkflowConflictCode(t, err, "WORKFLOW_RERUN_NOT_REUSABLE")
 }

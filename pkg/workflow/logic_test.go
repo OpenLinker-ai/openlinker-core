@@ -963,13 +963,13 @@ func TestWorkflowRetryRerunWaitAndClaimedRunErrorEdges(t *testing.T) {
 	retryConflictSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{
 		values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusSuccess, nil),
 	}}})}
-	_, err := retryConflictSvc.RetryWorkflowRun(context.Background(), userID, runID)
+	_, err := retryConflictSvc.RetryWorkflowRun(context.Background(), userID, runID, nil)
 	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
 
 	badInputRun := workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusFailed, nil)
 	badInputRun[4] = []byte(`{bad`)
 	retryBadInputSvc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: []workflowFakeRow{{values: badInputRun}}})}
-	_, err = retryBadInputSvc.RetryWorkflowRun(context.Background(), userID, runID)
+	_, err = retryBadInputSvc.RetryWorkflowRun(context.Background(), userID, runID, nil)
 	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
 
 	_, err = (&Service{}).RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "extract"})
@@ -1030,7 +1030,6 @@ func TestWorkflowRerunStepPlanningErrorEdges(t *testing.T) {
 		{values: workflowFakeNodeValues(workflowID, agentID, "extract", 0)},
 		{values: workflowFakeNodeValues(workflowID, agentID, "review", 1)},
 	}
-	reviewStep := workflowFakeStepValues(runID, twoNodeRows[1].values[0].(uuid.UUID), agentID, "review", workflowRunStatusSuccess)
 	extractStep := workflowFakeStepValues(runID, twoNodeRows[0].values[0].(uuid.UUID), agentID, "extract", workflowRunStatusSuccess)
 
 	statusConflictSvc := &Service{
@@ -1081,21 +1080,6 @@ func TestWorkflowRerunStepPlanningErrorEdges(t *testing.T) {
 	_, err = stepsErrSvc.RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "extract"})
 	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
 
-	sourceStepMissingSvc := &Service{
-		runtime: &runtimemod.Service{},
-		queries: db.New(&workflowFakeDBTX{
-			queryRowRows: []workflowFakeRow{
-				{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusSuccess, nil)},
-				{values: workflowFakeWorkflowValues(workflowID, userID)},
-			},
-			queryResults: []workflowFakeQueryResult{
-				{rows: extractNodeRows},
-				{},
-			},
-		}),
-	}
-	_, err = sourceStepMissingSvc.RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "extract"})
-	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
 
 	badInputRun := workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusSuccess, nil)
 	badInputRun[4] = []byte(`{bad`)
@@ -1134,21 +1118,6 @@ func TestWorkflowRerunStepPlanningErrorEdges(t *testing.T) {
 
 	failedExtractStep := append([]any(nil), extractStep...)
 	failedExtractStep[6] = workflowRunStatusFailed
-	unaffectedFailedSvc := &Service{
-		runtime: &runtimemod.Service{},
-		queries: db.New(&workflowFakeDBTX{
-			queryRowRows: []workflowFakeRow{
-				{values: workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusSuccess, nil)},
-				{values: workflowFakeWorkflowValues(workflowID, userID)},
-			},
-			queryResults: []workflowFakeQueryResult{
-				{rows: twoNodeRows},
-				{rows: []workflowFakeRow{{values: failedExtractStep}, {values: reviewStep}}},
-			},
-		}),
-	}
-	_, err = unaffectedFailedSvc.RerunWorkflowStep(context.Background(), userID, runID, &RerunWorkflowStepRequest{NodeKey: "review"})
-	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
 }
 
 func TestWorkflowStoppedAndWorkerTickErrorEdges(t *testing.T) {
@@ -1664,6 +1633,8 @@ func workflowFakeStepValues(runID, nodeID, agentID uuid.UUID, key, status string
 		nil,
 		now,
 		now,
+		int32(1),
+		"executed",
 	}
 }
 
