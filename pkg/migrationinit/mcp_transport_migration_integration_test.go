@@ -39,12 +39,14 @@ VALUES($1,$2,'mcp-transport-existing','Existing MCP','Synthetic','https://mcp.ex
 	}
 	conn.Close(ctx)
 
-	migrateTestDatabaseToCurrent(t, databaseURL)
+	// 102 is now an exact predecessor of the current schema; stop there so the
+	// rollback below exercises 102 itself.
+	migrateTestDatabaseToVersion(t, databaseURL, uint(CoreWorkflowAdmissionPredecessorVersion))
 	snapshot, err := Inspect(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if noop, err := snapshot.ValidateCoreUp(); err != nil || !noop {
+	if noop, err := snapshot.ValidateCoreUp(); err != nil || noop {
 		t.Fatalf("upgraded 102 preflight: noop=%t err=%v shape=%s", noop, err, formatShape(snapshot.CoreShape))
 	}
 
@@ -123,8 +125,7 @@ VALUES($1,$2,'mcp-transport-existing','Existing MCP','Synthetic','https://mcp.ex
 	// numbers, so the catalog is not the measured 102 fingerprint. The schema
 	// contract holds, but the preflight fails closed: the rollback exists for
 	// disposable databases and the production migrate command is forward-only.
-	migrateTestDatabaseToCurrent(t, databaseURL)
-	applyMigrationFile(t, ctx, conn, "086_current_schema_init_verify.sql")
+	migrateTestDatabaseToVersion(t, databaseURL, uint(CoreWorkflowAdmissionPredecessorVersion))
 	snapshot, err = Inspect(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)

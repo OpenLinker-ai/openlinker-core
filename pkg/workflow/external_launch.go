@@ -17,9 +17,23 @@ type ExternalExecutionLaunchFence struct {
 	ExternalRequestID uuid.UUID
 	ActorUserID       uuid.UUID
 	LaunchToken       uuid.UUID
+	// ExpectedContractHash is the contract the caller authorized. The launch
+	// transaction recomputes the hash of the bound version and refuses on a
+	// mismatch.
+	ExpectedContractHash string
+	// TargetVersionID binds the launch to one definition version; nil binds
+	// the version current at launch.
+	TargetVersionID *uuid.UUID
 }
 
 var ErrExternalWorkflowLaunchFenceRejected = errors.New("external workflow launch fence rejected")
+
+// Deterministic launch rejections, decided inside the launch transaction.
+// The transaction writes nothing; the caller records the rejection.
+var (
+	ErrExternalWorkflowTargetUnavailable     = errors.New("external workflow target unavailable")
+	ErrExternalWorkflowTargetContractChanged = errors.New("external workflow target contract changed")
+)
 
 // StartExternalExecutionWorkflowRunWithFence commits the deterministic
 // Workflow Run only while the external launch token is current. The external
@@ -48,19 +62,6 @@ func (s *Service) StartExternalExecutionWorkflowRunWithFence(
 	}
 	if s.runtime == nil {
 		return nil, httpx.Internal("workflow runtime 未配置")
-	}
-	w, nodes, err := s.getWorkflowForOwner(ctx, targetOwnerID, workflowID)
-	if err != nil {
-		return nil, err
-	}
-	if w.Status != "active" || len(nodes) == 0 {
-		return nil, httpx.Conflict("workflow 当前不可执行")
-	}
-	if _, err := workflowGraphFromDefinition(w, nodes); err != nil {
-		return nil, err
-	}
-	if err := s.validateWorkflowStoredAgentsAvailable(ctx, uuid.Nil, nodes, true); err != nil {
-		return nil, err
 	}
 
 	runID := externalExecutionWorkflowRunID(callerServiceID, fence.ExternalRequestID)
@@ -103,14 +104,33 @@ func (s *Service) StartExternalExecutionWorkflowRunWithFence(
 			targetType != "workflow" || targetID != workflowID {
 			return ErrExternalWorkflowLaunchFenceRejected
 		}
+		// A committed run is replayed without re-checking eligibility.
+		if existing, getErr := s.queries.WithTx(tx).GetWorkflowRunByID(ctx, runID); getErr == nil {
+			if !externalExecutionWorkflowRunMatches(existing, workflowID, actorUserID, input, defaultWorkflowRunMaxAttempts) {
+				return httpx.Conflict("external_request_id 已用于其他 workflow 执行")
+			}
+			run = existing
+			return nil
+		} else if !errors.Is(getErr, pgx.ErrNoRows) {
+			return getErr
+		}
+		versionID, err := s.recheckExternalWorkflowLaunch(ctx, tx, targetOwnerID, workflowID, fence)
+		if err != nil {
+			return err
+		}
 		created, err := s.queries.WithTx(tx).CreatePendingExternalExecutionWorkflowRun(
 			ctx, db.CreatePendingExternalExecutionWorkflowRunParams{
 				ID: runID, WorkflowID: workflowID, UserID: actorUserID,
 				Input: inputJSON, MaxAttempts: defaultWorkflowRunMaxAttempts,
+				WorkflowVersionID: &versionID,
 			},
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			existing, getErr := s.queries.WithTx(tx).GetWorkflowRunByID(ctx, runID)
+			if errors.Is(getErr, pgx.ErrNoRows) {
+				// No row and no identity: the insert was refused by admission.
+				return errWorkflowAdmissionDraining
+			}
 			if getErr != nil {
 				return getErr
 			}
@@ -130,6 +150,12 @@ func (s *Service) StartExternalExecutionWorkflowRunWithFence(
 	})
 	if errors.Is(err, ErrExternalWorkflowLaunchFenceRejected) {
 		return nil, httpx.Conflict(ErrExternalWorkflowLaunchFenceRejected.Error())
+	}
+	if errors.Is(err, errWorkflowAdmissionDraining) {
+		return nil, errWorkflowAdmissionDraining
+	}
+	if errors.Is(err, ErrExternalWorkflowTargetUnavailable) || errors.Is(err, ErrExternalWorkflowTargetContractChanged) {
+		return nil, err
 	}
 	if err != nil {
 		return nil, httpx.Internal("创建 external workflow_run 失败")
@@ -162,4 +188,70 @@ func (s *Service) LookupExternalExecutionWorkflowRunByIdentity(
 	}
 	resp := workflowRunToResponse(run, nil)
 	return &resp, true, nil
+}
+
+// recheckExternalWorkflowLaunch runs inside the launch transaction, after the
+// external key and execution rows are locked. Lock order: workflow row (FOR
+// SHARE, must be active) -> node Agent rows (FOR SHARE, by id). Agent
+// visibility, lifecycle and capability writes take the Agent row lock first,
+// so eligibility and the recomputed contract hash cannot change until this
+// transaction commits. External Execution never applies the owner exception
+// for private Agents.
+func (s *Service) recheckExternalWorkflowLaunch(
+	ctx context.Context,
+	tx pgx.Tx,
+	targetOwnerID, workflowID uuid.UUID,
+	fence ExternalExecutionLaunchFence,
+) (uuid.UUID, error) {
+	var status string
+	var ownerID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT status, user_id FROM workflows WHERE id = $1 FOR SHARE`, workflowID).Scan(&status, &ownerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, ErrExternalWorkflowTargetUnavailable
+		}
+		return uuid.Nil, err
+	}
+	if status != workflowStatusActive || ownerID != targetOwnerID {
+		return uuid.Nil, ErrExternalWorkflowTargetUnavailable
+	}
+	def, err := loadWorkflowVersion(ctx, tx, workflowID, fence.TargetVersionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrExternalWorkflowTargetUnavailable
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if def.semantics != workflowSemanticsV1 || len(def.nodes) == 0 {
+		return uuid.Nil, ErrExternalWorkflowTargetUnavailable
+	}
+	if _, err := tx.Exec(ctx, `
+		SELECT 1 FROM agents WHERE id IN (
+		    SELECT agent_id FROM workflow_version_nodes WHERE workflow_version_id = $1
+		) ORDER BY id FOR SHARE
+	`, def.id); err != nil {
+		return uuid.Nil, err
+	}
+	if _, err := workflowGraphFromDefinition(def.workflow, def.nodes); err != nil {
+		return uuid.Nil, ErrExternalWorkflowTargetUnavailable
+	}
+	txQueries := db.New(tx)
+	if err := s.validateWorkflowStoredAgentsAvailableWith(ctx, txQueries, uuid.Nil, def.nodes, true); err != nil {
+		if isWorkflowHTTPError(err) {
+			return uuid.Nil, ErrExternalWorkflowTargetUnavailable
+		}
+		return uuid.Nil, err
+	}
+	if fence.ExpectedContractHash != "" {
+		hash, err := s.externalExecutionWorkflowContractHashWith(ctx, txQueries, def.workflow, def.nodes)
+		if err != nil {
+			if isWorkflowHTTPError(err) {
+				return uuid.Nil, ErrExternalWorkflowTargetUnavailable
+			}
+			return uuid.Nil, err
+		}
+		if hash != fence.ExpectedContractHash {
+			return uuid.Nil, ErrExternalWorkflowTargetContractChanged
+		}
+	}
+	return def.id, nil
 }

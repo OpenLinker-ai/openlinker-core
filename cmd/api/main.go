@@ -405,6 +405,8 @@ func newEcho(cfg *config.Config, stores ...emw.RateLimiterStore) *echo.Echo {
 			echo.HeaderAuthorization,
 			"Idempotency-Key",
 			"Prefer",
+			"If-Match",
+			"Last-Event-ID",
 		},
 		ExposeHeaders: []string{
 			echo.HeaderLocation,

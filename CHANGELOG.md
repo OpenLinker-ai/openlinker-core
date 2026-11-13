@@ -7,6 +7,188 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+### Workflow release drain
+
+- Migration `103` adds a durable workflow admission state (`open` or
+  `draining`) so a release can stop new workflow work before migrating.
+  While draining, creating a workflow run (async, synchronous `/run`, Retry,
+  step Rerun, External Execution) returns 503 `WORKFLOW_DRAINING`, and the
+  worker claims no pending run; running runs finish. Creation and claiming
+  read the admission row `FOR SHARE`, so a committed switch to `draining` is
+  a barrier. The state survives restarts.
+- Platform administrators can read and switch admission at
+  `GET/POST /admin/workflow-admission`, list blocking runs at
+  `GET /admin/workflow-runs?state=nonterminal|cancelling`, and cancel any
+  user's run at `POST /admin/workflow-runs/:id/cancel`. The run owner stays
+  the authorization subject for Runtime; workflow cancellations now record
+  `requested_by` and `requested_via` (`owner`, `external` or `admin`).
+  Owner-facing cancellation is unchanged.
+- The workflow worker now reconciles cancellations left in `requested` or
+  `stopping` (for example after a crash between the cancellation commit and
+  its first reconciliation), regardless of admission or the parent run state.
+- Workflow run steps are listed in a deterministic order
+  (`sequence, created_at, id`), so duplicate step rows for one node always
+  resolve to the same latest row.
+
+- Migration `104` adds workflow attempts, logical node state, per-attempt
+  stop records and run lease columns for the coming execution engine. It
+  refuses unless every workflow run is finished and backfills history only;
+  the current engine keeps running unchanged on the new schema.
+- `workflow-cutover preflight|verify|reopen` (shipped in the image) checks a
+  workflow release drain before and after migrating and reopens admission
+  only when nothing blocks. It prints a JSON report and exits 3 when blocked.
+  `drain` switches admission to draining against the release being replaced
+  (schema 103) and is ready once every run finished; `abort-drain` reopens
+  admission for a release abandoned before migrating.
+
+- Workflow runs now execute under a database lease (owner, epoch, expiry
+  from the database clock), renewed every 15 seconds with a 60-second TTL.
+  Every executor write (steps, child launches, run outcome) locks the parent
+  run and checks the lease first; Runtime checks it again before creating a
+  workflow child Run, together with the launch attempt and any stop request.
+  The lease is checked in a separate statement after the row lock is taken,
+  because a single `SELECT ... FOR UPDATE` evaluates `clock_timestamp()`
+  before its lock wait ends and would accept a lease that expired during the
+  wait. Synchronous `/run` and step rerun take a lease for the run they
+  create. **Behaviour change:** stale recovery uses lease expiry instead of
+  `WORKFLOW_RUN_STALE_SECONDS`: an expired run goes back to pending while its
+  recovery budget (`max_attempts - 1`) lasts, and otherwise fails in one
+  transaction that invalidates unlaunched children and records stop requests
+  for in-flight ones. An executor that lost its lease stops and writes
+  nothing.
+- New workflow execution engine. Every node has a logical state
+  (`workflow_run_nodes`) separate from its attempts, and nodes start as soon
+  as all their parents succeeded (ready-set scheduling, at most
+  `WORKFLOW_RUN_PARALLELISM`, default 4, per run) instead of level by level.
+  A reclaimed run resumes from its persisted attempts; steps are no longer
+  deleted on retry.
+- **Behaviour change:** node attempts have a deadline
+  (`WORKFLOW_NODE_TIMEOUT_SECONDS`, default 1800) instead of the fixed
+  60-second wait. The executor waits for the child until the deadline; a
+  child that finishes after it does not count. A timed-out node is
+  immediately terminal (`timeout`) and its child is stopped in the
+  background. Deadlines are enforced by the worker even while the run is
+  paused or has no executor.
+- Attempts change state only through fixed transitions under the parent
+  row lock. Settling from Runtime facts uses the child's finish time against
+  the deadline and needs no lease; failures before any child exists are
+  judged by the database clock (past the deadline they are timeouts). A
+  logically terminal node never changes again.
+- `fail_workflow` is atomic: the run fails, every open attempt is canceled,
+  unlaunched children are invalidated and in-flight children get stop
+  requests in one transaction. Public cancellation now also cancels open
+  attempts in its transaction (**behaviour change:** such attempts show
+  `canceled` instead of `failed`).
+- Per-attempt stop records are driven by a stop reconciler with its own
+  claim, independent of the run lease. Only the claim holder can cancel the
+  child: Runtime checks the claim in its own cancellation transaction
+  (`CancelWorkflowChildFenced`). Runtime classifies whether a child is known
+  to have stopped (`in_progress`, `confirmed`, `unconfirmed`); any accepted
+  Attempt that was canceled or ended without a definite result is
+  unconfirmed and is never retried automatically.
+- Workflow child Runs snapshot a single accepted execution (`max_attempts`
+  1): an unaccepted offer is still redispatched, but Runtime never re-executes
+  an accepted Attempt; node retries happen only in the workflow, as new
+  attempts with their own launch and child Run. Node retry policies arrive
+  with node policies; until then every node has one attempt.
+- The worker claims runs on its tick and executes them in goroutines (at
+  most `WORKFLOW_RUN_MAX_CONCURRENT`, default 8, per process). Step lists
+  omit attempts that never started.
+- Retry and step Rerun lock the source run and, in the same transaction,
+  check every child Run the source ever referenced (launches and step
+  run_ids, including children reused from earlier reruns). While a stop or
+  the run's cancellation is still open they return 409
+  `WORKFLOW_CHILDREN_STOPPING`; when a child cannot be shown to have stopped
+  they return 409 `WORKFLOW_CHILDREN_UNCONFIRMED` unless the owner sends
+  `acknowledge_unconfirmed_children: true`, which is recorded on the new run
+  (`unconfirmed_children_acknowledged_by`). Runs report
+  `has_unconfirmed_children`.
+- **Behaviour change:** step Rerun no longer executes synchronously. It
+  returns 202 with a pending run whose reused nodes are copied with their
+  logical result (steps marked `source: reused`, keeping the source child
+  Run and output); the worker executes the rest. A node outside the rerun
+  set must have ended successfully (or skipped); otherwise 409
+  `WORKFLOW_RERUN_NOT_REUSABLE`. Steps now carry `attempt`, `effective` and
+  `source`.
+
+### Workflow versions
+
+- Migration `105` makes workflow definitions versioned. Every workflow gets
+  an immutable version 1 that keeps its node UUIDs, configs and edges, so the
+  execution contract hash (`hct:v1`) of an unedited workflow is unchanged.
+  Steps, launches and logical nodes now reference immutable version nodes
+  (the foreign keys are switched inside the migration with no unconstrained
+  window); `workflow_nodes` remains as the projection of the current version.
+  Every run records `workflow_version_id`. Like `104` it requires drained
+  workflow runs; `workflow-cutover mode` tells a release whether a drain is
+  needed for the database it upgrades.
+- New endpoints: `PUT /workflows/:id` (requires `If-Match: <version>`; 409
+  `WORKFLOW_VERSION_CONFLICT` when stale, 428 without it),
+  `GET /workflows/:id/versions[/:version]`,
+  `POST /workflows/:id/duplicate|archive|unarchive`. Workflow responses carry
+  `version`, `version_id` and `semantics`; run responses carry
+  `workflow_version`. `POST /workflows/:id/runs` accepts `version`.
+- Runs execute the version they pinned at creation: an edit never changes a
+  queued, paused or retried run. Retry and step Rerun use the source run's
+  version. Definition reads take nodes and edges from one version.
+- **Behaviour change:** archived workflows refuse new runs (409
+  `WORKFLOW_ARCHIVED`, checked atomically when the run is created) and new
+  versions.
+- External Execution accepts an optional `target_version_id` (validation
+  returns it with the contract hash). With it, that version executes;
+  without it, the version current at launch must still match
+  `expected_contract_hash`. Requests without a version keep their exact
+  request fingerprint. The workflow launch transaction locks the workflow
+  and the node Agents, re-checks eligibility and recomputes the contract
+  hash; deterministic refusals are recorded as `TARGET_UNAVAILABLE` or
+  `TARGET_CONTRACT_CHANGED` instead of a retryable 503. Capability writes now
+  lock the Agent row first. Workflows with `semantics: v2` are not
+  executable externally yet.
+
+### Workflow semantics v2
+
+- A definition can declare `"semantics": "v2"`; v1 definitions behave
+  exactly as before and ignore every v2 key. v2 interprets:
+  - node `config.policy`: `timeout_seconds`, `retry` (`max_attempts`,
+    `backoff_seconds`, `on` accepts only `failed`: timeouts are not retried
+    because no backend stop proof exists yet) and `on_failure`
+    (`fail_workflow` default, or `continue`);
+  - conditional edges `when` (`exists/eq/ne/in/gt/gte/lt/lte/truthy` on a
+    JSON path of the source output; never errors at runtime: a missing path
+    is true only for `ne`, numbers compare numerically so `1` equals `1.0`)
+    and node `config.join` (`all` default, or `any`; not on root nodes).
+    A node whose incoming edges resolve without activating it is `skipped`
+    with a recorded reason;
+  - input mapping v2 (JSON paths with integer indexes, `dependency` on any
+    ancestor, `default` whose presence is significant: `"default": null` is a
+    default) and a workflow `output_mapping`. A field whose source may be
+    unavailable (conditional, `join: any`, `continue` upstream) must have a
+    default; definitions are rejected otherwise.
+- v2 run outcome: with `output_mapping`, success exactly when every field
+  evaluates (else `failed` with `output_mapping_failed`); without it, success
+  when at least one sink succeeded (output lists only successful sinks),
+  else failed.
+- Retry and continue decisions read the node of the run's own version.
+  Workflows with semantics v2 are not executable through External Execution
+  until Cloud accepts their contract.
+
+### Workflow observation and limits
+
+- Migration `106` adds a monotonic `revision` to workflow runs. Every change
+  to a run, its logical nodes, attempts and stop records advances it in the
+  same transaction and sends `pg_notify('workflow_run.changed', run id)`
+  (delivered on commit; no triggers).
+- `GET /workflow-runs/:id` reads the run, steps, logical nodes and stop
+  evidence in one `REPEATABLE READ READ ONLY` snapshot and returns
+  `revision` and `nodes` (logical state, effective attempt, skip reason).
+- New `GET /workflow-runs/:id/events` (server-sent events, same
+  authorization as the run): a full snapshot on connect (`event: snapshot`,
+  `id` = revision) and whenever the revision advances, ending after a
+  terminal snapshot. `Last-Event-ID` resumes; notifications wake the stream
+  and a periodic re-read covers lost ones.
+- **Behaviour change:** definition limits are configurable and raised to 30
+  nodes and 60 edges by default (`WORKFLOW_MAX_NODES`, `WORKFLOW_MAX_EDGES`).
+
 ### Security
 
 - **Behaviour change:** the production HTTP rate limiter no longer trusts a

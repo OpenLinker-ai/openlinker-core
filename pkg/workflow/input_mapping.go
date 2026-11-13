@@ -58,6 +58,27 @@ func workflowStepInput(
 	node db.WorkflowNode,
 ) workflowStepInputResult {
 	legacy := legacyWorkflowStepInput(original, outputsByNode, parents, node.NodeKey)
+	// A v2 mapping (only valid in semantics v2 definitions) distinguishes a
+	// missing path, an unavailable source (the node did not succeed) and a
+	// null value; defaults cover the first two.
+	if raw, ok, _ := workflowConfigKey(node.Config, "input_mapping"); ok {
+		var probe struct {
+			Version string `json:"version"`
+		}
+		if json.Unmarshal(raw, &probe) == nil && probe.Version == "v2" {
+			var decoded interface{}
+			_ = json.Unmarshal(raw, &decoded)
+			mapping, err := parseWorkflowMappingV2(decoded, false)
+			if err != nil {
+				return workflowStepInputResult{Value: legacy, Mapped: true, Err: fmt.Errorf("workflow node %s input_mapping 无效: %w", node.NodeKey, err)}
+			}
+			value, err := mapping.evaluate(workflowMappingContext{input: original, outputs: outputsByNode, parents: parents})
+			if err != nil {
+				return workflowStepInputResult{Value: map[string]interface{}{}, Mapped: true, Err: fmt.Errorf("workflow node %s input_mapping 求值失败: %w", node.NodeKey, err)}
+			}
+			return workflowStepInputResult{Value: value, Mapped: true}
+		}
+	}
 	mapping, configured, err := decodeStoredWorkflowInputMapping(node.Config, parents)
 	if err != nil {
 		return workflowStepInputResult{Value: legacy, Mapped: true, Err: fmt.Errorf("workflow node %s input_mapping 无效: %w", node.NodeKey, err)}

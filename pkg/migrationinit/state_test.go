@@ -14,6 +14,21 @@ func TestValidateCoreUp(t *testing.T) {
 	}{
 		{name: "fresh", snapshot: Snapshot{}},
 		{name: "current", snapshot: currentCoreSnapshot(), wantNoop: true},
+		{name: "workflow revision predecessor", snapshot: workflowRevisionPredecessorCoreSnapshot()},
+		{name: "workflow revision predecessor drift", snapshot: withCoreDigest(workflowRevisionPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
+		{name: "current version with workflow revision predecessor shape", snapshot: withCoreShape(currentCoreSnapshot(), workflowRevisionPredecessorCoreSnapshot().CoreShape), wantError: "fingerprint mismatch"},
+		{name: "workflow versions predecessor", snapshot: workflowVersionsPredecessorCoreSnapshot()},
+		{name: "workflow versions predecessor drift", snapshot: withCoreDigest(workflowVersionsPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
+		{name: "workflow versions predecessor with current shape", snapshot: withCoreShape(workflowVersionsPredecessorCoreSnapshot(), currentCoreShape()), wantError: "fingerprint mismatch"},
+		{name: "current version with workflow versions predecessor shape", snapshot: withCoreShape(currentCoreSnapshot(), workflowVersionsPredecessorCoreSnapshot().CoreShape), wantError: "fingerprint mismatch"},
+		{name: "workflow attempts predecessor", snapshot: workflowAttemptsPredecessorCoreSnapshot()},
+		{name: "workflow attempts predecessor drift", snapshot: withCoreDigest(workflowAttemptsPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
+		{name: "workflow attempts predecessor with current shape", snapshot: withCoreShape(workflowAttemptsPredecessorCoreSnapshot(), currentCoreShape()), wantError: "fingerprint mismatch"},
+		{name: "current version with workflow attempts predecessor shape", snapshot: withCoreShape(currentCoreSnapshot(), workflowAttemptsPredecessorCoreSnapshot().CoreShape), wantError: "fingerprint mismatch"},
+		{name: "workflow admission predecessor", snapshot: workflowAdmissionPredecessorCoreSnapshot()},
+		{name: "workflow admission predecessor drift", snapshot: withCoreDigest(workflowAdmissionPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
+		{name: "workflow admission predecessor with current shape", snapshot: withCoreShape(workflowAdmissionPredecessorCoreSnapshot(), currentCoreShape()), wantError: "fingerprint mismatch"},
+		{name: "current version with workflow admission predecessor shape", snapshot: withCoreShape(currentCoreSnapshot(), workflowAdmissionPredecessorCoreSnapshot().CoreShape), wantError: "fingerprint mismatch"},
 		{name: "mcp transport predecessor", snapshot: mcpTransportPredecessorCoreSnapshot()},
 		{name: "mcp transport predecessor drift", snapshot: withCoreDigest(mcpTransportPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
 		{name: "mcp transport predecessor with current shape", snapshot: withCoreShape(mcpTransportPredecessorCoreSnapshot(), currentCoreShape()), wantError: "fingerprint mismatch"},
@@ -77,7 +92,7 @@ func TestValidateCloudUp(t *testing.T) {
 	current := fresh
 	current.Cloud = MigrationTableState{Exists: true, Rows: 1, Version: CloudVersion}
 	current.CloudShape = currentCloudShape()
-	current.NonBookkeepingObjects = 98
+	current.NonBookkeepingObjects = 103
 
 	tests := []struct {
 		name      string
@@ -131,7 +146,7 @@ func currentCoreSnapshot() Snapshot {
 	return Snapshot{
 		Core:                    MigrationTableState{Exists: true, Rows: 1, Version: CoreVersion},
 		CoreShape:               currentCoreShape(),
-		NonBookkeepingObjects:   91,
+		NonBookkeepingObjects:   96,
 		CallbackOwnerIndexValid: true,
 	}
 }
@@ -139,9 +154,9 @@ func currentCoreSnapshot() Snapshot {
 func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
-		Tables:            91,
-		Constraints:       730,
-		Indexes:           309,
+		Tables:            96,
+		Constraints:       782,
+		Indexes:           322,
 		Triggers:          80,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -161,8 +176,10 @@ func signalRetentionPredecessorCoreSnapshot() Snapshot {
 	s := currentCoreSnapshot()
 	s.Core.Version = CoreSignalRetentionPredecessorVersion
 	s.CoreShape.Digest = CoreSignalRetentionPredecessorDigest
+	s.CoreShape.Tables = 91
 	s.CoreShape.Constraints = 728
 	s.CoreShape.Indexes = 308
+	s.NonBookkeepingObjects = 91
 	return s
 }
 
@@ -172,12 +189,67 @@ func mcpTransportPredecessorCoreSnapshot() Snapshot {
 	s := currentCoreSnapshot()
 	s.Core.Version = CoreMCPTransportPredecessorVersion
 	s.CoreShape.Digest = CoreMCPTransportPredecessorDigest
+	s.CoreShape.Tables = 91
 	s.CoreShape.Constraints = 728
+	s.CoreShape.Indexes = 309
+	s.NonBookkeepingObjects = 91
+	return s
+}
+
+// workflowRevisionPredecessorCoreSnapshot is the exact 105 schema: 106 adds
+// only the run revision column.
+func workflowRevisionPredecessorCoreSnapshot() Snapshot {
+	s := currentCoreSnapshot()
+	s.Core.Version = CoreWorkflowRevisionPredecessorVersion
+	s.CoreShape.Digest = CoreWorkflowRevisionPredecessorDigest
+	s.CoreShape.Constraints = 781
+	return s
+}
+
+// workflowVersionsPredecessorCoreSnapshot is the exact 104 schema: 105 adds
+// the workflow version tables and the version foreign keys.
+func workflowVersionsPredecessorCoreSnapshot() Snapshot {
+	s := currentCoreSnapshot()
+	s.Core.Version = CoreWorkflowVersionsPredecessorVersion
+	s.CoreShape.Digest = CoreWorkflowVersionsPredecessorDigest
+	s.CoreShape.Tables = 94
+	s.CoreShape.Constraints = 761
+	s.CoreShape.Indexes = 316
+	s.NonBookkeepingObjects = 94
+	return s
+}
+
+// workflowAttemptsPredecessorCoreSnapshot is the exact 103 schema: 104 adds
+// the workflow attempt, logical node and stop tables and columns.
+func workflowAttemptsPredecessorCoreSnapshot() Snapshot {
+	s := currentCoreSnapshot()
+	s.Core.Version = CoreWorkflowAttemptsPredecessorVersion
+	s.CoreShape.Digest = CoreWorkflowAttemptsPredecessorDigest
+	s.CoreShape.Tables = 92
+	s.CoreShape.Constraints = 736
+	s.CoreShape.Indexes = 310
+	s.NonBookkeepingObjects = 92
+	return s
+}
+
+// workflowAdmissionPredecessorCoreSnapshot is the exact 102 schema: 103 adds
+// the workflow_admission table and the cancellation request columns.
+func workflowAdmissionPredecessorCoreSnapshot() Snapshot {
+	s := currentCoreSnapshot()
+	s.Core.Version = CoreWorkflowAdmissionPredecessorVersion
+	s.CoreShape.Digest = CoreWorkflowAdmissionPredecessorDigest
+	s.CoreShape.Tables = 91
+	s.CoreShape.Constraints = 730
+	s.CoreShape.Indexes = 309
+	s.NonBookkeepingObjects = 91
 	return s
 }
 
 func signalRetentionPredecessorCloudSnapshot(current Snapshot) Snapshot {
 	predecessor := signalRetentionPredecessorCoreSnapshot()
+	// The predecessor lacks the tables added after it, so the public relation
+	// count shrinks by the same amount.
+	current.NonBookkeepingObjects -= current.CoreShape.Tables - predecessor.CoreShape.Tables
 	current.Core = predecessor.Core
 	current.CoreShape = predecessor.CoreShape
 	return current

@@ -277,8 +277,15 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 
 	workflowSvc := workflow.NewService(pool, runtimeSvc)
 	workflowSvc.SetRunUpdateSource(runUpdates)
+	workflowSvc.SetWorkflowNodeTimeout(time.Duration(cfg.WorkflowNodeTimeoutSeconds) * time.Second)
+	workflowSvc.SetWorkflowParallelism(cfg.WorkflowRunParallelism)
+	workflowSvc.SetWorkflowLimits(cfg.WorkflowMaxNodes, cfg.WorkflowMaxEdges)
+	workflowSvc.StartWorkflowRunEventListener(rootCtx)
 	workflowHandler := workflow.NewHandler(workflowSvc)
 	workflowHandler.RegisterProtected(api, hybridMw)
+	if opts.AdminMiddleware != nil {
+		workflow.NewAdminHandler(workflowSvc).Register(api, jwtMiddleware, opts.AdminMiddleware)
+	}
 	externalExecutionSvc := externalexecution.NewService(
 		agentSvc,
 		runtimeSvc,
@@ -296,6 +303,8 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 			Interval:   time.Duration(cfg.WorkflowRunWorkerIntervalSeconds) * time.Second,
 			StaleAfter: time.Duration(cfg.WorkflowRunStaleSeconds) * time.Second,
 			ClaimBurst: cfg.WorkflowRunClaimBurst,
+
+			MaxConcurrentRuns: cfg.WorkflowRunMaxConcurrent,
 		})
 	}
 
@@ -423,6 +432,24 @@ func (s externalWorkflowService) ValidateExternalExecutionTarget(
 	return &externalexecution.WorkflowTargetValidation{
 		TargetName: result.TargetName, Executable: result.Executable,
 		UnavailableReason: result.UnavailableReason, ContractHash: result.ContractHash,
+		TargetVersionID: result.TargetVersionID,
+	}, nil
+}
+
+func (s externalWorkflowService) ValidateExternalExecutionTargetVersion(
+	ctx context.Context,
+	targetOwnerID uuid.UUID,
+	workflowID uuid.UUID,
+	versionID *uuid.UUID,
+) (*externalexecution.WorkflowTargetValidation, error) {
+	result, err := s.inner.ValidateExternalExecutionTargetVersion(ctx, targetOwnerID, workflowID, versionID)
+	if err != nil {
+		return nil, err
+	}
+	return &externalexecution.WorkflowTargetValidation{
+		TargetName: result.TargetName, Executable: result.Executable,
+		UnavailableReason: result.UnavailableReason, ContractHash: result.ContractHash,
+		TargetVersionID: result.TargetVersionID,
 	}, nil
 }
 

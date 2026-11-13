@@ -91,22 +91,50 @@ WHERE user_id = $1
   AND ($3::text = '' OR status = $3);
 
 -- name: CreateWorkflowRun :one
-INSERT INTO workflow_runs (workflow_id, user_id, status, input, attempt_count)
-VALUES ($1, $2, 'running', $3, 1)
+-- Returns no row while workflow admission is draining. Reading the admission
+-- row FOR SHARE makes a committed switch to 'draining' a barrier.
+-- An archived workflow yields a NULL version, which the NOT NULL column
+-- rejects: archiving is a barrier for new runs.
+INSERT INTO workflow_runs (workflow_id, user_id, status, input, attempt_count, workflow_version_id)
+SELECT $1, $2, 'running', $3, 1,
+       CASE WHEN (SELECT status FROM workflows WHERE id = $1) = 'active'
+            THEN COALESCE(sqlc.narg(workflow_version_id)::uuid, (SELECT current_version_id FROM workflows WHERE id = $1)) END
+WHERE EXISTS (
+    SELECT 1 FROM workflow_admission
+    WHERE singleton AND state = 'open'
+    FOR SHARE
+)
 RETURNING id, workflow_id, user_id, status, input, output, error_message,
           started_at, finished_at, created_at, updated_at,
           attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error;
 
 -- name: CreatePendingWorkflowRun :one
-INSERT INTO workflow_runs (workflow_id, user_id, status, input, max_attempts)
-VALUES ($1, $2, 'pending', $3, $4)
+-- Returns no row while workflow admission is draining.
+INSERT INTO workflow_runs (workflow_id, user_id, status, input, max_attempts, workflow_version_id)
+SELECT $1, $2, 'pending', $3, $4,
+       CASE WHEN (SELECT status FROM workflows WHERE id = $1) = 'active'
+            THEN COALESCE(sqlc.narg(workflow_version_id)::uuid, (SELECT current_version_id FROM workflows WHERE id = $1)) END
+WHERE EXISTS (
+    SELECT 1 FROM workflow_admission
+    WHERE singleton AND state = 'open'
+    FOR SHARE
+)
 RETURNING id, workflow_id, user_id, status, input, output, error_message,
           started_at, finished_at, created_at, updated_at,
           attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error;
 
 -- name: CreatePendingExternalExecutionWorkflowRun :one
-INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts)
-VALUES ($1, $2, $3, 'pending', $4, $5)
+-- Returns no row on an identity conflict or while workflow admission is
+-- draining; callers distinguish the two by looking the identity up.
+INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts, workflow_version_id)
+SELECT $1, $2, $3, 'pending', $4, $5,
+       CASE WHEN (SELECT status FROM workflows WHERE id = $2) = 'active'
+            THEN COALESCE(sqlc.narg(workflow_version_id)::uuid, (SELECT current_version_id FROM workflows WHERE id = $2)) END
+WHERE EXISTS (
+    SELECT 1 FROM workflow_admission
+    WHERE singleton AND state = 'open'
+    FOR SHARE
+)
 ON CONFLICT (id) DO NOTHING
 RETURNING id, workflow_id, user_id, status, input, output, error_message,
           started_at, finished_at, created_at, updated_at,
@@ -146,7 +174,8 @@ SET status = 'paused',
     END,
     next_retry_at = NULL,
     last_worker_error = NULL,
-    updated_at = NOW()
+    updated_at = NOW(),
+    revision = revision + 1
 WHERE id = $1
   AND (
       status = 'pending'
@@ -164,7 +193,8 @@ SET status = 'pending',
     finished_at = NULL,
     error_message = NULL,
     last_worker_error = NULL,
-    updated_at = NOW()
+    updated_at = NOW(),
+    revision = revision + 1
 WHERE id = $1
   AND status = 'paused'
   AND claimed_at IS NULL
@@ -280,6 +310,11 @@ WITH candidate AS (
     FROM workflow_runs
     WHERE status = 'pending'
       AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+      AND EXISTS (
+          SELECT 1 FROM workflow_admission
+          WHERE singleton AND state = 'open'
+          FOR SHARE
+      )
     ORDER BY created_at ASC
     LIMIT 1
     FOR UPDATE SKIP LOCKED
@@ -334,7 +369,7 @@ INSERT INTO workflow_run_steps (
 )
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
-          created_at, updated_at;
+          created_at, updated_at, attempt, source;
 
 -- name: AttachWorkflowRunStepRun :execrows
 -- A matching re-attachment is accepted and deliberately touches updated_at.
@@ -358,7 +393,7 @@ WHERE id = $1
   AND (run_id IS NULL OR run_id = $2)
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
-          created_at, updated_at;
+          created_at, updated_at, attempt, source;
 
 -- name: MarkWorkflowRunStepFailed :one
 UPDATE workflow_run_steps
@@ -372,20 +407,40 @@ WHERE id = $1
   AND (run_id IS NULL OR run_id = $2)
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
-          created_at, updated_at;
+          created_at, updated_at, attempt, source;
 
 -- name: ListWorkflowRunSteps :many
 SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        status, input, output, error_message, sequence, started_at, finished_at,
-       created_at, updated_at
+       created_at, updated_at, attempt, source
 FROM workflow_run_steps
 WHERE workflow_run_id = $1
-ORDER BY sequence ASC;
+  -- Attempts that never started (pending, or canceled before starting) are
+  -- scheduling data, not execution records.
+  AND status <> 'pending'
+  AND NOT (status = 'canceled' AND deadline_at IS NULL)
+ORDER BY sequence ASC, attempt ASC, created_at ASC, id ASC;
 
 -- name: ListWorkflowRunStepsByRunIDs :many
 SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        status, input, output, error_message, sequence, started_at, finished_at,
-       created_at, updated_at
+       created_at, updated_at, attempt, source
 FROM workflow_run_steps
 WHERE workflow_run_id = ANY($1::uuid[])
-ORDER BY workflow_run_id ASC, sequence ASC;
+  -- Attempts that never started (pending, or canceled before starting) are
+  -- scheduling data, not execution records.
+  AND status <> 'pending'
+  AND NOT (status = 'canceled' AND deadline_at IS NULL)
+ORDER BY workflow_run_id ASC, sequence ASC, attempt ASC, created_at ASC, id ASC;
+
+-- name: GetWorkflowAdmission :one
+SELECT state, reason, changed_by, changed_at
+FROM workflow_admission
+WHERE singleton;
+
+-- name: SetWorkflowAdmission :one
+UPDATE workflow_admission
+SET state = $1, reason = $2, changed_by = $3, changed_at = clock_timestamp()
+WHERE singleton
+RETURNING state, reason, changed_by, changed_at;
+

@@ -8,11 +8,11 @@ canonical seed data for a fresh database. The migration runner then applies
 `091_browser_interaction_policy.up.sql`,
 `092_browser_observation_audit.up.sql`,
 `093_skill_packages.up.sql`, `094_cli_login.up.sql`, `095_runtime_node_upgrade.up.sql`,
-`096_skill_package_publication.up.sql` `097_resource_metadata.up.sql` `098_agent_mcp_bindings.up.sql` `099_runtime_node_upgrade_features.up.sql`, `100_runtime_mtls_transition.up.sql`, `101_runtime_signal_outbox_retention.up.sql` and `102_agent_mcp_transport.up.sql`. Supported exact clean predecessors are
-`101`, `100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `102`.
+`096_skill_package_publication.up.sql` `097_resource_metadata.up.sql` `098_agent_mcp_bindings.up.sql` `099_runtime_node_upgrade_features.up.sql`, `100_runtime_mtls_transition.up.sql`, `101_runtime_signal_outbox_retention.up.sql`, `102_agent_mcp_transport.up.sql`, `103_workflow_admission_drain.up.sql`, `104_workflow_execution_attempts.up.sql`, `105_workflow_versions.up.sql` and `106_workflow_run_revision.up.sql`. Supported exact clean predecessors are
+`105`, `104`, `103`, `102`, `101`, `100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `106`.
 `086_current_schema_init_verify.sql` is the PostgreSQL 16 current-catalog and
 seed fingerprint used after the complete migration chain. Fresh and predecessor
-paths therefore execute the same `102` DDL and converge on one version `102`
+paths therefore execute the same `106` DDL and converge on one version `106`
 catalog fingerprint without an idempotent duplicate schema definition.
 
 Migration `093` adds private skill packages, immutable versions, Agent bindings
@@ -32,8 +32,8 @@ standard Sessions, publication and connection-mode changes therefore cannot
 race past the initial policy decision.
 
 The migration command accepts only a truly empty database, an exact clean
-supported predecessor (`101`, `100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
-version `102` current schema.
+supported predecessor (`105`, `104`, `103`, `102`, `101`, `100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
+version `106` current schema.
 Exactness is enforced with catalog object counts and a SHA-256 fingerprint over
 table, column/default, constraint, index, trigger, and function definitions.
 Legacy, dirty, partial, or malformed databases are rejected before the
@@ -193,3 +193,27 @@ because dropping either column would silently change how that Agent is called.
 Re-adding the columns after a rollback assigns new attribute numbers, so the
 reapplied catalog does not match the measured `102` fingerprint and the
 preflight fails closed; the rollback is for disposable databases only.
+
+Migration `103` adds the `workflow_admission` singleton (`open` or `draining`)
+and `requested_by` / `requested_via` on `workflow_run_cancellations`. Existing
+cancellations are backfilled: `requested_by` is the recorded actor (the run
+owner) and `requested_via` is `owner` for `OWNER_CANCEL_REQUESTED`, `external`
+otherwise. `actor_user_id` keeps its meaning as the authorization subject. The
+down script refuses while admission is draining or administrator cancellations
+exist. Exact `102`, `101` and `100` predecessors are one table short of `103`.
+
+Migration `104` adds what the new workflow execution engine needs: run lease
+columns (`lease_owner`, `lease_expires_at`, `lease_epoch`, `lease_mode`,
+`recovery_count`), attempts on `workflow_run_steps` (`attempt`, `deadline_at`,
+`not_before`, `legacy_unfinished`, unique per run, node and attempt), attempts
+on `workflow_step_launches` (`attempt` in the primary key, `legacy_orphan`),
+and the `workflow_run_nodes` and `workflow_step_stops` tables. It refuses
+while any workflow run is pending, running or paused: drain with migration
+`103`'s admission switch first. The backfill handles history only: steps are
+numbered in listing order without touching their timestamps, an interrupted
+`running` step is kept as `legacy_unfinished`, a launch whose step was deleted
+points at the node's effective step, a launch whose node has no step is a
+`legacy_orphan`, and only nodes whose effective attempt finished get a logical
+row. The down script refuses once the new engine produced data. `103` is two
+tables short of `104`; `102`, `101` and `100` are three short.
+

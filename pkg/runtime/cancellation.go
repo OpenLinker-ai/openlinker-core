@@ -87,6 +87,18 @@ func (c *RuntimeCancellationCoordinator) CancelOwnedRun(
 	requesterID, runID uuid.UUID,
 	reason string,
 ) (RuntimeCancellationResult, error) {
+	return c.cancelOwnedRun(ctx, requesterID, runID, reason, nil)
+}
+
+// cancelOwnedRun runs guard, when given, first in the cancellation
+// transaction: it locks and checks whatever authorizes this cancellation
+// (the workflow stop fence) before the child Run is locked.
+func (c *RuntimeCancellationCoordinator) cancelOwnedRun(
+	ctx context.Context,
+	requesterID, runID uuid.UUID,
+	reason string,
+	guard func(context.Context, pgx.Tx) error,
+) (RuntimeCancellationResult, error) {
 	reason, err := normalizeRuntimeCancellationReason(reason)
 	if err != nil {
 		return RuntimeCancellationResult{}, err
@@ -100,6 +112,15 @@ func (c *RuntimeCancellationCoordinator) CancelOwnedRun(
 
 	var result RuntimeCancellationResult
 	err = c.repository.WithTransaction(ctx, func(tx runtimeCancellationTransaction) error {
+		if guard != nil {
+			postgresTx, ok := tx.(*postgresRuntimeCancellationTransaction)
+			if !ok || postgresTx.tx == nil {
+				return errors.New("fenced runtime cancellation requires a database transaction")
+			}
+			if guardErr := guard(ctx, postgresTx.tx); guardErr != nil {
+				return guardErr
+			}
+		}
 		locked, lockErr := tx.LockRunForResultFinalization(ctx, runID)
 		if errors.Is(lockErr, pgx.ErrNoRows) {
 			return ErrRuntimeCancellationNotFound
@@ -1200,7 +1221,7 @@ func (r *postgresRuntimeCancellationRepository) WithTransaction(
 		IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite,
 	}, func(tx pgx.Tx) error {
 		queries := db.New(tx)
-		return fn(&postgresRuntimeCancellationTransaction{queries: queries})
+		return fn(&postgresRuntimeCancellationTransaction{queries: queries, tx: tx})
 	})
 }
 
@@ -1216,6 +1237,7 @@ func (r *postgresRuntimeCancellationRepository) nextReapDue(
 
 type postgresRuntimeCancellationTransaction struct {
 	queries *db.Queries
+	tx      pgx.Tx
 }
 
 func (t *postgresRuntimeCancellationTransaction) LockRuntimeSessionForPrincipalValidation(ctx context.Context, params db.LockRuntimeSessionForPrincipalValidationParams) (db.LockRuntimeSessionForPrincipalValidationRow, error) {

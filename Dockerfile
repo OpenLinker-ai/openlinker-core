@@ -21,7 +21,8 @@ COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-w -s" -o api ./cmd/api && \
-    CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-w -s" -o runtime-cutover ./cmd/runtime-cutover
+    CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-w -s" -o runtime-cutover ./cmd/runtime-cutover && \
+    CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-w -s" -o workflow-cutover ./cmd/workflow-cutover
 
 FROM alpine:3.23
 ARG OPENLINKER_GIT_SHA=unknown
@@ -36,6 +37,7 @@ RUN apk add --no-cache ca-certificates tzdata wget
 WORKDIR /app
 COPY --from=builder /app/api .
 COPY --from=builder /app/runtime-cutover .
+COPY --from=builder /app/workflow-cutover .
 COPY --from=builder /app/migrations ./migrations
 
 EXPOSE 8080

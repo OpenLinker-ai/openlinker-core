@@ -30,6 +30,23 @@ type Service struct {
 	runtime    workflowRuntime
 	observer   runtime.WorkerObserver
 	runUpdates runtime.RunUpdateSource
+
+	// instanceID identifies this process as a workflow run lease owner.
+	instanceID      uuid.UUID
+	leaseTTL        time.Duration
+	leaseRenewEvery time.Duration
+
+	// Node execution defaults until definitions carry node policies.
+	nodeTimeout       time.Duration
+	nodeRetryAttempts int32
+	nodeRetryBackoff  time.Duration
+	parallelism       int
+	maxNodes          int
+	maxEdges          int
+
+	// Run change notifications for event streams.
+	listenerOnce sync.Once
+	listener     *workflowRunListener
 }
 
 type workflowRuntime interface {
@@ -72,7 +89,7 @@ func normalizeRunStatus(status string) string {
 }
 
 func NewService(pool *pgxpool.Pool, runtimeSvc *runtime.Service) *Service {
-	return &Service{queries: db.New(pool), pool: pool, runtime: runtimeSvc}
+	return &Service{queries: db.New(pool), pool: pool, runtime: runtimeSvc, instanceID: uuid.New()}
 }
 
 // SetWorkerObserver installs payload-free test instrumentation only.
@@ -95,109 +112,47 @@ func (s *Service) CreateWorkflow(ctx context.Context, userID uuid.UUID, req *Cre
 	if req == nil {
 		return nil, httpx.BadRequest("请求体不能为空")
 	}
-	if len(req.Nodes) == 0 {
-		return nil, httpx.BadRequest("workflow 至少需要一个 Agent 节点")
-	}
-	if len(req.Nodes) > 10 {
-		return nil, httpx.BadRequest("workflow 节点不能超过 10 个")
-	}
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		return nil, httpx.BadRequest("workflow 名称不能为空")
-	}
-	description := strings.TrimSpace(req.Description)
-	edges, err := normalizeWorkflowEdgesFromRequest(req.Nodes, req.Edges)
+	def, err := s.prepareWorkflowDefinition(ctx, userID, req)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateWorkflowGraphFromRequest(req.Nodes, edges); err != nil {
-		return nil, err
+	if s.pool == nil {
+		return nil, httpx.Internal("workflow 存储未配置")
 	}
-	if err := s.validateWorkflowRequestAgentsAvailable(ctx, userID, req.Nodes, false); err != nil {
-		return nil, err
-	}
-	if err := s.validateWorkflowRequestInputMappings(ctx, req.Nodes, edges); err != nil {
-		return nil, err
-	}
-	edgesJSON, err := json.Marshal(edges)
-	if err != nil {
-		return nil, httpx.BadRequest("edges 不是合法 JSON")
-	}
-
-	var workflow db.Workflow
-	var nodes []db.WorkflowNode
+	var workflowID uuid.UUID
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		q := s.queries.WithTx(tx)
-		created, err := q.CreateWorkflow(ctx, db.CreateWorkflowParams{
+		created, err := s.queries.WithTx(tx).CreateWorkflow(ctx, db.CreateWorkflowParams{
 			UserID:      userID,
-			Name:        name,
-			Description: description,
-			Edges:       edgesJSON,
+			Name:        def.name,
+			Description: def.description,
+			Edges:       def.edgesJSON,
 		})
 		if err != nil {
 			return err
 		}
-		workflow = created
-		seen := map[string]struct{}{}
-		for i, node := range req.Nodes {
-			key := strings.TrimSpace(node.Key)
-			if key == "" {
-				return httpx.BadRequest("workflow node key 不能为空")
-			}
-			if _, ok := seen[key]; ok {
-				return httpx.BadRequest("workflow node key 不能重复: " + key)
-			}
-			if node.AgentID == uuid.Nil {
-				return httpx.BadRequest("workflow node agent_id 不能为空")
-			}
-			seen[key] = struct{}{}
-			title := strings.TrimSpace(node.Title)
-			if title == "" {
-				title = "Agent " + key
-			}
-			config := node.Config
-			if config == nil {
-				config = map[string]interface{}{}
-			}
-			configJSON, err := json.Marshal(config)
-			if err != nil {
-				return httpx.BadRequest("node config 不是合法 JSON")
-			}
-			createdNode, err := q.CreateWorkflowNode(ctx, db.CreateWorkflowNodeParams{
-				WorkflowID: workflow.ID,
-				NodeKey:    key,
-				NodeType:   "agent",
-				AgentID:    node.AgentID,
-				Title:      title,
-				Config:     configJSON,
-				Position:   int32(i),
-			})
-			if err != nil {
-				return err
-			}
-			nodes = append(nodes, createdNode)
-		}
-		return nil
+		workflowID = created.ID
+		return writeWorkflowVersion(ctx, tx, created.ID, userID, def)
 	})
 	if err != nil {
-		var he *httpx.HTTPError
-		if errors.As(err, &he) {
-			return nil, err
-		}
-		log.Error().Err(err).Str("user_id", userID.String()).Msg("workflow.CreateWorkflow")
-		return nil, httpx.Internal("创建 workflow 失败")
+		return nil, workflowWriteError(err, "workflow.CreateWorkflow", workflowID)
 	}
-	resp := workflowToResponse(workflow, nodes)
-	return &resp, nil
+	return s.GetWorkflow(ctx, userID, workflowID)
 }
 
 func (s *Service) GetWorkflow(ctx context.Context, userID, workflowID uuid.UUID) (*WorkflowResponse, error) {
-	w, nodes, err := s.getWorkflowForOwner(ctx, userID, workflowID)
+	if s.pool == nil {
+		w, nodes, err := s.getWorkflowForOwner(ctx, userID, workflowID)
+		if err != nil {
+			return nil, err
+		}
+		resp := workflowToResponse(w, nodes)
+		return &resp, nil
+	}
+	def, err := s.loadOwnedWorkflowVersion(ctx, userID, workflowID, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp := workflowToResponse(w, nodes)
-	return &resp, nil
+	return s.workflowResponseForVersion(def), nil
 }
 
 func (s *Service) ListWorkflows(ctx context.Context, userID uuid.UUID, limit int32) (*WorkflowListResponse, error) {
@@ -317,16 +272,43 @@ func (s *Service) RunWorkflow(ctx context.Context, userID, workflowID uuid.UUID,
 	if err != nil {
 		return nil, err
 	}
-	run, err := s.queries.CreateWorkflowRun(ctx, db.CreateWorkflowRunParams{
-		WorkflowID: workflowID,
-		UserID:     userID,
-		Input:      inputJSON,
-	})
+	versionID, err := s.requestedWorkflowVersionID(ctx, workflowID, req)
 	if err != nil {
-		log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.RunWorkflow: CreateWorkflowRun")
-		return nil, httpx.Internal("创建 workflow_run 失败")
+		return nil, err
 	}
-	return s.executeWorkflowRun(ctx, w, nodes, graph, run, input)
+	run, err := s.queries.CreateWorkflowRun(ctx, db.CreateWorkflowRunParams{
+		WorkflowID:        workflowID,
+		UserID:            userID,
+		Input:             inputJSON,
+		WorkflowVersionID: versionID,
+	})
+	if err = workflowRunCreateError(err); err != nil {
+		if !isWorkflowHTTPError(err) {
+			log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.RunWorkflow: CreateWorkflowRun")
+			return nil, httpx.Internal("创建 workflow_run 失败")
+		}
+		return nil, err
+	}
+	// Execute exactly the version the run pinned (an edit may have landed
+	// between reading the definition and creating the run).
+	if s.pool != nil {
+		if w, nodes, err = s.getWorkflowRunDefinition(ctx, run); err != nil {
+			return nil, err
+		}
+		if graph, err = workflowGraphFromDefinition(w, nodes); err != nil {
+			return nil, err
+		}
+	}
+	execCtx, finish, err := s.leaseNewWorkflowRun(ctx, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
+	resp, err := s.executeWorkflowRun(execCtx, w, nodes, graph, run, input)
+	if err != nil {
+		return nil, workflowExecutionError(err)
+	}
+	return resp, nil
 }
 
 // StartWorkflowRun creates a durable pending workflow run. A background worker
@@ -339,15 +321,23 @@ func (s *Service) StartWorkflowRun(ctx context.Context, userID, workflowID uuid.
 	if err != nil {
 		return nil, err
 	}
-	run, err := s.queries.CreatePendingWorkflowRun(ctx, db.CreatePendingWorkflowRunParams{
-		WorkflowID:  workflowID,
-		UserID:      userID,
-		Input:       inputJSON,
-		MaxAttempts: maxAttempts,
-	})
+	versionID, err := s.requestedWorkflowVersionID(ctx, workflowID, req)
 	if err != nil {
-		log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.StartWorkflowRun: CreatePendingWorkflowRun")
-		return nil, httpx.Internal("创建异步 workflow_run 失败")
+		return nil, err
+	}
+	run, err := s.queries.CreatePendingWorkflowRun(ctx, db.CreatePendingWorkflowRunParams{
+		WorkflowID:        workflowID,
+		UserID:            userID,
+		Input:             inputJSON,
+		MaxAttempts:       maxAttempts,
+		WorkflowVersionID: versionID,
+	})
+	if err = workflowRunCreateError(err); err != nil {
+		if !isWorkflowHTTPError(err) {
+			log.Error().Err(err).Str("workflow_id", workflowID.String()).Msg("workflow.StartWorkflowRun: CreatePendingWorkflowRun")
+			return nil, httpx.Internal("创建异步 workflow_run 失败")
+		}
+		return nil, err
 	}
 	resp := workflowRunToResponse(run, nil)
 	return &resp, nil
@@ -357,8 +347,34 @@ func (s *Service) StartWorkflowRun(ctx context.Context, userID, workflowID uuid.
 // for external execution. Passing uuid.Nil to the existing Agent validator
 // intentionally requires every node to be public and callable.
 func (s *Service) ValidateExternalExecutionTarget(ctx context.Context, targetOwnerID, workflowID uuid.UUID) (*ExternalExecutionTargetValidation, error) {
+	return s.ValidateExternalExecutionTargetVersion(ctx, targetOwnerID, workflowID, nil)
+}
+
+// ValidateExternalExecutionTargetVersion validates one definition version for
+// external execution; versionID nil means the current version. Only v1
+// semantics are executable until Cloud accepts the v2 contract.
+func (s *Service) ValidateExternalExecutionTargetVersion(ctx context.Context, targetOwnerID, workflowID uuid.UUID, versionID *uuid.UUID) (*ExternalExecutionTargetValidation, error) {
 	result := &ExternalExecutionTargetValidation{UnavailableReason: "not_found"}
-	w, nodes, err := s.getWorkflowForOwner(ctx, targetOwnerID, workflowID)
+	var w db.Workflow
+	var nodes []db.WorkflowNode
+	var err error
+	if s.pool != nil {
+		var def workflowVersionDefinition
+		def, err = s.loadOwnedWorkflowVersion(ctx, targetOwnerID, workflowID, versionID)
+		w, nodes = def.workflow, def.nodes
+		if err == nil {
+			result.TargetVersionID = def.id.String()
+			if def.semantics != workflowSemanticsV1 {
+				result.TargetName = w.Name
+				result.UnavailableReason = "semantics_unsupported"
+				return result, nil
+			}
+		}
+	} else if versionID != nil {
+		return result, nil
+	} else {
+		w, nodes, err = s.getWorkflowForOwner(ctx, targetOwnerID, workflowID)
+	}
 	if err != nil {
 		var he *httpx.HTTPError
 		if errors.As(err, &he) && he.Status < 500 {
@@ -407,6 +423,10 @@ func (s *Service) ValidateExternalExecutionTarget(ctx context.Context, targetOwn
 }
 
 func (s *Service) externalExecutionWorkflowContractHash(ctx context.Context, w db.Workflow, nodes []db.WorkflowNode) (string, error) {
+	return s.externalExecutionWorkflowContractHashWith(ctx, s.queries, w, nodes)
+}
+
+func (s *Service) externalExecutionWorkflowContractHashWith(ctx context.Context, q *db.Queries, w db.Workflow, nodes []db.WorkflowNode) (string, error) {
 	rawEdges := []map[string]interface{}{}
 	if len(w.Edges) > 0 {
 		if err := json.Unmarshal(w.Edges, &rawEdges); err != nil {
@@ -426,14 +446,14 @@ func (s *Service) externalExecutionWorkflowContractHash(ctx context.Context, w d
 	for _, node := range nodes {
 		agentHash, ok := agentHashes[node.AgentID]
 		if !ok {
-			agentRow, err := s.queries.GetAgentByID(ctx, node.AgentID)
+			agentRow, err := q.GetAgentByID(ctx, node.AgentID)
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return "", httpx.Conflict("workflow node Agent 当前不可用于外部执行")
 				}
 				return "", err
 			}
-			capability, err := s.queries.GetAgentCapabilityByAgentID(ctx, node.AgentID)
+			capability, err := q.GetAgentCapabilityByAgentID(ctx, node.AgentID)
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return "", httpx.Conflict("workflow node Agent 缺少 capability")
@@ -552,6 +572,8 @@ func (s *Service) StartExternalExecutionWorkflowRun(
 		if found {
 			return replay, nil
 		}
+		// No row and no identity: the insert was refused by admission.
+		return nil, errWorkflowAdmissionDraining
 	}
 	if err != nil {
 		log.Error().Err(err).Str("workflow_id", workflowID.String()).Str("external_request_id", externalRequestID.String()).Msg("workflow.StartExternalExecutionWorkflowRun")
@@ -652,183 +674,6 @@ func externalExecutionWorkflowRunMatches(run db.WorkflowRun, workflowID, actorUs
 	return reflect.DeepEqual(existing, normalizedInput)
 }
 
-func (s *Service) RetryWorkflowRun(ctx context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {
-	run, err := s.getWorkflowRunForOwner(ctx, userID, workflowRunID)
-	if err != nil {
-		return nil, err
-	}
-	if run.Status != workflowRunStatusFailed {
-		return nil, httpx.Conflict("只有 failed workflow_run 可以重试")
-	}
-	input := map[string]interface{}{}
-	if len(run.Input) > 0 {
-		if err := json.Unmarshal(run.Input, &input); err != nil {
-			return nil, httpx.Internal("workflow_run input 不是合法 JSON")
-		}
-	}
-	return s.StartWorkflowRun(ctx, userID, run.WorkflowID, &RunWorkflowRequest{
-		Input:       input,
-		MaxAttempts: run.MaxAttempts,
-	})
-}
-
-func (s *Service) RerunWorkflowStep(ctx context.Context, userID, workflowRunID uuid.UUID, req *RerunWorkflowStepRequest) (*WorkflowStepRerunResponse, error) {
-	if s.runtime == nil {
-		return nil, httpx.Internal("workflow runtime 未配置")
-	}
-	if req == nil {
-		return nil, httpx.BadRequest("请求体不能为空")
-	}
-	nodeKey := strings.TrimSpace(req.NodeKey)
-	if nodeKey == "" {
-		return nil, httpx.BadRequest("node_key 不能为空")
-	}
-	sourceRun, err := s.getWorkflowRunForOwner(ctx, userID, workflowRunID)
-	if err != nil {
-		return nil, err
-	}
-	switch sourceRun.Status {
-	case workflowRunStatusSuccess, workflowRunStatusFailed:
-	default:
-		return nil, httpx.Conflict("只有 success / failed workflow_run 可以 step 级重跑")
-	}
-	w, nodes, err := s.getWorkflowForOwner(ctx, userID, sourceRun.WorkflowID)
-	if err != nil {
-		return nil, err
-	}
-	graph, err := workflowGraphFromDefinition(w, nodes)
-	if err != nil {
-		return nil, err
-	}
-	nodeByKey := map[string]db.WorkflowNode{}
-	for _, node := range nodes {
-		nodeByKey[node.NodeKey] = node
-	}
-	if _, ok := nodeByKey[nodeKey]; !ok {
-		return nil, httpx.NotFound("workflow step 不存在")
-	}
-
-	sourceSteps, err := s.queries.ListWorkflowRunSteps(ctx, sourceRun.ID)
-	if err != nil {
-		log.Error().Err(err).Str("workflow_run_id", sourceRun.ID.String()).Msg("workflow.RerunWorkflowStep: source steps")
-		return nil, httpx.Internal("查询 workflow_run_steps 失败")
-	}
-	sourceStepByKey := latestWorkflowStepByNodeKey(sourceSteps)
-	if _, ok := sourceStepByKey[nodeKey]; !ok {
-		return nil, httpx.Conflict("source workflow_run 尚未执行该 step，请重跑已执行过的 step 或其失败父节点")
-	}
-	affected := workflowAffectedNodeKeys(graph, nodeKey)
-	for _, node := range nodes {
-		if _, shouldRerun := affected[node.NodeKey]; shouldRerun {
-			continue
-		}
-		step, ok := sourceStepByKey[node.NodeKey]
-		if !ok || step.Status != workflowRunStatusSuccess {
-			return nil, httpx.Conflict("非重跑路径上的 step 必须已成功，无法复用: " + node.NodeKey)
-		}
-	}
-
-	input := map[string]interface{}{}
-	if len(sourceRun.Input) > 0 {
-		if err := json.Unmarshal(sourceRun.Input, &input); err != nil {
-			return nil, httpx.Internal("workflow_run input 不是合法 JSON")
-		}
-	}
-	inputJSON, err := json.Marshal(input)
-	if err != nil {
-		return nil, httpx.BadRequest("input 不是合法 JSON")
-	}
-	rerun, err := s.queries.CreateWorkflowRun(ctx, db.CreateWorkflowRunParams{
-		WorkflowID: sourceRun.WorkflowID,
-		UserID:     userID,
-		Input:      inputJSON,
-	})
-	if err != nil {
-		log.Error().Err(err).Str("workflow_run_id", sourceRun.ID.String()).Msg("workflow.RerunWorkflowStep: CreateWorkflowRun")
-		return nil, httpx.Internal("创建 step rerun workflow_run 失败")
-	}
-
-	outputsByNode := map[string]map[string]interface{}{}
-	reusedKeys := []string{}
-	rerunKeys := []string{}
-	for _, level := range graph.Levels {
-		for _, node := range level {
-			if _, shouldRerun := affected[node.NodeKey]; !shouldRerun {
-				sourceStep := sourceStepByKey[node.NodeKey]
-				output, err := workflowStepOutputMap(sourceStep)
-				if err != nil {
-					_ = s.markWorkflowRunFailedStatus(ctx, rerun.ID, err.Error())
-					return nil, httpx.Internal(err.Error())
-				}
-				if err := s.copyWorkflowRunStep(ctx, rerun.ID, sourceStep); err != nil {
-					_ = s.markWorkflowRunFailedStatus(ctx, rerun.ID, err.Error())
-					return nil, err
-				}
-				outputsByNode[node.NodeKey] = output
-				reusedKeys = append(reusedKeys, node.NodeKey)
-				continue
-			}
-
-			stepInput := workflowStepInput(input, outputsByNode, graph.Parents[node.NodeKey], node)
-			result := s.runWorkflowNode(ctx, userID, w, rerun, node, stepInput, graph.Sequence[node.NodeKey])
-			rerunKeys = append(rerunKeys, node.NodeKey)
-			if result.Err != nil {
-				if err := s.markWorkflowRunFailedStatus(ctx, rerun.ID, result.Err.Error()); err != nil {
-					return nil, err
-				}
-				runResp, err := s.GetWorkflowRun(ctx, userID, rerun.ID)
-				if err != nil {
-					return nil, err
-				}
-				comparison, err := s.CompareWorkflowRuns(ctx, userID, sourceRun.ID, rerun.ID)
-				if err != nil {
-					return nil, err
-				}
-				return &WorkflowStepRerunResponse{
-					SourceRunID:    sourceRun.ID.String(),
-					RerunRunID:     rerun.ID.String(),
-					NodeKey:        nodeKey,
-					ReusedNodeKeys: reusedKeys,
-					RerunNodeKeys:  rerunKeys,
-					Run:            *runResp,
-					Comparison:     *comparison,
-				}, nil
-			}
-			outputsByNode[result.NodeKey] = result.Output
-		}
-	}
-
-	finalOutput := workflowFinalOutput(outputsByNode, graph.Sinks)
-	finalJSON, _ := json.Marshal(finalOutput)
-	if _, err := s.queries.MarkWorkflowRunSuccess(ctx, db.MarkWorkflowRunSuccessParams{
-		ID:     rerun.ID,
-		Output: finalJSON,
-	}); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.Conflict("step rerun workflow_run 已不是 running 状态")
-		}
-		log.Error().Err(err).Str("workflow_run_id", rerun.ID.String()).Msg("workflow.RerunWorkflowStep: MarkWorkflowRunSuccess")
-		return nil, httpx.Internal("更新 step rerun workflow_run 失败")
-	}
-	runResp, err := s.GetWorkflowRun(ctx, userID, rerun.ID)
-	if err != nil {
-		return nil, err
-	}
-	comparison, err := s.CompareWorkflowRuns(ctx, userID, sourceRun.ID, rerun.ID)
-	if err != nil {
-		return nil, err
-	}
-	return &WorkflowStepRerunResponse{
-		SourceRunID:    sourceRun.ID.String(),
-		RerunRunID:     rerun.ID.String(),
-		NodeKey:        nodeKey,
-		ReusedNodeKeys: reusedKeys,
-		RerunNodeKeys:  rerunKeys,
-		Run:            *runResp,
-		Comparison:     *comparison,
-	}, nil
-}
-
 func (s *Service) CompareWorkflowRuns(ctx context.Context, userID, baseRunID, candidateRunID uuid.UUID) (*WorkflowRunComparisonResponse, error) {
 	baseRun, err := s.getWorkflowRunForOwner(ctx, userID, baseRunID)
 	if err != nil {
@@ -917,6 +762,7 @@ func (s *Service) CancelWorkflowRun(ctx context.Context, userID, workflowRunID u
 	}
 	evidence, err := s.requestWorkflowCancellation(
 		ctx, userID, workflowRunID, "OWNER_CANCEL_REQUESTED",
+		cancellationRequester{userID: userID, via: cancellationRequestedViaOwner},
 	)
 	if err != nil {
 		return nil, err
@@ -1009,6 +855,11 @@ func (s *Service) ListWorkflowRunsPage(ctx context.Context, userID, workflowID u
 	for _, run := range rows {
 		items = append(items, workflowRunToResponse(run, stepsByRunID[run.ID]))
 	}
+	if s.pool != nil {
+		if err := decorateWorkflowRunStopEvidence(ctx, s.pool, items); err != nil {
+			log.Warn().Err(err).Msg("workflow.ListWorkflowRuns: decorate")
+		}
+	}
 	return &WorkflowRunListResponse{
 		Items:        items,
 		Total:        total,
@@ -1065,9 +916,22 @@ func (s *Service) prepareWorkflowExecution(
 	userID, workflowID uuid.UUID,
 	req *RunWorkflowRequest,
 ) (db.Workflow, []db.WorkflowNode, *workflowGraph, map[string]interface{}, []byte, int32, error) {
-	w, nodes, err := s.getWorkflowForOwner(ctx, userID, workflowID)
+	var w db.Workflow
+	var nodes []db.WorkflowNode
+	var err error
+	if versionID, versionErr := s.requestedWorkflowVersionID(ctx, workflowID, req); versionErr != nil {
+		return db.Workflow{}, nil, nil, nil, nil, 0, versionErr
+	} else if versionID != nil {
+		def, loadErr := s.loadOwnedWorkflowVersion(ctx, userID, workflowID, versionID)
+		w, nodes, err = def.workflow, def.nodes, loadErr
+	} else {
+		w, nodes, err = s.getWorkflowForOwner(ctx, userID, workflowID)
+	}
 	if err != nil {
 		return db.Workflow{}, nil, nil, nil, nil, 0, err
+	}
+	if w.Status == workflowStatusArchived {
+		return db.Workflow{}, nil, nil, nil, nil, 0, errWorkflowArchived
 	}
 	if len(nodes) == 0 {
 		return db.Workflow{}, nil, nil, nil, nil, 0, httpx.BadRequest("workflow 没有可执行节点")
@@ -1099,260 +963,6 @@ func (s *Service) prepareWorkflowExecution(
 	return w, nodes, graph, input, inputJSON, maxAttempts, nil
 }
 
-func (s *Service) executeWorkflowRun(
-	ctx context.Context,
-	w db.Workflow,
-	nodes []db.WorkflowNode,
-	graph *workflowGraph,
-	run db.WorkflowRun,
-	input map[string]interface{},
-) (*WorkflowRunResponse, error) {
-	outputsByNode := map[string]map[string]interface{}{}
-	for _, level := range graph.Levels {
-		if stopped, resp, err := s.workflowRunStopped(ctx, run.UserID, run.ID); stopped || err != nil {
-			return resp, err
-		}
-		levelCtx, cancelLevel := context.WithCancel(ctx)
-		results := make(chan workflowNodeRunResult, len(level))
-		var wg sync.WaitGroup
-		for _, node := range level {
-			node := node
-			stepInput := workflowStepInput(input, outputsByNode, graph.Parents[node.NodeKey], node)
-			sequence := graph.Sequence[node.NodeKey]
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				result := s.runWorkflowNode(levelCtx, run.UserID, w, run, node, stepInput, sequence)
-				if result.Err != nil {
-					cancelLevel()
-				}
-				results <- result
-			}()
-		}
-		wg.Wait()
-		cancelLevel()
-		close(results)
-		var levelErr error
-		for result := range results {
-			if result.Err != nil {
-				levelErr = preferWorkflowNodeError(levelErr, result.Err)
-				continue
-			}
-			outputsByNode[result.NodeKey] = result.Output
-		}
-		if levelErr != nil {
-			if stopped, resp, err := s.workflowRunStopped(ctx, run.UserID, run.ID); stopped || err != nil {
-				return resp, err
-			}
-			return nil, s.failWorkflowRun(ctx, run.ID, levelErr.Error())
-		}
-		if stopped, resp, err := s.workflowRunStopped(ctx, run.UserID, run.ID); stopped || err != nil {
-			return resp, err
-		}
-	}
-	finalOutput := workflowFinalOutput(outputsByNode, graph.Sinks)
-	finalJSON, _ := json.Marshal(finalOutput)
-	if _, err := s.queries.MarkWorkflowRunSuccess(ctx, db.MarkWorkflowRunSuccessParams{
-		ID:     run.ID,
-		Output: finalJSON,
-	}); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return s.GetWorkflowRun(ctx, run.UserID, run.ID)
-		}
-		return nil, httpx.Internal("更新 workflow_run 失败")
-	}
-	return s.GetWorkflowRun(ctx, run.UserID, run.ID)
-}
-
-type workflowNodeRunResult struct {
-	NodeKey string
-	Output  map[string]interface{}
-	Err     error
-}
-
-func (s *Service) runWorkflowNode(
-	ctx context.Context,
-	userID uuid.UUID,
-	w db.Workflow,
-	run db.WorkflowRun,
-	node db.WorkflowNode,
-	stepInput workflowStepInputResult,
-	sequence int32,
-) workflowNodeRunResult {
-	if stepInput.Value == nil {
-		stepInput.Value = map[string]interface{}{}
-	}
-	stepInputJSON, _ := json.Marshal(stepInput.Value)
-	step, err := s.queries.CreateWorkflowRunStep(ctx, db.CreateWorkflowRunStepParams{
-		WorkflowRunID:  run.ID,
-		WorkflowNodeID: node.ID,
-		NodeKey:        node.NodeKey,
-		AgentID:        node.AgentID,
-		Input:          stepInputJSON,
-		Sequence:       sequence,
-	})
-	if err != nil {
-		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: fmt.Errorf("创建 step 失败: %w", err)}
-	}
-	if stepInput.Err != nil {
-		msg := stepInput.Err.Error()
-		_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
-			ID:           step.ID,
-			ErrorMessage: &msg,
-		})
-		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
-	}
-	if stepInput.Mapped {
-		if err := s.validateMappedWorkflowNodeInput(ctx, node, stepInput.Value); err != nil {
-			msg := err.Error()
-			_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
-				ID:           step.ID,
-				ErrorMessage: &msg,
-			})
-			return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
-		}
-	}
-	runRequest := &runtime.RunRequest{
-		AgentID:          node.AgentID.String(),
-		Input:            stepInput.Value,
-		IdempotencyKey:   workflowNodeRunIdempotencyKey(run.ID, node.NodeKey),
-		CreationProtocol: "workflow",
-		CreationMethod:   "node.run",
-		Metadata: map[string]interface{}{
-			"workflow_id":       w.ID.String(),
-			"workflow_run_id":   run.ID.String(),
-			"workflow_node_id":  node.ID.String(),
-			"workflow_node_key": node.NodeKey,
-		},
-	}
-	var resp *runtime.RunResponse
-	if fencedRuntime, ok := s.runtime.(workflowLaunchRuntime); ok {
-		identity, identityErr := fencedRuntime.PrepareRunCreationIdentity(runRequest, "api")
-		if identityErr != nil {
-			return workflowNodeRunResult{NodeKey: node.NodeKey, Err: identityErr}
-		}
-		fence, fenceErr := s.claimWorkflowChildLaunch(
-			ctx, dbWorkflowRunIdentity{ID: run.ID, UserID: run.UserID},
-			node.ID, step.ID, node.NodeKey, identity,
-		)
-		if fenceErr != nil {
-			return workflowNodeRunResult{NodeKey: node.NodeKey, Err: fenceErr}
-		}
-		resp, err = fencedRuntime.RunWorkflowChild(ctx, userID, runRequest, "api", fence)
-		if err == nil {
-			childRunID, parseErr := workflowChildRunIDFromResponse(resp)
-			if parseErr == nil {
-				attachCtx, cancelAttach := context.WithTimeout(context.WithoutCancel(ctx), workflowStepEvidenceWriteTimeout)
-				parseErr = s.attachWorkflowChildLaunch(attachCtx, fence, step.ID, childRunID)
-				cancelAttach()
-			}
-			if parseErr != nil {
-				err = parseErr
-			}
-		}
-	} else {
-		resp, err = s.runtime.Run(ctx, userID, runRequest, "api")
-	}
-	if err != nil {
-		msg := err.Error()
-		_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
-			ID:           step.ID,
-			ErrorMessage: &msg,
-		})
-		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
-	}
-	childRunID, err := workflowChildRunIDFromResponse(resp)
-	if err != nil {
-		msg := err.Error()
-		_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
-			ID:           step.ID,
-			ErrorMessage: &msg,
-		})
-		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
-	}
-	childRunIDPtr := &childRunID
-	if _, fenced := s.runtime.(workflowLaunchRuntime); !fenced {
-		attachCtx, cancelAttach := context.WithTimeout(context.WithoutCancel(ctx), workflowStepEvidenceWriteTimeout)
-		attached, attachErr := s.queries.AttachWorkflowRunStepRun(attachCtx, db.AttachWorkflowRunStepRunParams{
-			ID:    step.ID,
-			RunID: childRunID,
-		})
-		cancelAttach()
-		if attachErr != nil {
-			msg := fmt.Sprintf("关联 step 子 run 失败: %v", attachErr)
-			_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
-				ID:           step.ID,
-				RunID:        childRunIDPtr,
-				ErrorMessage: &msg,
-			})
-			return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
-		}
-		if attached != 1 {
-			msg := "workflow step 不再接受子 run 关联"
-			return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
-		}
-	}
-	resp.Status = normalizeRunStatus(resp.Status)
-	if resp.Status == runtimeRunStatusRunning || resp.Status == runtimeRunStatusPending {
-		completed, err := s.waitForRuntimeRunCompletion(ctx, userID, childRunID)
-		if err != nil {
-			msg := err.Error()
-			_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
-				ID:           step.ID,
-				RunID:        childRunIDPtr,
-				ErrorMessage: &msg,
-			})
-			return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
-		}
-		resp = completed
-	}
-	if resp.Status != "success" {
-		msg := strings.TrimSpace(resp.ErrorMsg)
-		if msg == "" {
-			msg = "workflow step " + node.NodeKey + " returned status " + resp.Status
-		}
-		_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
-			ID:           step.ID,
-			RunID:        childRunIDPtr,
-			ErrorMessage: &msg,
-		})
-		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
-	}
-	output := resp.Output
-	if output == nil {
-		output = map[string]interface{}{}
-	}
-	outputJSON, _ := json.Marshal(output)
-	if err := s.markWorkflowRunStepSuccess(ctx, db.MarkWorkflowRunStepSuccessParams{
-		ID:     step.ID,
-		RunID:  childRunIDPtr,
-		Output: outputJSON,
-	}); err != nil {
-		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: fmt.Errorf("更新 step 失败: %w", err)}
-	}
-	return workflowNodeRunResult{NodeKey: node.NodeKey, Output: output}
-}
-
-func (s *Service) markWorkflowRunStepFailed(
-	ctx context.Context,
-	params db.MarkWorkflowRunStepFailedParams,
-) error {
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workflowStepEvidenceWriteTimeout)
-	defer cancel()
-	_, err := s.queries.MarkWorkflowRunStepFailed(writeCtx, params)
-	return err
-}
-
-func (s *Service) markWorkflowRunStepSuccess(
-	ctx context.Context,
-	params db.MarkWorkflowRunStepSuccessParams,
-) error {
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workflowStepEvidenceWriteTimeout)
-	defer cancel()
-	_, err := s.queries.MarkWorkflowRunStepSuccess(writeCtx, params)
-	return err
-}
-
 func workflowChildRunIDFromResponse(resp *runtime.RunResponse) (uuid.UUID, error) {
 	if resp == nil {
 		return uuid.Nil, errors.New("workflow runtime 返回空响应")
@@ -1377,19 +987,6 @@ func workflowNodeRunIdempotencyKey(workflowRunID uuid.UUID, nodeKey string) stri
 	return fmt.Sprintf("workflow/%s/node/%x", workflowRunID, digest)
 }
 
-func preferWorkflowNodeError(current, candidate error) error {
-	if candidate == nil {
-		return current
-	}
-	if current == nil {
-		return candidate
-	}
-	if isWorkflowContextError(current) && !isWorkflowContextError(candidate) {
-		return candidate
-	}
-	return current
-}
-
 func isWorkflowContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
@@ -1412,33 +1009,19 @@ func (s *Service) waitForRuntimeRunCompletionByPolling(
 	ctx context.Context,
 	userID, runID uuid.UUID,
 ) (*runtime.RunResponse, error) {
-	for i := 0; i < workflowNodeRunPollMaxLoops; i += 1 {
-		if s.observer != nil {
-			s.observer.ObserveWorker(runtime.WorkerObservation{
-				Category: "workflow.child_run.query", Reason: "poll", BatchSize: 1,
-			})
-		}
-		childRun, err := s.runtime.GetRun(ctx, userID, runID)
-		if err != nil {
-			return nil, err
-		}
-		childRun.Status = normalizeRunStatus(childRun.Status)
-		switch childRun.Status {
-		case runtimeRunStatusSuccess, runtimeRunStatusFailed, runtimeRunStatusTimeout, runtimeRunStatusCanceled:
-			return childRun, nil
-		case runtimeRunStatusRunning, runtimeRunStatusPending:
-			sleep := time.After(workflowNodeRunPollInterval)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-sleep:
-				continue
-			}
-		default:
-			return childRun, nil
-		}
+	deadline, timeout := workflowChildWaitDeadline(ctx)
+	return s.waitForRuntimeRunCompletionByPollingUntil(ctx, userID, runID, deadline, timeout, "poll")
+}
+
+// workflowChildWaitDeadline bounds one observation of a child Run. The
+// executor waits until the attempt's deadline (carried by ctx); waiting is
+// only observation and its end never decides the attempt by itself.
+func workflowChildWaitDeadline(ctx context.Context) (time.Time, time.Duration) {
+	if deadline, ok := ctx.Deadline(); ok {
+		return deadline, time.Until(deadline)
 	}
-	return nil, fmt.Errorf("workflow node run %s did not finish within %s", runID.String(), (workflowNodeRunPollInterval * workflowNodeRunPollMaxLoops))
+	timeout := workflowNodeRunPollInterval * workflowNodeRunPollMaxLoops
+	return time.Now().Add(timeout), timeout
 }
 
 func (s *Service) waitForRuntimeRunCompletionByEvent(
@@ -1446,8 +1029,7 @@ func (s *Service) waitForRuntimeRunCompletionByEvent(
 	userID, runID uuid.UUID,
 	subscription runtime.RunUpdateSubscription,
 ) (*runtime.RunResponse, error) {
-	timeout := workflowNodeRunPollInterval * workflowNodeRunPollMaxLoops
-	deadline := time.Now().Add(timeout)
+	deadline, timeout := workflowChildWaitDeadline(ctx)
 	reason := "event_initial"
 	for {
 		if s.observer != nil {
@@ -1491,12 +1073,12 @@ func (s *Service) waitForRuntimeRunCompletionByEvent(
 			continue
 		}
 		if !s.runUpdates.Healthy() {
-			return s.waitForRuntimeRunCompletionByPollingUntil(ctx, userID, runID, deadline, timeout)
+			return s.waitForRuntimeRunCompletionByPollingUntil(ctx, userID, runID, deadline, timeout, "degraded_poll")
 		}
 		if !errors.Is(waitErr, context.DeadlineExceeded) {
 			// Advisory wake failures degrade to the pre-existing database path;
 			// they are not Workflow business failures.
-			return s.waitForRuntimeRunCompletionByPollingUntil(ctx, userID, runID, deadline, timeout)
+			return s.waitForRuntimeRunCompletionByPollingUntil(ctx, userID, runID, deadline, timeout, "degraded_poll")
 		}
 	}
 }
@@ -1506,11 +1088,12 @@ func (s *Service) waitForRuntimeRunCompletionByPollingUntil(
 	userID, runID uuid.UUID,
 	deadline time.Time,
 	timeout time.Duration,
+	reason string,
 ) (*runtime.RunResponse, error) {
 	for time.Now().Before(deadline) {
 		if s.observer != nil {
 			s.observer.ObserveWorker(runtime.WorkerObservation{
-				Category: "workflow.child_run.query", Reason: "degraded_poll", BatchSize: 1,
+				Category: "workflow.child_run.query", Reason: reason, BatchSize: 1,
 			})
 		}
 		childRun, err := s.runtime.GetRun(ctx, userID, runID)
@@ -1546,17 +1129,201 @@ func (s *Service) waitForRuntimeRunCompletionByPollingUntil(
 }
 
 func (s *Service) GetWorkflowRun(ctx context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {
-	run, err := s.getWorkflowRunForOwner(ctx, userID, workflowRunID)
-	if err != nil {
-		return nil, err
+	if s.pool == nil {
+		run, err := s.getWorkflowRunForOwner(ctx, userID, workflowRunID)
+		if err != nil {
+			return nil, err
+		}
+		steps, err := s.queries.ListWorkflowRunSteps(ctx, workflowRunID)
+		if err != nil {
+			log.Error().Err(err).Str("workflow_run_id", workflowRunID.String()).Msg("workflow.GetWorkflowRun: steps")
+			return nil, httpx.Internal("查询 workflow_run_steps 失败")
+		}
+		resp := workflowRunToResponse(run, steps)
+		return &resp, nil
 	}
-	steps, err := s.queries.ListWorkflowRunSteps(ctx, workflowRunID)
+	// One REPEATABLE READ READ ONLY transaction: the run (with its revision),
+	// steps, logical nodes and stop evidence come from one snapshot.
+	var resp *WorkflowRunResponse
+	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		q := s.queries.WithTx(tx)
+		run, err := q.GetWorkflowRunByID(ctx, workflowRunID)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && run.UserID != userID) {
+			return httpx.NotFound("workflow_run 不存在")
+		}
+		if err != nil {
+			return err
+		}
+		steps, err := q.ListWorkflowRunSteps(ctx, workflowRunID)
+		if err != nil {
+			return err
+		}
+		built := workflowRunToResponse(run, steps)
+		items := []WorkflowRunResponse{built}
+		if err := decorateWorkflowRunStopEvidence(ctx, tx, items); err != nil {
+			return err
+		}
+		resp = &items[0]
+		rows, err := tx.Query(ctx, `
+			SELECT node_key, state, COALESCE(effective_attempt, 0), COALESCE(skip_reason, '')
+			FROM workflow_run_nodes WHERE workflow_run_id = $1 ORDER BY node_key
+		`, workflowRunID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var node WorkflowRunNodeResponse
+			if err := rows.Scan(&node.NodeKey, &node.State, &node.EffectiveAttempt, &node.SkipReason); err != nil {
+				return err
+			}
+			resp.Nodes = append(resp.Nodes, node)
+		}
+		return rows.Err()
+	})
 	if err != nil {
-		log.Error().Err(err).Str("workflow_run_id", workflowRunID.String()).Msg("workflow.GetWorkflowRun: steps")
-		return nil, httpx.Internal("查询 workflow_run_steps 失败")
+		if isWorkflowHTTPError(err) {
+			return nil, err
+		}
+		log.Error().Err(err).Str("workflow_run_id", workflowRunID.String()).Msg("workflow.GetWorkflowRun")
+		return nil, httpx.Internal("查询 workflow_run 失败")
 	}
-	resp := workflowRunToResponse(run, steps)
-	return &resp, nil
+	return resp, nil
+}
+
+// decorateWorkflowRunStopEvidence adds the unconfirmed-children markers, the
+// pinned version number and the revision. A child is unconfirmed when its
+// stop record or the run's public cancellation ended without a stop
+// confirmation, or when Runtime classifies it so; finished retryable runs use
+// the same child union and classifier as the Retry/Rerun gate, so the marker
+// agrees with what Retry will require.
+func decorateWorkflowRunStopEvidence(ctx context.Context, q db.DBTX, items []WorkflowRunResponse) error {
+	if q == nil || len(items) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, 0, len(items))
+	byID := map[string]int{}
+	for i, item := range items {
+		if id, err := uuid.Parse(item.ID); err == nil {
+			ids = append(ids, id)
+			byID[item.ID] = i
+		}
+	}
+	rows, err := q.Query(ctx, `
+		SELECT r.id,
+		       EXISTS (SELECT 1 FROM workflow_step_stops s WHERE s.workflow_run_id = r.id AND s.state = 'unconfirmed')
+		       OR EXISTS (SELECT 1 FROM workflow_run_cancellations c WHERE c.workflow_run_id = r.id AND c.state = 'unconfirmed'),
+		       r.unconfirmed_children_acknowledged_by,
+		       (SELECT v.version FROM workflow_versions v WHERE v.id = r.workflow_version_id),
+		       r.revision
+		FROM workflow_runs r WHERE r.id = ANY($1::uuid[])
+	`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		var unconfirmed bool
+		var acknowledgedBy *uuid.UUID
+		var version *int32
+		var revision int64
+		if err := rows.Scan(&id, &unconfirmed, &acknowledgedBy, &version, &revision); err != nil {
+			return err
+		}
+		item := &items[byID[id.String()]]
+		item.HasUnconfirmedChildren = unconfirmed
+		if acknowledgedBy != nil {
+			item.UnconfirmedChildrenAcknowledgedBy = acknowledgedBy.String()
+		}
+		if version != nil {
+			item.WorkflowVersion = *version
+		}
+		item.Revision = revision
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	return decorateWorkflowRunChildEvidence(ctx, q, items)
+}
+
+// decorateWorkflowRunChildEvidence marks finished runs (any terminal status:
+// Retry and step Rerun both read this evidence) whose child Runs Runtime
+// classifies as unconfirmed. It reads the children of the whole page in one
+// query and classifies them in three, with the same union and classifier as
+// the Retry/Rerun gate.
+func decorateWorkflowRunChildEvidence(ctx context.Context, q db.DBTX, items []WorkflowRunResponse) error {
+	byID := map[uuid.UUID][]int{}
+	ids := []uuid.UUID{}
+	for i, item := range items {
+		if item.HasUnconfirmedChildren {
+			continue
+		}
+		switch item.Status {
+		case workflowRunStatusFailed, workflowRunStatusCanceled, workflowRunStatusSuccess:
+		default:
+			continue
+		}
+		id, err := uuid.Parse(item.ID)
+		if err != nil {
+			continue
+		}
+		if _, seen := byID[id]; !seen {
+			ids = append(ids, id)
+		}
+		byID[id] = append(byID[id], i)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := q.Query(ctx, `
+		SELECT DISTINCT workflow_run_id, child_id FROM (
+		    SELECT workflow_run_id, run_id AS child_id FROM workflow_step_launches
+		    WHERE workflow_run_id = ANY($1::uuid[]) AND run_id IS NOT NULL
+		    UNION ALL
+		    SELECT workflow_run_id, run_id FROM workflow_run_steps
+		    WHERE workflow_run_id = ANY($1::uuid[]) AND run_id IS NOT NULL
+		) children
+	`, ids)
+	if err != nil {
+		return err
+	}
+	childrenOf := map[uuid.UUID][]uuid.UUID{}
+	children := []uuid.UUID{}
+	seenChild := map[uuid.UUID]bool{}
+	for rows.Next() {
+		var runID, childID uuid.UUID
+		if err := rows.Scan(&runID, &childID); err != nil {
+			rows.Close()
+			return err
+		}
+		childrenOf[runID] = append(childrenOf[runID], childID)
+		if !seenChild[childID] {
+			seenChild[childID] = true
+			children = append(children, childID)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	evidence, err := runtime.ClassifyWorkflowChildStops(ctx, q, children)
+	if err != nil {
+		return err
+	}
+	for runID, childIDs := range childrenOf {
+		for _, childID := range childIDs {
+			if evidence[childID].State != runtime.WorkflowChildStopUnconfirmed {
+				continue
+			}
+			for _, i := range byID[runID] {
+				items[i].HasUnconfirmedChildren = true
+			}
+			break
+		}
+	}
+	return nil
 }
 
 func (s *Service) getWorkflowRunForOwner(ctx context.Context, userID, workflowRunID uuid.UUID) (db.WorkflowRun, error) {
@@ -1590,24 +1357,53 @@ func (s *Service) workflowRunStopped(ctx context.Context, userID, workflowRunID 
 }
 
 func (s *Service) ClaimAndRunPendingWorkflow(ctx context.Context) (bool, error) {
-	if s.runtime == nil {
-		return false, httpx.Internal("workflow runtime 未配置")
+	execute, claimed, err := s.ClaimPendingWorkflow(ctx)
+	if err != nil || !claimed {
+		return claimed, err
 	}
-	run, err := s.queries.ClaimPendingWorkflowRun(ctx)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		log.Error().Err(err).Msg("workflow.ClaimAndRunPendingWorkflow: claim")
-		return false, httpx.Internal("认领 workflow_run 失败")
-	}
-	if err := s.executeClaimedWorkflowRun(ctx, run); err != nil {
-		log.Warn().Err(err).Str("workflow_run_id", run.ID.String()).Msg("workflow.ClaimAndRunPendingWorkflow: execute")
-	}
+	execute(ctx)
 	return true, nil
 }
 
+// ClaimPendingWorkflow claims one pending run under a new execution lease
+// and returns the function that executes it. The worker runs it in its own
+// goroutine; executing keeps the lease renewed and releases it at the end.
+func (s *Service) ClaimPendingWorkflow(ctx context.Context) (func(context.Context), bool, error) {
+	if s.runtime == nil {
+		return nil, false, httpx.Internal("workflow runtime 未配置")
+	}
+	if s.pool == nil {
+		return nil, false, httpx.Internal("workflow 存储未配置")
+	}
+	run, lease, err := s.claimPendingWorkflowRunWithLease(ctx)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		log.Error().Err(err).Msg("workflow.ClaimPendingWorkflow: claim")
+		return nil, false, httpx.Internal("认领 workflow_run 失败")
+	}
+	return func(execParent context.Context) {
+		execCtx, stop := s.keepWorkflowRunLease(execParent, lease)
+		defer s.releaseWorkflowRunLease(context.WithoutCancel(execParent), lease)
+		defer stop()
+		if err := s.executeClaimedWorkflowRun(execCtx, run); err != nil {
+			log.Warn().Err(err).Str("workflow_run_id", run.ID.String()).Msg("workflow: execute claimed run")
+		}
+	}, true, nil
+}
+
 func (s *Service) RequeueStaleWorkflowRuns(ctx context.Context, staleAfter time.Duration) (int64, error) {
+	if s.pool != nil {
+		// Lease expiry, measured by the database clock, replaces the
+		// claimed_at age; staleAfter only applies to the fake query layer.
+		total, err := s.RecoverExpiredWorkflowRunLeases(ctx)
+		if err != nil {
+			log.Error().Err(err).Msg("workflow.RecoverExpiredWorkflowRunLeases")
+			return 0, httpx.Internal("恢复超时 workflow_run 失败")
+		}
+		return total, nil
+	}
 	if staleAfter < 0 {
 		staleAfter = 0
 	}
@@ -1620,11 +1416,11 @@ func (s *Service) RequeueStaleWorkflowRuns(ctx context.Context, staleAfter time.
 }
 
 func (s *Service) executeClaimedWorkflowRun(ctx context.Context, run db.WorkflowRun) error {
-	if run.ClaimedAt != nil {
+	if _, leased := workflowRunLeaseFrom(ctx); !leased && run.ClaimedAt != nil {
 		defer s.releasePausedWorkflowRunClaim(ctx, run.ID, *run.ClaimedAt, run.AttemptCount)
 	}
 
-	w, nodes, err := s.getWorkflowDefinition(ctx, run.WorkflowID)
+	w, nodes, err := s.getWorkflowRunDefinition(ctx, run)
 	if err != nil {
 		return s.failWorkflowRun(ctx, run.ID, err.Error())
 	}
@@ -1641,16 +1437,12 @@ func (s *Service) executeClaimedWorkflowRun(ctx context.Context, run db.Workflow
 			return s.failWorkflowRun(ctx, run.ID, "workflow_run input 不是合法 JSON")
 		}
 	}
-	if run.AttemptCount > 1 {
-		if err := s.queries.DeleteWorkflowRunSteps(ctx, run.ID); err != nil {
-			return s.failWorkflowRun(ctx, run.ID, "清理重试 workflow steps 失败: "+err.Error())
-		}
-	}
+	// A reclaimed run resumes from its persisted attempts; nothing is deleted.
 	if err := s.validateWorkflowStoredAgentsAvailable(ctx, run.UserID, nodes, true); err != nil {
 		return s.failWorkflowRun(ctx, run.ID, err.Error())
 	}
 	_, err = s.executeWorkflowRun(ctx, w, nodes, graph, run, input)
-	return err
+	return workflowExecutionError(err)
 }
 
 func (s *Service) releasePausedWorkflowRunClaim(ctx context.Context, workflowRunID uuid.UUID, claimedAt time.Time, attemptCount int32) {
@@ -1666,6 +1458,10 @@ func (s *Service) releasePausedWorkflowRunClaim(ctx context.Context, workflowRun
 }
 
 func (s *Service) getWorkflowForOwner(ctx context.Context, userID, workflowID uuid.UUID) (db.Workflow, []db.WorkflowNode, error) {
+	if s.pool != nil {
+		def, err := s.loadOwnedWorkflowVersion(ctx, userID, workflowID, nil)
+		return def.workflow, def.nodes, err
+	}
 	w, err := s.queries.GetWorkflowByID(ctx, workflowID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1683,6 +1479,24 @@ func (s *Service) getWorkflowForOwner(ctx context.Context, userID, workflowID uu
 		return db.Workflow{}, nil, httpx.Internal("查询 workflow 节点失败")
 	}
 	return w, nodes, nil
+}
+
+// getWorkflowRunDefinition reads the definition version a run executes.
+func (s *Service) getWorkflowRunDefinition(ctx context.Context, run db.WorkflowRun) (db.Workflow, []db.WorkflowNode, error) {
+	if s.pool == nil {
+		return s.getWorkflowDefinition(ctx, run.WorkflowID)
+	}
+	versionID, err := s.workflowRunVersionID(ctx, run.ID)
+	if err != nil {
+		log.Error().Err(err).Str("workflow_run_id", run.ID.String()).Msg("workflow.getWorkflowRunDefinition")
+		return db.Workflow{}, nil, httpx.Internal("查询 workflow 版本失败")
+	}
+	def, err := loadWorkflowVersion(ctx, s.pool, run.WorkflowID, &versionID)
+	if err != nil {
+		log.Error().Err(err).Str("workflow_run_id", run.ID.String()).Msg("workflow.getWorkflowRunDefinition")
+		return db.Workflow{}, nil, httpx.Internal("查询 workflow 版本失败")
+	}
+	return def.workflow, def.nodes, nil
 }
 
 func (s *Service) getWorkflowDefinition(ctx context.Context, workflowID uuid.UUID) (db.Workflow, []db.WorkflowNode, error) {
@@ -1751,6 +1565,10 @@ func (s *Service) validateWorkflowRequestAgentsAvailable(ctx context.Context, us
 }
 
 func (s *Service) validateWorkflowStoredAgentsAvailable(ctx context.Context, userID uuid.UUID, nodes []db.WorkflowNode, requireRuntimeOnline bool) error {
+	return s.validateWorkflowStoredAgentsAvailableWith(ctx, s.queries, userID, nodes, requireRuntimeOnline)
+}
+
+func (s *Service) validateWorkflowStoredAgentsAvailableWith(ctx context.Context, q *db.Queries, userID uuid.UUID, nodes []db.WorkflowNode, requireRuntimeOnline bool) error {
 	refs := make([]workflowAgentRef, 0, len(nodes))
 	for _, node := range nodes {
 		refs = append(refs, workflowAgentRef{
@@ -1759,15 +1577,19 @@ func (s *Service) validateWorkflowStoredAgentsAvailable(ctx context.Context, use
 			AgentID: node.AgentID,
 		})
 	}
-	return s.validateWorkflowAgentsAvailable(ctx, userID, refs, requireRuntimeOnline)
+	return s.validateWorkflowAgentsAvailableWith(ctx, q, userID, refs, requireRuntimeOnline)
 }
 
 func (s *Service) validateWorkflowAgentsAvailable(ctx context.Context, userID uuid.UUID, refs []workflowAgentRef, requireRuntimeOnline bool) error {
+	return s.validateWorkflowAgentsAvailableWith(ctx, s.queries, userID, refs, requireRuntimeOnline)
+}
+
+func (s *Service) validateWorkflowAgentsAvailableWith(ctx context.Context, q *db.Queries, userID uuid.UUID, refs []workflowAgentRef, requireRuntimeOnline bool) error {
 	for _, ref := range refs {
 		if ref.AgentID == uuid.Nil {
 			return httpx.BadRequest("workflow node agent_id 不能为空")
 		}
-		agentRow, err := s.queries.GetAgentByID(ctx, ref.AgentID)
+		agentRow, err := q.GetAgentByID(ctx, ref.AgentID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return httpx.Conflict("workflow node Agent 当前不可用于工作流: " + workflowAgentRefLabel(ref))
@@ -1781,7 +1603,7 @@ func (s *Service) validateWorkflowAgentsAvailable(ctx context.Context, userID uu
 		if agentRow.CreatorID != userID && hasReservedWorkflowAgentTag(agentRow.Tags) {
 			return httpx.Conflict("workflow node Agent 当前不可用于工作流: " + workflowAgentRefLabel(ref))
 		}
-		callable, err := s.workflowAgentCallable(ctx, agentRow, requireRuntimeOnline)
+		callable, err := s.workflowAgentCallableWith(ctx, q, agentRow, requireRuntimeOnline)
 		if err != nil {
 			return err
 		}
@@ -1807,8 +1629,12 @@ func hasReservedWorkflowAgentTag(tags []string) bool {
 }
 
 func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, requireRuntimeOnline bool) (bool, error) {
+	return s.workflowAgentCallableWith(ctx, s.queries, agentRow, requireRuntimeOnline)
+}
+
+func (s *Service) workflowAgentCallableWith(ctx context.Context, q *db.Queries, agentRow db.Agent, requireRuntimeOnline bool) (bool, error) {
 	if agentRow.ConnectionMode == "runtime" {
-		hasActiveSession, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, agentRow.ID)
+		hasActiveSession, err := q.HasActiveRuntimeSessionForAgent(ctx, agentRow.ID)
 		if err != nil {
 			log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: HasActiveRuntimeSessionForAgent")
 			return false, httpx.Internal("校验 Workflow 的 Runtime Worker 连接状态失败")
@@ -1825,7 +1651,7 @@ func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, 
 		}
 	}
 
-	snapshot, err := s.queries.GetAgentAvailabilitySnapshot(ctx, agentRow.ID)
+	snapshot, err := q.GetAgentAvailabilitySnapshot(ctx, agentRow.ID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
@@ -1851,30 +1677,24 @@ func workflowAgentRefLabel(ref workflowAgentRef) string {
 
 func (s *Service) failWorkflowRun(ctx context.Context, workflowRunID uuid.UUID, message string) error {
 	msg := truncate(message, 1000)
-	if err := s.markWorkflowRunFailedStatus(ctx, workflowRunID, msg); err != nil {
-		return err
-	}
-	return httpx.Internal("workflow 执行失败: " + msg)
-}
-
-func (s *Service) markWorkflowRunFailedStatus(ctx context.Context, workflowRunID uuid.UUID, message string) error {
-	msg := truncate(message, 1000)
-	_, err := s.queries.MarkWorkflowRunFailed(ctx, db.MarkWorkflowRunFailedParams{
-		ID:           workflowRunID,
-		ErrorMessage: &msg,
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return httpx.Conflict("workflow_run 已不是 running 状态")
+	if err := s.failWorkflowRunAtomic(ctx, workflowRunID, msg); err != nil {
+		if errors.Is(err, errWorkflowRunLeaseLost) {
+			return err
 		}
 		log.Error().Err(err).Str("workflow_run_id", workflowRunID.String()).Msg("workflow.failWorkflowRun")
 		return httpx.Internal("更新 workflow_run 失败")
 	}
-	return nil
+	return httpx.Internal("workflow 执行失败: " + msg)
 }
 
 func (s *Service) copyWorkflowRunStep(ctx context.Context, workflowRunID uuid.UUID, sourceStep db.WorkflowRunStep) error {
-	step, err := s.queries.CreateWorkflowRunStep(ctx, db.CreateWorkflowRunStepParams{
+	return s.fencedWrite(ctx, workflowRunID, func(q *db.Queries) error {
+		return copyWorkflowRunStepWith(ctx, q, workflowRunID, sourceStep)
+	})
+}
+
+func copyWorkflowRunStepWith(ctx context.Context, q *db.Queries, workflowRunID uuid.UUID, sourceStep db.WorkflowRunStep) error {
+	step, err := q.CreateWorkflowRunStep(ctx, db.CreateWorkflowRunStepParams{
 		WorkflowRunID:  workflowRunID,
 		WorkflowNodeID: sourceStep.WorkflowNodeID,
 		NodeKey:        sourceStep.NodeKey,
@@ -1890,7 +1710,7 @@ func (s *Service) copyWorkflowRunStep(ctx context.Context, workflowRunID uuid.UU
 	if len(output) == 0 {
 		output = []byte(`{}`)
 	}
-	if _, err := s.queries.MarkWorkflowRunStepSuccess(ctx, db.MarkWorkflowRunStepSuccessParams{
+	if _, err := q.MarkWorkflowRunStepSuccess(ctx, db.MarkWorkflowRunStepSuccessParams{
 		ID:     step.ID,
 		RunID:  sourceStep.RunID,
 		Output: output,
@@ -2223,8 +2043,16 @@ func workflowRunToResponse(run db.WorkflowRun, steps []db.WorkflowRunStep) Workf
 	if run.FinishedAt != nil {
 		resp.FinishedAt = run.FinishedAt.UTC().Format(time.RFC3339)
 	}
+	latest := map[uuid.UUID]int32{}
 	for _, step := range steps {
-		resp.Steps = append(resp.Steps, workflowRunStepToResponse(step))
+		if step.Attempt > latest[step.WorkflowNodeID] {
+			latest[step.WorkflowNodeID] = step.Attempt
+		}
+	}
+	for _, step := range steps {
+		stepResp := workflowRunStepToResponse(step)
+		stepResp.Effective = step.Attempt == latest[step.WorkflowNodeID]
+		resp.Steps = append(resp.Steps, stepResp)
 	}
 	return resp
 }
@@ -2246,6 +2074,8 @@ func workflowRunStepToResponse(step db.WorkflowRunStep) WorkflowRunStepResponse 
 		Output:    output,
 		Sequence:  step.Sequence,
 		StartedAt: step.StartedAt.UTC().Format(time.RFC3339),
+		Attempt:   step.Attempt,
+		Source:    step.Source,
 	}
 	if step.RunID != nil {
 		resp.RunID = step.RunID.String()

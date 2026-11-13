@@ -298,6 +298,16 @@ func TestGetWorkflowExecutionReportsFirstFailedChildCategory(t *testing.T) {
 		t.Fatalf("timed-out child = %#v, %v", resp, err)
 	}
 
+	// A node that hit its deadline has no failed child run to read.
+	runtimeSvc.getCalls = 0
+	run.Steps = []workflow.WorkflowRunStepResponse{{Sequence: 0, Status: "timeout", RunID: uuid.NewString()}}
+	run.Nodes = []workflow.WorkflowRunNodeResponse{{NodeKey: "a", State: "timeout", EffectiveAttempt: 1}}
+	resp, err = svc.GetExecution(context.Background(), testPrincipal(actorID), record.ExternalRequestID.String())
+	if err != nil || resp.FailureCategory != FailureCategoryTimeout || runtimeSvc.getCalls != 0 {
+		t.Fatalf("timed-out node = %#v, %v (child reads %d)", resp, err, runtimeSvc.getCalls)
+	}
+	run.Nodes = nil
+
 	broken := uuid.New()
 	runtimeSvc.runErrs[broken] = httpx.Internal("查询调用记录失败")
 	run.Steps = []workflow.WorkflowRunStepResponse{{Sequence: 0, Status: "failed", RunID: broken.String()}}

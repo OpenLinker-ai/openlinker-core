@@ -170,8 +170,22 @@ func (s *Service) workflowFailureCategory(ctx context.Context, actorUserID uuid.
 	default:
 		return FailureCategoryUnknown, nil
 	}
+	// A node whose effective attempt hit its deadline is the cause: its
+	// child stop is recorded as unknown, not as a failed child run.
+	for _, node := range run.Nodes {
+		if strings.ToLower(strings.TrimSpace(node.State)) == "timeout" {
+			return FailureCategoryTimeout, nil
+		}
+	}
 	steps := append([]workflow.WorkflowRunStepResponse(nil), run.Steps...)
 	sort.SliceStable(steps, func(i, j int) bool { return steps[i].Sequence < steps[j].Sequence })
+	if len(run.Nodes) == 0 {
+		for _, step := range steps {
+			if strings.ToLower(strings.TrimSpace(step.Status)) == "timeout" {
+				return FailureCategoryTimeout, nil
+			}
+		}
+	}
 	for _, step := range steps {
 		if strings.ToLower(strings.TrimSpace(step.Status)) != "failed" {
 			continue

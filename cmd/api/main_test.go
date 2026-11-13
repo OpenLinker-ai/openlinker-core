@@ -481,7 +481,7 @@ func TestNewEchoAllowsRunIdempotencyCORSHeaders(t *testing.T) {
 	req := httptest.NewRequest(http.MethodOptions, "/api/v1/runs", nil)
 	req.Header.Set(echo.HeaderOrigin, "https://app.example")
 	req.Header.Set(echo.HeaderAccessControlRequestMethod, http.MethodPost)
-	req.Header.Set(echo.HeaderAccessControlRequestHeaders, "authorization,content-type,idempotency-key,prefer")
+	req.Header.Set(echo.HeaderAccessControlRequestHeaders, "authorization,content-type,idempotency-key,prefer,if-match,last-event-id")
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 
@@ -489,7 +489,7 @@ func TestNewEchoAllowsRunIdempotencyCORSHeaders(t *testing.T) {
 		t.Fatalf("preflight status = %d: %s", rec.Code, rec.Body.String())
 	}
 	allow := strings.ToLower(rec.Header().Get(echo.HeaderAccessControlAllowHeaders))
-	for _, header := range []string{"authorization", "content-type", "idempotency-key", "prefer"} {
+	for _, header := range []string{"authorization", "content-type", "idempotency-key", "prefer", "if-match", "last-event-id"} {
 		if !strings.Contains(allow, header) {
 			t.Fatalf("Access-Control-Allow-Headers = %q, missing %q", allow, header)
 		}
@@ -696,6 +696,34 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 			wantCode:     0,
 			wantOut:      "migrate up: ok",
 			wantSrc:      "file:///app/migrations",
+			wantDBURL:    "postgres://db",
+			wantInspect:  2,
+			wantFactory:  1,
+		},
+		{
+			name:         "workflow attempts predecessor up success",
+			args:         []string{"up"},
+			env:          map[string]string{"DATABASE_URL": "postgres://db"},
+			snapshot:     workflowAttemptsPredecessorCoreMigrationSnapshot(),
+			migrator:     &fakeMigrator{},
+			postSnapshot: migrationSnapshotPointer(currentCoreMigrationSnapshot()),
+			wantCode:     0,
+			wantOut:      "migrate up: ok",
+			wantSrc:      "file://./migrations",
+			wantDBURL:    "postgres://db",
+			wantInspect:  2,
+			wantFactory:  1,
+		},
+		{
+			name:         "workflow admission predecessor up success",
+			args:         []string{"up"},
+			env:          map[string]string{"DATABASE_URL": "postgres://db"},
+			snapshot:     workflowAdmissionPredecessorCoreMigrationSnapshot(),
+			migrator:     &fakeMigrator{},
+			postSnapshot: migrationSnapshotPointer(currentCoreMigrationSnapshot()),
+			wantCode:     0,
+			wantOut:      "migrate up: ok",
+			wantSrc:      "file://./migrations",
 			wantDBURL:    "postgres://db",
 			wantInspect:  2,
 			wantFactory:  1,
@@ -964,11 +992,11 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 func currentCoreMigrationSnapshot() migrationinit.Snapshot {
 	return migrationinit.Snapshot{
 		Core:                    migrationinit.MigrationTableState{Exists: true, Rows: 1, Version: migrationinit.CoreVersion},
-		NonBookkeepingObjects:   91,
+		NonBookkeepingObjects:   96,
 		CallbackOwnerIndexValid: true,
 		CoreShape: migrationinit.SchemaShape{
 			Digest: migrationinit.CoreSchemaDigest,
-			Tables: 91, Constraints: 730, Indexes: 309, Triggers: 80,
+			Tables: 96, Constraints: 782, Indexes: 322, Triggers: 80,
 			CoreIdentities: 1, RuntimeControls: 1, RuntimeSchemas: 13,
 			CurrentRuntime: 1, RuntimeWires: 5, CurrentWire: 1, PreviousWire: 1,
 			BuiltInSkills: 30, BuiltInSkillCases: 15,
@@ -980,6 +1008,8 @@ func signalRetentionPredecessorCoreMigrationSnapshot() migrationinit.Snapshot {
 	snapshot := currentCoreMigrationSnapshot()
 	snapshot.Core.Version = migrationinit.CoreSignalRetentionPredecessorVersion
 	snapshot.CoreShape.Digest = migrationinit.CoreSignalRetentionPredecessorDigest
+	snapshot.NonBookkeepingObjects = 91
+	snapshot.CoreShape.Tables = 91
 	snapshot.CoreShape.Constraints = 728
 	snapshot.CoreShape.Indexes = 308
 	return snapshot
@@ -989,7 +1019,32 @@ func mcpTransportPredecessorCoreMigrationSnapshot() migrationinit.Snapshot {
 	snapshot := currentCoreMigrationSnapshot()
 	snapshot.Core.Version = migrationinit.CoreMCPTransportPredecessorVersion
 	snapshot.CoreShape.Digest = migrationinit.CoreMCPTransportPredecessorDigest
+	snapshot.NonBookkeepingObjects = 91
+	snapshot.CoreShape.Tables = 91
 	snapshot.CoreShape.Constraints = 728
+	snapshot.CoreShape.Indexes = 309
+	return snapshot
+}
+
+func workflowAttemptsPredecessorCoreMigrationSnapshot() migrationinit.Snapshot {
+	snapshot := currentCoreMigrationSnapshot()
+	snapshot.Core.Version = migrationinit.CoreWorkflowAttemptsPredecessorVersion
+	snapshot.CoreShape.Digest = migrationinit.CoreWorkflowAttemptsPredecessorDigest
+	snapshot.NonBookkeepingObjects = 92
+	snapshot.CoreShape.Tables = 92
+	snapshot.CoreShape.Constraints = 736
+	snapshot.CoreShape.Indexes = 310
+	return snapshot
+}
+
+func workflowAdmissionPredecessorCoreMigrationSnapshot() migrationinit.Snapshot {
+	snapshot := currentCoreMigrationSnapshot()
+	snapshot.Core.Version = migrationinit.CoreWorkflowAdmissionPredecessorVersion
+	snapshot.CoreShape.Digest = migrationinit.CoreWorkflowAdmissionPredecessorDigest
+	snapshot.NonBookkeepingObjects = 91
+	snapshot.CoreShape.Tables = 91
+	snapshot.CoreShape.Constraints = 730
+	snapshot.CoreShape.Indexes = 309
 	return snapshot
 }
 

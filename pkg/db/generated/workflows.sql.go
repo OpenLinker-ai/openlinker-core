@@ -234,64 +234,88 @@ func scanWorkflowRun(row interface {
 }
 
 const createWorkflowRun = `-- name: CreateWorkflowRun :one
-INSERT INTO workflow_runs (workflow_id, user_id, status, input, attempt_count)
-VALUES ($1, $2, 'running', $3, 1)
+INSERT INTO workflow_runs (workflow_id, user_id, status, input, attempt_count, workflow_version_id)
+SELECT $1, $2, 'running', $3, 1,
+       CASE WHEN (SELECT status FROM workflows WHERE id = $1) = 'active'
+            THEN COALESCE($4::uuid, (SELECT current_version_id FROM workflows WHERE id = $1)) END
+WHERE EXISTS (
+    SELECT 1 FROM workflow_admission
+    WHERE singleton AND state = 'open'
+    FOR SHARE
+)
 	RETURNING id, workflow_id, user_id, status, input, output, error_message,
 	          started_at, finished_at, created_at, updated_at,
 	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
 
 type CreateWorkflowRunParams struct {
-	WorkflowID uuid.UUID `db:"workflow_id" json:"workflow_id"`
-	UserID     uuid.UUID `db:"user_id" json:"user_id"`
-	Input      []byte    `db:"input" json:"input"`
+	WorkflowID        uuid.UUID  `db:"workflow_id" json:"workflow_id"`
+	UserID            uuid.UUID  `db:"user_id" json:"user_id"`
+	Input             []byte     `db:"input" json:"input"`
+	WorkflowVersionID *uuid.UUID `db:"workflow_version_id" json:"workflow_version_id"`
 }
 
 func (q *Queries) CreateWorkflowRun(ctx context.Context, arg CreateWorkflowRunParams) (WorkflowRun, error) {
-	row := q.db.QueryRow(ctx, createWorkflowRun, arg.WorkflowID, arg.UserID, arg.Input)
+	row := q.db.QueryRow(ctx, createWorkflowRun, arg.WorkflowID, arg.UserID, arg.Input, arg.WorkflowVersionID)
 	var r WorkflowRun
 	err := scanWorkflowRun(row, &r)
 	return r, err
 }
 
 const createPendingWorkflowRun = `-- name: CreatePendingWorkflowRun :one
-	INSERT INTO workflow_runs (workflow_id, user_id, status, input, max_attempts)
-	VALUES ($1, $2, 'pending', $3, $4)
+INSERT INTO workflow_runs (workflow_id, user_id, status, input, max_attempts, workflow_version_id)
+SELECT $1, $2, 'pending', $3, $4,
+       CASE WHEN (SELECT status FROM workflows WHERE id = $1) = 'active'
+            THEN COALESCE($5::uuid, (SELECT current_version_id FROM workflows WHERE id = $1)) END
+WHERE EXISTS (
+    SELECT 1 FROM workflow_admission
+    WHERE singleton AND state = 'open'
+    FOR SHARE
+)
 	RETURNING id, workflow_id, user_id, status, input, output, error_message,
 	          started_at, finished_at, created_at, updated_at,
 	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
 
 type CreatePendingWorkflowRunParams struct {
-	WorkflowID  uuid.UUID `db:"workflow_id" json:"workflow_id"`
-	UserID      uuid.UUID `db:"user_id" json:"user_id"`
-	Input       []byte    `db:"input" json:"input"`
-	MaxAttempts int32     `db:"max_attempts" json:"max_attempts"`
+	WorkflowID        uuid.UUID  `db:"workflow_id" json:"workflow_id"`
+	UserID            uuid.UUID  `db:"user_id" json:"user_id"`
+	Input             []byte     `db:"input" json:"input"`
+	MaxAttempts       int32      `db:"max_attempts" json:"max_attempts"`
+	WorkflowVersionID *uuid.UUID `db:"workflow_version_id" json:"workflow_version_id"`
 }
 
 func (q *Queries) CreatePendingWorkflowRun(ctx context.Context, arg CreatePendingWorkflowRunParams) (WorkflowRun, error) {
-	row := q.db.QueryRow(ctx, createPendingWorkflowRun, arg.WorkflowID, arg.UserID, arg.Input, arg.MaxAttempts)
+	row := q.db.QueryRow(ctx, createPendingWorkflowRun, arg.WorkflowID, arg.UserID, arg.Input, arg.MaxAttempts, arg.WorkflowVersionID)
 	var r WorkflowRun
 	err := scanWorkflowRun(row, &r)
 	return r, err
 }
 
 const createPendingExternalExecutionWorkflowRun = `-- name: CreatePendingExternalExecutionWorkflowRun :one
-	INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts)
-	VALUES ($1, $2, $3, 'pending', $4, $5)
+INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts, workflow_version_id)
+SELECT $1, $2, $3, 'pending', $4, $5,
+       CASE WHEN (SELECT status FROM workflows WHERE id = $2) = 'active'
+            THEN COALESCE($6::uuid, (SELECT current_version_id FROM workflows WHERE id = $2)) END
+WHERE EXISTS (
+    SELECT 1 FROM workflow_admission
+    WHERE singleton AND state = 'open'
+    FOR SHARE
+)
 	ON CONFLICT (id) DO NOTHING
 	RETURNING id, workflow_id, user_id, status, input, output, error_message,
 	          started_at, finished_at, created_at, updated_at,
 	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
 
 type CreatePendingExternalExecutionWorkflowRunParams struct {
-	ID          uuid.UUID `db:"id" json:"id"`
-	WorkflowID  uuid.UUID `db:"workflow_id" json:"workflow_id"`
-	UserID      uuid.UUID `db:"user_id" json:"user_id"`
-	Input       []byte    `db:"input" json:"input"`
-	MaxAttempts int32     `db:"max_attempts" json:"max_attempts"`
+	ID                uuid.UUID  `db:"id" json:"id"`
+	WorkflowID        uuid.UUID  `db:"workflow_id" json:"workflow_id"`
+	UserID            uuid.UUID  `db:"user_id" json:"user_id"`
+	Input             []byte     `db:"input" json:"input"`
+	MaxAttempts       int32      `db:"max_attempts" json:"max_attempts"`
+	WorkflowVersionID *uuid.UUID `db:"workflow_version_id" json:"workflow_version_id"`
 }
 
 func (q *Queries) CreatePendingExternalExecutionWorkflowRun(ctx context.Context, arg CreatePendingExternalExecutionWorkflowRunParams) (WorkflowRun, error) {
-	row := q.db.QueryRow(ctx, createPendingExternalExecutionWorkflowRun, arg.ID, arg.WorkflowID, arg.UserID, arg.Input, arg.MaxAttempts)
+	row := q.db.QueryRow(ctx, createPendingExternalExecutionWorkflowRun, arg.ID, arg.WorkflowID, arg.UserID, arg.Input, arg.MaxAttempts, arg.WorkflowVersionID)
 	var r WorkflowRun
 	err := scanWorkflowRun(row, &r)
 	return r, err
@@ -355,7 +379,8 @@ const pauseWorkflowRun = `-- name: PauseWorkflowRun :one
 	    END,
 	    next_retry_at = NULL,
 	    last_worker_error = NULL,
-	    updated_at = NOW()
+	    updated_at = NOW(),
+    revision = revision + 1
 	WHERE id = $1
 	  AND (
 	      status = 'pending'
@@ -380,7 +405,8 @@ const resumeWorkflowRun = `-- name: ResumeWorkflowRun :one
 	    finished_at = NULL,
 	    error_message = NULL,
 	    last_worker_error = NULL,
-	    updated_at = NOW()
+	    updated_at = NOW(),
+    revision = revision + 1
 	WHERE id = $1
 	  AND status = 'paused'
 	  AND claimed_at IS NULL
@@ -573,6 +599,11 @@ const claimPendingWorkflowRun = `-- name: ClaimPendingWorkflowRun :one
 	    FROM workflow_runs
 	    WHERE status = 'pending'
 	      AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+	      AND EXISTS (
+	          SELECT 1 FROM workflow_admission
+	          WHERE singleton AND state = 'open'
+	          FOR SHARE
+	      )
 	    ORDER BY created_at ASC
 	    LIMIT 1
 	    FOR UPDATE SKIP LOCKED
@@ -645,7 +676,7 @@ func scanWorkflowRunStep(row interface {
 	return row.Scan(
 		&s.ID, &s.WorkflowRunID, &s.WorkflowNodeID, &s.NodeKey, &s.AgentID, &s.RunID,
 		&s.Status, &s.Input, &s.Output, &s.ErrorMessage, &s.Sequence, &s.StartedAt, &s.FinishedAt,
-		&s.CreatedAt, &s.UpdatedAt,
+		&s.CreatedAt, &s.UpdatedAt, &s.Attempt, &s.Source,
 	)
 }
 
@@ -657,7 +688,7 @@ INSERT INTO workflow_run_steps (
 )
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
-          created_at, updated_at`
+          created_at, updated_at, attempt, source`
 
 type CreateWorkflowRunStepParams struct {
 	WorkflowRunID  uuid.UUID `db:"workflow_run_id" json:"workflow_run_id"`
@@ -712,7 +743,7 @@ WHERE id = $1
   AND (run_id IS NULL OR run_id = $2)
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
-          created_at, updated_at`
+          created_at, updated_at, attempt, source`
 
 type MarkWorkflowRunStepSuccessParams struct {
 	ID     uuid.UUID  `db:"id" json:"id"`
@@ -739,7 +770,7 @@ WHERE id = $1
   AND (run_id IS NULL OR run_id = $2)
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
-          created_at, updated_at`
+          created_at, updated_at, attempt, source`
 
 type MarkWorkflowRunStepFailedParams struct {
 	ID           uuid.UUID  `db:"id" json:"id"`
@@ -757,10 +788,14 @@ func (q *Queries) MarkWorkflowRunStepFailed(ctx context.Context, arg MarkWorkflo
 const listWorkflowRunSteps = `-- name: ListWorkflowRunSteps :many
 SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        status, input, output, error_message, sequence, started_at, finished_at,
-       created_at, updated_at
+       created_at, updated_at, attempt, source
 FROM workflow_run_steps
 WHERE workflow_run_id = $1
-ORDER BY sequence ASC`
+  -- Attempts that never started (pending, or canceled before starting) are
+  -- scheduling data, not execution records.
+  AND status <> 'pending'
+  AND NOT (status = 'canceled' AND deadline_at IS NULL)
+ORDER BY sequence ASC, attempt ASC, created_at ASC, id ASC`
 
 func (q *Queries) ListWorkflowRunSteps(ctx context.Context, workflowRunID uuid.UUID) ([]WorkflowRunStep, error) {
 	rows, err := q.db.Query(ctx, listWorkflowRunSteps, workflowRunID)
@@ -782,10 +817,14 @@ func (q *Queries) ListWorkflowRunSteps(ctx context.Context, workflowRunID uuid.U
 const listWorkflowRunStepsByRunIDs = `-- name: ListWorkflowRunStepsByRunIDs :many
 SELECT id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
        status, input, output, error_message, sequence, started_at, finished_at,
-       created_at, updated_at
+       created_at, updated_at, attempt, source
 FROM workflow_run_steps
 WHERE workflow_run_id = ANY($1::uuid[])
-ORDER BY workflow_run_id ASC, sequence ASC`
+  -- Attempts that never started (pending, or canceled before starting) are
+  -- scheduling data, not execution records.
+  AND status <> 'pending'
+  AND NOT (status = 'canceled' AND deadline_at IS NULL)
+ORDER BY workflow_run_id ASC, sequence ASC, attempt ASC, created_at ASC, id ASC`
 
 func (q *Queries) ListWorkflowRunStepsByRunIDs(ctx context.Context, workflowRunIds []uuid.UUID) ([]WorkflowRunStep, error) {
 	rows, err := q.db.Query(ctx, listWorkflowRunStepsByRunIDs, workflowRunIds)
@@ -802,4 +841,45 @@ func (q *Queries) ListWorkflowRunStepsByRunIDs(ctx context.Context, workflowRunI
 		items = append(items, s)
 	}
 	return items, rows.Err()
+}
+
+const getWorkflowAdmission = `-- name: GetWorkflowAdmission :one
+SELECT state, reason, changed_by, changed_at
+FROM workflow_admission
+WHERE singleton`
+
+type WorkflowAdmission struct {
+	State     string     `db:"state" json:"state"`
+	Reason    *string    `db:"reason" json:"reason"`
+	ChangedBy *uuid.UUID `db:"changed_by" json:"changed_by"`
+	ChangedAt time.Time  `db:"changed_at" json:"changed_at"`
+}
+
+func (q *Queries) GetWorkflowAdmission(ctx context.Context) (WorkflowAdmission, error) {
+	row := q.db.QueryRow(ctx, getWorkflowAdmission)
+	var i WorkflowAdmission
+	err := row.Scan(&i.State, &i.Reason, &i.ChangedBy, &i.ChangedAt)
+	return i, err
+}
+
+const setWorkflowAdmission = `-- name: SetWorkflowAdmission :one
+UPDATE workflow_admission
+SET state = $1, reason = $2, changed_by = $3, changed_at = clock_timestamp()
+WHERE singleton
+RETURNING state, reason, changed_by, changed_at`
+
+type SetWorkflowAdmissionParams struct {
+	State     string     `db:"state" json:"state"`
+	Reason    *string    `db:"reason" json:"reason"`
+	ChangedBy *uuid.UUID `db:"changed_by" json:"changed_by"`
+}
+
+// SetWorkflowAdmission takes the admission row lock. It waits for every run
+// creation or claim that already read the row FOR SHARE, so once it commits as
+// 'draining' nothing created or claimed afterwards saw 'open'.
+func (q *Queries) SetWorkflowAdmission(ctx context.Context, arg SetWorkflowAdmissionParams) (WorkflowAdmission, error) {
+	row := q.db.QueryRow(ctx, setWorkflowAdmission, arg.State, arg.Reason, arg.ChangedBy)
+	var i WorkflowAdmission
+	err := row.Scan(&i.State, &i.Reason, &i.ChangedBy, &i.ChangedAt)
+	return i, err
 }

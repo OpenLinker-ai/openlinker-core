@@ -204,7 +204,7 @@ func TestWorkflowHandlerDispatchesServiceSuccess(t *testing.T) {
 		if err := h.RerunStep(rerunCtx); err != nil {
 			t.Fatalf("RerunStep error = %v", err)
 		}
-		if rerunRec.Code != http.StatusOK || mock.rerunUserID != userID || mock.rerunRunID != runID || mock.rerunReq.NodeKey != "review" {
+		if rerunRec.Code != http.StatusAccepted || mock.rerunUserID != userID || mock.rerunRunID != runID || mock.rerunReq.NodeKey != "review" {
 			t.Fatalf("rerun code=%d user=%s run=%s req=%#v", rerunRec.Code, mock.rerunUserID, mock.rerunRunID, mock.rerunReq)
 		}
 
@@ -547,7 +547,7 @@ func (m *mockWorkflowService) GetWorkflowRun(_ context.Context, userID, workflow
 	return m.runResp, m.err
 }
 
-func (m *mockWorkflowService) RetryWorkflowRun(_ context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {
+func (m *mockWorkflowService) RetryWorkflowRun(_ context.Context, userID, workflowRunID uuid.UUID, _ *RetryWorkflowRunRequest) (*WorkflowRunResponse, error) {
 	m.retryUserID = userID
 	m.retryRunID = workflowRunID
 	return m.runResp, m.err

@@ -181,7 +181,11 @@ run_database_test() {
     099_runtime_node_upgrade_features.up.sql \
     100_runtime_mtls_transition.up.sql \
     101_runtime_signal_outbox_retention.up.sql \
-    102_agent_mcp_transport.up.sql; do
+    102_agent_mcp_transport.up.sql \
+    103_workflow_admission_drain.up.sql \
+    104_workflow_execution_attempts.up.sql \
+    105_workflow_versions.up.sql \
+    106_workflow_run_revision.up.sql; do
     apply_schema_file "$repository_root/migrations/$migration_file"
   done
   apply_schema_file "$repository_root/migrations/086_current_schema_init_verify.sql"

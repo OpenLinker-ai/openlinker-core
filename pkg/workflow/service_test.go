@@ -609,24 +609,34 @@ func TestRerunWorkflowStepReusesUnaffectedStepsAndComparesRuns(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, original.ID, rerun.SourceRunID)
 	require.NotEqual(t, original.ID, rerun.RerunRunID)
-	require.Equal(t, int32(1), rerun.Run.AttemptCount, "synchronous step reruns have started their first attempt")
-	require.Equal(t, "success", rerun.Run.Status)
+	require.Equal(t, "pending", rerun.Run.Status, "a step rerun is queued for the worker")
 	require.Equal(t, []string{"collect"}, rerun.ReusedNodeKeys)
 	require.Equal(t, []string{"analyze", "synthesize"}, rerun.RerunNodeKeys)
-	require.Equal(t, "collect", rerun.Run.Steps[0].NodeKey)
-	require.Equal(t, original.Steps[0].RunID, rerun.Run.Steps[0].RunID)
-	require.Equal(t, original.Steps[0].Output, rerun.Run.Steps[0].Output)
-	require.NotEqual(t, original.Steps[1].RunID, rerun.Run.Steps[1].RunID)
-	require.NotEqual(t, original.Steps[2].RunID, rerun.Run.Steps[2].RunID)
-	require.Equal(t, float64(2), rerun.Run.Steps[1].Output["node_call"])
-	require.Equal(t, float64(2), rerun.Run.Steps[2].Output["node_call"])
-	require.True(t, rerun.Comparison.OutputChanged)
-	require.ElementsMatch(t, []string{"analyze", "synthesize"}, rerun.Comparison.ChangedNodeKeys)
+	require.Len(t, rerun.Run.Steps, 1, "only the reused node exists before execution")
+	require.Equal(t, "reused", rerun.Run.Steps[0].Source)
+
+	claimed, err := svc.ClaimAndRunPendingWorkflow(context.Background())
+	require.NoError(t, err)
+	require.True(t, claimed)
+	done, err := svc.GetWorkflowRun(context.Background(), userID, uuid.MustParse(rerun.RerunRunID))
+	require.NoError(t, err)
+	require.Equal(t, "success", done.Status)
+	require.Len(t, done.Steps, 3)
+	require.Equal(t, "collect", done.Steps[0].NodeKey)
+	require.Equal(t, "reused", done.Steps[0].Source)
+	require.Equal(t, original.Steps[0].RunID, done.Steps[0].RunID)
+	require.Equal(t, original.Steps[0].Output, done.Steps[0].Output)
+	require.Equal(t, "executed", done.Steps[1].Source)
+	require.NotEqual(t, original.Steps[1].RunID, done.Steps[1].RunID)
+	require.NotEqual(t, original.Steps[2].RunID, done.Steps[2].RunID)
+	require.Equal(t, float64(2), done.Steps[1].Output["node_call"])
+	require.Equal(t, float64(2), done.Steps[2].Output["node_call"])
 
 	comparison, err := svc.CompareWorkflowRuns(context.Background(), userID, uuid.MustParse(original.ID), uuid.MustParse(rerun.RerunRunID))
 	require.NoError(t, err)
 	require.False(t, comparison.StatusChanged)
 	require.True(t, comparison.OutputChanged)
+	require.ElementsMatch(t, []string{"analyze", "synthesize"}, comparison.ChangedNodeKeys)
 	require.Len(t, comparison.Steps, 3)
 	require.False(t, comparison.Steps[0].Changed)
 	require.True(t, comparison.Steps[1].RunChanged)
@@ -1102,8 +1112,8 @@ func TestReleasePausedWorkflowRunClaimRejectsStaleFence(t *testing.T) {
 	claimB := claimA.Add(30 * time.Second)
 	_, err = pool.Exec(context.Background(), `
 		INSERT INTO workflow_runs (
-			id, workflow_id, user_id, status, input, attempt_count, max_attempts, claimed_at
-		) VALUES ($1, $2, $3, 'paused', '{}'::jsonb, 2, 3, $4)`,
+			id, workflow_id, user_id, status, input, attempt_count, max_attempts, claimed_at, workflow_version_id
+		) VALUES ($1, $2, $3, 'paused', '{}'::jsonb, 2, 3, $4, (SELECT current_version_id FROM workflows WHERE id = $2))`,
 		runID, uuid.MustParse(created.ID), userID, claimB)
 	require.NoError(t, err)
 
@@ -1213,7 +1223,9 @@ func TestCancelRunningWorkflowRunPreventsSuccessOverwrite(t *testing.T) {
 	require.Equal(t, "canceled", final.Status)
 	require.Equal(t, "workflow run canceled", final.Error)
 	require.Len(t, final.Steps, 1)
-	require.Equal(t, "failed", final.Steps[0].Status)
+	// Public cancellation cancels the open attempt in its own transaction;
+	// the late child result cannot settle it afterwards.
+	require.Equal(t, "canceled", final.Steps[0].Status)
 
 	evidence, err := svc.GetWorkflowCancellationEvidence(
 		context.Background(), userID, uuid.MustParse(queued.ID),
@@ -1273,7 +1285,9 @@ func TestWorkflowWorkerRequeuesStaleRunAndCleansRetrySteps(t *testing.T) {
 	runID := uuid.MustParse(queued.ID)
 	_, err = pool.Exec(context.Background(), `
 		UPDATE workflow_runs
-		SET status='running', attempt_count=1, claimed_at=NOW() - INTERVAL '1 hour'
+		SET status='running', attempt_count=1, claimed_at=NOW() - INTERVAL '1 hour',
+		    lease_owner=gen_random_uuid(), lease_epoch=1, lease_mode='execute',
+		    lease_expires_at=clock_timestamp() - INTERVAL '1 minute'
 		WHERE id=$1`, runID)
 	require.NoError(t, err)
 	_, err = pool.Exec(context.Background(), `
@@ -1289,7 +1303,7 @@ func TestWorkflowWorkerRequeuesStaleRunAndCleansRetrySteps(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "pending", recovered.Status)
 	require.Equal(t, int32(1), recovered.AttemptCount)
-	require.Equal(t, "workflow worker stale claim timed out", recovered.LastWorkerError)
+	require.Equal(t, "workflow run lease expired before the executor finished", recovered.LastWorkerError)
 	require.Len(t, recovered.Steps, 1)
 
 	claimed, err := svc.ClaimAndRunPendingWorkflow(context.Background())
@@ -1333,7 +1347,7 @@ func TestRetryWorkflowRunCreatesNewPendingRun(t *testing.T) {
 		uuid.MustParse(queued.ID), msg)
 	require.NoError(t, err)
 
-	retry, err := svc.RetryWorkflowRun(context.Background(), userID, uuid.MustParse(queued.ID))
+	retry, err := svc.RetryWorkflowRun(context.Background(), userID, uuid.MustParse(queued.ID), nil)
 	require.NoError(t, err)
 	require.Equal(t, "pending", retry.Status)
 	require.NotEqual(t, queued.ID, retry.ID)
@@ -1374,8 +1388,8 @@ func TestWorkflowControlPlaneReadsListsAndRunStateTransitions(t *testing.T) {
 
 	runID := uuid.New()
 	_, err = pool.Exec(ctx, `
-		INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts)
-		VALUES ($1, $2, $3, 'pending', $4, 5)`,
+		INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts, workflow_version_id)
+		VALUES ($1, $2, $3, 'pending', $4, 5, (SELECT current_version_id FROM workflows WHERE id = $2))`,
 		runID, workflowID, userID, []byte(`{"topic":"control plane"}`))
 	require.NoError(t, err)
 
@@ -1454,8 +1468,15 @@ VALUES ($1,'{"type":"object"}'::jsonb,'{"type":"object"}'::jsonb,'external execu
 	require.True(t, first.Executable)
 	require.Regexp(t, `^hct:v1:[a-f0-9]{64}$`, first.ContractHash)
 
-	_, err = pool.Exec(context.Background(), `UPDATE workflow_nodes SET config=$2::jsonb WHERE workflow_id=$1`, workflowID,
-		`{"mode":"strict","input_mapping":{"version":"v1","fields":{"task":{"source":"workflow_input","path":["text"]}}}}`)
+	// Editing the definition creates version 2 with a new contract hash.
+	_, err = svc.UpdateWorkflow(context.Background(), ownerID, workflowID, created.Version, &workflow.UpdateWorkflowRequest{
+		Name: "Execution contract", Nodes: []workflow.WorkflowNodeRequest{{Key: "run", AgentID: agentID, Config: map[string]interface{}{
+			"mode": "strict",
+			"input_mapping": map[string]interface{}{"version": "v1", "fields": map[string]interface{}{
+				"task": map[string]interface{}{"source": "workflow_input", "path": []interface{}{"text"}},
+			}},
+		}}},
+	})
 	require.NoError(t, err)
 	mapped, err := svc.ValidateExternalExecutionTarget(context.Background(), ownerID, workflowID)
 	require.NoError(t, err)

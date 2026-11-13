@@ -15,6 +15,9 @@ type TargetValidationRequest struct {
 	TargetType  string          `json:"target_type"`
 	TargetID    string          `json:"target_id"`
 	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+	// TargetVersionID (workflow targets only) validates one definition
+	// version instead of the current one.
+	TargetVersionID string `json:"target_version_id,omitempty"`
 }
 
 type TargetValidationResponse struct {
@@ -28,6 +31,9 @@ type TargetValidationResponse struct {
 	// prove, so the target owner can fix the listing or the capability.
 	UnavailableDetail *TargetUnavailableDetail `json:"unavailable_detail,omitempty"`
 	ContractHash      string                   `json:"contract_hash,omitempty"`
+	// TargetVersionID is the workflow definition version the contract hash
+	// describes; pass it as target_version_id to execute exactly that version.
+	TargetVersionID string `json:"target_version_id,omitempty"`
 }
 
 // TargetUnavailableDetail explains an input-schema incompatibility. Rule is
@@ -86,6 +92,10 @@ type ExecutionRequest struct {
 	TraceID              string                 `json:"trace_id"`
 	ExpectedContractHash string                 `json:"expected_contract_hash"`
 	InputSchema          json.RawMessage        `json:"input_schema"`
+	// TargetVersionID (workflow targets only) binds the execution to one
+	// definition version. Without it the version current at launch runs and
+	// must still match expected_contract_hash.
+	TargetVersionID string `json:"target_version_id,omitempty"`
 }
 
 type ExecutionStartResponse struct {

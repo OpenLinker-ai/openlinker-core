@@ -47,7 +47,9 @@ func (s *Service) CancelExternalWorkflowRun(
 	if reasonCode != "CALLER_REQUESTED" && reasonCode != "DEADLINE_EXCEEDED" {
 		return nil, CancellationEvidence{}, httpx.BadRequest("workflow cancellation reason 无效")
 	}
-	evidence, err := s.requestWorkflowCancellation(ctx, actorUserID, workflowRunID, reasonCode)
+	evidence, err := s.requestWorkflowCancellation(ctx, actorUserID, workflowRunID, reasonCode, cancellationRequester{
+		userID: actorUserID, via: cancellationRequestedViaExternal,
+	})
 	if err != nil {
 		return nil, CancellationEvidence{}, err
 	}
@@ -95,12 +97,28 @@ func (s *Service) GetWorkflowCancellationEvidence(
 	return evidence, nil
 }
 
+const (
+	cancellationRequestedViaOwner    = "owner"
+	cancellationRequestedViaExternal = "external"
+	cancellationRequestedViaAdmin    = "admin"
+)
+
+// cancellationRequester records who actually asked for a cancellation. The
+// authorization subject stays actor_user_id, the run owner: Runtime authorizes
+// child cancellation and evidence reads against it. An administrator draining
+// another user's run is recorded here without changing that subject.
+type cancellationRequester struct {
+	userID uuid.UUID
+	via    string
+}
+
 func (s *Service) requestWorkflowCancellation(
 	ctx context.Context,
 	actorUserID, workflowRunID uuid.UUID,
 	reasonCode string,
+	requester cancellationRequester,
 ) (CancellationEvidence, error) {
-	if s == nil || s.pool == nil || actorUserID == uuid.Nil || workflowRunID == uuid.Nil {
+	if s == nil || s.pool == nil || actorUserID == uuid.Nil || workflowRunID == uuid.Nil || requester.userID == uuid.Nil {
 		return CancellationEvidence{}, httpx.BadRequest("workflow cancellation identity 无效")
 	}
 	var evidence CancellationEvidence
@@ -151,29 +169,32 @@ func (s *Service) requestWorkflowCancellation(
 			}
 			// Parent row is already locked. Every child creation locks it before
 			// its launch row, so invalidation and create are mutually exclusive.
-			if _, err := tx.Exec(ctx, `
-				UPDATE workflow_step_launches
-				SET state = 'invalidated', updated_at = clock_timestamp()
-				WHERE workflow_run_id = $1 AND state = 'claimed' AND run_id IS NULL
-			`, workflowRunID); err != nil {
+			// Open attempts become canceled; this cancellation's own
+			// reconciliation stops the children, so no stop records are added.
+			if err := s.cancelAttempts(ctx, tx, workflowRunID, stopReasonWorkflowCancel, false); err != nil {
 				return err
 			}
 		}
 		row := tx.QueryRow(ctx, `
 			INSERT INTO workflow_run_cancellations (
 			    workflow_run_id, id, actor_user_id, reason_code, state,
-			    applied_at, finished_at
+			    applied_at, finished_at, requested_by, requested_via
 			) VALUES (
 			    $1, $2, $3, $4, $5,
 			    CASE WHEN $5 = 'not_applied' THEN clock_timestamp() ELSE NULL END,
-			    CASE WHEN $5 = 'not_applied' THEN clock_timestamp() ELSE NULL END
+			    CASE WHEN $5 = 'not_applied' THEN clock_timestamp() ELSE NULL END,
+			    $6, $7
 			)
 			RETURNING id, workflow_run_id, actor_user_id, reason_code, state, error_code,
 			          requested_at, applied_at, finished_at
-		`, workflowRunID, deterministicWorkflowCancellationID(workflowRunID), actorUserID, reasonCode, state)
+		`, workflowRunID, deterministicWorkflowCancellationID(workflowRunID), actorUserID, reasonCode, state,
+			requester.userID, requester.via)
 		var err error
 		evidence, err = scanWorkflowCancellation(row)
-		return err
+		if err != nil {
+			return err
+		}
+		return notifyWorkflowRunChanged(ctx, tx, workflowRunID)
 	})
 	return evidence, err
 }
@@ -368,7 +389,10 @@ func (s *Service) advanceWorkflowCancellation(ctx context.Context, workflowRunID
 			    updated_at = clock_timestamp()
 			WHERE workflow_run_id = $1
 		`, workflowRunID, next)
-		return err
+		if err != nil {
+			return err
+		}
+		return notifyWorkflowRunChanged(ctx, tx, workflowRunID)
 	})
 }
 
