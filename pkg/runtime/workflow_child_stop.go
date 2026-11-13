@@ -192,6 +192,92 @@ func ClassifyWorkflowChildStop(ctx context.Context, q db.DBTX, childRunID uuid.U
 	return classifyWorkflowChildStop(runStatus, attempts, cancellationState), nil
 }
 
+// ClassifyWorkflowChildStops classifies many child Runs with the same rules
+// as ClassifyWorkflowChildStop, in three queries. Runs that do not exist are
+// left out of the result.
+func ClassifyWorkflowChildStops(ctx context.Context, q db.DBTX, childRunIDs []uuid.UUID) (map[uuid.UUID]WorkflowChildStopEvidence, error) {
+	result := map[uuid.UUID]WorkflowChildStopEvidence{}
+	if len(childRunIDs) == 0 {
+		return result, nil
+	}
+	if q == nil {
+		return nil, errors.New("workflow child stop classification requires a querier")
+	}
+	statuses := map[uuid.UUID]string{}
+	rows, err := q.Query(ctx, `SELECT id, status FROM runs WHERE id = ANY($1::uuid[])`, childRunIDs)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var id uuid.UUID
+		var status string
+		if err := rows.Scan(&id, &status); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		statuses[id] = status
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	type cancellation struct {
+		state  string
+		target *uuid.UUID
+	}
+	cancellations := map[uuid.UUID]cancellation{}
+	rows, err = q.Query(ctx, `
+		SELECT run_id, state, target_attempt_id FROM run_cancellations WHERE run_id = ANY($1::uuid[])
+	`, childRunIDs)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var id uuid.UUID
+		var c cancellation
+		if err := rows.Scan(&id, &c.state, &c.target); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		cancellations[id] = c
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	attempts := map[uuid.UUID][]workflowChildStopAttempt{}
+	rows, err = q.Query(ctx, `
+		SELECT run_id, id, accepted_at IS NOT NULL, finished_at IS NOT NULL,
+		       COALESCE(outcome, ''), result_id IS NOT NULL, COALESCE(error_code, '')
+		FROM run_attempts
+		WHERE run_id = ANY($1::uuid[])
+		ORDER BY run_id, created_at, id
+	`, childRunIDs)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var runID uuid.UUID
+		var attempt workflowChildStopAttempt
+		if err := rows.Scan(&runID, &attempt.id, &attempt.accepted, &attempt.finished,
+			&attempt.outcome, &attempt.hasResult, &attempt.errorCode); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		c := cancellations[runID]
+		attempt.canceledBy = attempt.outcome == "canceled" || (c.target != nil && *c.target == attempt.id)
+		attempts[runID] = append(attempts[runID], attempt)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for id, status := range statuses {
+		result[id] = classifyWorkflowChildStop(status, attempts[id], cancellations[id].state)
+	}
+	return result, nil
+}
+
 // WorkflowChildOutcome is a child Run's terminal facts, read under a share
 // lock in the workflow settlement transaction.
 type WorkflowChildOutcome struct {

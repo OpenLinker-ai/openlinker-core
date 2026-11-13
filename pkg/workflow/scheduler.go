@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -318,24 +319,35 @@ func (s *Service) executeWorkflowRun(
 	// attempt deadline bounds it and finishing, failing or canceling the run
 	// aborts it. driveCtx (waits, settlement, starting new work) also ends on
 	// pause.
-	callCtx, abortCalls := context.WithCancel(ctx)
-	driveCtx, cancelDrives := context.WithCancel(callCtx)
+	//
+	// callCtx does not inherit the lease context: releasing the lease after a
+	// pause must not cancel a call that is still executing. While attached,
+	// the lease context ending (shutdown, lease loss) aborts calls as before.
+	callCtx, abortCalls := context.WithCancel(context.WithoutCancel(ctx))
+	driveCtx, cancelDrives := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	// detached is set on pause: in-flight inline calls keep running after
-	// this executor returns, so the lease is released at once and Resume is
-	// not held up by a long child call. Their drives no longer write (driveCtx
-	// is canceled); the next executor or the deadline reconciler settles each
-	// attempt from its child Run.
-	detached := false
+	// this executor returns, bounded by their attempt deadline, so the lease
+	// is released at once and Resume is not held up by a long child call.
+	// Their drives no longer write (driveCtx is canceled); the next executor
+	// or the deadline reconciler settles each attempt from its child Run.
+	var detached atomic.Bool
+	stopAbortOnLeaseEnd := context.AfterFunc(ctx, func() {
+		if !detached.Load() {
+			abortCalls()
+		}
+	})
 	defer func() {
 		cancelDrives()
-		if detached {
+		if detached.Load() {
+			stopAbortOnLeaseEnd()
 			go func() {
 				wg.Wait()
 				abortCalls()
 			}()
 			return
 		}
+		stopAbortOnLeaseEnd()
 		abortCalls()
 		wg.Wait()
 	}()
@@ -363,8 +375,8 @@ func (s *Service) executeWorkflowRun(
 		case workflowRunStatusPaused:
 			// In-flight children keep running; their attempts are settled by
 			// the next executor or, at their deadline, by the reconciler.
+			detached.Store(true)
 			cancelDrives()
-			detached = true
 			return s.GetWorkflowRun(context.WithoutCancel(ctx), run.UserID, run.ID)
 		default:
 			// Canceled or finished elsewhere.

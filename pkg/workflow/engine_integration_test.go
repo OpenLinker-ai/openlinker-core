@@ -519,3 +519,63 @@ func TestWorkflowRerunRefusesReusingANodeThatFailedTheWorkflow(t *testing.T) {
 	})
 	requireWorkflowConflictCode(t, err, "WORKFLOW_RERUN_NOT_REUSABLE")
 }
+
+// Pausing during a long inline Agent call releases the lease at once without
+// canceling the call: the child Run still succeeds, and the resumed run
+// settles from it.
+func TestWorkflowPauseKeepsInlineCallRunning(t *testing.T) {
+	f := newAdmissionFixture(t)
+	ctx := context.Background()
+	runID, done := f.startBlockedRun(t, 1)
+
+	_, err := f.svc.PauseWorkflowRun(ctx, f.ownerID, runID)
+	require.NoError(t, err)
+	waitWorker(t, done)
+	require.Nil(t, f.runLease(t, runID).owner, "the executor released its lease while the call was in flight")
+
+	var childID uuid.UUID
+	require.Eventually(t, func() bool {
+		return f.pool.QueryRow(ctx, `SELECT run_id FROM workflow_step_launches WHERE workflow_run_id = $1 AND run_id IS NOT NULL`, runID).Scan(&childID) == nil
+	}, 5*time.Second, 50*time.Millisecond)
+	// The lease is gone; the call must still be running, not canceled.
+	var childStatus string
+	require.NoError(t, f.pool.QueryRow(ctx, `SELECT status FROM runs WHERE id = $1`, childID).Scan(&childStatus))
+	require.NotEqual(t, "failed", childStatus)
+
+	f.release()
+	require.Eventually(t, func() bool {
+		return f.pool.QueryRow(ctx, `SELECT status FROM runs WHERE id = $1`, childID).Scan(&childStatus) == nil && childStatus == "success"
+	}, 10*time.Second, 50*time.Millisecond, "the detached call completed")
+
+	_, err = f.svc.ResumeWorkflowRun(ctx, f.ownerID, runID)
+	require.NoError(t, err)
+	claimed, err := f.svc.ClaimAndRunPendingWorkflow(ctx)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	run, err := f.svc.GetWorkflowRun(ctx, f.ownerID, runID)
+	require.NoError(t, err)
+	require.Equal(t, "success", run.Status)
+}
+
+// The unconfirmed marker comes from Runtime's classification of the
+// children, for every finished run (a run that succeeded under continue
+// still allows step reruns), in the run detail and the run list alike.
+func TestWorkflowRunMarksUnconfirmedChildrenFromRuntime(t *testing.T) {
+	f, runID := timedOutRun(t)
+	ctx := context.Background()
+	// Without the stop record's own evidence, only Runtime's classification
+	// of the child remains.
+	_, err := f.pool.Exec(ctx, `DELETE FROM workflow_step_stops WHERE workflow_run_id = $1`, runID)
+	require.NoError(t, err)
+	for _, status := range []string{"failed", "success"} {
+		_, err = f.pool.Exec(ctx, `UPDATE workflow_runs SET status = $2 WHERE id = $1`, runID, status)
+		require.NoError(t, err)
+		run, err := f.svc.GetWorkflowRun(ctx, f.ownerID, runID)
+		require.NoError(t, err)
+		require.True(t, run.HasUnconfirmedChildren, status)
+		list, err := f.svc.ListWorkflowRuns(ctx, f.ownerID, f.workflowID, 20)
+		require.NoError(t, err)
+		require.Len(t, list.Items, 1)
+		require.True(t, list.Items[0].HasUnconfirmedChildren, status)
+	}
+}

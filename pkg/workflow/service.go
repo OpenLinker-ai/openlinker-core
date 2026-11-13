@@ -1245,21 +1245,83 @@ func decorateWorkflowRunStopEvidence(ctx context.Context, q db.DBTX, items []Wor
 		return err
 	}
 	rows.Close()
-	for i := range items {
-		item := &items[i]
-		if item.HasUnconfirmedChildren ||
-			(item.Status != workflowRunStatusFailed && item.Status != workflowRunStatusCanceled) {
+	return decorateWorkflowRunChildEvidence(ctx, q, items)
+}
+
+// decorateWorkflowRunChildEvidence marks finished runs (any terminal status:
+// Retry and step Rerun both read this evidence) whose child Runs Runtime
+// classifies as unconfirmed. It reads the children of the whole page in one
+// query and classifies them in three, with the same union and classifier as
+// the Retry/Rerun gate.
+func decorateWorkflowRunChildEvidence(ctx context.Context, q db.DBTX, items []WorkflowRunResponse) error {
+	byID := map[uuid.UUID][]int{}
+	ids := []uuid.UUID{}
+	for i, item := range items {
+		if item.HasUnconfirmedChildren {
+			continue
+		}
+		switch item.Status {
+		case workflowRunStatusFailed, workflowRunStatusCanceled, workflowRunStatusSuccess:
+		default:
 			continue
 		}
 		id, err := uuid.Parse(item.ID)
 		if err != nil {
 			continue
 		}
-		gate, err := evaluateWorkflowStopGate(ctx, q, id)
-		if err != nil {
+		if _, seen := byID[id]; !seen {
+			ids = append(ids, id)
+		}
+		byID[id] = append(byID[id], i)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := q.Query(ctx, `
+		SELECT DISTINCT workflow_run_id, child_id FROM (
+		    SELECT workflow_run_id, run_id AS child_id FROM workflow_step_launches
+		    WHERE workflow_run_id = ANY($1::uuid[]) AND run_id IS NOT NULL
+		    UNION ALL
+		    SELECT workflow_run_id, run_id FROM workflow_run_steps
+		    WHERE workflow_run_id = ANY($1::uuid[]) AND run_id IS NOT NULL
+		) children
+	`, ids)
+	if err != nil {
+		return err
+	}
+	childrenOf := map[uuid.UUID][]uuid.UUID{}
+	children := []uuid.UUID{}
+	seenChild := map[uuid.UUID]bool{}
+	for rows.Next() {
+		var runID, childID uuid.UUID
+		if err := rows.Scan(&runID, &childID); err != nil {
+			rows.Close()
 			return err
 		}
-		item.HasUnconfirmedChildren = len(gate.unconfirmed) > 0
+		childrenOf[runID] = append(childrenOf[runID], childID)
+		if !seenChild[childID] {
+			seenChild[childID] = true
+			children = append(children, childID)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	evidence, err := runtime.ClassifyWorkflowChildStops(ctx, q, children)
+	if err != nil {
+		return err
+	}
+	for runID, childIDs := range childrenOf {
+		for _, childID := range childIDs {
+			if evidence[childID].State != runtime.WorkflowChildStopUnconfirmed {
+				continue
+			}
+			for _, i := range byID[runID] {
+				items[i].HasUnconfirmedChildren = true
+			}
+			break
+		}
 	}
 	return nil
 }
