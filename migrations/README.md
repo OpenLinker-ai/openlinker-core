@@ -8,11 +8,11 @@ canonical seed data for a fresh database. The migration runner then applies
 `091_browser_interaction_policy.up.sql`,
 `092_browser_observation_audit.up.sql`,
 `093_skill_packages.up.sql`, `094_cli_login.up.sql`, `095_runtime_node_upgrade.up.sql`,
-`096_skill_package_publication.up.sql` `097_resource_metadata.up.sql` `098_agent_mcp_bindings.up.sql` `099_runtime_node_upgrade_features.up.sql`, `100_runtime_mtls_transition.up.sql`, `101_runtime_signal_outbox_retention.up.sql`, `102_agent_mcp_transport.up.sql`, `103_workflow_admission_drain.up.sql` and `104_workflow_execution_attempts.up.sql`. Supported exact clean predecessors are
-`103`, `102`, `101`, `100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `104`.
+`096_skill_package_publication.up.sql` `097_resource_metadata.up.sql` `098_agent_mcp_bindings.up.sql` `099_runtime_node_upgrade_features.up.sql`, `100_runtime_mtls_transition.up.sql`, `101_runtime_signal_outbox_retention.up.sql`, `102_agent_mcp_transport.up.sql`, `103_workflow_admission_drain.up.sql`, `104_workflow_execution_attempts.up.sql`, `105_workflow_versions.up.sql` and `106_workflow_run_revision.up.sql`. Supported exact clean predecessors are
+`105`, `104`, `103`, `102`, `101`, `100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` and `086`; the current version is `106`.
 `086_current_schema_init_verify.sql` is the PostgreSQL 16 current-catalog and
 seed fingerprint used after the complete migration chain. Fresh and predecessor
-paths therefore execute the same `104` DDL and converge on one version `104`
+paths therefore execute the same `106` DDL and converge on one version `106`
 catalog fingerprint without an idempotent duplicate schema definition.
 
 Migration `093` adds private skill packages, immutable versions, Agent bindings
@@ -32,8 +32,8 @@ standard Sessions, publication and connection-mode changes therefore cannot
 race past the initial policy decision.
 
 The migration command accepts only a truly empty database, an exact clean
-supported predecessor (`103`, `102`, `101`, `100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
-version `104` current schema.
+supported predecessor (`105`, `104`, `103`, `102`, `101`, `100`, `099`, `098`, `097`, `096`, `095`, `094`, `093`, `092`, `091`, `088` or `086`), or the exact clean
+version `106` current schema.
 Exactness is enforced with catalog object counts and a SHA-256 fingerprint over
 table, column/default, constraint, index, trigger, and function definitions.
 Legacy, dirty, partial, or malformed databases are rejected before the
