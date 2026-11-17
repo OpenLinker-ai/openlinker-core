@@ -32,6 +32,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/attachment"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/coreapi"
@@ -396,7 +397,13 @@ func newEcho(cfg *config.Config, stores ...emw.RateLimiterStore) *echo.Echo {
 	e.Use(runtimeListenerIsolationForConfig(cfg))
 	e.Use(emw.Recover())
 	e.Use(emw.RequestID())
-	e.Use(emw.BodyLimit(maxRequestBodySize))
+	e.Use(emw.BodyLimitWithConfig(emw.BodyLimitConfig{
+		Limit: maxRequestBodySize,
+		// Attachment uploads bound themselves to 30 MB while reading.
+		Skipper: func(c echo.Context) bool {
+			return c.Request().Method == http.MethodPost && c.Request().URL.Path == attachment.RoutePath
+		},
+	}))
 	e.Use(emw.CORSWithConfig(emw.CORSConfig{
 		AllowOrigins:     allowedCORSOrigins(cfg),
 		AllowCredentials: true,

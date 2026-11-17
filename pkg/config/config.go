@@ -50,6 +50,16 @@ type Config struct {
 
 	// 前端 URL
 	FrontendURL string `envconfig:"FRONTEND_URL"`
+	// Run attachments (trial console and service order uploads) live only in
+	// this dedicated local directory; unset disables uploads. Multi-instance
+	// Core must mount one shared volume and set AttachmentsShared.
+	AttachmentsDir               string `envconfig:"OPENLINKER_ATTACHMENTS_DIR"`
+	AttachmentsShared            bool   `envconfig:"OPENLINKER_ATTACHMENTS_SHARED" default:"false"`
+	AttachmentsPublicOrigin      string `envconfig:"OPENLINKER_ATTACHMENTS_PUBLIC_ORIGIN"`
+	AttachmentsOwnerMaxCount     int    `envconfig:"OPENLINKER_ATTACHMENTS_OWNER_MAX_COUNT" default:"40"`
+	AttachmentsOwnerMaxBytes     int64  `envconfig:"OPENLINKER_ATTACHMENTS_OWNER_MAX_BYTES" default:"1000000000"`
+	AttachmentsInstanceMaxBytes  int64  `envconfig:"OPENLINKER_ATTACHMENTS_INSTANCE_MAX_BYTES" default:"10000000000"`
+	AttachmentsUnboundTTLSeconds int    `envconfig:"OPENLINKER_ATTACHMENTS_UNBOUND_TTL_SECONDS" default:"86400"`
 	// Only these proxy networks may supply client IPs for CLI login rate limits.
 	// Empty means the direct peer; no private or loopback ranges are implicit.
 	CLIAuthTrustedProxyCIDRs    []string `envconfig:"CLI_AUTH_TRUSTED_PROXY_CIDRS"`

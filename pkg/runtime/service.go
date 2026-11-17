@@ -82,6 +82,7 @@ type TaskCallbackEnqueuer interface {
 // network I/O. Progress is written through EventStore and terminal facts only
 // through ResultFinalizer (or the database deadline reconciler after a crash).
 type Service struct {
+	attachments        RunAttachments
 	queries            *db.Queries
 	requirements       runRequirementQueries
 	pool               *pgxpool.Pool
@@ -1236,6 +1237,10 @@ func (s *Service) createRunningRun(
 		log.Error().Err(schemaErr).Str("agent_id", agentID.String()).Msg("runtime.Run: validate Agent input schema")
 		return nil, nil, httpx.Internal("Agent input_schema 配置无效")
 	}
+	attachmentIDs, err := s.checkRunAttachments(userID, req.Input)
+	if err != nil {
+		return nil, nil, err
+	}
 	if agent.ConnectionMode == "" {
 		agent.ConnectionMode = connectionModeDirectHTTP
 	}
@@ -1659,6 +1664,7 @@ func (s *Service) createRunningRun(
 	if dispatchEvent != nil {
 		s.triggerTaskCallbackEvent(dispatchEvent)
 	}
+	s.bindRunAttachments(runID, attachmentIDs)
 
 	invocation := &runInvocation{
 		runID:            runID,
