@@ -274,7 +274,9 @@ func TestSweepReleasesTerminalRunsExpiredAndOrphans(t *testing.T) {
 	result, err := s.Sweep(context.Background(), func(_ context.Context, run uuid.UUID) (string, bool, error) {
 		status, ok := statuses[run]
 		return status, ok, nil
-	}, func(status string) bool { return status == "success" || status == "failed" || status == "timeout" || status == "canceled" })
+	}, func(status string) bool {
+		return status == "success" || status == "failed" || status == "timeout" || status == "canceled"
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
