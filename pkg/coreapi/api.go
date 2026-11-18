@@ -224,6 +224,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 		opts.RuntimeSignalBus, eventWake,
 	)
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
+	configureAttachments(rootCtx, api, pool, cfg, hybridMw, runtimeSvc)
 	// Observation mounts on JWT only, not the hybrid group: watching a live
 	// screen is a person at a session, not a scriptable long-lived token.
 	runtimeHandler.RegisterObservation(api, jwtMiddleware)

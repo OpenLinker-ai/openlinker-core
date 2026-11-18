@@ -7,6 +7,17 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+### Run attachments
+
+- New `POST /api/v1/attachments` and capability-link `GET /api/v1/attachments/:token`
+  let users attach local images and any documents (30 MB each, 20 per Run) to Runs.
+  Contents live only in a dedicated local directory (`OPENLINKER_ATTACHMENTS_DIR`,
+  `0700`/`0600`, symlink and ownership checks); unset keeps the feature disabled.
+  Run creation checks ownership, expiry and single use for `*_image_url(s)` /
+  `*_file_url(s)` fields and binds the attachments; a sweeper releases them once the
+  Run is terminal, expires unused uploads and removes orphans. No migration; Run
+  inputs carry only links. See `docs/run-attachments.md`.
+
 ### Workflow release drain
 
 - Migration `103` adds a durable workflow admission state (`open` or
