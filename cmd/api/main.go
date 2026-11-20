@@ -320,7 +320,7 @@ func requestLogger() echo.MiddlewareFunc {
 				ev = log.Warn().Err(err)
 			}
 			ev.Str("method", req.Method).
-				Str("path", req.URL.Path).
+				Str("path", attachment.LogPath(req.URL.Path)).
 				Int("status", res.Status).
 				Int64("size", res.Size).
 				Dur("dur", time.Since(start)).
