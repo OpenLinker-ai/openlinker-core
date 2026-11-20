@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path"
 	"sort"
 	"strings"
 
@@ -12,6 +13,13 @@ import (
 
 // RoutePath is the API path of uploads and capability links.
 const RoutePath = "/api/v1/attachments"
+
+func LogPath(p string) string {
+	if strings.HasPrefix(path.Clean("/"+p), RoutePath+"/") {
+		return RoutePath + "/:token"
+	}
+	return p
+}
 
 // Field naming convention shared with the trial consoles, Cloud service
 // forms and Agent Node: single values end in _image_url / _file_url, arrays

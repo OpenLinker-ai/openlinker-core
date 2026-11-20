@@ -16,7 +16,10 @@ import (
 	migratefile "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/attachment"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/migrationinit"
@@ -406,6 +409,55 @@ func TestRequestLoggerSuccess(t *testing.T) {
 	}
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+}
+
+func TestRequestLoggerHidesAttachmentCapabilityTokens(t *testing.T) {
+	var buf bytes.Buffer
+	original := log.Logger
+	log.Logger = zerolog.New(&buf)
+	t.Cleanup(func() { log.Logger = original })
+
+	token := strings.Repeat("ab", 32)
+	e := echo.New()
+	e.HTTPErrorHandler = func(err error, c echo.Context) { _ = httpx.SendError(c, err) }
+	cases := []struct {
+		method string
+		path   string
+		fail   bool
+		want   string
+	}{
+		{http.MethodGet, attachment.RoutePath + "/" + token, false, attachment.RoutePath + "/:token"},
+		{http.MethodGet, attachment.RoutePath + "/" + token, true, attachment.RoutePath + "/:token"},
+		{http.MethodGet, attachment.RoutePath + "/" + token + "/", false, attachment.RoutePath + "/:token"},
+		{http.MethodGet, attachment.RoutePath + "/" + token + "/extra", false, attachment.RoutePath + "/:token"},
+		{http.MethodGet, "/api/v1//attachments/" + token, false, attachment.RoutePath + "/:token"},
+		{http.MethodGet, "/api/v1/runs/../attachments/" + token, false, attachment.RoutePath + "/:token"},
+		{http.MethodPost, attachment.RoutePath, false, attachment.RoutePath},
+		{http.MethodGet, "/api/v1/runs/" + token, false, "/api/v1/runs/" + token},
+		{http.MethodGet, "/api/v1/attachmentsx/" + token, false, "/api/v1/attachmentsx/" + token},
+	}
+	for _, tc := range cases {
+		buf.Reset()
+		req := httptest.NewRequest(tc.method, "/", nil)
+		req.URL.Path = tc.path
+		c := e.NewContext(req, httptest.NewRecorder())
+		_ = requestLogger()(func(c echo.Context) error {
+			if tc.fail {
+				return httpx.NewError(http.StatusNotFound, httpx.CodeNotFound, "not found")
+			}
+			return c.NoContent(http.StatusOK)
+		})(c)
+		var entry map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
+			t.Fatalf("%s %s: log line %q: %v", tc.method, tc.path, buf.String(), err)
+		}
+		if entry["path"] != tc.want {
+			t.Fatalf("%s %s: logged path %v, want %s", tc.method, tc.path, entry["path"], tc.want)
+		}
+		if strings.HasPrefix(tc.want, attachment.RoutePath+"/") && strings.Contains(buf.String(), token) {
+			t.Fatalf("%s %s: token reached the log: %s", tc.method, tc.path, buf.String())
+		}
 	}
 }
 

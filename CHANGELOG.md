@@ -17,6 +17,8 @@ runtime protocol, and migration contract are declared stable.
   `*_file_url(s)` fields and binds the attachments; a sweeper releases them once the
   Run is terminal, expires unused uploads and removes orphans. No migration; Run
   inputs carry only links. See `docs/run-attachments.md`.
+- The HTTP access log records attachment downloads as `/api/v1/attachments/:token`,
+  so the capability token no longer reaches Core's logs.
 
 ### Workflow release drain
 
