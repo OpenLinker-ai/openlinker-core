@@ -39,9 +39,9 @@ func NewHandler(client *Client, pool *pgxpool.Pool, packages *skillpackage.Handl
 
 var (
 	segmentPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	mcpNamespace      = regexp.MustCompile(`^[A-Za-z0-9.-]{1,128}$`)
-	mcpName           = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
-	mcpVersionPattern = regexp.MustCompile(`^[^\s/\\]{1,255}$`)
+	mcpNamespace      = regexp.MustCompile(`^[A-Za-z0-9.-]{1,198}$`)
+	mcpName           = regexp.MustCompile(`^[A-Za-z0-9._-]{1,198}$`)
+	mcpVersionPattern = regexp.MustCompile(`^[^/\\\x00-\x1f\x7f]{1,255}$`)
 	digestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
@@ -160,8 +160,16 @@ func (h *Handler) listRegistries(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"items": items})
 }
 
+func rawParam(c echo.Context, name string) (string, error) {
+	v := c.Param(name)
+	if c.Request().URL.RawPath == "" {
+		return v, nil
+	}
+	return url.PathUnescape(v)
+}
+
 func param(c echo.Context, name string, pattern *regexp.Regexp) (string, error) {
-	v, err := url.PathUnescape(c.Param(name))
+	v, err := rawParam(c, name)
 	if err != nil || !pattern.MatchString(v) || v == "." || v == ".." {
 		return "", httpx.BadRequest("invalid catalog path")
 	}
@@ -191,6 +199,9 @@ func entryPath(c echo.Context, kind string) (string, string, string, error) {
 	name, err := param(c, "name", namePattern)
 	if err != nil {
 		return "", "", "", err
+	}
+	if kind == "mcp/servers" && len(ns)+1+len(name) > 200 {
+		return "", "", "", httpx.BadRequest("invalid catalog path")
 	}
 	base := "/v1/" + kind + "/" + url.PathEscape(ns) + "/" + url.PathEscape(name)
 	return ns, name, base, nil
@@ -315,7 +326,7 @@ func (h *Handler) getSkillFile(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	file, err := url.PathUnescape(c.Param("*"))
+	file, err := rawParam(c, "*")
 	if err != nil || !safePath(file) || len(file) > 180 {
 		return httpx.BadRequest("invalid file path")
 	}
