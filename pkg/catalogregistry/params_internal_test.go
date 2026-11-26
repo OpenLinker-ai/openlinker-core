@@ -31,7 +31,7 @@ func TestPathParamsAreDecodedExactlyOnce(t *testing.T) {
 		"/m/io.github.a/w/release%20candidate":                          200,
 		"/m/io.github.a/" + long + "/1":                                 200,
 		"/m/io.github.a/" + long + "x" + strings.Repeat("y", 50) + "/1": 400,
-		"/m/io.github.a/w/a%2Fb":                                        400,
+		"/m/io.github.a/w/release%2F2026":                               200,
 		"/m/io.github.a/w/%0A":                                          400,
 	}
 	for path, want := range cases {
@@ -42,7 +42,7 @@ func TestPathParamsAreDecodedExactlyOnce(t *testing.T) {
 		}
 	}
 	joined := strings.Join(got, "\n")
-	for _, want := range []string{"|v%41", "|100%", "|release candidate"} {
+	for _, want := range []string{"|v%41", "|100%", "|release candidate", "|release/2026"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing decoded value %q in %s", want, joined)
 		}

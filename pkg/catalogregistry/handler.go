@@ -41,7 +41,7 @@ var (
 	segmentPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	mcpNamespace      = regexp.MustCompile(`^[A-Za-z0-9.-]{1,198}$`)
 	mcpName           = regexp.MustCompile(`^[A-Za-z0-9._-]{1,198}$`)
-	mcpVersionPattern = regexp.MustCompile(`^[^/\\\x00-\x1f\x7f]{1,255}$`)
+	mcpVersionPattern = regexp.MustCompile(`^[^\x00-\x1f\x7f]{1,255}$`)
 	digestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
