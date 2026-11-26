@@ -38,8 +38,24 @@ func (h *Handler) SetVisibility(c echo.Context) error {
 	if req.Visibility != "private" && req.Visibility != "unlisted" && req.Visibility != "public" {
 		return packageError("VISIBILITY_INVALID", "visibility must be private, unlisted or public")
 	}
-	var found uuid.UUID
-	err = h.pool.QueryRow(c.Request().Context(), `UPDATE skill_packages SET visibility=$3,updated_at=now() WHERE id=$1 AND owner_user_id=$2 RETURNING id`, id, uid, req.Visibility).Scan(&found)
+	ctx := c.Request().Context()
+	err = pgx.BeginFunc(ctx, h.pool, func(tx pgx.Tx) error {
+		var found uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT id FROM skill_packages WHERE id=$1 AND owner_user_id=$2 FOR UPDATE`, id, uid).Scan(&found); err != nil {
+			return err
+		}
+		if req.Visibility != "private" {
+			var restricted bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM skill_package_versions WHERE package_id=$1 AND source_kind IS NOT NULL AND source_redistributable IS NOT TRUE)`, id).Scan(&restricted); err != nil {
+				return err
+			}
+			if restricted {
+				return notRedistributable()
+			}
+		}
+		_, err := tx.Exec(ctx, `UPDATE skill_packages SET visibility=$2,updated_at=now() WHERE id=$1`, id, req.Visibility)
+		return err
+	})
 	if err != nil {
 		return databaseError(err)
 	}
@@ -102,9 +118,13 @@ func (h *Handler) setPublication(c echo.Context, publish bool) error {
 	err = pgx.BeginFunc(ctx, h.pool, func(tx pgx.Tx) error {
 		var version, payload, digest string
 		var frozen []byte
-		if err := tx.QueryRow(ctx, `SELECT v.version,v.payload,v.digest,v.publication_metadata FROM skill_package_versions v JOIN skill_packages p ON p.id=v.package_id
- WHERE p.id=$1 AND p.owner_user_id=$2 AND v.id=$3 FOR UPDATE OF v`, id, uid, versionID).Scan(&version, &payload, &digest, &frozen); err != nil {
+		var restricted bool
+		if err := tx.QueryRow(ctx, `SELECT v.version,v.payload,v.digest,v.publication_metadata,(v.source_kind IS NOT NULL AND v.source_redistributable IS NOT TRUE) FROM skill_package_versions v JOIN skill_packages p ON p.id=v.package_id
+ WHERE p.id=$1 AND p.owner_user_id=$2 AND v.id=$3 FOR UPDATE OF v`, id, uid, versionID).Scan(&version, &payload, &digest, &frozen, &restricted); err != nil {
 			return err
+		}
+		if publish && restricted {
+			return notRedistributable()
 		}
 		if !publish {
 			_, err := tx.Exec(ctx, `UPDATE skill_package_versions SET published_at=NULL WHERE id=$1`, versionID)
@@ -207,7 +227,13 @@ func (h *Handler) ImportPublished(c echo.Context) error {
 			return err
 		}
 		digest = source.Digest
-		_, err = tx.Exec(ctx, `INSERT INTO skill_package_versions(id,package_id,version,digest,payload,capability_ids,providers,source_version_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+		_, err = tx.Exec(ctx, `INSERT INTO skill_package_versions(id,package_id,version,digest,payload,capability_ids,providers,source_version_id,
+ source_kind,source_repository,source_commit,source_path,source_tree_sha,source_registry_url,source_registry_entry,source_registry_version,
+ source_registry_digest,source_registry_mode,source_license,source_checked_at,source_redistributable)
+ SELECT $1,$2,$3,$4,$5,$6,$7,$8,
+ s.source_kind,s.source_repository,s.source_commit,s.source_path,s.source_tree_sha,s.source_registry_url,s.source_registry_entry,s.source_registry_version,
+ s.source_registry_digest,s.source_registry_mode,s.source_license,s.source_checked_at,s.source_redistributable
+ FROM skill_package_versions s WHERE s.id=$8`,
 			versionID, packageID, source.Version, source.Digest, source.payload, bundle.CapabilityIDs, bundle.Providers, source.ID)
 		return err
 	})

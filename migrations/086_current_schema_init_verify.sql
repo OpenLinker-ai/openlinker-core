@@ -13,8 +13,8 @@ BEGIN
     FROM pg_catalog.pg_tables
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_tables <> 96 THEN
-        RAISE EXCEPTION 'Core initializer table count is %, expected 96', public_tables;
+    IF public_tables <> 97 THEN
+        RAISE EXCEPTION 'Core initializer table count is %, expected 97', public_tables;
     END IF;
 
     SELECT count(*) INTO public_constraints
@@ -23,16 +23,16 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 782 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 782', public_constraints;
+    IF public_constraints <> 791 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 791', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 322 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 322', public_indexes;
+    IF public_indexes <> 324 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 324', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers
@@ -350,6 +350,14 @@ BEGIN
           AND column_name = 'revision' AND is_nullable = 'NO'
     ) THEN
         RAISE EXCEPTION 'Core initializer is missing the workflow run revision';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_constraint
+        WHERE conname = 'skill_source_complete'
+          AND conrelid = 'public.skill_package_versions'::regclass
+    ) OR to_regclass('public.agent_catalog_sources') IS NULL THEN
+        RAISE EXCEPTION 'Core initializer is missing the registry catalog sources';
     END IF;
 
     IF NOT EXISTS (

@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/catalogconfig"
 	"github.com/kelseyhightower/envconfig"
 )
 
@@ -167,6 +168,8 @@ type Config struct {
 	WorkflowNodeTimeoutSeconds       int  `envconfig:"WORKFLOW_NODE_TIMEOUT_SECONDS" default:"1800"`
 	WorkflowMaxNodes                 int  `envconfig:"WORKFLOW_MAX_NODES" default:"30"`
 	WorkflowMaxEdges                 int  `envconfig:"WORKFLOW_MAX_EDGES" default:"60"`
+
+	CatalogRegistries string `envconfig:"CATALOG_REGISTRIES"`
 }
 
 // Load 从环境变量加载配置。
@@ -187,6 +190,9 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	if _, err := cfg.CLIAuthProxyRanges(); err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	if _, err := catalogconfig.Parse(cfg.CatalogRegistries); err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	return &cfg, nil

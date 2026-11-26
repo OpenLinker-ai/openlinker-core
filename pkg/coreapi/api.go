@@ -20,6 +20,7 @@ import (
 	coreadmin "github.com/OpenLinker-ai/openlinker-core/pkg/admin"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/catalogregistry"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/cutover"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
@@ -209,6 +210,11 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	skillPackages.Register(api, jwtMiddleware, hybridMw)
 	skillPackages.RegisterPublic(api)
 	mcpbinding.NewHandler(pool, cfg.EffectiveRuntimeMasterSecret()).Register(api, jwtMiddleware)
+	catalogRegistries, err := catalogregistry.Parse(cfg.CatalogRegistries)
+	if err != nil {
+		panic(err)
+	}
+	catalogregistry.NewHandler(catalogregistry.NewClient(catalogRegistries, catalogregistry.Options{}), pool, skillPackages, agentSvc).Register(api, jwtMiddleware)
 
 	runtimeSvc := runtime.NewService(pool, cfg)
 	if cfg.RuntimeMTLSListenerEnabled() && opts.RuntimePKI != nil {

@@ -449,3 +449,7 @@ func isReservedDocumentationHost(host string) bool {
 		strings.HasSuffix(host, ".example") ||
 		strings.HasSuffix(host, ".test")
 }
+
+func IsPublicAddr(addr netip.Addr) bool {
+	return validatePublicAddr(addr, false) == nil
+}

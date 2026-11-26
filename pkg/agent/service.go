@@ -95,6 +95,10 @@ func (s *Service) SetDryRunner(r DryRunner) {
 //  3. CheckSlugAvailable → 否则 Conflict
 //  4. INSERT agents（省略 visibility 时默认 private，可显式选择 public/unlisted）；UNIQUE 兜底再次 Conflict
 func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *CreateAgentRequest) (*AgentResponse, error) {
+	return s.CreateAgentWithin(ctx, creatorID, req, nil)
+}
+
+func (s *Service) CreateAgentWithin(ctx context.Context, creatorID uuid.UUID, req *CreateAgentRequest, within func(context.Context, pgx.Tx, uuid.UUID) error) (*AgentResponse, error) {
 	user, err := s.queries.GetUserByID(ctx, creatorID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -172,11 +176,20 @@ func (s *Service) CreateAgent(ctx context.Context, creatorID uuid.UUID, req *Cre
 		if createErr != nil {
 			return createErr
 		}
+		if within != nil {
+			if err := within(ctx, tx, created.ID); err != nil {
+				return err
+			}
+		}
 		if len(skillIDs) == 0 {
 			return nil
 		}
 		return db.ReplaceAgentSkills(ctx, tx, created.ID, skillIDs)
 	})
+	var hookErr *httpx.HTTPError
+	if errors.As(err, &hookErr) {
+		return nil, err
+	}
 	if err != nil {
 		// UNIQUE violation 兜底（并发场景）
 		if isUniqueViolation(err) {
