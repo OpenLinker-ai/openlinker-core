@@ -332,6 +332,10 @@ func TestCatalogThroughRealRegistry(t *testing.T) {
 	reg.expect(t, 201, "POST", "/v1/mcp/servers/io.github.acme", pub, "application/json", server("legacy", "sse", "https://127.0.0.1:9/sse"))
 	reg.expect(t, 201, "POST", "/v1/mcp/servers/io.github.acme", pub, "application/json", server("local", "packages", ""))
 	reg.expect(t, 201, "POST", "/v1/mcp/servers/io.github.acme", pub, "application/json", server("old", "streamable-http", "https://127.0.0.1:9/old"))
+	built := map[string]any{}
+	require.NoError(t, json.Unmarshal(server("_built", "streamable-http", "https://127.0.0.1:9/built"), &built))
+	built["version"] = "1.0.0+build.1"
+	reg.expect(t, 201, "POST", "/v1/mcp/servers/io.github.acme", pub, "application/json", jsonBody(built))
 	reg.expect(t, 200, "POST", "/v1/mcp/servers/io.github.acme/old/status", pub, "application/json", jsonBody(map[string]any{"status": "deprecated"}))
 
 	gw := reg.expect(t, 201, "POST", "/v1/admin/tokens", registryAdmin, "application/json", jsonBody(map[string]any{"name": "core", "scopes": []string{"skills:read"}}))
@@ -396,12 +400,18 @@ func TestCatalogThroughRealRegistry(t *testing.T) {
 		require.Equal(t, 403, status)
 		require.Contains(t, string(body), "CATALOG_CONTENT_WITHHELD")
 		core.expect(400, "GET", "/api/v1/catalog/registries/pub/skills/io.github.acme/tarred/versions/3/files/..%2Fsecret", uuid.Nil, nil)
+		core.expect(400, "GET", "/api/v1/catalog/registries/pub/skills?cursor="+strings.Repeat("a", 5000), uuid.Nil, nil)
+		page := core.expect(200, "GET", "/api/v1/catalog/registries/pub/skills?limit=1", uuid.Nil, nil)
+		cursor, _ := page["next_cursor"].(string)
+		require.NotEmpty(t, cursor)
+		next := core.expect(200, "GET", "/api/v1/catalog/registries/pub/skills?limit=1&cursor="+url.QueryEscape(cursor), uuid.Nil, nil)
+		require.NotEqual(t, names(page, "skills"), names(next, "skills"))
 		var servers []string
 		for _, it := range core.expect(200, "GET", "/api/v1/catalog/registries/pub/mcp/servers", uuid.Nil, nil)["servers"].([]any) {
 			servers = append(servers, it.(map[string]any)["name"].(string))
 		}
 		sort.Strings(servers)
-		require.Equal(t, "io.github.acme/legacy,io.github.acme/local,io.github.acme/old,io.github.acme/weather", strings.Join(servers, ","))
+		require.Equal(t, "io.github.acme/_built,io.github.acme/legacy,io.github.acme/local,io.github.acme/old,io.github.acme/weather", strings.Join(servers, ","))
 	})
 
 	importBody := func(registry, ns, name, version, digest string, providers ...string) map[string]any {
@@ -485,6 +495,7 @@ func TestCatalogThroughRealRegistry(t *testing.T) {
 		require.Equal(t, "legacy_sse", core.expect(200, "GET", base+"legacy/versions/1.0.0/registration-draft", alice, nil)["mcp_transport"])
 		require.Contains(t, fmt.Sprint(core.expect(422, "GET", base+"local/versions/1.0.0/registration-draft", alice, nil)), "CATALOG_MCP_SELF_HOST_REQUIRED")
 		require.Contains(t, fmt.Sprint(core.expect(409, "GET", base+"old/versions/1.0.0/registration-draft", alice, nil)), "CATALOG_MCP_INACTIVE")
+		require.Equal(t, "1.0.0+build.1", core.expect(200, "GET", base+"_built/versions/1.0.0%2Bbuild.1/registration-draft", alice, nil)["version"])
 	})
 
 	t.Run("mcp registration rechecks status and records provenance atomically", func(t *testing.T) {

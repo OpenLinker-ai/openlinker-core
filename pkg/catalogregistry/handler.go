@@ -38,8 +38,16 @@ func NewHandler(client *Client, pool *pgxpool.Pool, packages *skillpackage.Handl
 }
 
 var (
-	segmentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	digestPattern  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	segmentPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	mcpNamespace      = regexp.MustCompile(`^[A-Za-z0-9.-]{1,128}$`)
+	mcpName           = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+	mcpVersionPattern = regexp.MustCompile(`^[^\s/\\]{1,255}$`)
+	digestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+)
+
+const (
+	maxQueryValue  = 200
+	maxCursorValue = 4096
 )
 
 func catalogError(status int, code, message string) error {
@@ -152,23 +160,35 @@ func (h *Handler) listRegistries(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"items": items})
 }
 
-func segment(c echo.Context, name string) (string, error) {
-	v := c.Param(name)
-	if decoded, err := url.PathUnescape(v); err == nil {
-		v = decoded
-	}
-	if !segmentPattern.MatchString(v) {
+func param(c echo.Context, name string, pattern *regexp.Regexp) (string, error) {
+	v, err := url.PathUnescape(c.Param(name))
+	if err != nil || !pattern.MatchString(v) || v == "." || v == ".." {
 		return "", httpx.BadRequest("invalid catalog path")
 	}
 	return v, nil
 }
 
+func segment(c echo.Context, name string) (string, error) {
+	return param(c, name, segmentPattern)
+}
+
+func version(c echo.Context, kind string) (string, error) {
+	if kind == "mcp/servers" {
+		return param(c, "version", mcpVersionPattern)
+	}
+	return segment(c, "version")
+}
+
 func entryPath(c echo.Context, kind string) (string, string, string, error) {
-	ns, err := segment(c, "ns")
+	nsPattern, namePattern := segmentPattern, segmentPattern
+	if kind == "mcp/servers" {
+		nsPattern, namePattern = mcpNamespace, mcpName
+	}
+	ns, err := param(c, "ns", nsPattern)
 	if err != nil {
 		return "", "", "", err
 	}
-	name, err := segment(c, "name")
+	name, err := param(c, "name", namePattern)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -176,17 +196,26 @@ func entryPath(c echo.Context, kind string) (string, string, string, error) {
 	return ns, name, base, nil
 }
 
-func passQuery(c echo.Context, keys ...string) string {
+func passQuery(c echo.Context, keys ...string) (string, error) {
 	q := url.Values{}
 	for _, k := range keys {
-		if v := c.QueryParam(k); v != "" && len(v) <= 200 {
-			q.Set(k, v)
+		v := c.QueryParam(k)
+		if v == "" {
+			continue
 		}
+		limit := maxQueryValue
+		if k == "cursor" {
+			limit = maxCursorValue
+		}
+		if len(v) > limit {
+			return "", httpx.BadRequest("invalid catalog query")
+		}
+		q.Set(k, v)
 	}
 	if len(q) == 0 {
-		return ""
+		return "", nil
 	}
-	return "?" + q.Encode()
+	return "?" + q.Encode(), nil
 }
 
 func stripRegistryURLs(v any) any {
@@ -246,7 +275,11 @@ func relayJSON(c echo.Context, res Response) error {
 }
 
 func (h *Handler) listSkills(c echo.Context) error {
-	return h.proxyJSON(c, "/v1/skills"+passQuery(c, "q", "namespace", "mode", "compatible", "limit", "cursor"))
+	query, err := passQuery(c, "q", "namespace", "mode", "compatible", "limit", "cursor")
+	if err != nil {
+		return err
+	}
+	return h.proxyJSON(c, "/v1/skills"+query)
 }
 
 func (h *Handler) getSkill(c echo.Context) error {
@@ -313,7 +346,11 @@ func (h *Handler) getSkillFile(c echo.Context) error {
 }
 
 func (h *Handler) listMCP(c echo.Context) error {
-	return h.proxyJSON(c, "/v1/mcp/servers"+passQuery(c, "q", "namespace", "mode", "limit", "cursor"))
+	query, err := passQuery(c, "q", "namespace", "mode", "limit", "cursor")
+	if err != nil {
+		return err
+	}
+	return h.proxyJSON(c, "/v1/mcp/servers"+query)
 }
 
 func (h *Handler) getMCP(c echo.Context) error {
@@ -329,11 +366,11 @@ func (h *Handler) getMCPVersion(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	version, err := segment(c, "version")
+	v, err := version(c, "mcp/servers")
 	if err != nil {
 		return err
 	}
-	return h.proxyJSON(c, base+"/versions/"+url.PathEscape(version))
+	return h.proxyJSON(c, base+"/versions/"+url.PathEscape(v))
 }
 
 type importRequest struct {

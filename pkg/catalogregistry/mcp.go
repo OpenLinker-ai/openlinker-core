@@ -175,11 +175,11 @@ func (h *Handler) loadDraft(ctx context.Context, c echo.Context, remote int) (Dr
 	if err != nil {
 		return Draft{}, Registry{}, caller{}, err
 	}
-	version, err := segment(c, "version")
+	v, err := version(c, "mcp/servers")
 	if err != nil {
 		return Draft{}, Registry{}, caller{}, err
 	}
-	res, err := h.client.Get(ctx, reg.Name, base+"/versions/"+url.PathEscape(version), who.user, []string{"read"})
+	res, err := h.client.Get(ctx, reg.Name, base+"/versions/"+url.PathEscape(v), who.user, []string{"read"})
 	if err != nil {
 		return Draft{}, Registry{}, caller{}, upstreamError(err)
 	}
@@ -189,11 +189,11 @@ func (h *Handler) loadDraft(ctx context.Context, c echo.Context, remote int) (Dr
 	if res.Status != http.StatusOK {
 		return Draft{}, Registry{}, caller{}, catalogError(http.StatusBadGateway, "CATALOG_UNAVAILABLE", "the catalog is unavailable right now")
 	}
-	var v mcpVersion
-	if err := json.Unmarshal(res.Body, &v); err != nil {
+	var doc mcpVersion
+	if err := json.Unmarshal(res.Body, &doc); err != nil {
 		return Draft{}, Registry{}, caller{}, catalogError(http.StatusBadGateway, "CATALOG_UNAVAILABLE", "the catalog returned an invalid response")
 	}
-	d, err := BuildDraft(reg.Name, v, remote)
+	d, err := BuildDraft(reg.Name, doc, remote)
 	return d, reg, who, err
 }
 

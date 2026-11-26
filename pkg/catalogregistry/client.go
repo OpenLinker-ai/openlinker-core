@@ -189,6 +189,10 @@ func (c *Client) resolve(reg *Registry, target string) (*url.URL, error) {
 	if !strings.HasPrefix(path, "/v1/") || strings.Contains(path, "//") || strings.Contains(path, "\\") {
 		return nil, ErrInvalidTarget
 	}
+	decoded, err := url.PathUnescape(path)
+	if err != nil {
+		return nil, ErrInvalidTarget
+	}
 	query, err := url.ParseQuery(rawQuery)
 	if err != nil {
 		return nil, ErrInvalidTarget
@@ -200,8 +204,11 @@ func (c *Client) resolve(reg *Registry, target string) (*url.URL, error) {
 	}
 	base := reg.Base()
 	u := *base
-	u.RawPath = ""
-	u.Path = base.Path + path
+	u.Path = base.Path + decoded
+	u.RawPath = base.EscapedPath() + path
+	if u.EscapedPath() != u.RawPath {
+		return nil, ErrInvalidTarget
+	}
 	u.RawQuery = canonicalQuery(query)
 	if !endpointurl.SameOrigin(&u, base) {
 		return nil, ErrInvalidTarget

@@ -79,6 +79,13 @@ func TestCatalogSourcesMigrationKeepsContentAndGuardsSources(t *testing.T) {
 		`'registry','https://r.example','io.github.a/b','1',$5,'indexed',false`, packageID, "6", digest, payload, registryDigest); err != nil {
 		t.Fatalf("private registry source rejected: %v", err)
 	}
+	downSQL, err := os.ReadFile("../../migrations/107_registry_catalog_sources.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(downSQL), "LOCK TABLE public.skill_package_versions, public.agent_catalog_sources IN ACCESS EXCLUSIVE MODE") {
+		t.Fatal("down migration must lock both tables before checking for source records")
+	}
 	migrationDir := "../../migrations/107_registry_catalog_sources.down.sql"
 	down, err := os.ReadFile(migrationDir)
 	if err != nil {

@@ -786,11 +786,7 @@ func validateMigrationTableState(owner string, state MigrationTableState) error 
 
 func validateCoreShape(shape SchemaShape) error {
 	want := SchemaShape{
-		Digest: CoreSchemaDigest,
-		// 107 adds the skill package source columns and agent_catalog_sources;
-		// Runtime seeds stay fixed. Measured on a clean PostgreSQL 16 with
-		// 086..107 applied; the digest is a catalog fingerprint and cannot be
-		// derived from the DDL.
+		Digest:            CoreSchemaDigest,
 		Tables:            97,
 		Constraints:       791,
 		Indexes:           324,

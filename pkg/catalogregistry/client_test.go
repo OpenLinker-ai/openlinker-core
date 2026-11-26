@@ -169,3 +169,22 @@ func TestAssertionIsBoundToTheRequest(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "", assertion.Load())
 }
+
+func TestClientEscapesPathSegmentsOnce(t *testing.T) {
+	var target atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target.Store(r.URL.EscapedPath())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c := newClient(t, registryJSON("r", srv.URL+"/registry", `,"allow_http":true,"allow_private_network":true`), catalogregistry.Options{})
+	_, err := c.Get(context.Background(), "r", "/v1/skills/a/b/versions/1/files/my%20file.md", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, "/registry/v1/skills/a/b/versions/1/files/my%20file.md", target.Load())
+	_, err = c.Get(context.Background(), "r", "/v1/mcp/servers/io.github.a/w/versions/1.0.0%2Bbuild.1", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, "/registry/v1/mcp/servers/io.github.a/w/versions/1.0.0%2Bbuild.1", target.Load())
+	_, err = c.Get(context.Background(), "r", "/v1/skills/a/b/versions/1/files/%zz", nil, nil)
+	require.ErrorIs(t, err, catalogregistry.ErrInvalidTarget)
+}
