@@ -7,6 +7,26 @@ runtime protocol, and migration contract are declared stable.
 
 ## Unreleased
 
+### Registry catalog
+
+- Optional `CATALOG_REGISTRIES` connects Core to openlinker-registry
+  instances: `GET /api/v1/catalog/...` browses their Skills and MCP servers
+  with per-catalog audiences (`public`, `members`, `admins`), a dedicated
+  outbound policy and a five-minute cache for answers that carry no user
+  assertion; signed-in users of a signing catalog get Ed25519 user
+  assertions and see their own entries.
+- `POST /api/v1/creator/skill-packages/registry-imports` imports a Registry
+  Skill version into the user's private library after verifying its digest,
+  and records where it came from. Migration `107` adds the source columns of
+  `skill_package_versions` and `agent_catalog_sources`; versions whose source
+  license does not allow redistribution cannot be published or shared, also
+  after a copy.
+- MCP registration drafts and `POST .../registrations` create an
+  `mcp_server` Agent from a Registry entry, re-checking its status and
+  recording the source in the same transaction.
+- Without `CATALOG_REGISTRIES` no route is added. Delivery to Workers is
+  unchanged. See `REGISTRY_CATALOG.md`.
+
 ### Run attachments
 
 - New `POST /api/v1/attachments` and capability-link `GET /api/v1/attachments/:token`

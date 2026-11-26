@@ -14,6 +14,9 @@ func TestValidateCoreUp(t *testing.T) {
 	}{
 		{name: "fresh", snapshot: Snapshot{}},
 		{name: "current", snapshot: currentCoreSnapshot(), wantNoop: true},
+		{name: "catalog sources predecessor", snapshot: catalogSourcesPredecessorCoreSnapshot()},
+		{name: "catalog sources predecessor drift", snapshot: withCoreDigest(catalogSourcesPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
+		{name: "current version with catalog sources predecessor shape", snapshot: withCoreShape(currentCoreSnapshot(), catalogSourcesPredecessorCoreSnapshot().CoreShape), wantError: "fingerprint mismatch"},
 		{name: "workflow revision predecessor", snapshot: workflowRevisionPredecessorCoreSnapshot()},
 		{name: "workflow revision predecessor drift", snapshot: withCoreDigest(workflowRevisionPredecessorCoreSnapshot(), "wrong"), wantError: "fingerprint mismatch"},
 		{name: "current version with workflow revision predecessor shape", snapshot: withCoreShape(currentCoreSnapshot(), workflowRevisionPredecessorCoreSnapshot().CoreShape), wantError: "fingerprint mismatch"},
@@ -92,7 +95,7 @@ func TestValidateCloudUp(t *testing.T) {
 	current := fresh
 	current.Cloud = MigrationTableState{Exists: true, Rows: 1, Version: CloudVersion}
 	current.CloudShape = currentCloudShape()
-	current.NonBookkeepingObjects = 103
+	current.NonBookkeepingObjects = 104
 
 	tests := []struct {
 		name      string
@@ -146,7 +149,7 @@ func currentCoreSnapshot() Snapshot {
 	return Snapshot{
 		Core:                    MigrationTableState{Exists: true, Rows: 1, Version: CoreVersion},
 		CoreShape:               currentCoreShape(),
-		NonBookkeepingObjects:   96,
+		NonBookkeepingObjects:   97,
 		CallbackOwnerIndexValid: true,
 	}
 }
@@ -154,9 +157,9 @@ func currentCoreSnapshot() Snapshot {
 func currentCoreShape() SchemaShape {
 	return SchemaShape{
 		Digest:            CoreSchemaDigest,
-		Tables:            96,
-		Constraints:       782,
-		Indexes:           322,
+		Tables:            97,
+		Constraints:       791,
+		Indexes:           324,
 		Triggers:          80,
 		CoreIdentities:    1,
 		RuntimeControls:   1,
@@ -202,7 +205,21 @@ func workflowRevisionPredecessorCoreSnapshot() Snapshot {
 	s := currentCoreSnapshot()
 	s.Core.Version = CoreWorkflowRevisionPredecessorVersion
 	s.CoreShape.Digest = CoreWorkflowRevisionPredecessorDigest
+	s.CoreShape.Tables = 96
 	s.CoreShape.Constraints = 781
+	s.CoreShape.Indexes = 322
+	s.NonBookkeepingObjects = 96
+	return s
+}
+
+func catalogSourcesPredecessorCoreSnapshot() Snapshot {
+	s := currentCoreSnapshot()
+	s.Core.Version = CoreCatalogSourcesPredecessorVersion
+	s.CoreShape.Digest = CoreCatalogSourcesPredecessorDigest
+	s.CoreShape.Tables = 96
+	s.CoreShape.Constraints = 782
+	s.CoreShape.Indexes = 322
+	s.NonBookkeepingObjects = 96
 	return s
 }
 

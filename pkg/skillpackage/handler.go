@@ -129,7 +129,7 @@ const packageJSON = `jsonb_build_object('id',p.id,'name',p.name,'description',p.
  'visibility',p.visibility,'source_package_id',p.source_package_id,
  'versions',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',v.id,'version',v.version,'digest',v.digest,
  'capability_ids',v.capability_ids,'providers',v.providers,'created_at',v.created_at,'published_at',v.published_at,
- 'source_version_id',v.source_version_id,'publication_metadata',v.publication_metadata) ORDER BY v.created_at DESC,v.id)
+ 'source_version_id',v.source_version_id,'source',CASE WHEN v.source_kind IS NULL THEN NULL ELSE jsonb_build_object('kind',v.source_kind,'registry_url',v.source_registry_url,'entry',v.source_registry_entry,'version',v.source_registry_version,'digest',v.source_registry_digest,'mode',v.source_registry_mode,'license',v.source_license,'redistributable',v.source_redistributable,'checked_at',v.source_checked_at) END,'publication_metadata',v.publication_metadata) ORDER BY v.created_at DESC,v.id)
  FROM skill_package_versions v WHERE v.package_id=p.id),'[]'::jsonb))`
 
 func (h *Handler) List(c echo.Context) error {
