@@ -235,12 +235,12 @@ func (h *Handler) me(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	res, err := h.client.Get(c.Request().Context(), reg.Name, "/v1/whoami", user, []string{"read"})
+	res, err := h.client.Send(c.Request().Context(), reg.Name, http.MethodGet, "/v1/whoami", "", nil, user)
 	if err != nil {
 		return upstreamError(err)
 	}
 	if res.Status != http.StatusOK {
-		return catalogError(http.StatusBadGateway, "CATALOG_UNAVAILABLE", "the catalog is unavailable right now")
+		return relayWrite(c, res)
 	}
 	var who struct {
 		Mode string `json:"mode"`

@@ -186,12 +186,19 @@ func canonicalQuery(query url.Values) string {
 
 func (c *Client) resolve(reg *Registry, target string) (*url.URL, error) {
 	path, rawQuery, _ := strings.Cut(target, "?")
-	if !strings.HasPrefix(path, "/v1/") || strings.Contains(path, "//") || strings.Contains(path, "\\") {
+	lower := strings.ToLower(path)
+	if !strings.HasPrefix(path, "/v1/") || strings.Contains(path, "//") || strings.Contains(path, "\\") ||
+		strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
 		return nil, ErrInvalidTarget
 	}
 	decoded, err := url.PathUnescape(path)
 	if err != nil {
 		return nil, ErrInvalidTarget
+	}
+	for _, part := range strings.Split(decoded, "/") {
+		if part == "." || part == ".." {
+			return nil, ErrInvalidTarget
+		}
 	}
 	query, err := url.ParseQuery(rawQuery)
 	if err != nil {
@@ -297,6 +304,11 @@ func (c *Client) get(ctx context.Context, name, target string, user *User, acts 
 		next, err := c.redirectTarget(reg, u, location)
 		if err != nil {
 			return Response{}, ErrUnavailable
+		}
+		if purpose := u.Query().Get("purpose"); purpose != "" {
+			q := next.Query()
+			q.Set("purpose", purpose)
+			next.RawQuery = canonicalQuery(q)
 		}
 		u = next
 	}

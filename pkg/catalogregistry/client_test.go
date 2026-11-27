@@ -187,6 +187,11 @@ func TestClientEscapesPathSegmentsOnce(t *testing.T) {
 	require.Equal(t, "/registry/v1/mcp/servers/io.github.a/w/versions/1.0.0%2Bbuild.1", target.Load())
 	_, err = c.Get(context.Background(), "r", "/v1/skills/a/b/versions/1/files/%zz", nil, nil)
 	require.ErrorIs(t, err, catalogregistry.ErrInvalidTarget)
+	for _, target := range []string{"/v1/skills/a/%2e%2e/x", "/v1/skills/a/../x", "/v1/./skills", "/v1/skills/a/%2E%2E",
+		"/v1/mcp/servers/a/b/versions/release%2F2026/status", "/v1/skills/a%5Cb/x", "/v1/skills/a/b%2f"} {
+		_, err = c.Get(context.Background(), "r", target, nil, nil)
+		require.ErrorIs(t, err, catalogregistry.ErrInvalidTarget, target)
+	}
 }
 
 func assertionClaims(t *testing.T, raw string) map[string]any {
@@ -228,6 +233,12 @@ func TestClientFollowsRedirectsWithinTheRegistry(t *testing.T) {
 		case "/registry/v1/skills/up/a":
 			w.Header().Set("Location", "/elsewhere/v1/skills/x/y")
 			w.WriteHeader(http.StatusPermanentRedirect)
+		case "/registry/v1/skills/dots/a":
+			w.Header().Set("Location", "/registry/v1/%2e%2e/%2e%2e/admin")
+			w.WriteHeader(http.StatusPermanentRedirect)
+		case "/registry/v1/skills/purpose/a/versions/1/artifact":
+			w.Header().Set("Location", "/registry/v1/skills/io.github.acme/demo/versions/1/artifact")
+			w.WriteHeader(http.StatusPermanentRedirect)
 		case "/registry/v1/skills/found/a":
 			w.Header().Set("Location", "/registry/v1/skills/x/y")
 			w.WriteHeader(http.StatusFound)
@@ -245,7 +256,13 @@ func TestClientFollowsRedirectsWithinTheRegistry(t *testing.T) {
 	require.NotEqual(t, a["jti"], b["jti"])
 	require.Equal(t, "/registry/v1/skills/io.github.acme/demo/versions/1/artifact?purpose=import", b["req"].(map[string]any)["t"])
 	require.Equal(t, []any{"read", "import"}, b["act"])
-	for _, target := range []string{"/v1/skills/loop/a", "/v1/skills/out/a", "/v1/skills/up/a", "/v1/skills/found/a"} {
+	res, err = c.GetArtifact(context.Background(), "r", "/v1/skills/purpose/a/versions/1/artifact?purpose=import", user, []string{"read", "import"})
+	require.NoError(t, err)
+	require.Equal(t, "bytes", string(res.Body))
+	<-mu
+	kept := <-mu
+	require.Equal(t, "/registry/v1/skills/io.github.acme/demo/versions/1/artifact?purpose=import", kept.target)
+	for _, target := range []string{"/v1/skills/loop/a", "/v1/skills/out/a", "/v1/skills/up/a", "/v1/skills/found/a", "/v1/skills/dots/a"} {
 		_, err := c.Get(context.Background(), "r", target, user, []string{"read"})
 		require.ErrorIs(t, err, catalogregistry.ErrUnavailable, target)
 	}
