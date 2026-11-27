@@ -43,6 +43,7 @@ CREATE TABLE public.registry_projection_links (
     kind text NOT NULL CHECK (kind IN ('skill', 'mcp')),
     subject_id uuid NOT NULL,
     registry_url text NOT NULL,
+    consumer text NOT NULL,
     registry_entry text NOT NULL,
     registry_namespace text NOT NULL DEFAULT '',
     owner_id uuid NOT NULL,
@@ -53,20 +54,21 @@ CREATE TABLE public.registry_projection_links (
     mcp_version text NOT NULL DEFAULT '',
     mcp_digest text NOT NULL DEFAULT '',
     linked_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (kind, subject_id, registry_url)
+    PRIMARY KEY (kind, subject_id, registry_url, consumer)
 );
 
 CREATE TABLE public.skill_package_registry_links (
     package_id uuid NOT NULL,
     version_id uuid NOT NULL,
     registry_url text NOT NULL,
+    consumer text NOT NULL,
     registry_entry text NOT NULL,
     registry_version text NOT NULL,
     registry_digest text NOT NULL CHECK (registry_digest ~ '^sha256:[0-9a-f]{64}$'),
     linked_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (package_id, version_id, registry_url),
+    PRIMARY KEY (package_id, version_id, registry_url, consumer),
     FOREIGN KEY (package_id, version_id) REFERENCES public.skill_package_versions (package_id, id) ON DELETE RESTRICT,
-    UNIQUE (registry_url, registry_entry, registry_version)
+    UNIQUE (registry_url, consumer, registry_entry, registry_version)
 );
 
 CREATE TABLE public.registry_projection_version_errors (

@@ -171,10 +171,10 @@ type link struct {
 	RegistryURL string
 }
 
-func loadLink(ctx context.Context, q querier, kind string, id uuid.UUID, registryURL string) (link, error) {
+func loadLink(ctx context.Context, q querier, kind string, id uuid.UUID, registryURL, consumer string) (link, error) {
 	var l link
 	err := q.QueryRow(ctx, `SELECT registry_entry, registry_namespace, owner_id, attempted, applied_revision, applied_phase, applied_hidden, mcp_version, mcp_digest, registry_url
-		FROM registry_projection_links WHERE kind = $1 AND subject_id = $2 AND registry_url = $3`, kind, id, registryURL).
+		FROM registry_projection_links WHERE kind = $1 AND subject_id = $2 AND registry_url = $3 AND consumer = $4`, kind, id, registryURL, consumer).
 		Scan(&l.Entry, &l.Namespace, &l.Owner, &l.Attempted, &l.Revision, &l.Phase, &l.Hidden, &l.MCPVersion, &l.MCPDigest, &l.RegistryURL)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return l, nil
@@ -183,9 +183,9 @@ func loadLink(ctx context.Context, q querier, kind string, id uuid.UUID, registr
 	return l, err
 }
 
-func ingestedVersions(ctx context.Context, q querier, pkg uuid.UUID, registryURL, entry string) (map[uuid.UUID]string, error) {
-	rows, err := q.Query(ctx, `SELECT version_id, registry_version FROM skill_package_registry_links WHERE package_id = $1 AND registry_url = $2 AND registry_entry = $3`,
-		pkg, registryURL, entry)
+func ingestedVersions(ctx context.Context, q querier, pkg uuid.UUID, registryURL, consumer, entry string) (map[uuid.UUID]string, error) {
+	rows, err := q.Query(ctx, `SELECT version_id, registry_version FROM skill_package_registry_links
+		WHERE package_id = $1 AND registry_url = $2 AND consumer = $3 AND registry_entry = $4`, pkg, registryURL, consumer, entry)
 	if err != nil {
 		return nil, err
 	}

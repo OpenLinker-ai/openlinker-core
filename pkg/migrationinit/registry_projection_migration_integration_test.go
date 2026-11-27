@@ -72,7 +72,7 @@ func TestRegistryProjectionMigrationStartsLocalAndGuardsRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.Exec(ctx, `INSERT INTO skill_package_registry_links(package_id,version_id,registry_url,registry_entry,registry_version,registry_digest) VALUES($1,$2,'https://r.example','ai.openlinker.u1/p-x','1.0.0',$3)`,
+	if _, err := conn.Exec(ctx, `INSERT INTO skill_package_registry_links(package_id,version_id,registry_url,consumer,registry_entry,registry_version,registry_digest) VALUES($1,$2,'https://r.example','core','ai.openlinker.u1/p-x','1.0.0',$3)`,
 		packageID, versionID, "sha256:"+digest); err != nil {
 		t.Fatal(err)
 	}

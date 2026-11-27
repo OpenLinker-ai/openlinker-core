@@ -274,7 +274,7 @@ func (p *Projector) Cutover(ctx context.Context, limit time.Duration) (Report, e
 			return err
 		}
 		if _, err := tx.Exec(ctx, `SELECT registry_projection_mark(l.kind, l.subject_id, 0::smallint) FROM registry_projection_links l
-			WHERE l.attempted AND l.registry_url = $1`, p.registry.URL); err != nil {
+			WHERE l.attempted AND l.registry_url = $1 AND l.consumer = $2`, p.registry.URL, p.registry.Consumer); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `SELECT registry_projection_mark('skill', c.id, 1::smallint) FROM (`+skillCandidates+`) c`); err != nil {
@@ -349,8 +349,8 @@ func (p *Projector) Reconcile(ctx context.Context) (ReconcileReport, error) {
 		id   uuid.UUID
 	}
 	var subjects []subject
-	rows, err := p.pool.Query(ctx, `SELECT kind, subject_id FROM registry_projection_links WHERE attempted AND registry_url = $1
-		UNION SELECT 'skill', c.id FROM (`+skillCandidates+`) c UNION SELECT 'mcp', c.id FROM (`+mcpCandidates+`) c`, p.registry.URL)
+	rows, err := p.pool.Query(ctx, `SELECT kind, subject_id FROM registry_projection_links WHERE attempted AND registry_url = $1 AND consumer = $2
+		UNION SELECT 'skill', c.id FROM (`+skillCandidates+`) c UNION SELECT 'mcp', c.id FROM (`+mcpCandidates+`) c`, p.registry.URL, p.registry.Consumer)
 	if err != nil {
 		return rep, err
 	}
@@ -381,7 +381,7 @@ func (p *Projector) Reconcile(ctx context.Context) (ReconcileReport, error) {
 }
 
 func (p *Projector) drifted(ctx context.Context, s Settings, kind string, id uuid.UUID) (bool, error) {
-	l, err := loadLink(ctx, p.pool, kind, id, p.registry.URL)
+	l, err := loadLink(ctx, p.pool, kind, id, p.registry.URL, p.registry.Consumer)
 	if err != nil {
 		return false, err
 	}
