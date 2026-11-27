@@ -36,6 +36,11 @@ func TestParseRegistries(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "https://catalog.example/registry", regs[0].PublicBase())
 
+	withCredentials := strings.Replace(ok, `"assertion_audience":"https://openlinker.ai/registry"`, `"assertion_audience":"https://user:secret@openlinker.ai/registry?x=1#y"`, 1)
+	regs, err = catalogregistry.Parse(withCredentials)
+	require.NoError(t, err)
+	require.Equal(t, "https://openlinker.ai/registry", regs[0].PublicBase())
+
 	unsigned := `[{"name":"mem","url":"http://registry:8080/registry","consumer":"core-a","token":"olr_abcdefghijklmnop_` + strings.Repeat("s", 40) + `","audience":"members","allow_http":true,"allow_private_network":true}]`
 	regs, err = catalogregistry.Parse(unsigned)
 	require.NoError(t, err)
@@ -69,6 +74,9 @@ func TestParseRegistries(t *testing.T) {
 		"writes need a key":  `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","writes":true}]`,
 		"public url query":   `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","public_url":"https://p.example/?x=1"}]`,
 		"public url scheme":  `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","public_url":"ftp://p.example"}]`,
+		"public url empty q": `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","public_url":"https://p.example/?"}]`,
+		"public url empty #": `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","public_url":"https://p.example/#"}]`,
+		"public url creds":   `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","public_url":"https://u:p@p.example/"}]`,
 	}
 	for name, raw := range bad {
 		_, err := catalogregistry.Parse(raw)

@@ -38,9 +38,12 @@ type Registry struct {
 
 func (r Registry) PublicBase() string {
 	for _, candidate := range []string{r.PublicURL, r.AssertionAudience, r.URL} {
-		if candidate != "" {
-			return strings.TrimRight(candidate, "/")
+		u, err := url.Parse(candidate)
+		if candidate == "" || err != nil || u.Host == "" {
+			continue
 		}
+		u.User, u.RawQuery, u.ForceQuery, u.Fragment, u.RawFragment = nil, "", false, "", ""
+		return strings.TrimRight(u.String(), "/")
 	}
 	return ""
 }
@@ -154,7 +157,7 @@ func parseOne(item rawRegistry) (Registry, error) {
 	}
 	if item.PublicURL != "" {
 		pub, err := url.Parse(item.PublicURL)
-		if err != nil || pub.Host == "" || (pub.Scheme != "https" && pub.Scheme != "http") || pub.User != nil || pub.RawQuery != "" || pub.Fragment != "" {
+		if err != nil || pub.Host == "" || (pub.Scheme != "https" && pub.Scheme != "http") || pub.User != nil || strings.ContainsAny(item.PublicURL, "?#") {
 			return Registry{}, errors.New("public_url must be an absolute http(s) URL without credentials, query or fragment")
 		}
 		reg.PublicURL = item.PublicURL
