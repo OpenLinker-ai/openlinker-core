@@ -31,6 +31,7 @@ type Registry struct {
 	SigningKey          ed25519.PrivateKey
 	AllowHTTP           bool
 	AllowPrivateNetwork bool
+	Writes              bool
 	base                *url.URL
 }
 
@@ -61,6 +62,7 @@ type rawRegistry struct {
 	SigningKey          string `json:"signing_key"`
 	AllowHTTP           bool   `json:"allow_http"`
 	AllowPrivateNetwork bool   `json:"allow_private_network"`
+	Writes              bool   `json:"writes"`
 }
 
 func Parse(raw string) ([]Registry, error) {
@@ -119,7 +121,7 @@ func parseOne(item rawRegistry) (Registry, error) {
 		return Registry{}, errors.New("audience must be public, members or admins")
 	}
 	reg := Registry{Name: item.Name, URL: u.String(), Consumer: item.Consumer, Token: item.Token, Audience: audience,
-		AllowHTTP: item.AllowHTTP, AllowPrivateNetwork: item.AllowPrivateNetwork, base: u}
+		AllowHTTP: item.AllowHTTP, AllowPrivateNetwork: item.AllowPrivateNetwork, Writes: item.Writes, base: u}
 	if (item.SigningKey == "") != (item.SigningKeyID == "") {
 		return Registry{}, errors.New("signing_key and signing_key_id must be set together")
 	}
@@ -138,6 +140,9 @@ func parseOne(item rawRegistry) (Registry, error) {
 		reg.SigningKey = ed25519.NewKeyFromSeed(seed)
 		reg.SigningKeyID = item.SigningKeyID
 		reg.AssertionAudience = item.AssertionAudience
+	}
+	if reg.Writes && reg.SigningKey == nil {
+		return Registry{}, errors.New("writes need signing_key, signing_key_id and assertion_audience")
 	}
 	return reg, nil
 }
