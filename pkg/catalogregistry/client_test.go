@@ -187,8 +187,10 @@ func TestClientEscapesPathSegmentsOnce(t *testing.T) {
 	require.Equal(t, "/registry/v1/mcp/servers/io.github.a/w/versions/1.0.0%2Bbuild.1", target.Load())
 	_, err = c.Get(context.Background(), "r", "/v1/skills/a/b/versions/1/files/%zz", nil, nil)
 	require.ErrorIs(t, err, catalogregistry.ErrInvalidTarget)
-	for _, target := range []string{"/v1/skills/a/%2e%2e/x", "/v1/skills/a/../x", "/v1/./skills", "/v1/skills/a/%2E%2E",
-		"/v1/mcp/servers/a/b/versions/release%2F2026/status", "/v1/skills/a%5Cb/x", "/v1/skills/a/b%2f"} {
+	_, err = c.Get(context.Background(), "r", "/v1/mcp/servers/io.github.a/w/versions/release%2F2026", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, "/registry/v1/mcp/servers/io.github.a/w/versions/release%2F2026", target.Load())
+	for _, target := range []string{"/v1/skills/a/%2e%2e/x", "/v1/skills/a/../x", "/v1/./skills", "/v1/skills/a/%2E%2E", "/v1/skills/a%5Cb/x"} {
 		_, err = c.Get(context.Background(), "r", target, nil, nil)
 		require.ErrorIs(t, err, catalogregistry.ErrInvalidTarget, target)
 	}
@@ -239,6 +241,9 @@ func TestClientFollowsRedirectsWithinTheRegistry(t *testing.T) {
 		case "/registry/v1/skills/purpose/a/versions/1/artifact":
 			w.Header().Set("Location", "/registry/v1/skills/io.github.acme/demo/versions/1/artifact")
 			w.WriteHeader(http.StatusPermanentRedirect)
+		case "/registry/v1/skills/slash/a":
+			w.Header().Set("Location", "/registry/v1/skills/x%2F..%2F..%2Fadmin/y")
+			w.WriteHeader(http.StatusPermanentRedirect)
 		case "/registry/v1/skills/found/a":
 			w.Header().Set("Location", "/registry/v1/skills/x/y")
 			w.WriteHeader(http.StatusFound)
@@ -262,7 +267,7 @@ func TestClientFollowsRedirectsWithinTheRegistry(t *testing.T) {
 	<-mu
 	kept := <-mu
 	require.Equal(t, "/registry/v1/skills/io.github.acme/demo/versions/1/artifact?purpose=import", kept.target)
-	for _, target := range []string{"/v1/skills/loop/a", "/v1/skills/out/a", "/v1/skills/up/a", "/v1/skills/found/a", "/v1/skills/dots/a"} {
+	for _, target := range []string{"/v1/skills/loop/a", "/v1/skills/out/a", "/v1/skills/up/a", "/v1/skills/found/a", "/v1/skills/dots/a", "/v1/skills/slash/a"} {
 		_, err := c.Get(context.Background(), "r", target, user, []string{"read"})
 		require.ErrorIs(t, err, catalogregistry.ErrUnavailable, target)
 	}
@@ -300,6 +305,8 @@ func TestClientSendSignsWritesAndNeverFollowsRedirects(t *testing.T) {
 	require.Equal(t, []any{"read", "write"}, claims["act"])
 	_, err = c.Send(context.Background(), "r", http.MethodPost, "/v1/skills/a/moved", "application/json", body, user)
 	require.ErrorIs(t, err, catalogregistry.ErrUnavailable)
+	_, err = c.Send(context.Background(), "r", http.MethodPost, "/v1/mcp/servers/a/b/versions/release%2F2026/status", "application/json", body, user)
+	require.ErrorIs(t, err, catalogregistry.ErrInvalidTarget)
 	_, err = c.Send(context.Background(), "r", http.MethodPost, "/v1/namespaces", "application/json", body, nil)
 	require.Error(t, err)
 	readOnly := newClient(t, registryJSON("r", srv.URL+"/registry", `,"allow_http":true,"allow_private_network":true`), catalogregistry.Options{})

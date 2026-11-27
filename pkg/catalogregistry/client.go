@@ -184,11 +184,11 @@ func canonicalQuery(query url.Values) string {
 	return strings.Join(parts, "&")
 }
 
-func (c *Client) resolve(reg *Registry, target string) (*url.URL, error) {
+func (c *Client) resolve(reg *Registry, target string, strict bool) (*url.URL, error) {
 	path, rawQuery, _ := strings.Cut(target, "?")
 	lower := strings.ToLower(path)
 	if !strings.HasPrefix(path, "/v1/") || strings.Contains(path, "//") || strings.Contains(path, "\\") ||
-		strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
+		strings.Contains(lower, "%5c") || (strict && strings.Contains(lower, "%2f")) {
 		return nil, ErrInvalidTarget
 	}
 	decoded, err := url.PathUnescape(path)
@@ -275,7 +275,7 @@ func (c *Client) get(ctx context.Context, name, target string, user *User, acts 
 	if !ok {
 		return Response{}, ErrUnknownRegistry
 	}
-	u, err := c.resolve(reg, target)
+	u, err := c.resolve(reg, target, false)
 	if err != nil {
 		return Response{}, err
 	}
@@ -332,7 +332,7 @@ func (c *Client) redirectTarget(reg *Registry, from *url.URL, location string) (
 	if loc.RawQuery != "" {
 		target += "?" + loc.RawQuery
 	}
-	return c.resolve(reg, target)
+	return c.resolve(reg, target, true)
 }
 
 func (c *Client) exchange(ctx context.Context, reg *Registry, method string, u *url.URL, contentType string, body []byte, user *User, acts []string, signed bool, limit int64) (Response, string, error) {
@@ -382,7 +382,7 @@ func (c *Client) Send(ctx context.Context, name, method, target, contentType str
 	if !reg.Writes || !reg.CanSign() || user == nil {
 		return Response{}, ErrWritesDisabled
 	}
-	u, err := c.resolve(reg, target)
+	u, err := c.resolve(reg, target, true)
 	if err != nil {
 		return Response{}, err
 	}
