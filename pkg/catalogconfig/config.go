@@ -32,7 +32,17 @@ type Registry struct {
 	AllowHTTP           bool
 	AllowPrivateNetwork bool
 	Writes              bool
+	PublicURL           string
 	base                *url.URL
+}
+
+func (r Registry) PublicBase() string {
+	for _, candidate := range []string{r.PublicURL, r.AssertionAudience, r.URL} {
+		if candidate != "" {
+			return strings.TrimRight(candidate, "/")
+		}
+	}
+	return ""
 }
 
 func (r Registry) CanSign() bool { return r.SigningKey != nil }
@@ -63,6 +73,7 @@ type rawRegistry struct {
 	AllowHTTP           bool   `json:"allow_http"`
 	AllowPrivateNetwork bool   `json:"allow_private_network"`
 	Writes              bool   `json:"writes"`
+	PublicURL           string `json:"public_url"`
 }
 
 func Parse(raw string) ([]Registry, error) {
@@ -140,6 +151,13 @@ func parseOne(item rawRegistry) (Registry, error) {
 		reg.SigningKey = ed25519.NewKeyFromSeed(seed)
 		reg.SigningKeyID = item.SigningKeyID
 		reg.AssertionAudience = item.AssertionAudience
+	}
+	if item.PublicURL != "" {
+		pub, err := url.Parse(item.PublicURL)
+		if err != nil || pub.Host == "" || (pub.Scheme != "https" && pub.Scheme != "http") || pub.User != nil || pub.RawQuery != "" || pub.Fragment != "" {
+			return Registry{}, errors.New("public_url must be an absolute http(s) URL without credentials, query or fragment")
+		}
+		reg.PublicURL = item.PublicURL
 	}
 	if reg.Writes && reg.SigningKey == nil {
 		return Registry{}, errors.New("writes need signing_key, signing_key_id and assertion_audience")
