@@ -372,6 +372,7 @@ func TestProjectionThroughRealRegistry(t *testing.T) {
 		require.Equal(t, 200, rec.Code)
 		require.Equal(t, "true", rec.Header().Get("Deprecation"))
 		require.Contains(t, rec.Header().Get("Link"), name("p", p1))
+		require.True(t, strings.HasPrefix(rec.Header().Get("Link"), "<"+audience+"/v1/skills/"), rec.Header().Get("Link"))
 		rec = f.get("/api/v1/catalog/legacy/skill-packages/" + p1.String())
 		require.Equal(t, 200, rec.Code)
 		require.Contains(t, rec.Body.String(), name("p", p1))

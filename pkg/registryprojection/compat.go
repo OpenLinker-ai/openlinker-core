@@ -42,7 +42,7 @@ func (p *Projector) skillMapping(ctx context.Context, id uuid.UUID) (mapping, bo
 	if err != nil {
 		return m, false, err
 	}
-	m.URL = registryURL + "/v1/skills/" + url.PathEscape(m.Namespace) + "/" + url.PathEscape(m.Name)
+	m.URL = p.registry.PublicBase() + "/v1/skills/" + url.PathEscape(m.Namespace) + "/" + url.PathEscape(m.Name)
 	return m, true, nil
 }
 
@@ -60,7 +60,7 @@ func (p *Projector) serviceMapping(ctx context.Context, slug string) (mapping, b
 	if err != nil {
 		return m, false, err
 	}
-	m.URL = registryURL + "/v0.1/servers/" + url.PathEscape(m.Namespace+"/"+m.Name) + "/versions/latest"
+	m.URL = p.registry.PublicBase() + "/v0.1/servers/" + url.PathEscape(m.Namespace+"/"+m.Name) + "/versions/latest"
 	return m, true, nil
 }
 

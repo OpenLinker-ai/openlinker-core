@@ -210,7 +210,9 @@ to `local` only when nothing is pending, claimed or failing; otherwise it stays
 
 In `registry` and `draining` mode the old public endpoints keep their answers
 (decided by Core's own state) and add `Deprecation: true` and
-`Link: <registry entry>; rel="alternate"` when an entry exists;
+`Link: <registry entry>; rel="alternate"` when an entry exists (built from the
+catalog's optional `public_url`, else its `assertion_audience`, so it is the
+Registry's public address rather than the internal `url`);
 `/mcp-services` and the public metadata endpoint also hide services whose
 owner is disabled. `GET /api/v1/catalog/legacy/skill-packages/{id}` and
 `/catalog/legacy/mcp-services/{slug}` return `{registry, kind, namespace, name}`

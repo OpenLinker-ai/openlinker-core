@@ -29,12 +29,24 @@ func TestParseRegistries(t *testing.T) {
 	require.Equal(t, "https://registry.example/registry", regs[0].URL)
 	require.True(t, regs[0].CanSign())
 	require.Equal(t, catalogregistry.AudiencePublic, regs[0].Audience)
+	require.Equal(t, "https://openlinker.ai/registry", regs[0].PublicBase())
+
+	public := strings.Replace(ok, `"audience":"public"`, `"audience":"public","public_url":"https://catalog.example/registry/"`, 1)
+	regs, err = catalogregistry.Parse(public)
+	require.NoError(t, err)
+	require.Equal(t, "https://catalog.example/registry", regs[0].PublicBase())
+
+	withCredentials := strings.Replace(ok, `"assertion_audience":"https://openlinker.ai/registry"`, `"assertion_audience":"https://user:secret@openlinker.ai/registry?x=1#y"`, 1)
+	regs, err = catalogregistry.Parse(withCredentials)
+	require.NoError(t, err)
+	require.Equal(t, "https://openlinker.ai/registry", regs[0].PublicBase())
 
 	unsigned := `[{"name":"mem","url":"http://registry:8080/registry","consumer":"core-a","token":"olr_abcdefghijklmnop_` + strings.Repeat("s", 40) + `","audience":"members","allow_http":true,"allow_private_network":true}]`
 	regs, err = catalogregistry.Parse(unsigned)
 	require.NoError(t, err)
 	require.False(t, regs[0].CanSign())
 	require.False(t, regs[0].Writes)
+	require.Equal(t, "http://registry:8080/registry", regs[0].PublicBase())
 
 	writes := strings.Replace(ok, `"audience":"public"`, `"audience":"public","writes":true`, 1)
 	regs, err = catalogregistry.Parse(writes)
@@ -60,6 +72,11 @@ func TestParseRegistries(t *testing.T) {
 		"short key":          `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","signing_key_id":"k1","signing_key":"AAAA"}]`,
 		"key needs audience": `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","signing_key_id":"k1","signing_key":"` + seed() + `"}]`,
 		"writes need a key":  `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","writes":true}]`,
+		"public url query":   `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","public_url":"https://p.example/?x=1"}]`,
+		"public url scheme":  `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","public_url":"ftp://p.example"}]`,
+		"public url empty q": `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","public_url":"https://p.example/?"}]`,
+		"public url empty #": `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","public_url":"https://p.example/#"}]`,
+		"public url creds":   `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","public_url":"https://u:p@p.example/"}]`,
 	}
 	for name, raw := range bad {
 		_, err := catalogregistry.Parse(raw)
