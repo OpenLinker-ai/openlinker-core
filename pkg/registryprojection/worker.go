@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -65,15 +66,18 @@ type claim struct {
 	Token    uuid.UUID
 }
 
+const destinationMatches = `EXISTS (SELECT 1 FROM registry_projection_settings st WHERE st.mode <> 'local' AND st.registry_url = $%d AND st.consumer = $%d)`
+
 func (p *Projector) claim(ctx context.Context) (*claim, error) {
 	token := uuid.New()
 	var c claim
 	err := p.pool.QueryRow(ctx, `UPDATE registry_projection_dirty d SET claim_token = $1, claimed_at = clock_timestamp(), attempts = d.attempts + 1
 		WHERE (d.kind, d.subject_id) = (SELECT kind, subject_id FROM registry_projection_dirty
-			WHERE (next_attempt_at IS NULL OR next_attempt_at <= clock_timestamp())
+			WHERE NOT suspended AND (next_attempt_at IS NULL OR next_attempt_at <= clock_timestamp())
 			AND (claim_token IS NULL OR claimed_at < clock_timestamp() - $2::interval)
 			ORDER BY priority, marked_at LIMIT 1 FOR UPDATE SKIP LOCKED)
-		RETURNING d.kind, d.subject_id, d.revision`, token, claimLease.String()).Scan(&c.Kind, &c.Subject, &c.Revision)
+		AND `+fmt.Sprintf(destinationMatches, 3, 4)+`
+		RETURNING d.kind, d.subject_id, d.revision`, token, claimLease.String(), p.registry.URL, p.registry.Consumer).Scan(&c.Kind, &c.Subject, &c.Revision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -87,6 +91,14 @@ func (p *Projector) claim(ctx context.Context) (*claim, error) {
 func (p *Projector) registerAttempt(ctx context.Context, c *claim, entry string, owner uuid.UUID) (bool, error) {
 	ok := false
 	err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		var mode, url, consumer string
+		if err := tx.QueryRow(ctx, `SELECT mode, COALESCE(registry_url, ''), COALESCE(consumer, '') FROM registry_projection_settings WHERE singleton FOR SHARE`).
+			Scan(&mode, &url, &consumer); err != nil {
+			return err
+		}
+		if mode == ModeLocal || url != p.registry.URL || consumer != p.registry.Consumer {
+			return nil
+		}
 		tag, err := tx.Exec(ctx, `UPDATE registry_projection_dirty SET claimed_at = clock_timestamp()
 			WHERE kind = $1 AND subject_id = $2 AND claim_token = $3 AND revision = $4 AND claimed_at > clock_timestamp() - $5::interval`,
 			c.Kind, c.Subject, c.Token, c.Revision, claimLease.String())
@@ -106,13 +118,21 @@ func (p *Projector) registerAttempt(ctx context.Context, c *claim, entry string,
 }
 
 func (p *Projector) ack(ctx context.Context, c *claim) error {
-	tag, err := p.pool.Exec(ctx, `DELETE FROM registry_projection_dirty WHERE kind = $1 AND subject_id = $2 AND claim_token = $3 AND revision = $4`,
-		c.Kind, c.Subject, c.Token, c.Revision)
+	tag, err := p.pool.Exec(ctx, `DELETE FROM registry_projection_dirty WHERE kind = $1 AND subject_id = $2 AND claim_token = $3 AND revision = $4
+		AND `+fmt.Sprintf(destinationMatches, 5, 6), c.Kind, c.Subject, c.Token, c.Revision, p.registry.URL, p.registry.Consumer)
 	if err != nil || tag.RowsAffected() == 1 {
 		return err
 	}
-	_, err = p.pool.Exec(ctx, `UPDATE registry_projection_dirty SET claim_token = NULL, claimed_at = NULL, last_error = '' WHERE claim_token = $1`, c.Token)
+	_, err = p.pool.Exec(ctx, `UPDATE registry_projection_dirty SET claim_token = NULL, claimed_at = NULL WHERE claim_token = $1`, c.Token)
 	return err
+}
+
+var permanentCodes = map[string]bool{"managed_by_core": true, "name_conflict": true, "projection_namespace": true, "owner_mismatch": true,
+	"projection_public_only": true, "projection_not_allowed": true, "name_invalid": true}
+
+func permanent(err error) bool {
+	var re *remoteError
+	return errors.As(err, &re) && permanentCodes[re.Code]
 }
 
 func (p *Projector) release(ctx context.Context, c *claim, cause error) {
@@ -120,9 +140,13 @@ func (p *Projector) release(ctx context.Context, c *claim, cause error) {
 	if len(msg) > 500 {
 		msg = msg[:500]
 	}
-	_, _ = p.pool.Exec(context.WithoutCancel(ctx), `UPDATE registry_projection_dirty SET claim_token = NULL, claimed_at = NULL, last_error = $2,
+	ctx = context.WithoutCancel(ctx)
+	tag, _ := p.pool.Exec(ctx, `UPDATE registry_projection_dirty SET claim_token = NULL, claimed_at = NULL, last_error = $3, suspended = $4,
 		next_attempt_at = clock_timestamp() + LEAST(interval '1 second' * power(2, LEAST(attempts, 12)), interval '1 hour')
-		WHERE claim_token = $1`, c.Token, msg)
+		WHERE claim_token = $1 AND revision = $2`, c.Token, c.Revision, msg, permanent(cause))
+	if tag.RowsAffected() == 0 {
+		_, _ = p.pool.Exec(ctx, `UPDATE registry_projection_dirty SET claim_token = NULL, claimed_at = NULL WHERE claim_token = $1`, c.Token)
+	}
 }
 
 func (p *Projector) RunOnce(ctx context.Context) (bool, error) {
@@ -157,9 +181,13 @@ func (p *Projector) Drain(ctx context.Context, limit time.Duration) error {
 	deadline := time.Now().Add(limit)
 	for {
 		processed, err := p.RunOnce(ctx)
-		var pending int
-		if qerr := p.pool.QueryRow(ctx, `SELECT count(*) FROM registry_projection_dirty`).Scan(&pending); qerr != nil {
+		var pending, suspended int
+		if qerr := p.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE NOT suspended), count(*) FILTER (WHERE suspended) FROM registry_projection_dirty`).
+			Scan(&pending, &suspended); qerr != nil {
 			return qerr
+		}
+		if pending == 0 && suspended > 0 {
+			return fmt.Errorf("%d projection subjects failed permanently; see status", suspended)
 		}
 		if pending == 0 {
 			return nil
@@ -241,20 +269,24 @@ func versionRefused(err error) (*remoteError, bool) {
 	return nil, false
 }
 
-func (p *Projector) sendSkillState(ctx context.Context, entry string, owner uuid.UUID, c *claim, phase int, hidden, listed bool, versions []skillVersion) error {
+func (p *Projector) sendSkillState(ctx context.Context, instance uuid.UUID, entry string, owner uuid.UUID, c *claim, phase int, hidden, listed bool, versions []skillVersion) error {
 	labels := []string{}
-	current, description := "", ""
+	current, name, description := "", "", ""
 	for _, v := range versions {
 		labels = append(labels, v.Label)
-		current, description = v.Label, v.Description
+		current, name, description = v.Label, v.Name, v.Description
 	}
 	state := "visible"
 	if hidden || len(labels) == 0 {
-		state, labels, current, description = "hidden", []string{}, "", ""
+		state, labels, current, name, description = "hidden", []string{}, "", "", ""
+	}
+	legacy := map[string]string{"core_instance": instance.String(), "package_id": c.Subject.String()}
+	if len(versions) > 0 && state == "visible" {
+		legacy["version_id"] = versions[len(versions)-1].ID.String()
 	}
 	body, _ := json.Marshal(map[string]any{"op": uuid.NewString(), "revision": c.Revision, "phase": phase, "owner": map[string]string{"sub": owner.String()},
-		"state": state, "listed": listed, "versions": labels, "current_version": current, "display": map[string]string{"description": description},
-		"legacy": map[string]string{"package_id": c.Subject.String()}})
+		"state": state, "listed": listed, "versions": labels, "current_version": current, "display": map[string]string{"name": name, "description": description},
+		"legacy": legacy})
 	doc, err := p.call(ctx, http.MethodPut, "/v1/projections/skills/"+entry, "application/json", body, owner)
 	if err != nil {
 		return err
@@ -276,10 +308,23 @@ func (p *Projector) projectSkill(ctx context.Context, s Settings, c *claim) erro
 		return err
 	}
 	if l.Found && l.Attempted && d.Exists && l.Owner != d.Owner {
-		if err := p.sendSkillState(ctx, l.Entry, l.Owner, c, 0, true, false, nil); err != nil {
+		ok, err := p.registerAttempt(ctx, c, l.Entry, l.Owner)
+		if err != nil {
 			return err
 		}
-		if _, err := p.pool.Exec(ctx, `DELETE FROM registry_projection_links WHERE kind = $1 AND subject_id = $2`, KindSkill, c.Subject); err != nil {
+		if !ok {
+			return errors.New("claim lost before the first request")
+		}
+		if err := p.sendSkillState(ctx, s.Instance, l.Entry, l.Owner, c, 0, true, false, nil); err != nil {
+			return err
+		}
+		if err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `DELETE FROM registry_projection_links WHERE kind = $1 AND subject_id = $2 AND owner_id = $3`, KindSkill, c.Subject, l.Owner); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `DELETE FROM skill_package_registry_links WHERE package_id = $1`, c.Subject)
+			return err
+		}); err != nil {
 			return err
 		}
 		l = link{}
@@ -309,7 +354,7 @@ func (p *Projector) projectSkill(ctx context.Context, s Settings, c *claim) erro
 			retained = append(retained, v)
 		}
 	}
-	if err := p.sendSkillState(ctx, entry, owner, c, 0, !d.Visible, d.Listed, retained); err != nil {
+	if err := p.sendSkillState(ctx, s.Instance, entry, owner, c, 0, !d.Visible, d.Listed, retained); err != nil {
 		return err
 	}
 	if !d.Visible {
@@ -328,8 +373,7 @@ func (p *Projector) projectSkill(ctx context.Context, s Settings, c *claim) erro
 		if failed[v.ID] {
 			continue
 		}
-		doc, err := p.call(ctx, http.MethodPut, "/v1/projections/skills/"+entry+"/versions/"+url.PathEscape(v.Label)+"?license="+platformLicense,
-			bundleType, []byte(v.Payload), owner)
+		doc, err := p.ingest(ctx, entry, owner, v)
 		if re, refused := versionRefused(err); refused {
 			if _, err := p.pool.Exec(ctx, `INSERT INTO registry_projection_version_errors (package_id, version_id, code, message) VALUES ($1, $2, $3, $4)
 				ON CONFLICT (package_id, version_id) DO UPDATE SET code = EXCLUDED.code, message = EXCLUDED.message, at = now()`,
@@ -352,13 +396,14 @@ func (p *Projector) projectSkill(ctx context.Context, s Settings, c *claim) erro
 		}
 		namespace, _ := doc["namespace"].(string)
 		if _, err := p.pool.Exec(ctx, `INSERT INTO skill_package_registry_links (package_id, version_id, registry_url, registry_entry, registry_version, registry_digest)
-			VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (package_id, version_id) DO NOTHING`,
+			VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (package_id, version_id) DO UPDATE SET registry_url = EXCLUDED.registry_url,
+				registry_entry = EXCLUDED.registry_entry, registry_version = EXCLUDED.registry_version, registry_digest = EXCLUDED.registry_digest, linked_at = now()`,
 			c.Subject, v.ID, p.registry.URL, namespace+"/"+entry, v.Label, digest); err != nil {
 			return err
 		}
 		available = append(available, v)
 	}
-	return p.sendSkillState(ctx, entry, owner, c, 1, false, d.Listed, available)
+	return p.sendSkillState(ctx, s.Instance, entry, owner, c, 1, false, d.Listed, available)
 }
 
 func (p *Projector) projectMCP(ctx context.Context, s Settings, c *claim) error {
@@ -378,6 +423,7 @@ func (p *Projector) projectMCP(ctx context.Context, s Settings, c *claim) error 
 		d.Visible = false
 		owner = l.Owner
 	}
+	serverJSON, digest := mcpDocument(p.publicURL, c.Subject, d)
 	if !d.Visible && !(l.Found && l.Attempted) {
 		return nil
 	}
@@ -389,11 +435,6 @@ func (p *Projector) projectMCP(ctx context.Context, s Settings, c *claim) error 
 	if !ok {
 		return errors.New("claim lost before the first request")
 	}
-	server := map[string]any{"title": d.Name, "description": d.Description,
-		"remotes": []map[string]string{{"type": "streamable-http", "url": p.publicURL + "/mcp/agents/" + c.Subject.String()}}}
-	serverJSON, _ := json.Marshal(server)
-	sum := sha256.Sum256(append(append([]byte{}, serverJSON...), d.Metadata...))
-	digest := hex.EncodeToString(sum[:])
 	version := l.MCPVersion
 	if version == "" || digest != l.MCPDigest {
 		version = fmt.Sprintf("0.%d.%d", d.MetadataRevision, c.Revision)
@@ -413,10 +454,35 @@ func (p *Projector) projectMCP(ctx context.Context, s Settings, c *claim) error 
 	if err != nil {
 		return err
 	}
+	if applied, _ := res["applied"].(bool); !applied {
+		return nil
+	}
 	namespace, _ := res["namespace"].(string)
 	_, err = p.pool.Exec(ctx, `UPDATE registry_projection_links SET applied_revision = $3, applied_phase = $4, applied_hidden = $5,
 		mcp_version = CASE WHEN $5 THEN mcp_version ELSE $6 END, mcp_digest = CASE WHEN $5 THEN mcp_digest ELSE $7 END,
 		registry_namespace = CASE WHEN $8 = '' THEN registry_namespace ELSE $8 END
-		WHERE kind = $1 AND subject_id = $2`, KindMCP, c.Subject, c.Revision, phase, state == "hidden", version, digest, namespace)
+		WHERE kind = $1 AND subject_id = $2 AND (applied_revision, applied_phase) < ($3, $4)`, KindMCP, c.Subject, c.Revision, phase, state == "hidden", version, digest, namespace)
 	return err
+}
+
+func mcpDocument(publicURL string, subject uuid.UUID, d mcpDesired) ([]byte, string) {
+	server := map[string]any{"title": d.Name, "description": d.Description,
+		"remotes": []map[string]string{{"type": "streamable-http", "url": publicURL + "/mcp/agents/" + subject.String()}}}
+	serverJSON, _ := json.Marshal(server)
+	sum := sha256.Sum256(append(append([]byte{}, serverJSON...), d.Metadata...))
+	return serverJSON, hex.EncodeToString(sum[:])
+}
+
+var spdxID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$`)
+
+func (p *Projector) ingest(ctx context.Context, entry string, owner uuid.UUID, v skillVersion) (map[string]any, error) {
+	target := "/v1/projections/skills/" + entry + "/versions/" + url.PathEscape(v.Label) + "?license="
+	if spdxID.MatchString(v.License) && v.License != "NOASSERTION" && v.License != "NONE" {
+		doc, err := p.call(ctx, http.MethodPut, target+url.QueryEscape(v.License), bundleType, []byte(v.Payload), owner)
+		var re *remoteError
+		if !(errors.As(err, &re) && strings.HasPrefix(re.Code, "license")) {
+			return doc, err
+		}
+	}
+	return p.call(ctx, http.MethodPut, target+platformLicense, bundleType, []byte(v.Payload), owner)
 }

@@ -282,7 +282,7 @@ func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 		"public_constraints <> 817",
 		"public_indexes <> 333",
 		"public_triggers <> 85",
-		"public_functions <> 78",
+		"public_functions <> 79",
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",
 		"Core initializer built-in skills are incomplete",
 		"Core Runtime schema contract initialization is inconsistent",

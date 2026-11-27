@@ -33,6 +33,7 @@ CREATE TABLE public.registry_projection_dirty (
     attempts integer NOT NULL DEFAULT 0,
     next_attempt_at timestamptz,
     last_error text NOT NULL DEFAULT '' CHECK (length(last_error) <= 500),
+    suspended boolean NOT NULL DEFAULT false,
     PRIMARY KEY (kind, subject_id),
     CHECK ((claim_token IS NULL) = (claimed_at IS NULL))
 );
@@ -103,7 +104,20 @@ BEGIN
     INSERT INTO public.registry_projection_dirty AS d (kind, subject_id, revision, priority, marked_at)
     VALUES (p_kind, p_subject, next_revision, p_priority, clock_timestamp())
     ON CONFLICT (kind, subject_id) DO UPDATE SET revision = EXCLUDED.revision,
-        priority = LEAST(d.priority, EXCLUDED.priority), marked_at = EXCLUDED.marked_at, next_attempt_at = NULL;
+        priority = LEAST(d.priority, EXCLUDED.priority), marked_at = EXCLUDED.marked_at, next_attempt_at = NULL, suspended = false;
+END;
+$$;
+
+CREATE FUNCTION public.registry_projection_lock_owner(p_owner uuid) RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+    current_mode text;
+BEGIN
+    SELECT mode INTO current_mode FROM public.registry_projection_settings WHERE singleton FOR SHARE;
+    IF current_mode IS NULL OR current_mode = 'local' THEN
+        RETURN;
+    END IF;
+    PERFORM 1 FROM public.users WHERE id = p_owner FOR SHARE;
 END;
 $$;
 
@@ -112,6 +126,9 @@ LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'UPDATE' AND (NEW.visibility, NEW.owner_user_id) IS NOT DISTINCT FROM (OLD.visibility, OLD.owner_user_id) THEN
         RETURN NULL;
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        PERFORM public.registry_projection_lock_owner(NEW.owner_user_id);
     END IF;
     IF TG_OP = 'DELETE' THEN
         PERFORM public.registry_projection_mark('skill', OLD.id, 0::smallint);
@@ -179,6 +196,7 @@ LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
         IF NEW.connection_mode = 'mcp_server' THEN
+            PERFORM public.registry_projection_lock_owner(NEW.creator_id);
             PERFORM public.registry_projection_mark('mcp', NEW.id, 1::smallint);
         END IF;
         RETURN NULL;
@@ -197,6 +215,7 @@ BEGIN
        (OLD.visibility, OLD.lifecycle_status, OLD.connection_mode, OLD.tags, OLD.name, OLD.description, OLD.slug, OLD.mcp_tool_name, OLD.creator_id) THEN
         RETURN NULL;
     END IF;
+    PERFORM public.registry_projection_lock_owner(NEW.creator_id);
     PERFORM public.registry_projection_mark('mcp', NEW.id,
         CASE WHEN NEW.visibility <> 'public' OR NEW.lifecycle_status <> 'active' OR NEW.connection_mode <> 'mcp_server'
                   OR NEW.tags IS DISTINCT FROM OLD.tags OR NEW.creator_id <> OLD.creator_id THEN 0 ELSE 1 END::smallint);

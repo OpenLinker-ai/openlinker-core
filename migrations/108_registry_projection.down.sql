@@ -13,7 +13,8 @@ BEGIN
     RAISE EXCEPTION 'registry projection is not local; roll it back before downgrading';
   END IF;
   IF EXISTS (SELECT 1 FROM public.registry_projection_links) OR EXISTS (SELECT 1 FROM public.skill_package_registry_links)
-     OR EXISTS (SELECT 1 FROM public.registry_projection_dirty) OR EXISTS (SELECT 1 FROM public.registry_projection_exclusions) THEN
+     OR EXISTS (SELECT 1 FROM public.registry_projection_dirty) OR EXISTS (SELECT 1 FROM public.registry_projection_exclusions)
+     OR EXISTS (SELECT 1 FROM public.registry_projection_revisions) OR EXISTS (SELECT 1 FROM public.registry_projection_version_errors) THEN
     RAISE EXCEPTION 'registry projection records exist; refusing to drop them';
   END IF;
 END $$;
@@ -28,6 +29,7 @@ DROP FUNCTION public.registry_projection_agents();
 DROP FUNCTION public.registry_projection_users();
 DROP FUNCTION public.registry_projection_skill_versions();
 DROP FUNCTION public.registry_projection_skill_packages();
+DROP FUNCTION public.registry_projection_lock_owner(uuid);
 DROP FUNCTION public.registry_projection_mark(text, uuid, smallint);
 DROP TABLE public.registry_projection_exclusions;
 DROP TABLE public.registry_projection_version_errors;

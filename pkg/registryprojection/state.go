@@ -55,6 +55,7 @@ type skillVersion struct {
 	Label       string
 	Digest      string
 	Payload     string
+	License     string
 	Name        string
 	Description string
 }
@@ -86,7 +87,7 @@ func desiredSkill(ctx context.Context, q querier, id uuid.UUID) (skillDesired, e
 	if (visibility != "public" && visibility != "unlisted") || !active || excluded {
 		return d, nil
 	}
-	rows, err := q.Query(ctx, `SELECT v.id, v.version, v.digest, v.payload FROM skill_package_versions v
+	rows, err := q.Query(ctx, `SELECT v.id, v.version, v.digest, v.payload, COALESCE(v.publication_metadata->>'license', '') FROM skill_package_versions v
 		WHERE v.package_id = $1 AND v.published_at IS NOT NULL
 		AND NOT EXISTS (SELECT 1 FROM registry_projection_exclusions x WHERE x.kind = 'skill' AND x.subject_id = v.package_id AND x.version_id = v.id)
 		ORDER BY v.created_at, v.id`, id)
@@ -96,7 +97,7 @@ func desiredSkill(ctx context.Context, q querier, id uuid.UUID) (skillDesired, e
 	defer rows.Close()
 	for rows.Next() {
 		var v skillVersion
-		if err := rows.Scan(&v.ID, &v.Label, &v.Digest, &v.Payload); err != nil {
+		if err := rows.Scan(&v.ID, &v.Label, &v.Digest, &v.Payload, &v.License); err != nil {
 			return d, err
 		}
 		var meta struct {

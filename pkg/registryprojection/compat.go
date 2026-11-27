@@ -33,6 +33,7 @@ func (p *Projector) skillMapping(ctx context.Context, id uuid.UUID) (mapping, bo
 		JOIN skill_packages pk ON pk.id = l.subject_id
 		WHERE l.kind = 'skill' AND l.subject_id = $1 AND NOT l.applied_hidden AND l.registry_namespace <> ''
 		AND pk.visibility IN ('public','unlisted')
+		AND EXISTS (SELECT 1 FROM skill_package_versions v WHERE v.package_id = pk.id AND v.published_at IS NOT NULL)
 		AND EXISTS (SELECT 1 FROM users u WHERE u.id = pk.owner_user_id AND u.deleted_at IS NULL AND u.disabled_at IS NULL)`, id).
 		Scan(&registryURL, &m.Namespace, &m.Name)
 	if errors.Is(err, pgx.ErrNoRows) {

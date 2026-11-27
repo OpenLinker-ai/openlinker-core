@@ -50,8 +50,8 @@ BEGIN
     FROM pg_catalog.pg_proc p
     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public';
-    IF public_functions <> 78 THEN
-        RAISE EXCEPTION 'Core initializer function count is %, expected 78', public_functions;
+    IF public_functions <> 79 THEN
+        RAISE EXCEPTION 'Core initializer function count is %, expected 79', public_functions;
     END IF;
 
     IF (SELECT count(*) FROM skills WHERE id IN (

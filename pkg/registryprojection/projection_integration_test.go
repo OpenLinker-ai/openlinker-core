@@ -274,6 +274,19 @@ func TestProjectionThroughRealRegistry(t *testing.T) {
 		return prefix + "-" + strings.ReplaceAll(inst.String(), "-", "")[:8] + "-" + strings.ReplaceAll(id.String(), "-", "")
 	}
 
+	f.exec(`UPDATE skill_package_versions SET publication_metadata = '{"license":"MIT"}'::jsonb WHERE id = $1`, p1v1)
+
+	t.Run("a target without projection permission blocks preflight", func(t *testing.T) {
+		status, _ := f.reg.call(t, "PATCH", "/v1/admin/gateways/core-p", registryAdmin, map[string]any{"projection": false})
+		require.Equal(t, 200, status)
+		pre, err := f.proj.Preflight(ctx)
+		require.NoError(t, err)
+		require.NotEmpty(t, pre.Blockers)
+		require.Equal(t, "target_unusable", pre.Blockers[0].Code)
+		status, _ = f.reg.call(t, "PATCH", "/v1/admin/gateways/core-p", registryAdmin, map[string]any{"projection": true})
+		require.Equal(t, 200, status)
+	})
+
 	t.Run("inventory and preflight", func(t *testing.T) {
 		inv, err := f.proj.Inventory(ctx)
 		require.NoError(t, err)
@@ -327,6 +340,19 @@ func TestProjectionThroughRealRegistry(t *testing.T) {
 		require.NotContains(t, string(raw), "mcp.example/mcp")
 	})
 
+	t.Run("declared licenses and display names are kept", func(t *testing.T) {
+		ns := ""
+		require.NoError(t, f.pool.QueryRow(ctx, `SELECT registry_namespace FROM registry_projection_links WHERE kind = 'skill' AND subject_id = $1`, p1).Scan(&ns))
+		status, doc := f.reg.call(t, "GET", fmt.Sprintf("/v1/skills/%s/%s/versions/1.0.0", ns, name("p", p1)), registryAdmin, nil)
+		require.Equal(t, 200, status)
+		lic, _ := doc["license"].(map[string]any)
+		require.Equal(t, "spdx", lic["kind"], "%v", doc["license"])
+		require.Equal(t, "MIT", lic["id"], "%v", doc["license"])
+		status, doc = f.reg.call(t, "GET", fmt.Sprintf("/v1/skills/%s/%s", ns, name("p", p1)), "", nil)
+		require.Equal(t, 200, status)
+		require.Equal(t, "pdf-tools", doc["display_name"])
+	})
+
 	t.Run("compatibility headers and legacy lookups", func(t *testing.T) {
 		rec := f.get("/api/v1/skill-packages/" + p1.String())
 		require.Equal(t, 200, rec.Code)
@@ -336,6 +362,14 @@ func TestProjectionThroughRealRegistry(t *testing.T) {
 		require.Equal(t, 200, rec.Code)
 		require.Contains(t, rec.Body.String(), name("p", p1))
 		require.Equal(t, 404, f.get("/api/v1/catalog/legacy/skill-packages/"+p3.String()).Code)
+	})
+
+	t.Run("withdrawing the only published version drops the legacy mapping at once", func(t *testing.T) {
+		require.Equal(t, 200, f.get("/api/v1/catalog/legacy/skill-packages/"+p2.String()).Code)
+		f.exec(`UPDATE skill_package_versions SET published_at = NULL WHERE package_id = $1`, p2)
+		require.Equal(t, 404, f.get("/api/v1/catalog/legacy/skill-packages/"+p2.String()).Code)
+		f.exec(`UPDATE skill_package_versions SET published_at = now() WHERE package_id = $1`, p2)
+		f.drain()
 	})
 
 	t.Run("withdrawal and owner shutdown", func(t *testing.T) {
@@ -396,7 +430,7 @@ func TestProjectionThroughRealRegistry(t *testing.T) {
 		st, err := f.proj.Status(ctx)
 		require.NoError(t, err)
 		require.Equal(t, "draining", st.Mode)
-		f.reg = startRegistry(t, f.reg.env)
+		f.reg = startRegistry(f.t, f.reg.env)
 		_, err = f.proj.Rollback(ctx, 30*time.Second)
 		require.NoError(t, err)
 		st, err = f.proj.Status(ctx)
@@ -412,5 +446,20 @@ func TestProjectionThroughRealRegistry(t *testing.T) {
 		f.exec(`UPDATE users SET disabled_at=now() WHERE id=$1`, alice)
 		require.Contains(t, f.get("/api/v1/mcp-services").Body.String(), "weather")
 		require.Equal(t, 200, f.get("/api/v1/mcp-services/weather/metadata").Code)
+	})
+
+	t.Run("a new cutover hides what changed while local", func(t *testing.T) {
+		f.exec(`UPDATE skill_packages SET visibility = 'private' WHERE id = $1`, p1)
+		var dirty int
+		require.NoError(t, f.pool.QueryRow(ctx, `SELECT count(*) FROM registry_projection_dirty`).Scan(&dirty))
+		require.Zero(t, dirty)
+		pre, err := f.proj.Preflight(ctx)
+		require.NoError(t, err)
+		require.Empty(t, pre.Blockers)
+		report, err := f.proj.Cutover(ctx, time.Minute)
+		require.NoError(t, err)
+		require.True(t, report.Complete, "%+v", report)
+		_, doc := f.state("skills", name("p", p1), alice)
+		require.Equal(t, true, doc["hidden"])
 	})
 }

@@ -61,9 +61,10 @@ func (p *Projector) Inventory(ctx context.Context) (Inventory, error) {
 		{&inv.NonPublicMCPAgents, `SELECT count(*) FROM agents a WHERE a.connection_mode = 'mcp_server' AND NOT (` + serviceEligible + `)`},
 		{&inv.ExcludedSubjects, `SELECT count(*) FROM registry_projection_exclusions WHERE version_id IS NULL`},
 		{&inv.ExcludedVersions, `SELECT count(*) FROM registry_projection_exclusions WHERE version_id IS NOT NULL`},
-		{&inv.UnknownHistoryVersions, `SELECT count(*) FROM skill_package_versions v JOIN skill_packages p ON p.id = v.package_id
+		{&inv.UnknownHistoryVersions, `SELECT count(*) FROM skill_package_versions v
 			WHERE v.published_at IS NULL AND (EXISTS (SELECT 1 FROM run_skill_package_snapshots s WHERE s.version_id = v.id)
-			OR EXISTS (SELECT 1 FROM agent_skill_package_bindings b WHERE b.version_id = v.id AND b.package_id <> p.id))`},
+			OR EXISTS (SELECT 1 FROM agent_skill_package_bindings b WHERE b.version_id = v.id)
+			OR EXISTS (SELECT 1 FROM skill_package_versions c WHERE c.source_version_id = v.id))`},
 	}
 	for _, c := range counts {
 		if err := p.pool.QueryRow(ctx, c.sql).Scan(c.dst); err != nil {
@@ -106,6 +107,13 @@ func (p *Projector) Preflight(ctx context.Context) (Preflight, error) {
 		return Preflight{}, err
 	}
 	out := Preflight{Inventory: inv, Blockers: []Blocker{}}
+	if _, err := p.call(ctx, http.MethodGet, "/v1/projections/skills/p-preflight-probe", "", nil, uuid.Nil); err != nil {
+		var re *remoteError
+		if !errors.As(err, &re) || re.Status != http.StatusNotFound {
+			out.Blockers = append(out.Blockers, Blocker{Kind: "registry", Subject: p.registry.Name, Code: "target_unusable", Message: err.Error()})
+			return out, nil
+		}
+	}
 	rows, err := p.pool.Query(ctx, `SELECT v.package_id, v.id, v.version, v.payload, p.owner_user_id FROM skill_package_versions v
 		JOIN (`+skillCandidates+`) c ON c.id = v.package_id JOIN skill_packages p ON p.id = v.package_id
 		WHERE v.published_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM registry_projection_exclusions x
@@ -172,15 +180,19 @@ func (p *Projector) Preflight(ctx context.Context) (Preflight, error) {
 		subjects = append(subjects, o.String())
 	}
 	slices.Sort(subjects)
-	if len(subjects) > 0 {
-		body, _ := json.Marshal(map[string]any{"subjects": subjects})
-		var first uuid.UUID
-		first, _ = uuid.Parse(subjects[0])
+	var list []any
+	for start := 0; start < len(subjects); start += preflightBatch {
+		batch := subjects[start:min(start+preflightBatch, len(subjects))]
+		body, _ := json.Marshal(map[string]any{"subjects": batch})
+		first, _ := uuid.Parse(batch[0])
 		doc, err := p.call(ctx, http.MethodPost, "/v1/projections/namespaces/preflight", "application/json", body, first)
 		if err != nil {
 			return out, err
 		}
-		list, _ := doc["namespaces"].([]any)
+		page, _ := doc["namespaces"].([]any)
+		list = append(list, page...)
+	}
+	if len(list) > 0 {
 		withHandle := 0
 		for _, item := range list {
 			m, _ := item.(map[string]any)
@@ -197,6 +209,8 @@ func (p *Projector) Preflight(ctx context.Context) (Preflight, error) {
 	}
 	return out, nil
 }
+
+const preflightBatch = 1000
 
 func generatedNamespace(ns string) bool {
 	handle, ok := strings.CutPrefix(ns, "ai.openlinker.u")
@@ -245,11 +259,11 @@ func (p *Projector) Cutover(ctx context.Context, limit time.Duration) (Report, e
 		return Report{}, fmt.Errorf("%d preflight blockers remain; exclude or fix them first", len(pre.Blockers))
 	}
 	err = pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
-		s, err := loadSettings(ctx, tx)
-		if err != nil {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM registry_projection_settings WHERE singleton FOR UPDATE`); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `SELECT 1 FROM registry_projection_settings WHERE singleton FOR UPDATE`); err != nil {
+		s, err := loadSettings(ctx, tx)
+		if err != nil {
 			return err
 		}
 		if s.Mode != ModeLocal && !p.matches(s) {
@@ -257,6 +271,10 @@ func (p *Projector) Cutover(ctx context.Context, limit time.Duration) (Report, e
 		}
 		if _, err := tx.Exec(ctx, `UPDATE registry_projection_settings SET mode = 'registry', registry_url = $1, consumer = $2, changed_at = now() WHERE singleton`,
 			p.registry.URL, p.registry.Consumer); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `SELECT registry_projection_mark(l.kind, l.subject_id, 0::smallint) FROM registry_projection_links l
+			WHERE l.attempted AND l.registry_url = $1`, p.registry.URL); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `SELECT registry_projection_mark('skill', c.id, 1::smallint) FROM (`+skillCandidates+`) c`); err != nil {
@@ -388,9 +406,13 @@ func (p *Projector) drifted(ctx context.Context, s Settings, kind string, id uui
 			return false, err
 		}
 		want := []string{}
+		wantDigests := map[string]string{}
+		current := ""
 		for _, v := range d.Versions {
 			if !failed[v.ID] {
 				want = append(want, v.Label)
+				wantDigests[v.Label] = "sha256:" + v.Digest
+				current = v.Label
 			}
 		}
 		got := []string{}
@@ -405,9 +427,16 @@ func (p *Projector) drifted(ctx context.Context, s Settings, kind string, id uui
 		if wantHidden {
 			return !hidden, nil
 		}
+		digests, _ := doc["digests"].(map[string]any)
+		for label, digest := range wantDigests {
+			if digests[label] != digest {
+				return true, nil
+			}
+		}
+		gotCurrent, _ := doc["current_version"].(string)
 		slices.Sort(want)
 		slices.Sort(got)
-		return hidden || listed != d.Listed || !slices.Equal(want, got) || d.Owner != l.Owner, nil
+		return hidden || listed != d.Listed || !slices.Equal(want, got) || gotCurrent != current || d.Owner != l.Owner, nil
 	}
 	d, err := desiredMCP(ctx, p.pool, id)
 	if err != nil {
@@ -425,7 +454,15 @@ func (p *Projector) drifted(ctx context.Context, s Settings, kind string, id uui
 		return false, err
 	}
 	hidden, _ := doc["hidden"].(bool)
-	return hidden == d.Visible, nil
+	if hidden == d.Visible || d.Owner != l.Owner {
+		return true, nil
+	}
+	if !d.Visible {
+		return false, nil
+	}
+	_, digest := mcpDocument(p.publicURL, id, d)
+	version, _ := doc["version"].(string)
+	return digest != l.MCPDigest || version != l.MCPVersion, nil
 }
 
 func (p *Projector) Rollback(ctx context.Context, limit time.Duration) (Report, error) {
