@@ -443,3 +443,25 @@ func (c *responseCache) put(key string, res Response, expires time.Time) {
 		delete(c.items, last.Value.(*cacheEntry).key)
 	}
 }
+
+func (c *Client) Project(ctx context.Context, name, method, target, contentType string, body []byte, owner *User) (Response, error) {
+	reg, ok := c.regs[name]
+	if !ok {
+		return Response{}, ErrUnknownRegistry
+	}
+	if !reg.CanSign() || owner == nil {
+		return Response{}, ErrWritesDisabled
+	}
+	u, err := c.resolve(reg, target, true)
+	if err != nil {
+		return Response{}, err
+	}
+	res, location, err := c.exchange(ctx, reg, method, u, contentType, body, owner, []string{"project"}, true, MaxJSONBytes)
+	if err != nil {
+		return Response{}, err
+	}
+	if location != "" {
+		return Response{}, ErrUnavailable
+	}
+	return res, nil
+}

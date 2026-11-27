@@ -32,6 +32,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/mcp"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/mcpbinding"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/registry"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/registryprojection"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtimepki"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/skill"
@@ -214,7 +215,17 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	if err != nil {
 		panic(err)
 	}
-	catalogregistry.NewHandler(catalogregistry.NewClient(catalogRegistries, catalogregistry.Options{}), pool, skillPackages, agentSvc).Register(api, jwtMiddleware)
+	catalogClient := catalogregistry.NewClient(catalogRegistries, catalogregistry.Options{})
+	catalogregistry.NewHandler(catalogClient, pool, skillPackages, agentSvc).Register(api, jwtMiddleware)
+	if cfg.CatalogProjectionRegistry != "" {
+		projector, err := registryprojection.New(pool, catalogClient, cfg.CatalogProjectionRegistry, cfg.CatalogProjectionPublicURL)
+		if err != nil {
+			panic(err)
+		}
+		e.Use(projector.CompatMiddleware())
+		projector.RegisterLegacy(api)
+		projector.Start(rootCtx)
+	}
 
 	runtimeSvc := runtime.NewService(pool, cfg)
 	if cfg.RuntimeMTLSListenerEnabled() && opts.RuntimePKI != nil {

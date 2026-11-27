@@ -313,3 +313,28 @@ func TestClientSendSignsWritesAndNeverFollowsRedirects(t *testing.T) {
 	_, err = readOnly.Send(context.Background(), "r", http.MethodPost, "/v1/namespaces", "application/json", body, user)
 	require.Error(t, err)
 }
+
+func TestClientProjectSignsTheProjectAction(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	var got atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store([]string{r.Method, r.URL.RequestURI(), r.Header.Get("OpenLinker-User-Assertion")})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"applied":true}`))
+	}))
+	defer srv.Close()
+	extra := `,"allow_http":true,"allow_private_network":true,"assertion_audience":"https://openlinker.ai/registry","signing_key_id":"k1","signing_key":"` + base64.StdEncoding.EncodeToString(priv.Seed()) + `"`
+	c := newClient(t, registryJSON("r", srv.URL+"/registry", extra), catalogregistry.Options{})
+	owner := &catalogregistry.User{ID: uuid.MustParse("8f14e45f-ceea-467a-a866-051b2ad0d4a1")}
+	res, err := c.Project(context.Background(), "r", http.MethodPut, "/v1/projections/skills/p-x", "application/json", []byte(`{}`), owner)
+	require.NoError(t, err)
+	require.Equal(t, 200, res.Status)
+	seen := got.Load().([]string)
+	require.Equal(t, []string{"PUT", "/registry/v1/projections/skills/p-x"}, seen[:2])
+	require.Equal(t, []any{"project"}, assertionClaims(t, seen[2])["act"])
+	_, err = c.Project(context.Background(), "r", http.MethodGet, "/v1/projections/skills/p%2Fx", "", nil, owner)
+	require.ErrorIs(t, err, catalogregistry.ErrInvalidTarget)
+	unsigned := newClient(t, registryJSON("r", srv.URL+"/registry", `,"allow_http":true,"allow_private_network":true`), catalogregistry.Options{})
+	_, err = unsigned.Project(context.Background(), "r", http.MethodPut, "/v1/projections/skills/p-x", "application/json", []byte(`{}`), owner)
+	require.Error(t, err)
+}

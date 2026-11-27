@@ -94,7 +94,10 @@ type ServiceListResponse struct {
 }
 
 // Filtering happens in SQL before pagination, with the market's hidden-tag rule.
-const serviceCatalogFilter = ` FROM agents a WHERE a.visibility='public' AND a.lifecycle_status='active' AND a.connection_mode='mcp_server'
+const projectedOwnerActive = ` AND (NOT EXISTS (SELECT 1 FROM registry_projection_settings ps WHERE ps.mode <> 'local')
+ OR EXISTS (SELECT 1 FROM users ou WHERE ou.id = a.creator_id AND ou.deleted_at IS NULL AND ou.disabled_at IS NULL))`
+
+const serviceCatalogFilter = ` FROM agents a WHERE a.visibility='public' AND a.lifecycle_status='active' AND a.connection_mode='mcp_server'` + projectedOwnerActive + `
  AND NOT EXISTS (SELECT 1 FROM unnest(a.tags) AS tag WHERE lower(tag) IN ('internal','test','testing','validation') OR tag IN ('内部','测试','验收'))
  AND ($1='' OR a.slug ILIKE $2 ESCAPE '\' OR a.name ILIKE $2 ESCAPE '\' OR a.description ILIKE $2 ESCAPE '\') AND ($3='' OR EXISTS (SELECT 1 FROM agent_skills s WHERE s.agent_id=a.id AND s.skill_id=$3)) AND ($4='' OR $4=ANY(a.tags))`
 

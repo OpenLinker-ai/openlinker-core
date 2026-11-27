@@ -68,9 +68,7 @@ func (h *CatalogHandler) PublicMetadata(c echo.Context) error {
 	c.Response().Header().Set("Cache-Control", "no-store")
 	c.Response().Header().Set("X-Content-Type-Options", "nosniff")
 	var out metadataResponse
-	// Keep the existing public Agent detail visibility contract. No private
-	// credentials, revision, or owner records are projected into this response.
-	err := h.directory.pool.QueryRow(c.Request().Context(), `SELECT COALESCE(m.metadata,'{}'::jsonb),m.updated_at FROM agents a LEFT JOIN mcp_service_metadata m ON m.agent_id=a.id WHERE a.slug=$1 AND a.lifecycle_status='active' AND a.visibility IN ('public','unlisted') AND a.connection_mode='mcp_server'`, c.Param("slug")).Scan(&out.Metadata, &out.UpdatedAt)
+	err := h.directory.pool.QueryRow(c.Request().Context(), `SELECT COALESCE(m.metadata,'{}'::jsonb),m.updated_at FROM agents a LEFT JOIN mcp_service_metadata m ON m.agent_id=a.id WHERE a.slug=$1 AND a.lifecycle_status='active' AND a.visibility IN ('public','unlisted') AND a.connection_mode='mcp_server'`+projectedOwnerActive, c.Param("slug")).Scan(&out.Metadata, &out.UpdatedAt)
 	if err != nil {
 		return metadataError(err)
 	}

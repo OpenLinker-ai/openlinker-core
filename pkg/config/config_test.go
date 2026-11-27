@@ -245,3 +245,42 @@ func TestLoadRejectsInvalidRuntimeWebSocketBounds(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadValidatesCatalogProjection(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://dev:dev@localhost/openlinker_test")
+	t.Setenv("JWT_SECRET", "test-secret")
+	seed := strings.Repeat("A", 43) + "="
+	token := "olr_" + strings.Repeat("t", 40)
+	signed := `[{"name":"pub","url":"https://registry.example/registry","consumer":"core","token":"` + token + `","audience":"public","assertion_audience":"https://registry.example/registry","signing_key_id":"k1","signing_key":"` + seed + `"}]`
+	unsigned := `[{"name":"pub","url":"https://registry.example/registry","consumer":"core","token":"` + token + `","audience":"public"}]`
+
+	cfg, err := Load()
+	if err != nil || cfg.CatalogProjectionRegistry != "" {
+		t.Fatalf("projection must stay off by default: %v", err)
+	}
+	for _, test := range []struct {
+		name, registries, registry, public string
+		ok                                 bool
+	}{
+		{"configured", signed, "pub", "https://openlinker.example", true},
+		{"public url without registry", signed, "", "https://openlinker.example", false},
+		{"unknown registry", signed, "other", "https://openlinker.example", false},
+		{"registry without signing", unsigned, "pub", "https://openlinker.example", false},
+		{"missing public url", signed, "pub", "", false},
+		{"plain http public url", signed, "pub", "http://openlinker.example", false},
+		{"public url with query", signed, "pub", "https://openlinker.example/?a=1", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("CATALOG_REGISTRIES", test.registries)
+			t.Setenv("CATALOG_PROJECTION_REGISTRY", test.registry)
+			t.Setenv("CATALOG_PROJECTION_PUBLIC_URL", test.public)
+			_, err := Load()
+			if test.ok != (err == nil) {
+				t.Fatalf("Load() error = %v, want ok=%v", err, test.ok)
+			}
+			if err != nil && strings.Contains(err.Error(), seed) {
+				t.Fatalf("error echoed the signing key: %v", err)
+			}
+		})
+	}
+}

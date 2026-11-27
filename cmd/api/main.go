@@ -79,6 +79,10 @@ func main() {
 		runBootstrapAdmin(os.Args[2:])
 		return
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "registry-migrate" {
+		runRegistryMigrate(os.Args[2:])
+		return
+	}
 	if len(os.Args) >= 2 && os.Args[1] == "runtime-node" {
 		if code := runRuntimeNode(os.Args[2:], os.Getenv, os.Stdout, os.Stderr); code != 0 {
 			os.Exit(code)

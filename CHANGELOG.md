@@ -34,6 +34,15 @@ runtime protocol, and migration contract are declared stable.
   relays the Registry's refusals as `CATALOG_<CODE>`. No migration.
 - Catalog reads follow up to three redirects within the same Registry and base
   path (claimed entries move), re-signing each hop.
+- Optional `CATALOG_PROJECTION_REGISTRY` and `CATALOG_PROJECTION_PUBLIC_URL`
+  project Core's public Skill packages and MCP services to one Registry as
+  managed entries. Migration `108` adds the mode row, dirty queue, links,
+  version errors and exclusions; its triggers write nothing in `local` mode.
+  `api registry-migrate` runs inventory, preflight, cutover, reconcile,
+  status, exclusions and rollback. In `registry` mode the old public endpoints
+  add `Deprecation` and `Link` headers, `/catalog/legacy/...` maps old ids to
+  entries, and `/mcp-services` hides services of disabled owners. Delivery to
+  Workers is unchanged.
 
 ### Run attachments
 

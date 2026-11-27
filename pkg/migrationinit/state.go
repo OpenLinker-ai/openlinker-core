@@ -16,14 +16,16 @@ import (
 )
 
 const (
-	CoreVersion int64 = 107
+	CoreVersion int64 = 108
 	// CoreShapeVersion is the migration version the shape constants below were
 	// measured against. The digest and the object counts come from a live
 	// catalog, so adding a migration cannot update them offline; leaving them
 	// stale would pass every test and then fail the postflight shape check at
 	// deploy time. A test requires these two to match, turning that into a
 	// local failure with an explicit instruction.
-	CoreShapeVersion                         int64 = 107
+	CoreShapeVersion                         int64 = 108
+	CoreRegistryProjectionPredecessorVersion int64 = 107
+	CoreRegistryProjectionPredecessorDigest        = "e766a409d2fffee1d65ee11582a110889e5552996c07eb4f3c3c6dabd782ddee"
 	CoreCatalogSourcesPredecessorVersion     int64 = 106
 	CoreCatalogSourcesPredecessorDigest            = "6e042db058efb79f5058c97a50dc11c1429cbc3f4cc2ca384894d894f671db99"
 	CoreWorkflowRevisionPredecessorVersion   int64 = 105
@@ -63,7 +65,7 @@ const (
 	CoreReviewedBridgeVersion      int64 = 88
 	CoreLegacyBridgeVersion        int64 = 86
 	CloudVersion                   int64 = 55
-	CoreSchemaDigest                     = "e766a409d2fffee1d65ee11582a110889e5552996c07eb4f3c3c6dabd782ddee"
+	CoreSchemaDigest                     = "4b93a0c4d05a8332cab719c5f616102634a6e074ba208b46f70d8f16d2f642f0"
 	CoreUpgradeSchemaDigest              = "1b2591b579018b4edd6465e19f36823fca28af01068742358293d1367c1c1ed8"
 	CoreReviewedBridgeSchemaDigest       = "fb26f772c0a32842f968a7b6f3b6afcf0b0cdf89f20df556a7df6d67e0aa1e3e"
 	CoreLegacyBridgeSchemaDigest         = "6c22808a8cd658cf827a5828a92d3343f040d7d6ff3302f9fdab691fe90aec5b"
@@ -157,6 +159,13 @@ var coreTables = []string{
 	"workflow_version_nodes",
 	"workflow_versions",
 	"agent_catalog_sources",
+	"registry_projection_settings",
+	"registry_projection_revisions",
+	"registry_projection_dirty",
+	"registry_projection_links",
+	"skill_package_registry_links",
+	"registry_projection_version_errors",
+	"registry_projection_exclusions",
 	"workflows",
 }
 
@@ -333,22 +342,23 @@ func Inspect(ctx context.Context, databaseURL string) (Snapshot, error) {
 	// tables short and every older delta grows by two again.
 	// 106 adds only the run revision column, so 105 has every table.
 	if snapshot.CoreShape.Tables == int64(len(coreTables)) ||
-		((snapshot.Core.Version == CoreCatalogSourcesPredecessorVersion || snapshot.Core.Version == CoreWorkflowRevisionPredecessorVersion) && snapshot.CoreShape.Tables == int64(len(coreTables)-1)) ||
-		(snapshot.Core.Version == CoreWorkflowVersionsPredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-3)) ||
-		(snapshot.Core.Version == CoreWorkflowAttemptsPredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-5)) ||
-		((snapshot.Core.Version == CoreWorkflowAdmissionPredecessorVersion || snapshot.Core.Version == CoreMCPTransportPredecessorVersion || snapshot.Core.Version == CoreSignalRetentionPredecessorVersion) && snapshot.CoreShape.Tables == int64(len(coreTables)-6)) ||
+		(snapshot.Core.Version == CoreRegistryProjectionPredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-7)) ||
+		((snapshot.Core.Version == CoreCatalogSourcesPredecessorVersion || snapshot.Core.Version == CoreWorkflowRevisionPredecessorVersion) && snapshot.CoreShape.Tables == int64(len(coreTables)-8)) ||
+		(snapshot.Core.Version == CoreWorkflowVersionsPredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-10)) ||
+		(snapshot.Core.Version == CoreWorkflowAttemptsPredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-12)) ||
+		((snapshot.Core.Version == CoreWorkflowAdmissionPredecessorVersion || snapshot.Core.Version == CoreMCPTransportPredecessorVersion || snapshot.Core.Version == CoreSignalRetentionPredecessorVersion) && snapshot.CoreShape.Tables == int64(len(coreTables)-13)) ||
 		((snapshot.Core.Version == CoreAuthenticationPredecessorVersion || snapshot.Core.Version == CoreFeatureUpgradePredecessorVersion) && snapshot.CoreShape.Tables == 88) ||
 		(snapshot.Core.Version == CoreMCPBindingPredecessorVersion && snapshot.CoreShape.Tables == 85) ||
-		((snapshot.Core.Version == CoreResourceMetadataPredecessorVersion || snapshot.Core.Version == CorePackagePublicationPredecessorVersion) && snapshot.CoreShape.Tables == int64(len(coreTables)-13)) ||
-		(snapshot.Core.Version == CoreNodeUpgradePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-16)) ||
-		(snapshot.Core.Version == CoreCLILoginPredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-18)) ||
-		(snapshot.Core.Version == CoreSkillPackagePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-22)) ||
+		((snapshot.Core.Version == CoreResourceMetadataPredecessorVersion || snapshot.Core.Version == CorePackagePublicationPredecessorVersion) && snapshot.CoreShape.Tables == int64(len(coreTables)-20)) ||
+		(snapshot.Core.Version == CoreNodeUpgradePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-23)) ||
+		(snapshot.Core.Version == CoreCLILoginPredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-25)) ||
+		(snapshot.Core.Version == CoreSkillPackagePredecessorVersion && snapshot.CoreShape.Tables == int64(len(coreTables)-29)) ||
 		(snapshot.Core.Version == CoreUpgradeVersion &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-24)) ||
+			snapshot.CoreShape.Tables == int64(len(coreTables)-31)) ||
 		(snapshot.Core.Version == CoreReviewedBridgeVersion &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-25)) ||
+			snapshot.CoreShape.Tables == int64(len(coreTables)-32)) ||
 		(snapshot.Core.Version == CoreLegacyBridgeVersion &&
-			snapshot.CoreShape.Tables == int64(len(coreTables)-28)) {
+			snapshot.CoreShape.Tables == int64(len(coreTables)-35)) {
 		if err := inspectCoreSeeds(ctx, conn, &snapshot.CoreShape, snapshot.Core.Version); err != nil {
 			return Snapshot{}, err
 		}
@@ -624,7 +634,7 @@ func (s Snapshot) ValidateCoreUp() (bool, error) {
 			return false, err
 		}
 		return true, nil
-	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion, CorePackagePublicationPredecessorVersion, CoreResourceMetadataPredecessorVersion, CoreMCPBindingPredecessorVersion, CoreFeatureUpgradePredecessorVersion, CoreAuthenticationPredecessorVersion, CoreSignalRetentionPredecessorVersion, CoreMCPTransportPredecessorVersion, CoreWorkflowAdmissionPredecessorVersion, CoreWorkflowAttemptsPredecessorVersion, CoreWorkflowVersionsPredecessorVersion, CoreWorkflowRevisionPredecessorVersion, CoreCatalogSourcesPredecessorVersion:
+	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion, CorePackagePublicationPredecessorVersion, CoreResourceMetadataPredecessorVersion, CoreMCPBindingPredecessorVersion, CoreFeatureUpgradePredecessorVersion, CoreAuthenticationPredecessorVersion, CoreSignalRetentionPredecessorVersion, CoreMCPTransportPredecessorVersion, CoreWorkflowAdmissionPredecessorVersion, CoreWorkflowAttemptsPredecessorVersion, CoreWorkflowVersionsPredecessorVersion, CoreWorkflowRevisionPredecessorVersion, CoreCatalogSourcesPredecessorVersion, CoreRegistryProjectionPredecessorVersion:
 		if s.Core.Version >= CoreCLILoginPredecessorVersion && (!s.CallbackOwnerIndexValid || s.UnclassifiedBrowserAgents != 0) {
 			return false, errors.New("Core predecessor has invalid callback index or incomplete Browser profile backfill")
 		}
@@ -688,7 +698,7 @@ func (s Snapshot) ValidateCloudUp() (bool, error) {
 				s.UnclassifiedBrowserAgents,
 			)
 		}
-	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion, CorePackagePublicationPredecessorVersion, CoreResourceMetadataPredecessorVersion, CoreMCPBindingPredecessorVersion, CoreFeatureUpgradePredecessorVersion, CoreAuthenticationPredecessorVersion, CoreSignalRetentionPredecessorVersion, CoreMCPTransportPredecessorVersion, CoreWorkflowAdmissionPredecessorVersion, CoreWorkflowAttemptsPredecessorVersion, CoreWorkflowVersionsPredecessorVersion, CoreWorkflowRevisionPredecessorVersion, CoreCatalogSourcesPredecessorVersion:
+	case CoreUpgradeVersion, CoreSkillPackagePredecessorVersion, CoreCLILoginPredecessorVersion, CoreNodeUpgradePredecessorVersion, CorePackagePublicationPredecessorVersion, CoreResourceMetadataPredecessorVersion, CoreMCPBindingPredecessorVersion, CoreFeatureUpgradePredecessorVersion, CoreAuthenticationPredecessorVersion, CoreSignalRetentionPredecessorVersion, CoreMCPTransportPredecessorVersion, CoreWorkflowAdmissionPredecessorVersion, CoreWorkflowAttemptsPredecessorVersion, CoreWorkflowVersionsPredecessorVersion, CoreWorkflowRevisionPredecessorVersion, CoreCatalogSourcesPredecessorVersion, CoreRegistryProjectionPredecessorVersion:
 		if s.Core.Version >= CoreCLILoginPredecessorVersion && (!s.CallbackOwnerIndexValid || s.UnclassifiedBrowserAgents != 0) {
 			return false, errors.New("Core predecessor has invalid callback index or incomplete Browser profile backfill")
 		}
@@ -787,6 +797,35 @@ func validateMigrationTableState(owner string, state MigrationTableState) error 
 func validateCoreShape(shape SchemaShape) error {
 	want := SchemaShape{
 		Digest:            CoreSchemaDigest,
+		Tables:            104,
+		Constraints:       817,
+		Indexes:           333,
+		Triggers:          85,
+		CoreIdentities:    1,
+		RuntimeControls:   1,
+		RuntimeSchemas:    13,
+		CurrentRuntime:    1,
+		RuntimeWires:      5,
+		CurrentWire:       1,
+		PreviousWire:      1,
+		BuiltInSkills:     30,
+		BuiltInSkillCases: 15,
+	}
+	if shape.Digest != want.Digest || shape.Tables != want.Tables || shape.Constraints != want.Constraints ||
+		shape.Indexes != want.Indexes || shape.Triggers != want.Triggers ||
+		shape.CoreIdentities != want.CoreIdentities || shape.RuntimeControls != want.RuntimeControls ||
+		shape.RuntimeSchemas != want.RuntimeSchemas || shape.CurrentRuntime != want.CurrentRuntime ||
+		shape.RuntimeWires != want.RuntimeWires || shape.CurrentWire != want.CurrentWire ||
+		shape.PreviousWire != want.PreviousWire || shape.BuiltInSkills != want.BuiltInSkills ||
+		shape.BuiltInSkillCases < want.BuiltInSkillCases {
+		return fmt.Errorf("Core schema fingerprint mismatch: %s", formatShape(shape))
+	}
+	return nil
+}
+
+func validateCoreRegistryProjectionPredecessorShape(shape SchemaShape) error {
+	want := SchemaShape{
+		Digest:            CoreRegistryProjectionPredecessorDigest,
 		Tables:            97,
 		Constraints:       791,
 		Indexes:           324,
@@ -808,7 +847,7 @@ func validateCoreShape(shape SchemaShape) error {
 		shape.RuntimeWires != want.RuntimeWires || shape.CurrentWire != want.CurrentWire ||
 		shape.PreviousWire != want.PreviousWire || shape.BuiltInSkills != want.BuiltInSkills ||
 		shape.BuiltInSkillCases < want.BuiltInSkillCases {
-		return fmt.Errorf("Core schema fingerprint mismatch: %s", formatShape(shape))
+		return fmt.Errorf("Core registry projection predecessor fingerprint mismatch: %s", formatShape(shape))
 	}
 	return nil
 }
@@ -1295,6 +1334,9 @@ func validateCorePackagePredecessorShape(shape SchemaShape) error {
 }
 
 func validateCorePredecessorShape(shape SchemaShape, version int64) error {
+	if version == CoreRegistryProjectionPredecessorVersion {
+		return validateCoreRegistryProjectionPredecessorShape(shape)
+	}
 	if version == CoreCatalogSourcesPredecessorVersion {
 		return validateCoreCatalogSourcesPredecessorShape(shape)
 	}
