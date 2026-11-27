@@ -53,7 +53,7 @@ CREATE TABLE public.registry_projection_links (
     mcp_version text NOT NULL DEFAULT '',
     mcp_digest text NOT NULL DEFAULT '',
     linked_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (kind, subject_id)
+    PRIMARY KEY (kind, subject_id, registry_url)
 );
 
 CREATE TABLE public.skill_package_registry_links (
@@ -64,7 +64,7 @@ CREATE TABLE public.skill_package_registry_links (
     registry_version text NOT NULL,
     registry_digest text NOT NULL CHECK (registry_digest ~ '^sha256:[0-9a-f]{64}$'),
     linked_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (package_id, version_id),
+    PRIMARY KEY (package_id, version_id, registry_url),
     FOREIGN KEY (package_id, version_id) REFERENCES public.skill_package_versions (package_id, id) ON DELETE RESTRICT,
     UNIQUE (registry_url, registry_entry, registry_version)
 );

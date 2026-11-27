@@ -107,7 +107,7 @@ func (p *Projector) registerAttempt(ctx context.Context, c *claim, entry string,
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO registry_projection_links (kind, subject_id, registry_url, registry_entry, owner_id, attempted)
 			VALUES ($1, $2, $3, $4, $5, true)
-			ON CONFLICT (kind, subject_id) DO UPDATE SET attempted = true, registry_url = EXCLUDED.registry_url,
+			ON CONFLICT (kind, subject_id, registry_url) DO UPDATE SET attempted = true,
 				registry_entry = EXCLUDED.registry_entry, owner_id = EXCLUDED.owner_id`, c.Kind, c.Subject, p.registry.URL, entry, owner); err != nil {
 			return err
 		}
@@ -157,7 +157,7 @@ func (p *Projector) release(ctx context.Context, c *claim, cause error) {
 		matched = tag.RowsAffected() == 1
 		if matched && neverOurs(cause) {
 			_, err = tx.Exec(ctx, `UPDATE registry_projection_links SET attempted = false
-				WHERE kind = $1 AND subject_id = $2 AND applied_revision = 0 AND registry_namespace = ''`, c.Kind, c.Subject)
+				WHERE kind = $1 AND subject_id = $2 AND registry_url = $3 AND applied_revision = 0 AND registry_namespace = ''`, c.Kind, c.Subject, p.registry.URL)
 		}
 		return err
 	})
@@ -311,7 +311,8 @@ func (p *Projector) sendSkillState(ctx context.Context, instance uuid.UUID, entr
 	namespace, _ := doc["namespace"].(string)
 	_, err = p.pool.Exec(ctx, `UPDATE registry_projection_links SET applied_revision = $3, applied_phase = $4, applied_hidden = $5,
 		registry_namespace = CASE WHEN $6 = '' THEN registry_namespace ELSE $6 END
-		WHERE kind = $1 AND subject_id = $2 AND (applied_revision, applied_phase) < ($3, $4)`, KindSkill, c.Subject, c.Revision, phase, state == "hidden", namespace)
+		WHERE kind = $1 AND subject_id = $2 AND registry_url = $7 AND (applied_revision, applied_phase) < ($3, $4)`,
+		KindSkill, c.Subject, c.Revision, phase, state == "hidden", namespace, p.registry.URL)
 	return err
 }
 
@@ -320,7 +321,7 @@ func (p *Projector) projectSkill(ctx context.Context, s Settings, c *claim) erro
 	if err != nil {
 		return err
 	}
-	l, err := loadLink(ctx, p.pool, KindSkill, c.Subject)
+	l, err := loadLink(ctx, p.pool, KindSkill, c.Subject, p.registry.URL)
 	if err != nil {
 		return err
 	}
@@ -355,7 +356,7 @@ func (p *Projector) projectSkill(ctx context.Context, s Settings, c *claim) erro
 	if !ok {
 		return errors.New("claim lost before the first request")
 	}
-	l, err = loadLink(ctx, p.pool, KindSkill, c.Subject)
+	l, err = loadLink(ctx, p.pool, KindSkill, c.Subject, p.registry.URL)
 	if err != nil {
 		return err
 	}
@@ -413,19 +414,8 @@ func (p *Projector) projectSkill(ctx context.Context, s Settings, c *claim) erro
 			continue
 		}
 		namespace, _ := doc["namespace"].(string)
-		tag, err := p.pool.Exec(ctx, `INSERT INTO skill_package_registry_links (package_id, version_id, registry_url, registry_entry, registry_version, registry_digest)
-			SELECT $1, $2, $3, $4, $5, $6
-			WHERE EXISTS (SELECT 1 FROM registry_projection_dirty d WHERE d.kind = 'skill' AND d.subject_id = $1 AND d.claim_token = $7 AND d.revision = $8
-				AND d.claimed_at > clock_timestamp() - $9::interval)
-			AND EXISTS (SELECT 1 FROM registry_projection_links l WHERE l.kind = 'skill' AND l.subject_id = $1 AND l.owner_id = $10)
-			ON CONFLICT (package_id, version_id) DO UPDATE SET registry_url = EXCLUDED.registry_url,
-				registry_entry = EXCLUDED.registry_entry, registry_version = EXCLUDED.registry_version, registry_digest = EXCLUDED.registry_digest, linked_at = now()`,
-			c.Subject, v.ID, p.registry.URL, namespace+"/"+entry, v.Label, digest, c.Token, c.Revision, claimLease.String(), owner)
-		if err != nil {
+		if err := p.recordVersion(ctx, c, owner, v, namespace+"/"+entry, digest); err != nil {
 			return err
-		}
-		if tag.RowsAffected() != 1 {
-			return errors.New("claim lost while recording an ingested version")
 		}
 		available = append(available, v)
 	}
@@ -437,7 +427,7 @@ func (p *Projector) projectMCP(ctx context.Context, s Settings, c *claim) error 
 	if err != nil {
 		return err
 	}
-	l, err := loadLink(ctx, p.pool, KindMCP, c.Subject)
+	l, err := loadLink(ctx, p.pool, KindMCP, c.Subject, p.registry.URL)
 	if err != nil {
 		return err
 	}
@@ -511,7 +501,8 @@ func (p *Projector) projectMCP(ctx context.Context, s Settings, c *claim) error 
 	_, err = p.pool.Exec(ctx, `UPDATE registry_projection_links SET applied_revision = $3, applied_phase = $4, applied_hidden = $5,
 		mcp_version = CASE WHEN $5 THEN mcp_version ELSE $6 END, mcp_digest = CASE WHEN $5 THEN mcp_digest ELSE $7 END,
 		registry_namespace = CASE WHEN $8 = '' THEN registry_namespace ELSE $8 END
-		WHERE kind = $1 AND subject_id = $2 AND (applied_revision, applied_phase) < ($3, $4)`, KindMCP, c.Subject, c.Revision, phase, state == "hidden", version, digest, namespace)
+		WHERE kind = $1 AND subject_id = $2 AND registry_url = $9 AND (applied_revision, applied_phase) < ($3, $4)`,
+		KindMCP, c.Subject, c.Revision, phase, state == "hidden", version, digest, namespace, p.registry.URL)
 	return err
 }
 
@@ -558,11 +549,12 @@ func (p *Projector) forgetOwner(ctx context.Context, c *claim, previous uuid.UUI
 		if tag.RowsAffected() != 1 {
 			return errors.New("claim lost before the ownership change was recorded")
 		}
-		tag, err = tx.Exec(ctx, `DELETE FROM registry_projection_links WHERE kind = $1 AND subject_id = $2 AND owner_id = $3`, c.Kind, c.Subject, previous)
+		tag, err = tx.Exec(ctx, `DELETE FROM registry_projection_links WHERE kind = $1 AND subject_id = $2 AND registry_url = $3 AND owner_id = $4`,
+			c.Kind, c.Subject, p.registry.URL, previous)
 		if err != nil || tag.RowsAffected() == 0 || c.Kind != KindSkill {
 			return err
 		}
-		_, err = tx.Exec(ctx, `DELETE FROM skill_package_registry_links WHERE package_id = $1`, c.Subject)
+		_, err = tx.Exec(ctx, `DELETE FROM skill_package_registry_links WHERE package_id = $1 AND registry_url = $2`, c.Subject, p.registry.URL)
 		return err
 	})
 }
@@ -575,4 +567,31 @@ func clipRunes(s string, n int) string {
 		return s
 	}
 	return strings.TrimSpace(string(r[:n]))
+}
+
+func (p *Projector) recordVersion(ctx context.Context, c *claim, owner uuid.UUID, v skillVersion, entry, digest string) error {
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `SELECT 1 FROM registry_projection_dirty WHERE kind = 'skill' AND subject_id = $1 AND claim_token = $2 AND revision = $3
+			AND claimed_at > clock_timestamp() - $4::interval FOR UPDATE`, c.Subject, c.Token, c.Revision, claimLease.String())
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return errors.New("claim lost while recording an ingested version")
+		}
+		tag, err = tx.Exec(ctx, `SELECT 1 FROM registry_projection_links WHERE kind = 'skill' AND subject_id = $1 AND registry_url = $2 AND owner_id = $3 FOR SHARE`,
+			c.Subject, p.registry.URL, owner)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return errors.New("the package changed owner while recording an ingested version")
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO skill_package_registry_links (package_id, version_id, registry_url, registry_entry, registry_version, registry_digest)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (package_id, version_id, registry_url) DO UPDATE SET registry_entry = EXCLUDED.registry_entry,
+				registry_version = EXCLUDED.registry_version, registry_digest = EXCLUDED.registry_digest, linked_at = now()`,
+			c.Subject, v.ID, p.registry.URL, entry, v.Label, digest)
+		return err
+	})
 }

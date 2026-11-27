@@ -349,8 +349,8 @@ func (p *Projector) Reconcile(ctx context.Context) (ReconcileReport, error) {
 		id   uuid.UUID
 	}
 	var subjects []subject
-	rows, err := p.pool.Query(ctx, `SELECT kind, subject_id FROM registry_projection_links WHERE attempted
-		UNION SELECT 'skill', c.id FROM (`+skillCandidates+`) c UNION SELECT 'mcp', c.id FROM (`+mcpCandidates+`) c`)
+	rows, err := p.pool.Query(ctx, `SELECT kind, subject_id FROM registry_projection_links WHERE attempted AND registry_url = $1
+		UNION SELECT 'skill', c.id FROM (`+skillCandidates+`) c UNION SELECT 'mcp', c.id FROM (`+mcpCandidates+`) c`, p.registry.URL)
 	if err != nil {
 		return rep, err
 	}
@@ -381,7 +381,7 @@ func (p *Projector) Reconcile(ctx context.Context) (ReconcileReport, error) {
 }
 
 func (p *Projector) drifted(ctx context.Context, s Settings, kind string, id uuid.UUID) (bool, error) {
-	l, err := loadLink(ctx, p.pool, kind, id)
+	l, err := loadLink(ctx, p.pool, kind, id, p.registry.URL)
 	if err != nil {
 		return false, err
 	}

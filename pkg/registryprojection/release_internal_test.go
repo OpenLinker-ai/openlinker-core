@@ -136,7 +136,7 @@ func TestReleaseRules(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, ok)
 		p.release(ctx, c, &remoteError{Status: 409, Code: "name_conflict"})
-		l, err := loadLink(ctx, pool, KindSkill, id)
+		l, err := loadLink(ctx, pool, KindSkill, id, "https://registry.example")
 		require.NoError(t, err)
 		require.False(t, l.Attempted)
 		_, err = pool.Exec(ctx, `DELETE FROM registry_projection_dirty`)
@@ -159,5 +159,19 @@ func TestReleaseRules(t *testing.T) {
 		_, err = pool.Exec(ctx, `UPDATE registry_projection_settings SET changed_at = clock_timestamp()`)
 		require.NoError(t, err)
 		require.ErrorIs(t, lock(p, s.ChangedAt, ModeRegistry), ErrNotConfigured)
+	})
+
+	t.Run("projection history is kept per destination", func(t *testing.T) {
+		id, ownerA, ownerB := uuid.New(), uuid.New(), uuid.New()
+		_, err := pool.Exec(ctx, `INSERT INTO registry_projection_links (kind, subject_id, registry_url, registry_entry, owner_id, attempted)
+			VALUES ('skill', $1, 'https://a.example', 'p-x', $2, true), ('skill', $1, 'https://b.example', 'p-x', $3, true)`, id, ownerA, ownerB)
+		require.NoError(t, err)
+		a, err := loadLink(ctx, pool, KindSkill, id, "https://a.example")
+		require.NoError(t, err)
+		b, err := loadLink(ctx, pool, KindSkill, id, "https://b.example")
+		require.NoError(t, err)
+		require.True(t, a.Found && a.Attempted && b.Found && b.Attempted)
+		require.Equal(t, ownerA, a.Owner)
+		require.Equal(t, ownerB, b.Owner)
 	})
 }

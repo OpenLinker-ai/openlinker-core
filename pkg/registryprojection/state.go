@@ -171,10 +171,10 @@ type link struct {
 	RegistryURL string
 }
 
-func loadLink(ctx context.Context, q querier, kind string, id uuid.UUID) (link, error) {
+func loadLink(ctx context.Context, q querier, kind string, id uuid.UUID, registryURL string) (link, error) {
 	var l link
 	err := q.QueryRow(ctx, `SELECT registry_entry, registry_namespace, owner_id, attempted, applied_revision, applied_phase, applied_hidden, mcp_version, mcp_digest, registry_url
-		FROM registry_projection_links WHERE kind = $1 AND subject_id = $2`, kind, id).
+		FROM registry_projection_links WHERE kind = $1 AND subject_id = $2 AND registry_url = $3`, kind, id, registryURL).
 		Scan(&l.Entry, &l.Namespace, &l.Owner, &l.Attempted, &l.Revision, &l.Phase, &l.Hidden, &l.MCPVersion, &l.MCPDigest, &l.RegistryURL)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return l, nil
