@@ -33,6 +33,7 @@ valid; errors never echo the token or key.
 | `signing_key_id`, `signing_key`, `assertion_audience` | Optional. With them Core signs a user assertion for signed-in users, so they also see their own `internal`/`private` entries and can import indexed content whose license does not allow the Registry to redistribute it |
 | `allow_http` | Allow an `http://` URL (internal network) |
 | `allow_private_network` | Allow private addresses (still not unspecified, multicast or link-local such as `169.254.169.254`) |
+| `writes` | Optional, default `false`. Lets signed-in users publish to the Registry through Core (see below). Needs the signing fields; the gateway token at the Registry must carry `skills:write` |
 
 On the Registry: create a read token, register it as a gateway with the
 public key of `signing_key`, and set `REGISTRY_ASSERTION_AUDIENCE` to the same
@@ -49,7 +50,7 @@ curl -H "Authorization: Bearer $ADMIN" -d '{"kid":"k1","public_key":"<base64 pub
 Requests go only to the configured origin. Addresses are checked when the
 connection is made (so a name that later resolves to a private address is
 refused unless `allow_private_network` is set), environment proxies are not
-used, redirects are not followed, and responses are capped (1 MiB JSON,
+used, and responses are capped (1 MiB JSON,
 256 KiB artifacts). The Agent endpoint policy is unchanged.
 
 ## Reading
@@ -70,6 +71,12 @@ Answers obtained without a user assertion are cached in-process for five
 minutes per catalog, audience and request; answers for a signed-in user of a
 signing catalog are never cached. When the Registry cannot be reached the
 answer is 502 `CATALOG_UNAVAILABLE`.
+
+Reads follow up to three `307`/`308` redirects (a claimed entry moves to its
+author's namespace) only when the new location is under the same Registry
+origin and base path; each hop is a new request with a freshly signed
+assertion, and an import keeps `purpose=import` and the digest check. Any other
+redirect, and every redirect of a write, is `CATALOG_UNAVAILABLE`.
 
 ## Importing a Skill
 
@@ -121,3 +128,31 @@ entry (refusing it if it became inactive since the draft), creates the Agent
 through the ordinary creation path (creator role, slug, endpoint policy) and
 records the source in `agent_catalog_sources` in the same transaction.
 Existing Agents are never changed when a Registry entry changes.
+
+## Publishing through Core
+
+With `"writes": true` (and the signing fields), Core forwards these requests of
+a signed-in user to the Registry with a `read`+`write` assertion for that
+user. The Registry decides with the user's own roles only; the gateway token
+never grants a write. All return `Cache-Control: private, no-store`; a catalog
+without `writes` answers 404, an anonymous caller 401.
+
+| Core path (under `/api/v1/catalog/registries/{r}`) | Registry path |
+|---|---|
+| `GET /me` | `GET /v1/whoami`, reduced to `{writes, mode, github, namespaces:[{name, role}]}` |
+| `POST /namespaces` | `POST /v1/namespaces` (`ai.openlinker.<handle>` or `io.github.<login>`) |
+| `POST /skills/{ns}/{name}/versions?version=&visibility=&listed=&license=` | Upload; `Content-Type` one of `text/markdown`, `application/x-tar`, `application/gzip`, `application/zip`, `application/vnd.openlinker.skill-bundle.v1+json`; at most 8 MiB |
+| `POST /skills/{ns}/github-imports/preview`, `…/github-imports`, `…/indexes/preview`, `…/indexes` | Same |
+| `POST /skills/{ns}/{name}/deprecate`, `…/yank`, `…/claim`, `…/versions/{v}/yank`; `PATCH /skills/{ns}/{name}` | Same |
+| `POST /mcp/servers/{ns}?visibility=&listed=&indexed=` | Register or index a `server.json` |
+| `POST /mcp/servers/{ns}/{name}/status`, `…/versions/{v}/status`; `PATCH /mcp/servers/{ns}/{name}` | Same |
+| `POST /reports` | `POST /v1/reports` |
+
+Only the listed paths and query parameters are forwarded; other content types
+are 415 and larger bodies 413 before anything is sent. Registry refusals keep
+their status (400, 403, 404, 409, 413, 415, 422, 429) with the code prefixed,
+for example `CATALOG_NAMESPACE_EXISTS`, `CATALOG_FORBIDDEN`,
+`CATALOG_CLAIM_NAME_TAKEN`; a Registry 401 or 5xx is 502 `CATALOG_UNAVAILABLE`.
+Each user may send 30 writes a minute through one Core process (429
+`CATALOG_RATE_LIMITED`). Nothing written this way changes Core's own Skill
+packages, Agents or Runs.

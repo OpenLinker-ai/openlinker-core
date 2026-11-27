@@ -115,7 +115,7 @@ func createDatabase(t *testing.T, baseURL string) string {
 	return target.String()
 }
 
-func startRegistry(t *testing.T) *registryProcess {
+func startRegistry(t *testing.T, extraEnv ...string) *registryProcess {
 	t.Helper()
 	binary := os.Getenv("REGISTRY_TEST_BINARY")
 	dbURL := os.Getenv("REGISTRY_TEST_DATABASE_URL")
@@ -130,6 +130,10 @@ func startRegistry(t *testing.T) *registryProcess {
 		"REGISTRY_DATABASE_URL="+createDatabase(t, dbURL), "REGISTRY_STORAGE_DIR="+t.TempDir(),
 		"REGISTRY_ADMIN_TOKEN="+registryAdmin, "REGISTRY_UPSTREAM_ALLOW_HTTP=true", "REGISTRY_UPSTREAM_ALLOW_CIDRS=127.0.0.0/8",
 		"REGISTRY_RATE_LIMIT_READ=0", "REGISTRY_RATE_LIMIT_WRITE=0", "REGISTRY_RATE_LIMIT_FORWARD=0", "REGISTRY_BACKGROUND_SYNC=false")
+	if len(extraEnv) == 0 {
+		extraEnv = []string{"REGISTRY_REVIEW=false"}
+	}
+	cmd.Env = append(cmd.Env, extraEnv...)
 	var logs bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &logs, &logs
 	require.NoError(t, cmd.Start())

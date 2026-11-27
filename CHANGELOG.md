@@ -26,6 +26,14 @@ runtime protocol, and migration contract are declared stable.
   recording the source in the same transaction.
 - Without `CATALOG_REGISTRIES` no route is added. Delivery to Workers is
   unchanged. See `REGISTRY_CATALOG.md`.
+- A catalog with `"writes": true` lets signed-in users publish to the Registry
+  through Core: claim a namespace, upload or import Skills from GitHub, index,
+  register MCP servers, change status and visibility, claim indexed entries and
+  report entries. Core forwards only a fixed list of paths with a
+  `read`+`write` user assertion, limits each user to 30 writes a minute and
+  relays the Registry's refusals as `CATALOG_<CODE>`. No migration.
+- Catalog reads follow up to three redirects within the same Registry and base
+  path (claimed entries move), re-signing each hop.
 
 ### Run attachments
 

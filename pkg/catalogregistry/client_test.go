@@ -188,3 +188,104 @@ func TestClientEscapesPathSegmentsOnce(t *testing.T) {
 	_, err = c.Get(context.Background(), "r", "/v1/skills/a/b/versions/1/files/%zz", nil, nil)
 	require.ErrorIs(t, err, catalogregistry.ErrInvalidTarget)
 }
+
+func assertionClaims(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	parts := strings.Split(raw, ".")
+	require.Len(t, parts, 3)
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var claims map[string]any
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	return claims
+}
+
+func signingExtra(priv ed25519.PrivateKey) string {
+	return `,"allow_http":true,"allow_private_network":true,"writes":true,"assertion_audience":"https://openlinker.ai/registry","signing_key_id":"k1","signing_key":"` + base64.StdEncoding.EncodeToString(priv.Seed()) + `"`
+}
+
+func TestClientFollowsRedirectsWithinTheRegistry(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	type seen struct{ target, assertion string }
+	var mu = make(chan seen, 16)
+	var other atomic.Int32
+	outside := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { other.Add(1) }))
+	defer outside.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu <- seen{r.URL.RequestURI(), r.Header.Get("OpenLinker-User-Assertion")}
+		switch r.URL.Path {
+		case "/registry/v1/skills/old/demo/versions/1/artifact":
+			w.Header().Set("Location", "/registry/v1/skills/io.github.acme/demo/versions/1/artifact?purpose=import")
+			w.WriteHeader(http.StatusPermanentRedirect)
+		case "/registry/v1/skills/io.github.acme/demo/versions/1/artifact":
+			_, _ = w.Write([]byte("bytes"))
+		case "/registry/v1/skills/loop/a":
+			w.Header().Set("Location", "/registry/v1/skills/loop/a")
+			w.WriteHeader(http.StatusPermanentRedirect)
+		case "/registry/v1/skills/out/a":
+			w.Header().Set("Location", outside.URL+"/registry/v1/skills/x/y")
+			w.WriteHeader(http.StatusPermanentRedirect)
+		case "/registry/v1/skills/up/a":
+			w.Header().Set("Location", "/elsewhere/v1/skills/x/y")
+			w.WriteHeader(http.StatusPermanentRedirect)
+		case "/registry/v1/skills/found/a":
+			w.Header().Set("Location", "/registry/v1/skills/x/y")
+			w.WriteHeader(http.StatusFound)
+		}
+	}))
+	defer srv.Close()
+	c := newClient(t, registryJSON("r", srv.URL+"/registry", signingExtra(priv)), catalogregistry.Options{})
+	user := &catalogregistry.User{ID: uuid.MustParse("8f14e45f-ceea-467a-a866-051b2ad0d4a1"), GitHubID: "4242"}
+	res, err := c.GetArtifact(context.Background(), "r", "/v1/skills/old/demo/versions/1/artifact?purpose=import", user, []string{"read", "import"})
+	require.NoError(t, err)
+	require.Equal(t, "bytes", string(res.Body))
+	first, second := <-mu, <-mu
+	require.Equal(t, "/registry/v1/skills/io.github.acme/demo/versions/1/artifact?purpose=import", second.target)
+	a, b := assertionClaims(t, first.assertion), assertionClaims(t, second.assertion)
+	require.NotEqual(t, a["jti"], b["jti"])
+	require.Equal(t, "/registry/v1/skills/io.github.acme/demo/versions/1/artifact?purpose=import", b["req"].(map[string]any)["t"])
+	require.Equal(t, []any{"read", "import"}, b["act"])
+	for _, target := range []string{"/v1/skills/loop/a", "/v1/skills/out/a", "/v1/skills/up/a", "/v1/skills/found/a"} {
+		_, err := c.Get(context.Background(), "r", target, user, []string{"read"})
+		require.ErrorIs(t, err, catalogregistry.ErrUnavailable, target)
+	}
+	require.Zero(t, other.Load())
+}
+
+func TestClientSendSignsWritesAndNeverFollowsRedirects(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	var got atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := make([]byte, r.ContentLength)
+		_, _ = r.Body.Read(body)
+		got.Store([]string{r.Method, r.URL.RequestURI(), r.Header.Get("Content-Type"), string(body), r.Header.Get("OpenLinker-User-Assertion")})
+		if strings.HasSuffix(r.URL.Path, "/moved") {
+			w.Header().Set("Location", "/registry/v1/namespaces")
+			w.WriteHeader(http.StatusPermanentRedirect)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"name":"ai.openlinker.alice"}`))
+	}))
+	defer srv.Close()
+	c := newClient(t, registryJSON("r", srv.URL+"/registry", signingExtra(priv)), catalogregistry.Options{})
+	user := &catalogregistry.User{ID: uuid.MustParse("8f14e45f-ceea-467a-a866-051b2ad0d4a1")}
+	body := []byte(`{"name":"ai.openlinker.alice"}`)
+	res, err := c.Send(context.Background(), "r", http.MethodPost, "/v1/namespaces", "application/json", body, user)
+	require.NoError(t, err)
+	require.Equal(t, 201, res.Status)
+	seen := got.Load().([]string)
+	require.Equal(t, []string{"POST", "/registry/v1/namespaces", "application/json", string(body)}, seen[:4])
+	claims := assertionClaims(t, seen[4])
+	h := sha256.Sum256(body)
+	require.Equal(t, map[string]any{"m": "POST", "t": "/registry/v1/namespaces", "bh": hex.EncodeToString(h[:])}, claims["req"])
+	require.Equal(t, []any{"read", "write"}, claims["act"])
+	_, err = c.Send(context.Background(), "r", http.MethodPost, "/v1/skills/a/moved", "application/json", body, user)
+	require.ErrorIs(t, err, catalogregistry.ErrUnavailable)
+	_, err = c.Send(context.Background(), "r", http.MethodPost, "/v1/namespaces", "application/json", body, nil)
+	require.Error(t, err)
+	readOnly := newClient(t, registryJSON("r", srv.URL+"/registry", `,"allow_http":true,"allow_private_network":true`), catalogregistry.Options{})
+	_, err = readOnly.Send(context.Background(), "r", http.MethodPost, "/v1/namespaces", "application/json", body, user)
+	require.Error(t, err)
+}

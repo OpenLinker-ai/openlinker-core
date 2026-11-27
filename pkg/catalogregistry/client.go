@@ -259,6 +259,10 @@ func (c *Client) GetArtifact(ctx context.Context, name, target string, user *Use
 	return c.get(ctx, name, target, user, acts, MaxArtifactBytes, false)
 }
 
+const maxRedirects = 3
+
+var ErrWritesDisabled = errors.New("catalog writes are not enabled")
+
 func (c *Client) get(ctx context.Context, name, target string, user *User, acts []string, limit int64, useCache bool) (Response, error) {
 	reg, ok := c.regs[name]
 	if !ok {
@@ -276,36 +280,108 @@ func (c *Client) get(ctx context.Context, name, target string, user *User, acts 
 			return res, nil
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	for hop := 0; ; hop++ {
+		res, location, err := c.exchange(ctx, reg, http.MethodGet, u, "", nil, user, acts, signed, limit)
+		if err != nil {
+			return Response{}, err
+		}
+		if location == "" {
+			if key != "" && res.Status == http.StatusOK {
+				c.cache.put(key, res, c.now().Add(cacheTTL))
+			}
+			return res, nil
+		}
+		if hop >= maxRedirects {
+			return Response{}, ErrUnavailable
+		}
+		next, err := c.redirectTarget(reg, u, location)
+		if err != nil {
+			return Response{}, ErrUnavailable
+		}
+		u = next
+	}
+}
+
+func (c *Client) redirectTarget(reg *Registry, from *url.URL, location string) (*url.URL, error) {
+	loc, err := from.Parse(location)
 	if err != nil {
-		return Response{}, ErrInvalidTarget
+		return nil, ErrInvalidTarget
+	}
+	base := reg.Base()
+	if !endpointurl.SameOrigin(loc, base) || loc.User != nil || loc.Fragment != "" {
+		return nil, ErrInvalidTarget
+	}
+	prefix := base.EscapedPath() + "/v1/"
+	escaped := loc.EscapedPath()
+	if !strings.HasPrefix(escaped, prefix) {
+		return nil, ErrInvalidTarget
+	}
+	target := strings.TrimPrefix(escaped, base.EscapedPath())
+	if loc.RawQuery != "" {
+		target += "?" + loc.RawQuery
+	}
+	return c.resolve(reg, target)
+}
+
+func (c *Client) exchange(ctx context.Context, reg *Registry, method string, u *url.URL, contentType string, body []byte, user *User, acts []string, signed bool, limit int64) (Response, string, error) {
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return Response{}, "", ErrInvalidTarget
+	}
+	if body == nil {
+		req.Body, req.ContentLength = http.NoBody, 0
 	}
 	req.Header.Set("Authorization", "Bearer "+reg.Token)
 	req.Header.Set("Accept", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 	if signed {
-		assertion, err := signAssertion(reg, user, http.MethodGet, u, nil, acts, c.now())
+		assertion, err := signAssertion(reg, user, method, u, body, acts, c.now())
 		if err != nil {
-			return Response{}, err
+			return Response{}, "", err
 		}
 		req.Header.Set("OpenLinker-User-Assertion", assertion)
 	}
 	res, err := c.clients[reg.Name].Do(req)
 	if err != nil {
-		return Response{}, ErrUnavailable
+		return Response{}, "", ErrUnavailable
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 300 && res.StatusCode < 400 {
+		location := res.Header.Get("Location")
+		if method != http.MethodGet || (res.StatusCode != http.StatusPermanentRedirect && res.StatusCode != http.StatusTemporaryRedirect) || location == "" {
+			return Response{}, "", ErrUnavailable
+		}
+		return Response{}, location, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
+	if err != nil || int64(len(data)) > limit {
+		return Response{}, "", ErrUnavailable
+	}
+	return Response{Status: res.StatusCode, Header: res.Header.Clone(), Body: data}, "", nil
+}
+
+func (c *Client) Send(ctx context.Context, name, method, target, contentType string, body []byte, user *User) (Response, error) {
+	reg, ok := c.regs[name]
+	if !ok {
+		return Response{}, ErrUnknownRegistry
+	}
+	if !reg.Writes || !reg.CanSign() || user == nil {
+		return Response{}, ErrWritesDisabled
+	}
+	u, err := c.resolve(reg, target)
+	if err != nil {
+		return Response{}, err
+	}
+	res, location, err := c.exchange(ctx, reg, method, u, contentType, body, user, []string{"read", "write"}, true, MaxJSONBytes)
+	if err != nil {
+		return Response{}, err
+	}
+	if location != "" {
 		return Response{}, ErrUnavailable
 	}
-	body, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
-	if err != nil || int64(len(body)) > limit {
-		return Response{}, ErrUnavailable
-	}
-	out := Response{Status: res.StatusCode, Header: res.Header.Clone(), Body: body}
-	if key != "" && res.StatusCode == http.StatusOK {
-		c.cache.put(key, out, c.now().Add(cacheTTL))
-	}
-	return out, nil
+	return res, nil
 }
 
 type cacheEntry struct {

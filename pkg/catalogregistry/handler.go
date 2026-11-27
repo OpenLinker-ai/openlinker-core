@@ -31,6 +31,7 @@ type Handler struct {
 	packages *skillpackage.Handler
 	agents   AgentCreator
 	now      func() time.Time
+	limiter  writeLimiter
 }
 
 func NewHandler(client *Client, pool *pgxpool.Pool, packages *skillpackage.Handler, agents AgentCreator) *Handler {
@@ -78,6 +79,7 @@ func (h *Handler) Register(api *echo.Group, jwt echo.MiddlewareFunc) {
 	g.GET("/registries/:registry/mcp/servers/:ns/:name/versions/:version", h.getMCPVersion)
 	g.GET("/registries/:registry/mcp/servers/:ns/:name/versions/:version/registration-draft", h.mcpDraft)
 	g.POST("/registries/:registry/mcp/servers/:ns/:name/versions/:version/registrations", h.registerMCP)
+	h.registerWrites(g)
 	api.POST("/creator/skill-packages/registry-imports", h.importSkill, jwt, noStore)
 }
 

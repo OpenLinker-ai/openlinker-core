@@ -34,6 +34,12 @@ func TestParseRegistries(t *testing.T) {
 	regs, err = catalogregistry.Parse(unsigned)
 	require.NoError(t, err)
 	require.False(t, regs[0].CanSign())
+	require.False(t, regs[0].Writes)
+
+	writes := strings.Replace(ok, `"audience":"public"`, `"audience":"public","writes":true`, 1)
+	regs, err = catalogregistry.Parse(writes)
+	require.NoError(t, err)
+	require.True(t, regs[0].Writes)
 
 	token := `"token":"olr_abcdefghijklmnop_` + strings.Repeat("s", 40) + `"`
 	bad := map[string]string{
@@ -53,6 +59,7 @@ func TestParseRegistries(t *testing.T) {
 		"id without key":     `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","signing_key_id":"k1"}]`,
 		"short key":          `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","signing_key_id":"k1","signing_key":"AAAA"}]`,
 		"key needs audience": `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","signing_key_id":"k1","signing_key":"` + seed() + `"}]`,
+		"writes need a key":  `[{"name":"a","url":"https://r.example","consumer":"c",` + token + `,"audience":"public","writes":true}]`,
 	}
 	for name, raw := range bad {
 		_, err := catalogregistry.Parse(raw)
