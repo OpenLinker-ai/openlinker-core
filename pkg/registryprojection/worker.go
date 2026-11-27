@@ -127,12 +127,12 @@ func (p *Projector) ack(ctx context.Context, c *claim) error {
 	return err
 }
 
-var permanentCodes = map[string]bool{"managed_by_core": true, "name_conflict": true, "projection_namespace": true, "owner_mismatch": true,
+var permanentCodes = map[string]bool{"managed_by_core": true, "name_conflict": true, "namespace_conflict": true, "owner_mismatch": true,
 	"projection_public_only": true, "projection_not_allowed": true, "name_invalid": true}
 
 func neverOurs(err error) bool {
 	var re *remoteError
-	return errors.As(err, &re) && (re.Code == "name_conflict" || re.Code == "managed_by_core")
+	return errors.As(err, &re) && (re.Code == "name_conflict" || re.Code == "managed_by_core" || re.Code == "namespace_conflict")
 }
 
 func permanent(err error) bool {
