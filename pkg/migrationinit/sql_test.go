@@ -22,6 +22,8 @@ func TestCoreMigrationDirectoryContainsCurrentInitializerAndSupportedForwardMigr
 		"101_runtime_signal_outbox_retention.up.sql":   true,
 		"101_runtime_signal_outbox_retention.down.sql": true,
 		"100_runtime_mtls_transition.up.sql":           true,
+		"108_registry_projection.up.sql":               true,
+		"108_registry_projection.down.sql":             true,
 		"107_registry_catalog_sources.up.sql":          true,
 		"107_registry_catalog_sources.down.sql":        true,
 		"106_workflow_run_revision.up.sql":             true,
@@ -276,11 +278,11 @@ func TestCoreFoundationalInitializerContainsPredecessorContracts(t *testing.T) {
 func TestCoreInitializerVerifierCoversCatalogAndSeedState(t *testing.T) {
 	verify := readInitializer(t, "../../migrations/086_current_schema_init_verify.sql")
 	for _, fragment := range []string{
-		"public_tables <> 97",
-		"public_constraints <> 791",
-		"public_indexes <> 324",
-		"public_triggers <> 80",
-		"public_functions <> 72",
+		"public_tables <> 104",
+		"public_constraints <> 817",
+		"public_indexes <> 333",
+		"public_triggers <> 85",
+		"public_functions <> 79",
 		"NOT IN ('schema_migrations', 'schema_migrations_cloud')",
 		"Core initializer built-in skills are incomplete",
 		"Core Runtime schema contract initialization is inconsistent",

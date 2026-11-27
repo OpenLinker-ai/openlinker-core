@@ -13,8 +13,8 @@ BEGIN
     FROM pg_catalog.pg_tables
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_tables <> 97 THEN
-        RAISE EXCEPTION 'Core initializer table count is %, expected 97', public_tables;
+    IF public_tables <> 104 THEN
+        RAISE EXCEPTION 'Core initializer table count is %, expected 104', public_tables;
     END IF;
 
     SELECT count(*) INTO public_constraints
@@ -23,16 +23,16 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
     WHERE n.nspname = 'public'
       AND r.relname NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_constraints <> 791 THEN
-        RAISE EXCEPTION 'Core initializer constraint count is %, expected 791', public_constraints;
+    IF public_constraints <> 817 THEN
+        RAISE EXCEPTION 'Core initializer constraint count is %, expected 817', public_constraints;
     END IF;
 
     SELECT count(*) INTO public_indexes
     FROM pg_catalog.pg_indexes
     WHERE schemaname = 'public'
       AND tablename NOT IN ('schema_migrations', 'schema_migrations_cloud');
-    IF public_indexes <> 324 THEN
-        RAISE EXCEPTION 'Core initializer index count is %, expected 324', public_indexes;
+    IF public_indexes <> 333 THEN
+        RAISE EXCEPTION 'Core initializer index count is %, expected 333', public_indexes;
     END IF;
 
     SELECT count(*) INTO public_triggers
@@ -42,16 +42,16 @@ BEGIN
     WHERE n.nspname = 'public'
       AND c.relname NOT IN ('schema_migrations', 'schema_migrations_cloud')
       AND NOT t.tgisinternal;
-    IF public_triggers <> 80 THEN
-        RAISE EXCEPTION 'Core initializer trigger count is %, expected 80', public_triggers;
+    IF public_triggers <> 85 THEN
+        RAISE EXCEPTION 'Core initializer trigger count is %, expected 85', public_triggers;
     END IF;
 
     SELECT count(*) INTO public_functions
     FROM pg_catalog.pg_proc p
     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public';
-    IF public_functions <> 72 THEN
-        RAISE EXCEPTION 'Core initializer function count is %, expected 72', public_functions;
+    IF public_functions <> 79 THEN
+        RAISE EXCEPTION 'Core initializer function count is %, expected 79', public_functions;
     END IF;
 
     IF (SELECT count(*) FROM skills WHERE id IN (
@@ -358,6 +358,11 @@ BEGIN
           AND conrelid = 'public.skill_package_versions'::regclass
     ) OR to_regclass('public.agent_catalog_sources') IS NULL THEN
         RAISE EXCEPTION 'Core initializer is missing the registry catalog sources';
+    END IF;
+
+    IF to_regclass('public.registry_projection_settings') IS NULL OR to_regclass('public.registry_projection_dirty') IS NULL
+       OR NOT EXISTS (SELECT 1 FROM public.registry_projection_settings WHERE mode = 'local') THEN
+        RAISE EXCEPTION 'Core initializer is missing the registry projection state';
     END IF;
 
     IF NOT EXISTS (

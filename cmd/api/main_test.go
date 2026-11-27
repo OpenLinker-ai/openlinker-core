@@ -1044,11 +1044,11 @@ func TestRunMigrateWithCommandBranches(t *testing.T) {
 func currentCoreMigrationSnapshot() migrationinit.Snapshot {
 	return migrationinit.Snapshot{
 		Core:                    migrationinit.MigrationTableState{Exists: true, Rows: 1, Version: migrationinit.CoreVersion},
-		NonBookkeepingObjects:   97,
+		NonBookkeepingObjects:   104,
 		CallbackOwnerIndexValid: true,
 		CoreShape: migrationinit.SchemaShape{
 			Digest: migrationinit.CoreSchemaDigest,
-			Tables: 97, Constraints: 791, Indexes: 324, Triggers: 80,
+			Tables: 104, Constraints: 817, Indexes: 333, Triggers: 85,
 			CoreIdentities: 1, RuntimeControls: 1, RuntimeSchemas: 13,
 			CurrentRuntime: 1, RuntimeWires: 5, CurrentWire: 1, PreviousWire: 1,
 			BuiltInSkills: 30, BuiltInSkillCases: 15,
@@ -1064,6 +1064,7 @@ func signalRetentionPredecessorCoreMigrationSnapshot() migrationinit.Snapshot {
 	snapshot.CoreShape.Tables = 91
 	snapshot.CoreShape.Constraints = 728
 	snapshot.CoreShape.Indexes = 308
+	snapshot.CoreShape.Triggers = 80
 	return snapshot
 }
 
@@ -1075,6 +1076,7 @@ func mcpTransportPredecessorCoreMigrationSnapshot() migrationinit.Snapshot {
 	snapshot.CoreShape.Tables = 91
 	snapshot.CoreShape.Constraints = 728
 	snapshot.CoreShape.Indexes = 309
+	snapshot.CoreShape.Triggers = 80
 	return snapshot
 }
 
@@ -1086,6 +1088,7 @@ func workflowAttemptsPredecessorCoreMigrationSnapshot() migrationinit.Snapshot {
 	snapshot.CoreShape.Tables = 92
 	snapshot.CoreShape.Constraints = 736
 	snapshot.CoreShape.Indexes = 310
+	snapshot.CoreShape.Triggers = 80
 	return snapshot
 }
 
@@ -1097,6 +1100,7 @@ func workflowAdmissionPredecessorCoreMigrationSnapshot() migrationinit.Snapshot 
 	snapshot.CoreShape.Tables = 91
 	snapshot.CoreShape.Constraints = 730
 	snapshot.CoreShape.Indexes = 309
+	snapshot.CoreShape.Triggers = 80
 	return snapshot
 }
 

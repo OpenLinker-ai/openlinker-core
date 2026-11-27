@@ -169,7 +169,9 @@ type Config struct {
 	WorkflowMaxNodes                 int  `envconfig:"WORKFLOW_MAX_NODES" default:"30"`
 	WorkflowMaxEdges                 int  `envconfig:"WORKFLOW_MAX_EDGES" default:"60"`
 
-	CatalogRegistries string `envconfig:"CATALOG_REGISTRIES"`
+	CatalogRegistries          string `envconfig:"CATALOG_REGISTRIES"`
+	CatalogProjectionRegistry  string `envconfig:"CATALOG_PROJECTION_REGISTRY"`
+	CatalogProjectionPublicURL string `envconfig:"CATALOG_PROJECTION_PUBLIC_URL"`
 }
 
 // Load 从环境变量加载配置。
@@ -192,7 +194,11 @@ func Load() (*Config, error) {
 	if _, err := cfg.CLIAuthProxyRanges(); err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
-	if _, err := catalogconfig.Parse(cfg.CatalogRegistries); err != nil {
+	registries, err := catalogconfig.Parse(cfg.CatalogRegistries)
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	if _, err := catalogconfig.Projection(registries, cfg.CatalogProjectionRegistry, cfg.CatalogProjectionPublicURL); err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	return &cfg, nil

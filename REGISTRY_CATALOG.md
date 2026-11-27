@@ -156,3 +156,62 @@ for example `CATALOG_NAMESPACE_EXISTS`, `CATALOG_FORBIDDEN`,
 Each user may send 30 writes a minute through one Core process (429
 `CATALOG_RATE_LIMITED`). Nothing written this way changes Core's own Skill
 packages, Agents or Runs.
+
+## Projecting the public catalog
+
+Core can publish its public Skill packages and public MCP services to one
+Registry, so the Registry becomes their public catalog. Core stays the source of
+truth; Workers keep receiving the same bound versions and Runs never call the
+Registry.
+
+```bash
+CATALOG_PROJECTION_REGISTRY=public            # a signing entry of CATALOG_REGISTRIES
+CATALOG_PROJECTION_PUBLIC_URL=https://openlinker.example
+```
+
+The Registry gateway must have projection enabled
+(`PATCH /v1/admin/gateways/{consumer}` with `{"projection": true}`). Without
+these variables Core adds no route, starts no worker and behaves as before.
+
+Migration `108` adds a mode row (`local`, `registry`, `draining`), a dirty
+queue, entry and version links, version errors and exclusions. In `local` mode
+the triggers write nothing. In `registry` mode every change that can alter the
+public catalog (package visibility, version publication, owner status, MCP
+Agent visibility, lifecycle, tags and metadata) marks the subject in the same
+transaction; run counters, passwords and profile edits mark nothing.
+
+The worker sends each subject's complete desired state with a revision: first
+the restrictive part (hide or withdraw), then the expanding part (new versions
+and visibility). Versions are ingested once, immutably, before they become
+visible. Entries are named `p-<instance>-<package>` and `m-<instance>-<agent>`
+in a namespace the Registry generates per owner; packages without an SPDX
+license use `LicenseRef-openlinker-platform-terms`. Drafts, private packages,
+unpublished versions and non-public MCP Agents are never sent, and MCP entries
+point at Core's `/mcp/agents/{id}` endpoint rather than the Agent's own URL.
+An hourly reconciliation compares Registry state with Core and re-marks drift.
+
+```text
+api registry-migrate inventory      # read-only counts
+api registry-migrate preflight      # validates every version with the Registry
+api registry-migrate exclude --add --kind skill --subject <id> [--version <id>] --reason <text>
+api registry-migrate exclude --remove --kind skill --subject <id> [--version <id>]
+api registry-migrate cutover [--timeout 10m]
+api registry-migrate reconcile
+api registry-migrate status
+api registry-migrate rollback [--timeout 10m]
+```
+
+`cutover` refuses while unexcluded preflight blockers remain, switches the mode
+row to `registry` under a row lock, marks every candidate and drives delivery;
+it reports incomplete while work is queued or a version error remains.
+`rollback` switches to `draining`, waits for the queue, reconciles, and returns
+to `local` only when nothing is pending, claimed or failing; otherwise it stays
+`draining`. Neither command deletes Registry entries or Core's links.
+
+In `registry` and `draining` mode the old public endpoints keep their answers
+(decided by Core's own state) and add `Deprecation: true` and
+`Link: <registry entry>; rel="alternate"` when an entry exists;
+`/mcp-services` and the public metadata endpoint also hide services whose
+owner is disabled. `GET /api/v1/catalog/legacy/skill-packages/{id}` and
+`/catalog/legacy/mcp-services/{slug}` return `{registry, kind, namespace, name}`
+for a projected, still public subject, otherwise 404.

@@ -146,3 +146,30 @@ func parseOne(item rawRegistry) (Registry, error) {
 	}
 	return reg, nil
 }
+
+func Projection(regs []Registry, name, publicURL string) (Registry, error) {
+	if name == "" {
+		if publicURL != "" {
+			return Registry{}, errors.New("CATALOG_PROJECTION_PUBLIC_URL needs CATALOG_PROJECTION_REGISTRY")
+		}
+		return Registry{}, nil
+	}
+	var reg Registry
+	found := false
+	for _, r := range regs {
+		if r.Name == name {
+			reg, found = r, true
+		}
+	}
+	if !found {
+		return Registry{}, errors.New("CATALOG_PROJECTION_REGISTRY must name one of CATALOG_REGISTRIES")
+	}
+	if !reg.CanSign() {
+		return Registry{}, errors.New("the projection registry needs signing_key, signing_key_id and assertion_audience")
+	}
+	u, err := url.Parse(publicURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return Registry{}, errors.New("CATALOG_PROJECTION_PUBLIC_URL must be an https URL without credentials, query or fragment")
+	}
+	return reg, nil
+}
