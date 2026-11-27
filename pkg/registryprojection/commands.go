@@ -157,24 +157,17 @@ func (p *Projector) Preflight(ctx context.Context) (Preflight, error) {
 			out.Blockers = append(out.Blockers, Blocker{Kind: KindSkill, Subject: c.pkg.String(), Version: c.label, Code: code, Message: msg})
 		}
 	}
-	mrows, err := p.pool.Query(ctx, mcpCandidates)
+	mrows, err := p.pool.Query(ctx, `SELECT a.creator_id FROM agents a WHERE a.id IN (`+mcpCandidates+`)`)
 	if err != nil {
 		return out, err
 	}
-	for mrows.Next() {
-		var id uuid.UUID
-		if err := mrows.Scan(&id); err != nil {
-			mrows.Close()
-			return out, err
-		}
-		var owner uuid.UUID
-		if err := p.pool.QueryRow(ctx, `SELECT creator_id FROM agents WHERE id = $1`, id).Scan(&owner); err != nil {
-			mrows.Close()
-			return out, err
-		}
+	mcpOwners, err := pgx.CollectRows(mrows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return out, err
+	}
+	for _, owner := range mcpOwners {
 		owners[owner] = true
 	}
-	mrows.Close()
 	subjects := []string{}
 	for o := range owners {
 		subjects = append(subjects, o.String())

@@ -128,6 +128,7 @@ func (p *Projector) ack(ctx context.Context, c *claim) error {
 }
 
 var permanentCodes = map[string]bool{"managed_by_core": true, "name_conflict": true, "namespace_conflict": true, "owner_mismatch": true,
+	"mode_mismatch": true, "name_reserved": true, "namespace_upstream_managed": true,
 	"projection_public_only": true, "projection_not_allowed": true, "name_invalid": true}
 
 func hiddenDone(err error) bool {

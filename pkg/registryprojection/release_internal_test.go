@@ -217,6 +217,9 @@ func TestReleaseRules(t *testing.T) {
 		require.True(t, hiddenDone(&remoteError{Status: 409, Code: "managed_by_core"}))
 		require.False(t, hiddenDone(&remoteError{Status: 403, Code: "projection_not_allowed"}))
 		require.False(t, hiddenDone(errors.New("timeout")))
+		for _, code := range []string{"mode_mismatch", "name_reserved", "namespace_upstream_managed", "name_conflict", "managed_by_core", "namespace_conflict"} {
+			require.True(t, permanent(&remoteError{Status: 409, Code: code}), code)
+		}
 	})
 
 	t.Run("reconciliation leaves suspended subjects alone", func(t *testing.T) {

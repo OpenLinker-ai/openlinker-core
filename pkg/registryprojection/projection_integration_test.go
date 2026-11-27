@@ -305,6 +305,20 @@ func TestProjectionThroughRealRegistry(t *testing.T) {
 		require.Empty(t, pre.Blockers)
 	})
 
+	t.Run("preflight works with a single database connection", func(t *testing.T) {
+		cfg := f.pool.Config().Copy()
+		cfg.MaxConns = 1
+		single, err := pgxpool.NewWithConfig(ctx, cfg)
+		require.NoError(t, err)
+		defer single.Close()
+		proj, err := registryprojection.New(single, f.proj.Client(), "projection", "https://openlinker.example")
+		require.NoError(t, err)
+		bounded, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		_, err = proj.Preflight(bounded)
+		require.NoError(t, err)
+	})
+
 	t.Run("cutover projects exactly the public catalog", func(t *testing.T) {
 		report, err := f.proj.Cutover(ctx, time.Minute)
 		require.NoError(t, err)
