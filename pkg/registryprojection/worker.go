@@ -130,7 +130,7 @@ func (p *Projector) ack(ctx context.Context, c *claim) error {
 var permanentCodes = map[string]bool{"managed_by_core": true, "name_conflict": true, "namespace_conflict": true, "owner_mismatch": true,
 	"projection_public_only": true, "projection_not_allowed": true, "name_invalid": true}
 
-func neverOurs(err error) bool {
+func hiddenDone(err error) bool {
 	var re *remoteError
 	return errors.As(err, &re) && (re.Code == "name_conflict" || re.Code == "managed_by_core" || re.Code == "namespace_conflict")
 }
@@ -146,23 +146,10 @@ func (p *Projector) release(ctx context.Context, c *claim, cause error) {
 		msg = msg[:500]
 	}
 	ctx = context.WithoutCancel(ctx)
-	var matched bool
-	_ = pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE registry_projection_dirty SET claim_token = NULL, claimed_at = NULL, last_error = $3, suspended = $4,
-			next_attempt_at = clock_timestamp() + LEAST(interval '1 second' * power(2, LEAST(attempts, 12)), interval '1 hour')
-			WHERE claim_token = $1 AND revision = $2`, c.Token, c.Revision, msg, permanent(cause))
-		if err != nil {
-			return err
-		}
-		matched = tag.RowsAffected() == 1
-		if matched && neverOurs(cause) {
-			_, err = tx.Exec(ctx, `UPDATE registry_projection_links SET attempted = false
-				WHERE kind = $1 AND subject_id = $2 AND registry_url = $3 AND consumer = $4 AND applied_revision = 0 AND registry_namespace = ''`,
-				c.Kind, c.Subject, p.registry.URL, p.registry.Consumer)
-		}
-		return err
-	})
-	if !matched {
+	tag, _ := p.pool.Exec(ctx, `UPDATE registry_projection_dirty SET claim_token = NULL, claimed_at = NULL, last_error = $3, suspended = $4,
+		next_attempt_at = clock_timestamp() + LEAST(interval '1 second' * power(2, LEAST(attempts, 12)), interval '1 hour')
+		WHERE claim_token = $1 AND revision = $2`, c.Token, c.Revision, msg, permanent(cause))
+	if tag.RowsAffected() == 0 {
 		_, _ = p.pool.Exec(ctx, `UPDATE registry_projection_dirty SET claim_token = NULL, claimed_at = NULL WHERE claim_token = $1`, c.Token)
 	}
 }
@@ -303,6 +290,9 @@ func (p *Projector) sendSkillState(ctx context.Context, instance uuid.UUID, entr
 		"state": state, "listed": listed, "versions": labels, "current_version": current, "display": map[string]string{"name": name, "description": description},
 		"legacy": legacy})
 	doc, err := p.call(ctx, http.MethodPut, "/v1/projections/skills/"+entry, "application/json", body, owner)
+	if err != nil && state == "hidden" && hiddenDone(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -443,7 +433,7 @@ func (p *Projector) projectMCP(ctx context.Context, s Settings, c *claim) error 
 		}
 		hide, _ := json.Marshal(map[string]any{"op": uuid.NewString(), "revision": c.Revision, "phase": 0, "owner": map[string]string{"sub": l.Owner.String()},
 			"state": "hidden", "listed": false})
-		if _, err := p.call(ctx, http.MethodPut, "/v1/projections/mcp/"+l.Entry, "application/json", hide, l.Owner); err != nil {
+		if _, err := p.call(ctx, http.MethodPut, "/v1/projections/mcp/"+l.Entry, "application/json", hide, l.Owner); err != nil && !hiddenDone(err) {
 			return err
 		}
 		if err := p.forgetOwner(ctx, c, l.Owner); err != nil {
@@ -479,6 +469,9 @@ func (p *Projector) projectMCP(ctx context.Context, s Settings, c *claim) error 
 	}
 	body, _ := json.Marshal(doc)
 	res, err := p.call(ctx, http.MethodPut, "/v1/projections/mcp/"+entry, "application/json", body, owner)
+	if err != nil && state == "hidden" && hiddenDone(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

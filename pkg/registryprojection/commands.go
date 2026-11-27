@@ -364,6 +364,14 @@ func (p *Projector) Reconcile(ctx context.Context) (ReconcileReport, error) {
 	}
 	rows.Close()
 	for _, sj := range subjects {
+		var suspended bool
+		if err := p.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM registry_projection_dirty WHERE kind = $1 AND subject_id = $2 AND suspended)`,
+			sj.kind, sj.id).Scan(&suspended); err != nil {
+			return rep, err
+		}
+		if suspended {
+			continue
+		}
 		rep.Checked++
 		drift, err := p.drifted(ctx, s, sj.kind, sj.id)
 		if err != nil {

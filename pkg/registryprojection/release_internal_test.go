@@ -123,7 +123,7 @@ func TestReleaseRules(t *testing.T) {
 		require.Equal(t, 1, left)
 	})
 
-	t.Run("a permanent refusal of the first request forgets the attempt", func(t *testing.T) {
+	t.Run("a permanent refusal keeps the attempt", func(t *testing.T) {
 		_, err := pool.Exec(ctx, `DELETE FROM registry_projection_dirty`)
 		require.NoError(t, err)
 		_, err = pool.Exec(ctx, `UPDATE registry_projection_settings SET registry_url = 'https://registry.example'`)
@@ -140,7 +140,7 @@ func TestReleaseRules(t *testing.T) {
 		require.True(t, suspended)
 		l, err := loadLink(ctx, pool, KindSkill, id, "https://registry.example", "core")
 		require.NoError(t, err)
-		require.False(t, l.Attempted)
+		require.True(t, l.Attempted)
 		_, err = pool.Exec(ctx, `DELETE FROM registry_projection_dirty`)
 		require.NoError(t, err)
 	})
@@ -209,5 +209,33 @@ func TestReleaseRules(t *testing.T) {
 		var delayed bool
 		require.NoError(t, pool.QueryRow(ctx, `SELECT next_attempt_at > clock_timestamp() + interval '30 seconds' FROM registry_projection_dirty WHERE subject_id = $1`, id).Scan(&delayed))
 		require.True(t, delayed)
+	})
+
+	t.Run("a hidden state refused as not ours is done", func(t *testing.T) {
+		require.True(t, hiddenDone(&remoteError{Status: 409, Code: "name_conflict"}))
+		require.True(t, hiddenDone(&remoteError{Status: 409, Code: "namespace_conflict"}))
+		require.True(t, hiddenDone(&remoteError{Status: 409, Code: "managed_by_core"}))
+		require.False(t, hiddenDone(&remoteError{Status: 403, Code: "projection_not_allowed"}))
+		require.False(t, hiddenDone(errors.New("timeout")))
+	})
+
+	t.Run("reconciliation leaves suspended subjects alone", func(t *testing.T) {
+		for _, q := range []string{`DELETE FROM registry_projection_dirty`, `DELETE FROM registry_projection_links`,
+			`UPDATE registry_projection_settings SET mode = 'registry', registry_url = 'https://registry.example', consumer = 'core'`} {
+			_, err := pool.Exec(ctx, q)
+			require.NoError(t, err)
+		}
+		id := uuid.New()
+		mark(id)
+		_, err := pool.Exec(ctx, `UPDATE registry_projection_dirty SET suspended = true, last_error = 'registry answered 409 name_conflict' WHERE subject_id = $1`, id)
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, `INSERT INTO registry_projection_links (kind, subject_id, registry_url, consumer, registry_entry, owner_id, attempted)
+			VALUES ('skill', $1, 'https://registry.example', 'core', 'p-x', $2, true)`, id, uuid.New())
+		require.NoError(t, err)
+		rep, err := p.Reconcile(ctx)
+		require.NoError(t, err)
+		require.Zero(t, rep.Marked)
+		suspended, _, _ := row(id)
+		require.True(t, suspended)
 	})
 }
