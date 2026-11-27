@@ -176,4 +176,38 @@ func TestReleaseRules(t *testing.T) {
 		require.Equal(t, ownerA, a.Owner)
 		require.Equal(t, ownerB, b.Owner)
 	})
+
+	t.Run("making a public package unlisted is restrictive", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `DELETE FROM registry_projection_dirty`)
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, `UPDATE registry_projection_settings SET mode = 'local'`)
+		require.NoError(t, err)
+		owner, pkg := uuid.New(), uuid.New()
+		_, err = pool.Exec(ctx, `INSERT INTO users(id,email,password_hash,display_name) VALUES($1,$2,'x','Owner')`, owner, owner.String()+"@example.invalid")
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, `INSERT INTO skill_packages(id,owner_user_id,name,description,visibility) VALUES($1,$2,'p','d','public')`, pkg, owner)
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, `UPDATE registry_projection_settings SET mode = 'registry'`)
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, `UPDATE skill_packages SET visibility = 'unlisted' WHERE id = $1`, pkg)
+		require.NoError(t, err)
+		var priority int
+		require.NoError(t, pool.QueryRow(ctx, `SELECT priority FROM registry_projection_dirty WHERE subject_id = $1`, pkg).Scan(&priority))
+		require.Zero(t, priority)
+	})
+
+	t.Run("drain keeps a scheduled backoff", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `DELETE FROM registry_projection_dirty`)
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, `UPDATE registry_projection_settings SET registry_url = 'https://registry.example'`)
+		require.NoError(t, err)
+		id := uuid.New()
+		mark(id)
+		_, err = pool.Exec(ctx, `UPDATE registry_projection_dirty SET next_attempt_at = clock_timestamp() + interval '1 minute' WHERE subject_id = $1`, id)
+		require.NoError(t, err)
+		require.Error(t, p.Drain(ctx, 500*time.Millisecond))
+		var delayed bool
+		require.NoError(t, pool.QueryRow(ctx, `SELECT next_attempt_at > clock_timestamp() + interval '30 seconds' FROM registry_projection_dirty WHERE subject_id = $1`, id).Scan(&delayed))
+		require.True(t, delayed)
+	})
 }

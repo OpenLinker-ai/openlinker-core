@@ -136,7 +136,8 @@ BEGIN
         PERFORM public.registry_projection_mark('skill', NEW.id, 1::smallint);
     ELSE
         PERFORM public.registry_projection_mark('skill', NEW.id,
-            CASE WHEN NEW.visibility = 'private' OR NEW.owner_user_id <> OLD.owner_user_id THEN 0 ELSE 1 END::smallint);
+            CASE WHEN NEW.visibility = 'private' OR (OLD.visibility = 'public' AND NEW.visibility <> 'public')
+                      OR NEW.owner_user_id <> OLD.owner_user_id THEN 0 ELSE 1 END::smallint);
     END IF;
     RETURN NULL;
 END;

@@ -186,7 +186,8 @@ run_database_test() {
     104_workflow_execution_attempts.up.sql \
     105_workflow_versions.up.sql \
     106_workflow_run_revision.up.sql \
-    107_registry_catalog_sources.up.sql; do
+    107_registry_catalog_sources.up.sql \
+    108_registry_projection.up.sql; do
     apply_schema_file "$repository_root/migrations/$migration_file"
   done
   apply_schema_file "$repository_root/migrations/086_current_schema_init_verify.sql"

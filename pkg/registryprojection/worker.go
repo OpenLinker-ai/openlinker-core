@@ -216,9 +216,6 @@ func (p *Projector) Drain(ctx context.Context, limit time.Duration) error {
 			return fmt.Errorf("%d projection subjects are still pending", pending)
 		}
 		if !processed {
-			if _, rerr := p.pool.Exec(ctx, `UPDATE registry_projection_dirty SET next_attempt_at = NULL WHERE claim_token IS NULL AND next_attempt_at > clock_timestamp() + interval '2 seconds'`); rerr != nil {
-				return rerr
-			}
 			time.Sleep(200 * time.Millisecond)
 		}
 	}
