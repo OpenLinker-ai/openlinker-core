@@ -394,6 +394,20 @@ func TestProjectionThroughRealRegistry(t *testing.T) {
 		require.Equal(t, false, doc["hidden"])
 	})
 
+	t.Run("an MCP Agent moved to another owner is listed under the new owner", func(t *testing.T) {
+		f.exec(`UPDATE agents SET creator_id = $1 WHERE id = $2`, bob, agent)
+		f.drain()
+		_, doc := f.state("mcp", name("m", agent), alice)
+		require.Equal(t, true, doc["hidden"])
+		status, doc := f.state("mcp", name("m", agent), bob)
+		require.Equal(t, 200, status)
+		require.Equal(t, false, doc["hidden"])
+		f.exec(`UPDATE agents SET creator_id = $1 WHERE id = $2`, alice, agent)
+		f.drain()
+		_, doc = f.state("mcp", name("m", agent), alice)
+		require.Equal(t, false, doc["hidden"])
+	})
+
 	t.Run("unrelated updates mark nothing", func(t *testing.T) {
 		f.exec(`UPDATE agents SET total_calls = total_calls + 1, updated_at = now() WHERE id=$1`, agent)
 		f.exec(`UPDATE users SET password_hash='y', display_name='Renamed' WHERE id=$1`, alice)

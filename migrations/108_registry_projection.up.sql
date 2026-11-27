@@ -176,6 +176,7 @@ BEGIN
     IF TG_OP = 'UPDATE' AND (NEW.disabled_at, NEW.deleted_at) IS NOT DISTINCT FROM (OLD.disabled_at, OLD.deleted_at) THEN
         RETURN NULL;
     END IF;
+    PERFORM 1 FROM public.registry_projection_settings WHERE singleton FOR SHARE;
     IF TG_OP = 'DELETE' THEN
         target := OLD.id;
         restrictive := 0;

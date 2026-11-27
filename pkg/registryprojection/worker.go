@@ -144,6 +144,10 @@ func (p *Projector) release(ctx context.Context, c *claim, cause error) {
 	tag, _ := p.pool.Exec(ctx, `UPDATE registry_projection_dirty SET claim_token = NULL, claimed_at = NULL, last_error = $3, suspended = $4,
 		next_attempt_at = clock_timestamp() + LEAST(interval '1 second' * power(2, LEAST(attempts, 12)), interval '1 hour')
 		WHERE claim_token = $1 AND revision = $2`, c.Token, c.Revision, msg, permanent(cause))
+	if tag.RowsAffected() == 1 && permanent(cause) {
+		_, _ = p.pool.Exec(ctx, `UPDATE registry_projection_links SET attempted = false
+			WHERE kind = $1 AND subject_id = $2 AND applied_revision = 0 AND registry_namespace = ''`, c.Kind, c.Subject)
+	}
 	if tag.RowsAffected() == 0 {
 		_, _ = p.pool.Exec(ctx, `UPDATE registry_projection_dirty SET claim_token = NULL, claimed_at = NULL WHERE claim_token = $1`, c.Token)
 	}
@@ -318,13 +322,7 @@ func (p *Projector) projectSkill(ctx context.Context, s Settings, c *claim) erro
 		if err := p.sendSkillState(ctx, s.Instance, l.Entry, l.Owner, c, 0, true, false, nil); err != nil {
 			return err
 		}
-		if err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, `DELETE FROM registry_projection_links WHERE kind = $1 AND subject_id = $2 AND owner_id = $3`, KindSkill, c.Subject, l.Owner); err != nil {
-				return err
-			}
-			_, err := tx.Exec(ctx, `DELETE FROM skill_package_registry_links WHERE package_id = $1`, c.Subject)
-			return err
-		}); err != nil {
+		if err := p.forgetOwner(ctx, c, l.Owner); err != nil {
 			return err
 		}
 		l = link{}
@@ -420,8 +418,22 @@ func (p *Projector) projectMCP(ctx context.Context, s Settings, c *claim) error 
 		owner = l.Owner
 	}
 	if l.Found && l.Attempted && d.Exists && l.Owner != d.Owner {
-		d.Visible = false
-		owner = l.Owner
+		ok, err := p.registerAttempt(ctx, c, l.Entry, l.Owner)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("claim lost before the first request")
+		}
+		hide, _ := json.Marshal(map[string]any{"op": uuid.NewString(), "revision": c.Revision, "phase": 0, "owner": map[string]string{"sub": l.Owner.String()},
+			"state": "hidden", "listed": false})
+		if _, err := p.call(ctx, http.MethodPut, "/v1/projections/mcp/"+l.Entry, "application/json", hide, l.Owner); err != nil {
+			return err
+		}
+		if err := p.forgetOwner(ctx, c, l.Owner); err != nil {
+			return err
+		}
+		l, owner = link{}, d.Owner
 	}
 	serverJSON, digest := mcpDocument(p.publicURL, c.Subject, d)
 	if !d.Visible && !(l.Found && l.Attempted) {
@@ -455,7 +467,17 @@ func (p *Projector) projectMCP(ctx context.Context, s Settings, c *claim) error 
 		return err
 	}
 	if applied, _ := res["applied"].(bool); !applied {
-		return nil
+		remote, err := p.call(ctx, http.MethodGet, "/v1/projections/mcp/"+entry, "", nil, owner)
+		if err != nil {
+			return err
+		}
+		revision, _ := remote["revision"].(float64)
+		remotePhase, _ := remote["phase"].(float64)
+		remoteVersion, _ := remote["version"].(string)
+		if int64(revision) != c.Revision || int(remotePhase) != phase || (state == "visible" && remoteVersion != version) {
+			return nil
+		}
+		res = remote
 	}
 	namespace, _ := res["namespace"].(string)
 	_, err = p.pool.Exec(ctx, `UPDATE registry_projection_links SET applied_revision = $3, applied_phase = $4, applied_hidden = $5,
@@ -485,4 +507,23 @@ func (p *Projector) ingest(ctx context.Context, entry string, owner uuid.UUID, v
 		}
 	}
 	return p.call(ctx, http.MethodPut, target+platformLicense, bundleType, []byte(v.Payload), owner)
+}
+
+func (p *Projector) forgetOwner(ctx context.Context, c *claim, previous uuid.UUID) error {
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `SELECT 1 FROM registry_projection_dirty WHERE kind = $1 AND subject_id = $2 AND claim_token = $3 AND revision = $4
+			AND claimed_at > clock_timestamp() - $5::interval FOR UPDATE`, c.Kind, c.Subject, c.Token, c.Revision, claimLease.String())
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return errors.New("claim lost before the ownership change was recorded")
+		}
+		tag, err = tx.Exec(ctx, `DELETE FROM registry_projection_links WHERE kind = $1 AND subject_id = $2 AND owner_id = $3`, c.Kind, c.Subject, previous)
+		if err != nil || tag.RowsAffected() == 0 || c.Kind != KindSkill {
+			return err
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM skill_package_registry_links WHERE package_id = $1`, c.Subject)
+		return err
+	})
 }

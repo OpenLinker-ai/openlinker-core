@@ -476,7 +476,13 @@ func (p *Projector) Rollback(ctx context.Context, limit time.Duration) (Report, 
 	if !p.matches(s) {
 		return Report{}, ErrNotConfigured
 	}
-	if _, err := p.pool.Exec(ctx, `UPDATE registry_projection_settings SET mode = 'draining', changed_at = now() WHERE singleton`); err != nil {
+	if err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		if err := p.lockDestination(ctx, tx, ModeRegistry, ModeDraining); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE registry_projection_settings SET mode = 'draining', changed_at = now() WHERE singleton`)
+		return err
+	}); err != nil {
 		return Report{}, err
 	}
 	if err := p.Drain(ctx, limit); err != nil {
@@ -492,8 +498,11 @@ func (p *Projector) Rollback(ctx context.Context, limit time.Duration) (Report, 
 		return rep, fmt.Errorf("rollback stays draining: %w", err)
 	}
 	err = pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		if err := p.lockDestination(ctx, tx, ModeDraining); err != nil {
+			return err
+		}
 		var reconciled *time.Time
-		if err := tx.QueryRow(ctx, `SELECT reconciled_at FROM registry_projection_settings WHERE singleton FOR UPDATE`).Scan(&reconciled); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT reconciled_at FROM registry_projection_settings WHERE singleton`).Scan(&reconciled); err != nil {
 			return err
 		}
 		var pending, claimed, versionErrors int
@@ -517,6 +526,20 @@ func (p *Projector) Rollback(ctx context.Context, limit time.Duration) (Report, 
 		return rep, err
 	}
 	return rep, rerr
+}
+
+func (p *Projector) lockDestination(ctx context.Context, tx pgx.Tx, modes ...string) error {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM registry_projection_settings WHERE singleton FOR UPDATE`); err != nil {
+		return err
+	}
+	s, err := loadSettings(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(modes, s.Mode) || !p.matches(s) {
+		return fmt.Errorf("the projection mode changed to %s meanwhile: %w", s.Mode, ErrNotConfigured)
+	}
+	return nil
 }
 
 type Status struct {

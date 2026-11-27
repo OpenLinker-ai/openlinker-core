@@ -14,6 +14,7 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -120,5 +121,37 @@ func TestReleaseRules(t *testing.T) {
 		var left int
 		require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM registry_projection_dirty WHERE subject_id = $1`, id).Scan(&left))
 		require.Equal(t, 1, left)
+	})
+
+	t.Run("a permanent refusal of the first request forgets the attempt", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `DELETE FROM registry_projection_dirty`)
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, `UPDATE registry_projection_settings SET registry_url = 'https://registry.example'`)
+		require.NoError(t, err)
+		id := uuid.New()
+		mark(id)
+		c, err := p.claim(ctx)
+		require.NoError(t, err)
+		ok, err := p.registerAttempt(ctx, c, "p-x", uuid.New())
+		require.NoError(t, err)
+		require.True(t, ok)
+		p.release(ctx, c, &remoteError{Status: 409, Code: "name_conflict"})
+		l, err := loadLink(ctx, pool, KindSkill, id)
+		require.NoError(t, err)
+		require.False(t, l.Attempted)
+		_, err = pool.Exec(ctx, `DELETE FROM registry_projection_dirty`)
+		require.NoError(t, err)
+	})
+
+	t.Run("rollback refuses when the destination changed meanwhile", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `UPDATE registry_projection_settings SET mode = 'registry', registry_url = 'https://registry.example'`)
+		require.NoError(t, err)
+		err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return p.lockDestination(ctx, tx, ModeDraining) })
+		require.ErrorIs(t, err, ErrNotConfigured)
+		other := &Projector{pool: pool}
+		other.registry.URL, other.registry.Consumer = "https://other.example", "core"
+		err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return other.lockDestination(ctx, tx, ModeRegistry) })
+		require.ErrorIs(t, err, ErrNotConfigured)
+		require.NoError(t, pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return p.lockDestination(ctx, tx, ModeRegistry) }))
 	})
 }
