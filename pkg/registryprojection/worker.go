@@ -381,6 +381,9 @@ func (p *Projector) projectSkill(ctx context.Context, s Settings, c *claim) erro
 			continue
 		}
 		doc, err := p.ingest(ctx, entry, owner, v)
+		if permanent(err) {
+			return err
+		}
 		if re, refused := versionRefused(err); refused {
 			if _, err := p.pool.Exec(ctx, `INSERT INTO registry_projection_version_errors (package_id, version_id, code, message) VALUES ($1, $2, $3, $4)
 				ON CONFLICT (package_id, version_id) DO UPDATE SET code = EXCLUDED.code, message = EXCLUDED.message, at = now()`,

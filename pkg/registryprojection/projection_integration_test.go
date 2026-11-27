@@ -418,6 +418,33 @@ func TestProjectionThroughRealRegistry(t *testing.T) {
 		require.Equal(t, false, doc["hidden"])
 	})
 
+	t.Run("a name conflict suspends the package without failing its versions", func(t *testing.T) {
+		ns := ""
+		require.NoError(t, f.pool.QueryRow(ctx, `SELECT registry_namespace FROM registry_projection_links WHERE kind = 'skill' AND subject_id = $1`, p1).Scan(&ns))
+		taken := uuid.New()
+		md := []byte("---\nname: squatter\ndescription: Not from Core\nlicense: MIT\n---\nBody.\n")
+		req, _ := http.NewRequest("POST", f.reg.base+"/v1/skills/"+ns+"/"+name("p", taken)+"/versions?version=1&license=MIT", bytes.NewReader(md))
+		req.Header.Set("Authorization", "Bearer "+registryAdmin)
+		req.Header.Set("Content-Type", "text/markdown")
+		res, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		res.Body.Close()
+		require.Equal(t, 201, res.StatusCode)
+		f.exec(`INSERT INTO skill_packages(id,owner_user_id,name,description,visibility) VALUES($1,$2,'squatted','d','public')`, taken, alice)
+		version(taken, "1", "squatted", "Conflicting name", true)
+		_ = f.proj.Drain(ctx, 3*time.Second)
+		var suspended bool
+		var lastError string
+		require.NoError(t, f.pool.QueryRow(ctx, `SELECT suspended, last_error FROM registry_projection_dirty WHERE subject_id = $1`, taken).Scan(&suspended, &lastError))
+		require.True(t, suspended)
+		require.Contains(t, lastError, "name_conflict")
+		var failed int
+		require.NoError(t, f.pool.QueryRow(ctx, `SELECT count(*) FROM registry_projection_version_errors WHERE package_id = $1`, taken).Scan(&failed))
+		require.Zero(t, failed)
+		f.exec(`UPDATE skill_packages SET visibility = 'private' WHERE id = $1`, taken)
+		f.drain()
+	})
+
 	t.Run("unrelated updates mark nothing", func(t *testing.T) {
 		f.exec(`UPDATE agents SET total_calls = total_calls + 1, updated_at = now() WHERE id=$1`, agent)
 		f.exec(`UPDATE users SET password_hash='y', display_name='Renamed' WHERE id=$1`, alice)
