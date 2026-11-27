@@ -269,7 +269,7 @@ func (p *Projector) Cutover(ctx context.Context, limit time.Duration) (Report, e
 		if s.Mode != ModeLocal && !p.matches(s) {
 			return ErrNotConfigured
 		}
-		if _, err := tx.Exec(ctx, `UPDATE registry_projection_settings SET mode = 'registry', registry_url = $1, consumer = $2, changed_at = now() WHERE singleton`,
+		if _, err := tx.Exec(ctx, `UPDATE registry_projection_settings SET mode = 'registry', registry_url = $1, consumer = $2, changed_at = clock_timestamp() WHERE singleton`,
 			p.registry.URL, p.registry.Consumer); err != nil {
 			return err
 		}
@@ -476,12 +476,12 @@ func (p *Projector) Rollback(ctx context.Context, limit time.Duration) (Report, 
 	if !p.matches(s) {
 		return Report{}, ErrNotConfigured
 	}
+	generation := s.ChangedAt
 	if err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
-		if err := p.lockDestination(ctx, tx, ModeRegistry, ModeDraining); err != nil {
+		if err := p.lockDestination(ctx, tx, generation, ModeRegistry, ModeDraining); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `UPDATE registry_projection_settings SET mode = 'draining', changed_at = now() WHERE singleton`)
-		return err
+		return tx.QueryRow(ctx, `UPDATE registry_projection_settings SET mode = 'draining', changed_at = clock_timestamp() WHERE singleton RETURNING changed_at`).Scan(&generation)
 	}); err != nil {
 		return Report{}, err
 	}
@@ -498,7 +498,7 @@ func (p *Projector) Rollback(ctx context.Context, limit time.Duration) (Report, 
 		return rep, fmt.Errorf("rollback stays draining: %w", err)
 	}
 	err = pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
-		if err := p.lockDestination(ctx, tx, ModeDraining); err != nil {
+		if err := p.lockDestination(ctx, tx, generation, ModeDraining); err != nil {
 			return err
 		}
 		var reconciled *time.Time
@@ -518,7 +518,7 @@ func (p *Projector) Rollback(ctx context.Context, limit time.Duration) (Report, 
 		if pending > 0 || claimed > 0 || versionErrors > 0 || reconciled == nil {
 			return fmt.Errorf("rollback stays draining: %d pending, %d claimed, %d version errors", pending, claimed, versionErrors)
 		}
-		_, err := tx.Exec(ctx, `UPDATE registry_projection_settings SET mode = 'local', changed_at = now() WHERE singleton`)
+		_, err := tx.Exec(ctx, `UPDATE registry_projection_settings SET mode = 'local', changed_at = clock_timestamp() WHERE singleton`)
 		return err
 	})
 	rep, rerr := p.report(ctx)
@@ -528,7 +528,7 @@ func (p *Projector) Rollback(ctx context.Context, limit time.Duration) (Report, 
 	return rep, rerr
 }
 
-func (p *Projector) lockDestination(ctx context.Context, tx pgx.Tx, modes ...string) error {
+func (p *Projector) lockDestination(ctx context.Context, tx pgx.Tx, generation time.Time, modes ...string) error {
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM registry_projection_settings WHERE singleton FOR UPDATE`); err != nil {
 		return err
 	}
@@ -536,7 +536,7 @@ func (p *Projector) lockDestination(ctx context.Context, tx pgx.Tx, modes ...str
 	if err != nil {
 		return err
 	}
-	if !slices.Contains(modes, s.Mode) || !p.matches(s) {
+	if !slices.Contains(modes, s.Mode) || !p.matches(s) || !s.ChangedAt.Equal(generation) {
 		return fmt.Errorf("the projection mode changed to %s meanwhile: %w", s.Mode, ErrNotConfigured)
 	}
 	return nil

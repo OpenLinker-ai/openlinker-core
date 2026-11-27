@@ -143,15 +143,21 @@ func TestReleaseRules(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("rollback refuses when the destination changed meanwhile", func(t *testing.T) {
-		_, err := pool.Exec(ctx, `UPDATE registry_projection_settings SET mode = 'registry', registry_url = 'https://registry.example'`)
+	t.Run("rollback refuses when the destination or its generation changed meanwhile", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `UPDATE registry_projection_settings SET mode = 'registry', registry_url = 'https://registry.example', changed_at = clock_timestamp()`)
 		require.NoError(t, err)
-		err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return p.lockDestination(ctx, tx, ModeDraining) })
-		require.ErrorIs(t, err, ErrNotConfigured)
+		s, err := loadSettings(ctx, pool)
+		require.NoError(t, err)
+		lock := func(q *Projector, generation time.Time, modes ...string) error {
+			return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return q.lockDestination(ctx, tx, generation, modes...) })
+		}
+		require.ErrorIs(t, lock(p, s.ChangedAt, ModeDraining), ErrNotConfigured)
 		other := &Projector{pool: pool}
 		other.registry.URL, other.registry.Consumer = "https://other.example", "core"
-		err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return other.lockDestination(ctx, tx, ModeRegistry) })
-		require.ErrorIs(t, err, ErrNotConfigured)
-		require.NoError(t, pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return p.lockDestination(ctx, tx, ModeRegistry) }))
+		require.ErrorIs(t, lock(other, s.ChangedAt, ModeRegistry), ErrNotConfigured)
+		require.NoError(t, lock(p, s.ChangedAt, ModeRegistry))
+		_, err = pool.Exec(ctx, `UPDATE registry_projection_settings SET changed_at = clock_timestamp()`)
+		require.NoError(t, err)
+		require.ErrorIs(t, lock(p, s.ChangedAt, ModeRegistry), ErrNotConfigured)
 	})
 }

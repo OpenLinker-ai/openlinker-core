@@ -408,6 +408,16 @@ func TestProjectionThroughRealRegistry(t *testing.T) {
 		require.Equal(t, false, doc["hidden"])
 	})
 
+	t.Run("an MCP Agent with Core-valid text outside the Registry limits is still listed", func(t *testing.T) {
+		odd := uuid.New()
+		f.exec(`INSERT INTO agents(id,creator_id,slug,name,description,endpoint_url,connection_mode,visibility,lifecycle_status,mcp_tool_name,price_per_call_cents)
+			VALUES($1,$2,'odd-mcp',$3,'','https://mcp.example/odd','mcp_server','public','active','x',0)`, odd, alice, strings.Repeat("n", 150))
+		f.drain()
+		status, doc := f.state("mcp", name("m", odd), alice)
+		require.Equal(t, 200, status)
+		require.Equal(t, false, doc["hidden"])
+	})
+
 	t.Run("unrelated updates mark nothing", func(t *testing.T) {
 		f.exec(`UPDATE agents SET total_calls = total_calls + 1, updated_at = now() WHERE id=$1`, agent)
 		f.exec(`UPDATE users SET password_hash='y', display_name='Renamed' WHERE id=$1`, alice)

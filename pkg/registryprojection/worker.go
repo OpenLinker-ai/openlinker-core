@@ -130,6 +130,11 @@ func (p *Projector) ack(ctx context.Context, c *claim) error {
 var permanentCodes = map[string]bool{"managed_by_core": true, "name_conflict": true, "projection_namespace": true, "owner_mismatch": true,
 	"projection_public_only": true, "projection_not_allowed": true, "name_invalid": true}
 
+func neverOurs(err error) bool {
+	var re *remoteError
+	return errors.As(err, &re) && (re.Code == "name_conflict" || re.Code == "managed_by_core")
+}
+
 func permanent(err error) bool {
 	var re *remoteError
 	return errors.As(err, &re) && permanentCodes[re.Code]
@@ -141,14 +146,22 @@ func (p *Projector) release(ctx context.Context, c *claim, cause error) {
 		msg = msg[:500]
 	}
 	ctx = context.WithoutCancel(ctx)
-	tag, _ := p.pool.Exec(ctx, `UPDATE registry_projection_dirty SET claim_token = NULL, claimed_at = NULL, last_error = $3, suspended = $4,
-		next_attempt_at = clock_timestamp() + LEAST(interval '1 second' * power(2, LEAST(attempts, 12)), interval '1 hour')
-		WHERE claim_token = $1 AND revision = $2`, c.Token, c.Revision, msg, permanent(cause))
-	if tag.RowsAffected() == 1 && permanent(cause) {
-		_, _ = p.pool.Exec(ctx, `UPDATE registry_projection_links SET attempted = false
-			WHERE kind = $1 AND subject_id = $2 AND applied_revision = 0 AND registry_namespace = ''`, c.Kind, c.Subject)
-	}
-	if tag.RowsAffected() == 0 {
+	var matched bool
+	_ = pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE registry_projection_dirty SET claim_token = NULL, claimed_at = NULL, last_error = $3, suspended = $4,
+			next_attempt_at = clock_timestamp() + LEAST(interval '1 second' * power(2, LEAST(attempts, 12)), interval '1 hour')
+			WHERE claim_token = $1 AND revision = $2`, c.Token, c.Revision, msg, permanent(cause))
+		if err != nil {
+			return err
+		}
+		matched = tag.RowsAffected() == 1
+		if matched && neverOurs(cause) {
+			_, err = tx.Exec(ctx, `UPDATE registry_projection_links SET attempted = false
+				WHERE kind = $1 AND subject_id = $2 AND applied_revision = 0 AND registry_namespace = ''`, c.Kind, c.Subject)
+		}
+		return err
+	})
+	if !matched {
 		_, _ = p.pool.Exec(ctx, `UPDATE registry_projection_dirty SET claim_token = NULL, claimed_at = NULL WHERE claim_token = $1`, c.Token)
 	}
 }
@@ -342,7 +355,14 @@ func (p *Projector) projectSkill(ctx context.Context, s Settings, c *claim) erro
 	if !ok {
 		return errors.New("claim lost before the first request")
 	}
-	ingested, err := ingestedVersions(ctx, p.pool, c.Subject, p.registry.URL)
+	l, err = loadLink(ctx, p.pool, KindSkill, c.Subject)
+	if err != nil {
+		return err
+	}
+	ingested := map[uuid.UUID]string{}
+	if l.Namespace != "" {
+		ingested, err = ingestedVersions(ctx, p.pool, c.Subject, p.registry.URL, l.Namespace+"/"+entry)
+	}
 	if err != nil {
 		return err
 	}
@@ -393,11 +413,19 @@ func (p *Projector) projectSkill(ctx context.Context, s Settings, c *claim) erro
 			continue
 		}
 		namespace, _ := doc["namespace"].(string)
-		if _, err := p.pool.Exec(ctx, `INSERT INTO skill_package_registry_links (package_id, version_id, registry_url, registry_entry, registry_version, registry_digest)
-			VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (package_id, version_id) DO UPDATE SET registry_url = EXCLUDED.registry_url,
+		tag, err := p.pool.Exec(ctx, `INSERT INTO skill_package_registry_links (package_id, version_id, registry_url, registry_entry, registry_version, registry_digest)
+			SELECT $1, $2, $3, $4, $5, $6
+			WHERE EXISTS (SELECT 1 FROM registry_projection_dirty d WHERE d.kind = 'skill' AND d.subject_id = $1 AND d.claim_token = $7 AND d.revision = $8
+				AND d.claimed_at > clock_timestamp() - $9::interval)
+			AND EXISTS (SELECT 1 FROM registry_projection_links l WHERE l.kind = 'skill' AND l.subject_id = $1 AND l.owner_id = $10)
+			ON CONFLICT (package_id, version_id) DO UPDATE SET registry_url = EXCLUDED.registry_url,
 				registry_entry = EXCLUDED.registry_entry, registry_version = EXCLUDED.registry_version, registry_digest = EXCLUDED.registry_digest, linked_at = now()`,
-			c.Subject, v.ID, p.registry.URL, namespace+"/"+entry, v.Label, digest); err != nil {
+			c.Subject, v.ID, p.registry.URL, namespace+"/"+entry, v.Label, digest, c.Token, c.Revision, claimLease.String(), owner)
+		if err != nil {
 			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return errors.New("claim lost while recording an ingested version")
 		}
 		available = append(available, v)
 	}
@@ -488,8 +516,19 @@ func (p *Projector) projectMCP(ctx context.Context, s Settings, c *claim) error 
 }
 
 func mcpDocument(publicURL string, subject uuid.UUID, d mcpDesired) ([]byte, string) {
-	server := map[string]any{"title": d.Name, "description": d.Description,
+	title := clipRunes(strings.TrimSpace(d.Name), mcpTextRunes)
+	description := clipRunes(strings.TrimSpace(d.Description), mcpTextRunes)
+	if description == "" {
+		description = title
+	}
+	if description == "" {
+		description = "MCP service"
+	}
+	server := map[string]any{"description": description,
 		"remotes": []map[string]string{{"type": "streamable-http", "url": publicURL + "/mcp/agents/" + subject.String()}}}
+	if title != "" {
+		server["title"] = title
+	}
 	serverJSON, _ := json.Marshal(server)
 	sum := sha256.Sum256(append(append([]byte{}, serverJSON...), d.Metadata...))
 	return serverJSON, hex.EncodeToString(sum[:])
@@ -526,4 +565,14 @@ func (p *Projector) forgetOwner(ctx context.Context, c *claim, previous uuid.UUI
 		_, err = tx.Exec(ctx, `DELETE FROM skill_package_registry_links WHERE package_id = $1`, c.Subject)
 		return err
 	})
+}
+
+const mcpTextRunes = 100
+
+func clipRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return strings.TrimSpace(string(r[:n]))
 }

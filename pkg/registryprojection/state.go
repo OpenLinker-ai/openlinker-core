@@ -25,6 +25,7 @@ type Settings struct {
 	RegistryURL  string
 	Consumer     string
 	ReconciledAt *time.Time
+	ChangedAt    time.Time
 }
 
 type querier interface {
@@ -35,8 +36,8 @@ type querier interface {
 func loadSettings(ctx context.Context, q querier) (Settings, error) {
 	var s Settings
 	var url, consumer *string
-	err := q.QueryRow(ctx, `SELECT mode, core_instance, registry_url, consumer, reconciled_at FROM registry_projection_settings WHERE singleton`).
-		Scan(&s.Mode, &s.Instance, &url, &consumer, &s.ReconciledAt)
+	err := q.QueryRow(ctx, `SELECT mode, core_instance, registry_url, consumer, reconciled_at, changed_at FROM registry_projection_settings WHERE singleton`).
+		Scan(&s.Mode, &s.Instance, &url, &consumer, &s.ReconciledAt, &s.ChangedAt)
 	if url != nil {
 		s.RegistryURL = *url
 	}
@@ -159,6 +160,7 @@ func desiredMCP(ctx context.Context, q querier, id uuid.UUID) (mcpDesired, error
 type link struct {
 	Found       bool
 	Entry       string
+	Namespace   string
 	Owner       uuid.UUID
 	Attempted   bool
 	Revision    int64
@@ -171,9 +173,9 @@ type link struct {
 
 func loadLink(ctx context.Context, q querier, kind string, id uuid.UUID) (link, error) {
 	var l link
-	err := q.QueryRow(ctx, `SELECT registry_entry, owner_id, attempted, applied_revision, applied_phase, applied_hidden, mcp_version, mcp_digest, registry_url
+	err := q.QueryRow(ctx, `SELECT registry_entry, registry_namespace, owner_id, attempted, applied_revision, applied_phase, applied_hidden, mcp_version, mcp_digest, registry_url
 		FROM registry_projection_links WHERE kind = $1 AND subject_id = $2`, kind, id).
-		Scan(&l.Entry, &l.Owner, &l.Attempted, &l.Revision, &l.Phase, &l.Hidden, &l.MCPVersion, &l.MCPDigest, &l.RegistryURL)
+		Scan(&l.Entry, &l.Namespace, &l.Owner, &l.Attempted, &l.Revision, &l.Phase, &l.Hidden, &l.MCPVersion, &l.MCPDigest, &l.RegistryURL)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return l, nil
 	}
@@ -181,8 +183,9 @@ func loadLink(ctx context.Context, q querier, kind string, id uuid.UUID) (link, 
 	return l, err
 }
 
-func ingestedVersions(ctx context.Context, q querier, pkg uuid.UUID, registryURL string) (map[uuid.UUID]string, error) {
-	rows, err := q.Query(ctx, `SELECT version_id, registry_version FROM skill_package_registry_links WHERE package_id = $1 AND registry_url = $2`, pkg, registryURL)
+func ingestedVersions(ctx context.Context, q querier, pkg uuid.UUID, registryURL, entry string) (map[uuid.UUID]string, error) {
+	rows, err := q.Query(ctx, `SELECT version_id, registry_version FROM skill_package_registry_links WHERE package_id = $1 AND registry_url = $2 AND registry_entry = $3`,
+		pkg, registryURL, entry)
 	if err != nil {
 		return nil, err
 	}
